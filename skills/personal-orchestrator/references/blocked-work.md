@@ -1,25 +1,37 @@
-# When a packet cannot proceed
+# When an item cannot proceed
 
-Use the actual denial and current state to choose the next action. This is
-coordinator guidance, not an automatic recovery engine. Never change acceptance,
-permissions or budgets merely to make a rejected packet pass.
+Routing for blocked, failed and stalled nodes is in `AGENTS.md` and the
+orchestrator prompt (`oh-my-opencode-slim/orchestrator_append.md`). This file
+covers how to read the cause and how to record an item so it can resume. Never change acceptance, scope or permissions just to get
+an item through.
 
-| Cause | Useful next action | Boundary |
-|---|---|---|
-| Another writer owns overlapping paths or a shared resource | Review that work and accept or reject based on checks; then refresh and serialize the next packet | A dependent packet still needs its accepted prerequisite; worktrees alone do not isolate databases, ports or accounts |
-| Missing accepted prerequisite | Inspect its result and checks, or finish the prerequisite | A worker's completion message is not acceptance; resolve cycles before dispatch |
-| Oversized context | Keep constraints and current evidence; replace transcripts with source pointers and useful failed hypotheses | Recheck the rendered size; no silent truncation or removal of acceptance checks |
-| Worker discovers a larger task | Return findings and a proposed split to the coordinator | No child-created workers; a genuine new subtask needs owned scope and acceptance |
-| Failed attempt | Diagnose with new evidence, then retry within the same logical packet and remaining budget | Renaming or splitting failed work must not reset accounting |
-| Budget exhausted or usage unknown under a configured threshold | Preserve the result and give an incomplete handoff | Do not open another session, switch models or continue directly to evade the limit |
-| Unsafe helper, unsupported execution host, or approval denial | Follow the host's approval/error path; report the blocked action | Do not weaken trust checks or route the same denied action through another tool |
-| Stale preview or changed source | Inspect the new state and regenerate the proposal/preview | Do not replay an old approval against changed work |
+| Cause | Useful next action |
+|---|---|
+| Another lane owns overlapping paths or a shared resource | Finish or accept that lane first, then refresh and serialize this one; separate worktrees do not isolate databases, ports or accounts |
+| A prerequisite has not passed | Evaluate its result yourself or finish it; a worker's completion message is not acceptance |
+| The packet is too large | Keep constraints and current evidence; replace transcripts with file pointers and failed hypotheses; never drop the acceptance check |
+| A worker finds a larger task | Take its `Discovered` report, add a node or split the item, with owned scope and a `done_when` |
+| A failed attempt | Diagnose with new evidence and continue the same session; renaming or splitting does not make it a new item |
+| Same failure twice or a stall | Ask whether the item is too big or its brief or evaluation is wrong, then move it up a tier |
+| Missing fact, design question, or a choice only the user can make | Route to `explorer` or `researcher`, to `oracle` or `oracle-lite`, or ask the user, then resume the blocked item with the answer |
+| Approval denied, or a tool or environment error | Report the blocked action and the denial; do not route the same action through another tool |
+| Source moved since the packet was written | Inspect the new state and rewrite the brief; do not replay old instructions against changed files |
 
-Prefer serialization when ownership is uncertain. Split only when it produces
-independently useful results, rather than merely satisfying a gate. Direct work
-is suitable when delegation itself is unnecessary and the action remains allowed;
-it is not a fallback around a safety or spending limit.
+Prefer serializing when ownership is unclear. Split only when each piece is useful
+on its own. Keep dispatching other ready nodes while one waits.
 
-After an adaptation, reassess once against the actual gate. If the same cause
-persists without new evidence, stop that path and name the blocker. Continue
-independent authorized work only when it fits the remaining task budget.
+## Record a blocked item so it can resume
+
+Write these into the graph node (or its artifact) before stopping:
+
+- the goal and the evaluation, unchanged;
+- the best working state and where it is (paths, branch or revision);
+- what passed and what remains unverified;
+- the failed hypotheses and the evidence against each;
+- the exact command that fails and its output, trimmed to the deciding lines;
+- the kind of failure (`code`, `evaluation`, `environment`, `input`) and the next
+  hypothesis or the question that must be answered.
+
+Keep the best state; do not revert or restart. After one adaptation, reassess
+once against the real cause. If it persists without new evidence, record the item
+as blocked and route it as `AGENTS.md` says.

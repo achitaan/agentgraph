@@ -1,82 +1,49 @@
 # Workflow decisions
 
-Skilled work in the continuing conversation is the default. Use the
-[task profiles](task-profiles.md) to change the assignment and selected guidance
-without changing the model, effort or execution policy. The main profiles are
-Engineer, Optimizer, Interface Builder and Researcher. Loop mode can apply to any
-of them; Loop Engineer is the Engineer + loop preset.
-Engineer, Loop Engineer, Interface Builder and optimization changes use
-the existing implementer role; Researcher and analysis-only optimization use the
-read-only investigator role. Investigator and Reviewer remain supporting
-assignments with their existing read-only roles.
+Craft for choosing how to run a task. The rules (roster, sizing, loop items, the
+verifier loop, the reviewer gate, the task graph, artifacts) are in `AGENTS.md`
+and the orchestrator prompt (`oh-my-opencode-slim/orchestrator_append.md`) and are
+not restated here. The
+[task profiles](task-profiles.md) say which agent and skills fit a kind of work.
 
-Profiles do not start agents; delegation follows `AGENTS.md` and the orchestrator
-prompt, and a worker never starts one. Run the agreed checks and read their real
-output, with bounded repairs as needed; a reported pass is a claim, and a check
-is never weakened to get a pass. An independent review is the single `reviewer`
-gate, dispatched by the orchestrator; if it cannot run, that stage remains pending. The task-profile guide defines shared limits
-and domain checks.
+## Choose the smallest shape
 
-| Role | Responsibility | Default model | Execution target |
-|---|---|---|---|
-| Coordinator | Scope work, choose actions, own state and acceptance | User-selected model in the continuing conversation | Sole dispatch authority |
-| Implementer | Change owned paths and check acceptance | Inherit the user-selected model | Workspace-write |
-| Investigator | Explain a bounded unknown with source evidence | Inherit the user-selected model | Read-only |
-| Reviewer | Independently inspect behavior and its consumers | Inherit | Read-only |
+- A small edit: inspect, change, run the relevant check, read the diff, finish.
+  That is a feedback loop already; it needs no graph, no packet and no extra call.
+- One bounded change: one loop item to one implementer.
+- Anything with two or more nodes: a graph. Before writing it, ask what can run
+  at the same time; a dependency you invented turns a graph into a line.
+- After a failed pass, change the hypothesis or add evidence before the next pass; repeating an identical pass adds nothing.
 
-Fast requires bounded scope, explicit acceptance, low consequence and low
-uncertainty. A short auth, integrity or concurrency change is not automatically
-low risk. The controller rejects an incompatible inherited effort; a fast preset may not
-accept `ultra` in the recorded host catalog. An explicit effort override must
-appear in the preview. Never silently substitute or downgrade a model.
+## Fast versus careful
 
-Optional prompt profiles are separate from execution permissions. Profile/config
-preferences describe exports; an existing execution session retains its captured
-model, effort and policy. Updating a profile config does not rewrite that session.
+Treat a task as low risk only when its scope is bounded, its acceptance is
+explicit, the consequence of a mistake is small and little is uncertain. A short
+change to auth, data integrity or concurrency is not low risk because it is
+short: size it up a tier or add the reviewer gate. When unsure, start small and
+move up on evidence.
 
-## Loops proportional to the task
+## Tracking
 
-For an explicitly selected loop mode on any profile, follow the
-[loop-engineering guide](loop-engineering.md): bounded work/check passes,
-evidence-based diagnosis and the requested review mode before completion. Researcher
-keeps its read-only role and uses source/proof checks; Optimizer uses measurements
-and correctness checks. Shared allowances survive profile or mode changes.
-The Loop Engineer preset selects Engineer with loop mode. No external process
-is started by either selection.
+The task graph file (`.opencode/graph/<task>.json`) is the record: statuses,
+attempts, artifacts, changed paths. Update it as each node starts and finishes
+rather than reconstructing it afterward. For a single lane with no graph, a
+todo list with the attempt count and last result is enough.
 
-When the user wants visible durable tracking, keep it in the task graph file (`.opencode/graph/<task>.json`), which the agent graph view shows live.
-It saves checkpoints and gates completion without launching work. Native Goals
-remain separately requested host features; never create one implicitly.
+## Handoffs and cost
 
-For a small unprofiled edit: inspect, change, run the relevant check, review the diff, finish.
-That is a normal feedback loop, not a reason for an outer agent loop. Retry after
-a new hypothesis or useful evidence. For substantial work, use one bounded packet
-at a time, choosing only the roles that help.
+A handoff names the changed paths or findings, the checks run and their results,
+unresolved risks and the next useful action. It separates what a check showed
+from what an agent claimed.
 
-Defaults are eight calls, two retries per logical packet, and one active worker.
-Failed and interrupted launches count. Keep packet IDs stable across retries.
-Evidence fingerprints must come from real observations, not invented digests.
-A token threshold uses observed input plus output; cached input is a subset.
-Unknown usage blocks further admission when that threshold is configured. This
-cannot reserve provider tokens or cap a call already running.
+When comparing a cheaper arrangement with a dearer one, count the whole cost:
+failed attempts, retries and review calls, not only the first successful lane.
+Judge quality per accepted result, not token count or agent count alone.
 
-## Skills, graphs and knowledge
+## Skills, maps and notes
 
-Start with one entrypoint, normally use one or two, and add a third only for a
-specific acceptance requirement. Select guidance separately for each role; the
-coordinator receives no worker
-guides by default. The runtime accepts at most three entrypoints per role, within
-16,000 combined characters. Existing engineering, assurance, contracts, delivery and knowledge
-skills consolidate Addy-inspired workflows; no 25-agent roster is needed.
-Frontend and research guidance is loaded only for the actual task.
-
-Use a source-backed codebase map for cross-module callers, dependencies or change
-impact. Refresh the relevant subgraph rather than rebuilding an entire graph for
-one known edit. A graph is evidence, not a scheduler. Use project-knowledge for
-ADRs, linked notes and compact handoffs when they help future work. Obsidian can
-view that Markdown; no vault plugin is required here.
-
-A handoff identifies changed paths/findings, checks and results, unresolved risks,
-and the next useful action. Distinguish self-review from explicitly requested
-independent review. Compare total model usage
-including failed attempts and review before claiming a cheaper preset saves cost.
+Name skills per agent, from that agent's own list. For cross-module callers,
+dependencies or change impact, have `explorer` or `impl-claude` use `codebase-map`
+and refresh only the subgraph the task touches. A map is evidence, not a plan.
+For decisions worth keeping, write a short note with source, date and
+uncertainty; do not keep transcripts.

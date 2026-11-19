@@ -1,205 +1,98 @@
-# Compact task profiles
+# Task profiles
 
-A profile chooses the current responsibility and relevant guidance. It preserves
-the user's model and reasoning setting. Model choice follows the routing in the orchestrator prompt. The profile arrangement
-has not been benchmarked; it does not promise the same quality or lower cost.
+A profile is a way to think about a kind of work: which agent does it in this
+setup, which one or two skills to name in that agent's brief, and what the
+check should look like. A profile starts no agent and picks no model. Dispatch,
+sizing, loop items, the verifier loop and the reviewer gate are defined in
+`AGENTS.md` and the orchestrator prompt
+(`oh-my-opencode-slim/orchestrator_append.md`); this file adds only the craft.
 
-Do the main work in the continuing session. Delegation follows `AGENTS.md` and
-the orchestrator prompt; a profile selection does not by itself start any agent,
-and a worker never starts one. Direct work includes a clearly labeled self-review. Start with one
-skill; normally use one or two. A third needs a specific
-acceptance requirement, within the controller's three-entrypoint / 16,000-character
-guidance limit when using that controller. Mandatory host and project instructions
-are never removed to meet a skill budget. Read only needed references.
+An agent can load only the skills on its own list (`orchestration/SKILLS.md`),
+and a skill the brief does not name is usually not loaded. Name one skill, at
+most two, in the `Context` field of the loop item. A skill the user names takes
+precedence over these starting points.
 
-## Choose a task profile
+## Agent to skills
 
-Keep Engineer, Optimizer, Interface Builder and Researcher. Loop engineering is
-an optional mode for any profile; Loop Engineer remains shorthand for Engineer
-with that mode enabled. Investigator and Reviewer are supporting assignments.
-The default is work, checks, self-review, then bounded corrections if needed.
-An explicitly requested independent review requires an authorized separate
-read-only reviewer; unavailable review remains pending. Use host-supported
-delegation only when explicitly requested; this guidance does not automatically
-invoke the experimental mode pipeline, a paid coordinator or its model defaults.
+Starting points, not bundles. Pick the line for the agent doing the work, then
+one or two skills from it that fit the item.
 
-| Profile | Existing controller role, if used | Start with | Add only when the task requires it |
+- `impl-openai`: `engineering-delivery`, `code-assurance`
+- `impl-claude`: `project-contracts`, `codebase-map`
+- `impl-hard`: `performance-speedup`, `research-software-engineering`
+- `verifier`: `code-assurance`, `playwright-cli`
+- `reviewer`: `code-assurance`, `project-contracts`
+- `designer`: `ui-ux-pro-max`, `playwright-cli`
+- `researcher`: `exa-research`, `research-summarizer`
+- `explorer`: `codebase-map`, `context7-mcp`
+
+Other skills on the same lists fit narrower needs, for example `sympy` or
+`math-research` for exact or proof work, `ml-experiment-standards` or
+`experimental-design` for evaluation design, `supabase-postgres-best-practices`
+for database changes, `design-taste-frontend` or `impeccable` for a new page or
+an existing-interface audit.
+
+## Kinds of work
+
+| Work | Agent | Skills to name | Evaluation looks like |
 |---|---|---|---|
-| Engineer | `implementer` | The relevant project/language specialist, or Engineering Delivery for substantial increments | Project Contracts for a consumer boundary; Context7 for an uncertain library API |
-| Loop Engineer (preset) | `implementer` | Engineer guidance with loop mode enabled | Same task-relevant specialists as Engineer |
-| Optimizer | `implementer` for changes; `investigator` for analysis only | Performance Speedup for a measured bottleneck, or Research Software Engineering for numerical work | Math Research for proof/reformulation; SymPy for exact calculations; relevant experiment guidance when evaluation needs it |
-| Interface Builder | `implementer` | UI-UX-Pro-Max for app UI, Taste for a new landing page, or Impeccable for an existing-interface audit; choose the owner of this task | Playwright CLI for interaction evidence; a project specialist for its implementation rules |
-| Researcher | `investigator` | Exa Research for public discovery, Research Summarizer for supplied sources, Codebase Map for repository evidence, or Math Research for a mathematical question | SymPy for exact calculations; Project Knowledge for a requested durable synthesis |
+| Engineer | `impl-openai`; `impl-claude` when big or cross-module; `impl-hard` when subtle | `engineering-delivery` for a substantial increment, `code-assurance` for a bug or risky change | A targeted test, typecheck, build or lint on the owned paths; for a bug, one that fails before the fix |
+| Optimizer | `impl-hard` for subtle numerics or performance; `impl-openai` for a mechanical change | `performance-speedup` for a measured bottleneck, `research-software-engineering` for numerical code | A named metric on a representative input, plus the correctness checks that must keep passing |
+| Interface Builder | `designer` | `ui-ux-pro-max` for app UI, `design-taste-frontend` for a new landing page, `impeccable` for an audit | Required states exercised in a browser (`playwright-cli`), plus a read of the result |
+| Researcher | `researcher` for judgment about papers or techniques; `explorer` for codebase search and library docs | `exa-research` for public discovery, `research-summarizer` for supplied sources, `codebase-map` or `context7-mcp` for `explorer` | Claims tied to sources, assumptions and open questions separated |
+| Investigator | `explorer` to map code; `impl-hard` when a persistent bug needs a fix | `code-assurance` for a bug, `codebase-map` for a relationship question | A cause shown by evidence, not a guess |
+| Reviewer | `reviewer` for the final gate; `verifier` for one item inside a loop | `code-assurance` for code, `project-contracts` when an interface is disputed | Findings tied to the original requirements and the real changed files |
 
-### Supporting assignments
+Non-coding work uses the matching research, writing or science skill; do not
+force it through an engineering profile. A small known edit needs no skill.
 
-| Assignment | Existing controller role, if used | Start with | Add only when the task requires it |
-|---|---|---|---|
-| Investigator | `investigator` | Code Assurance for a bug, or Codebase Map for a relationship question | Context7 for an uncertain dependency; Project Contracts when an interface is the disputed behavior |
-| Reviewer | `reviewer` | Code Assurance for code; the relevant source/math/science specialist for other artifacts | Project guidance when its conventions affect correctness; the relevant UI skill for visual review |
+## Craft per kind
 
-These skill choices are alternatives, not bundles to preload. A small known edit can use
-no extra skill beyond applicable project guidance. Non-coding tasks use their
-matching research, writing, data or science specialist; do not force them through
-an engineering profile.
+**Engineer.** Read the project's own docs and the current code before the brief:
+existing owners, affected consumers and how behavior is checked. Missing or stale
+docs are uncertainties to resolve, not rules to invent. Prefer an existing
+mechanism to a new one, and put the affected consumers in `Context` so the lane
+checks them.
 
-Profile, mode and execution role are separate choices. “Use Researcher in loop
-mode” keeps a read-only investigator when delegated; “Use Optimizer in loop mode”
-uses an implementer only when changes are authorized. Mode selection never grants
-write access or starts another coordinator. It changes how feedback is used,
-not which subject skills are loaded.
+**Optimizer.** The brief names the baseline, the metric, a representative input,
+the constraints and when to stop. Speed is not a pass unless correctness holds.
+Do not turn a proof question into a benchmark, or a small edit into an open
+search; if the algorithm is the open question, send it to `researcher` or
+`oracle` first and hand the result to the lane as an artifact.
 
-The coordinator handles scope and acceptance with a compact brief. It need not
-read every implementation skill the worker receives. These profiles do not
-introduce new controller role values or register native agent types.
+**Interface Builder.** Say which states matter (empty, error, loading, small
+screen, keyboard) and what evidence shows them. A screenshot or browser run is
+evidence; a claim that it looks right is not. The designer owns visual choices;
+an implementer asked to change UI reports design questions under `Discovered`.
 
-### Engineer: understand, reuse and verify
+**Researcher.** Bound the question and the source scope. Separate supported
+findings, assumptions and unresolved questions. When a published technique could
+change a choice, follow [paper research](paper-research.md). Do not search when
+the project's own evidence already settles it. Distinguish a proof from numerical
+evidence. A read-only worker returns a report; the orchestrator saves it as the
+node's artifact.
 
-Start with relevant project documentation and instructions, then inspect current
-code, existing owners and affected consumers. Understand the architectural
-boundaries and how the project checks its behavior. Missing or stale docs are
-uncertainties to resolve, not rules to invent.
+**Investigator.** Ask for the cause and the evidence, not a fix, unless the item
+says otherwise. A cause that two attempts could not find goes to `oracle` with a
+self-contained brief.
 
-Prefer a suitable existing mechanism before adding one. Keep the change cohesive,
-use local conventions, and verify the real behavior and its affected consumers.
-Engineering Delivery supplies general planning and verification habits; choose
-project/language specialists when local implementation or review rules matter.
-Adapt depth to the task rather than requiring a fixed document list or applying
-one company's conventions everywhere.
+**Reviewer.** Give it the objectives, the changed files and the check evidence,
+never the implementer's own account. Trace affected consumers for code, required
+states for UI, baseline validity for optimization, and sources and proof steps
+for research. A blocker needs a concrete requirement and reproducible evidence;
+separate a demonstrated defect from an unsettled input boundary or a wished-for
+extension. Passing checks are evidence, not proof that the checks cover every
+requirement.
 
-### Review and repair
+## Uncertainty to skill
 
-In direct work, review the final diff, affected consumers and evidence here.
-Do not call that independent review. The following separate-review procedure
-applies only when the orchestrator dispatches a reviewer; a profile selection alone starts no agent.
-
-1. Complete the bounded work and relevant checks. Reserve time and launch
-   capacity for a fresh read-only reviewer using the selected model and effort.
-   Keep one active worker; the continuing conversation dispatches the review.
-2. Give the reviewer the original requirements, current artifact/diff, affected
-   source or supporting evidence, actual check results and selected domain
-   guidance. Do not substitute the worker's summary for accessible evidence.
-3. Require concrete findings tied to the contract. For Engineer, trace affected
-   consumers and compatibility; for Interface Builder, inspect required UI
-   states and accessibility; for Optimizer, check baseline/measurement validity
-   and correctness constraints; for Researcher, check sources, material claims,
-   assumptions and proof steps. Loop Engineer uses the domain checks for its
-   task and verifies that feedback covers the original requirements. Numerical
-   checks alone are not a proof.
-4. Return concrete defects to the worker for correction, rerun affected checks,
-   and independently re-review the changed result. Use an Investigator only when
-   the cause is unclear or repeated failure needs diagnosis. Optional extensions
-   do not justify repair loops; a disputed finding needs evidence and scope review.
-5. Default to at most two repair cycles and eight delegated role launches in
-   total, within the task's finite deadline and any usage allowance. Review,
-   investigation and retries consume that same allowance. If required review,
-   evidence or a supported launch is unavailable, or limits are reached, report
-   the result as incomplete with review pending. Do not substitute self-review
-   or another model without the user's direction.
-
-Profile switching preserves completed work, current evidence
-and remaining allowances; it does not reset the limits or validate a stale review.
-Within one composed task, a supporting Researcher memo is intermediate evidence:
-the final review covers the deliverable and the research claims it uses. A
-standalone research report needs its own verification, with independent review
-only when requested. Do not add a separate review after every internal handoff.
-
-### Loop mode across profiles
-
-Use [loop engineering](loop-engineering.md) when selected for any profile.
-Engineer and Interface Builder iterate changes and behavioral checks; Optimizer
-iterates measured candidates while preserving correctness; Researcher iterates
-findings and source/proof checks. Default to three work/check passes including
-initial work and two revisions, with the requested review mode before completion.
-Keep one shared allowance across supporting research, implementation and review.
-The Loop Engineer preset selects Engineer plus this mode. Existing profile,
-model and permissions are preserved when the user simply turns loop mode on.
-
-### Research, mathematics and optimization
-
-Researcher starts with a bounded question and source scope. Separate supported
-findings, assumptions and unresolved questions. When a research-dependent choice
-could benefit from published work, follow [paper research](paper-research.md):
-look for relevant recent work and foundational papers, inspect the methods and
-limits, and return source-backed implications for this task. A supplied-source
-summary stays within its requested scope; do not search by default when current
-project evidence already settles the question. For mathematical work, preserve
-assumptions and distinguish a proof from numerical evidence. A delegated
-researcher returns a report without editing project source; saving that report
-uses an authorized write outside the read-only worker.
-
-Optimizer starts with a baseline, metric, representative evaluation, constraints
-and a finite stopping allowance. Recheck correctness alongside speed, memory,
-cost or numerical accuracy. Do not turn a proof question into a benchmark or a
-small edit into an open-ended search.
-
-| Actual uncertainty | Relevant guidance to select |
+| Actual uncertainty | Skill |
 |---|---|
-| Difficult proof, algorithmic reduction or reformulation | Math Research |
-| Exact algebra, calculus or symbolic calculation | SymPy |
-| Numerical stability, scientific code or simulation correctness | Research Software Engineering |
-| Runtime, memory, GPU or query bottleneck | Performance Speedup; the applicable project/database specialist |
-| Predictive ML training or evaluation | ML Experiment Standards; Experimental Design when planning the comparison |
+| Difficult proof or reformulation | `math-research` (`researcher`, `oracle`) |
+| Exact algebra or calculus | `sympy` (`impl-hard`, `oracle`) |
+| Numerical stability or simulation correctness | `research-software-engineering` (`impl-hard`, `researcher`) |
+| Runtime, memory or query bottleneck | `performance-speedup` (`impl-hard`, `oracle-lite`) |
+| Predictive ML training or evaluation | `ml-experiment-standards`, `experimental-design` (`researcher`) |
 
-This is a selection map, not a science bundle. Keep one or two relevant skills
-and add further guidance only for an actual requirement. A coding-workflow
-benchmark does not establish research accuracy or mathematical capability.
-
-## Swap in one sentence
-
-- “Use Engineer; keep the model and reasoning setting; follow this project's implementation conventions.”
-- “Use Loop Engineer here; keep the model; allow three work/check passes and twenty minutes total, including self-review. Show progress without spawning anything.”
-- “Use Optimizer in loop mode; explicitly spawn one bounded Researcher for the algorithm question and one independent reviewer after measurement.”
-- “Use Researcher in loop mode; compare relevant recent and foundational papers, verify the central claims, and stop within three synthesis/check passes.”
-- “Use Optimizer; keep the model; measure this bottleneck with Performance Speedup, preserve correctness, and try at most two candidates.”
-- “Use Interface Builder; keep the model; use UI-UX-Pro-Max and Playwright.”
-- “Use Researcher; keep the model; compare these supplied papers with Research Summarizer.”
-- “Use Researcher; keep the model; use Math Research for this proof and SymPy only if exact calculations help.”
-- “Use Investigator; keep the model; use Code Assurance; explain the cause without editing.”
-- “Use Reviewer; keep the model; use Code Assurance; check the original contract and affected consumers.”
-- “Use direct skilled work without a separate reviewer for this small change; keep the model.”
-
-A skill or model explicitly named by the user takes precedence over these
-starting points. A role swap alone never selects a cheaper worker or escalates
-to a larger model. If the user explicitly chooses a different model or effort,
-apply it at a supported dispatch boundary and retain the previous evidence.
-
-For a delegated assignment, keep a compact packet:
-
-```text
-Task profile: Interface Builder
-Mode: direct or loop (only when selected)
-Execution role: implementer
-Model / reasoning: inherit the user's selection
-Selected skills: ui-ux-pro-max, playwright-cli
-Objective and accepted input/failure boundaries: ...
-Owned paths and affected consumers: ...
-Current source and check evidence: ...
-Acceptance, deadline and remaining allowance: ...
-```
-
-The host still needs its supported role name and explicit execution settings.
-A profile line describes the work and its review; the host still controls
-execution and permissions.
-
-## Context and review boundaries
-
-Switching profiles in the same conversation does not erase previously read
-skills or history. When the user requests a fresh worker, finish or
-checkpoint the active assignment, then provide only the current task packet,
-source pointers, relevant check results and bounded findings. Keep one active
-worker when authorized; workers do not delegate. Requested independent review
-uses a separate session; relabeling the implementer's conversation is not an
-independent review.
-
-The role's skill list guides what is read. It does not hide the host's installed
-skill catalog or enforce a hard context/token limit in the main conversation.
-The execution host remains responsible for read-only and workspace-write
-permissions; changing a profile cannot widen or retroactively change them.
-
-Review receives the original requirements, accepted input forms, affected source,
-diff and current check results. A blocker needs a concrete requirement and
-reproducible evidence. Distinguish a demonstrated defect from an unresolved input
-boundary or a proposed extension. Resolve a disputed boundary before asking a
-worker to implement new behavior. Passing checks is evidence, not proof that the
-checks cover every requirement.
+A coding-workflow check does not establish research accuracy, and a numerical
+check alone is not a proof.

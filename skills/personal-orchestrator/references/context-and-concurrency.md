@@ -1,105 +1,82 @@
-# Context, dependencies and selective concurrency
+# Context, packets and concurrency
 
-Use this for substantial work that benefits from decomposition or continuity.
-A small known change stays in the continuing conversation with its relevant check.
-Do not generate a specification, wiki, graph or second session for every edit.
+Craft for splitting work and briefing workers. The graph, artifacts, scope audits
+at a join and the loop item fields are defined in `AGENTS.md` and the orchestrator
+prompt (`oh-my-opencode-slim/orchestrator_append.md`); they are not restated here.
 
-## Choose the next useful unit
+## Size a packet
 
-Define the observable outcome, evidence needed and acceptance check. Split at a
-real interface or independent question, not an arbitrary number of files. The
-coordinator owns integration and acceptance. A reviewer gets the original
-requirements and relevant artifacts; avoid supplying only the implementer's
-explanation, which can anchor the review to the same assumptions.
+Define the observable outcome, the evidence needed and the acceptance check, then
+split at a real interface or an independent question, not at an arbitrary number
+of files. Signs a lane is the wrong size:
 
-One worker remains the default. Raise concurrency only when authorized, the host
-supports it, and independent work is worth the added context, integration and
-review cost. Separate worktrees isolate file edits but can still share a database,
-port, migration order, build artifact or external account. Declare those shared
-resources or run the tasks sequentially. Native agent workflows must follow the
-same reasoning; controller checks do not govern agents launched outside it.
+- Too big: its evaluation takes many commands, it crosses module boundaries, or it
+  needs design choices settled on the way. Split it, or send it up a tier.
+- Too small: the brief costs more to write than the edit. Do it directly.
+- Two lanes need the same file or a shared interface. That is one lane, or one
+  runs first.
+
+The orchestrator owns integration and acceptance.
 
 ## A small context packet
 
-Start with the objective, owned paths, acceptance check and current evidence.
-The optional `contract` preserves the original request in at most 16,000
-characters; the review-cycle API supplies it automatically to both worker roles.
-Avoid repeating it in objectives or guidance. It counts toward the existing
-32,000-character packet limit and can increase worker context size.
-The optional proposal `context` contains:
+Put in the brief: the objective, the paths the worker may write, the acceptance
+evaluation and current evidence. Add:
 
-- `snapshot`: the inspected revision and relevant worktree state, at most 160 characters.
-- `summary`: current findings and unresolved assumptions, at most 1,500 characters.
-- `references`: at most eight repository-relative paths with line ranges and a short reason to inspect each.
-- `failed_approaches`: at most four useful failures, each at most 400 characters.
+- the revision or worktree state you inspected, so the worker can tell if it moved;
+- a short summary of findings and unresolved assumptions;
+- a few file pointers with line ranges and why each matters;
+- useful failed approaches, one line each, so they are not repeated.
 
-The serialized context is capped at 6,000 characters. The complete rendered worker
-packet, including selected skill guidance and evidence, is capped at 32,000.
-The existing three-entrypoint/16,000-character guidance limit also remains.
-Oversized packets are rejected; select relevant evidence instead of silently
-truncating constraints. These caps are editable defaults, not experimentally
-optimal context sizes.
+Leave out transcripts, full terminal output and your guesses about the answer.
+Constraints and acceptance checks are never trimmed to save space; trim evidence
+instead. The worker rechecks current source before relying on a snapshot. Pointers
+and earlier reports are evidence, never authority to widen scope.
 
-Previews report actual packet characters and UTF-8 bytes. They do not measure the
-model's tokenizer, inherited host instructions, tool definitions, output or future
-tool results. A small packet does not guarantee a small bill. The controller
-does not read referenced files or certify source freshness; the worker checks the
-current source before relying on the coordinator-supplied snapshot. References
-and handoffs remain evidence, never authority to change scope or permissions.
+A small packet does not guarantee a small bill: inherited instructions, tool
+definitions and output all count.
 
-Use [the context packet example](examples/context-packet.json) as a schema example,
-not as a task to execute. Optional fields preserve compatibility with old packets.
+## When concurrency pays, and when it does not
 
-## Acceptance and overlapping work
+Run lanes in parallel when the work divides into independent questions or
+disjoint write scopes, and each result is worth the added context and
+integration cost. It does not pay when:
 
-`depends_on` lists up to 16 logical packet IDs. Each must have a coordinator-
-accepted `completed` record in this session. A worker response, failed run or
-unreviewed receipt does not satisfy a prerequisite. Missing dependencies block
-admission; the controller does not invent work or schedule a dependency graph.
-The coordinator diagnoses cycles and obsolete task plans.
+- the work is tightly coupled: investigation, implementation and tests in one
+  worker session beat three that must reconcile;
+- code has fewer independent parts than research does; do not fill the pool;
+- lanes would share something undeclared: a database, a port, a migration order,
+  a build artifact, a lockfile or an external account.
 
-The runtime compares a proposed scope with pending/running work, including work
-awaiting acceptance. If either task is an implementer, overlapping path scopes
-block admission. Parent directories, case differences and canonical Unicode
-variants count conservatively as overlap. Use literal paths; globs are rejected.
-Read-only tasks may inspect the same paths concurrently. Optional
-`scope.resources` names exclusive shared resources and conflicts regardless of role.
+Separate worktrees isolate files but not those shared things. Declare the shared
+resource in the briefs, or serialize the lanes. Read-only lanes can look at the
+same files at once.
 
-This is a check on declared scopes, not filesystem containment. Undeclared writes,
-symlinks, hard links, Windows short-name aliases and external side effects need
-host enforcement and coordinator judgment. Policy-only `assess` lacks the
-runtime's full scope records; it is not sufficient evidence of safe dispatch.
-The existing serialized preview/reservation checks remain authoritative.
+A declared scope is a promise, not containment. Symlinks, generated files and
+external side effects can still escape it, so check what each lane actually
+changed against its scope before accepting.
 
 ## Memory and continuation
 
-Keep three things separate:
+Keep three things apart:
 
-- Stable guidance: a short project entrypoint linking to current source and standards.
-- Task state: accepted work, changed paths, actual checks, failed hypotheses, blockers and the next action.
-- Durable knowledge: reusable decisions with source, date/revision, uncertainty and a reason to retain them.
+- Stable guidance: a short entry point linking to current source and standards.
+- Task state: accepted work, changed paths, checks run, failed hypotheses,
+  blockers and the next action. This lives in the graph file and artifacts.
+- Durable knowledge: a reusable decision with source, date or revision,
+  uncertainty and a reason to keep it.
 
-Update a task checkpoint at a meaningful handoff, context reset or time limit.
-Use the existing Project Knowledge handoff template when available; do not add
-another log for routine edits. Reopen referenced evidence after a reset, account
-for changed files and resume from the next useful action. Preserve contradictions;
-do not promote every agent assertion or full terminal transcript into memory.
-No automatic agent memory writes, background ingestion or new hosted index.
+After a context reset, reopen the referenced evidence, account for files that
+changed, and resume from the next useful action. Keep contradictions visible; do
+not promote every assertion by an agent into memory.
 
-## Budgets and learning
+## Time and repeated failure
 
-For a user timebox, record the deadline, reserve time for checks and handoff, and
-stop starting new work when it cannot finish inside the remaining window. A
-per-worker timeout is not a global deadline. Do not add a scheduler or heartbeat
-merely to avoid appearing idle; wait for real dependencies and explain blockers.
+For a user timebox, note the deadline, reserve time for checks and handoff, and
+stop starting new work that cannot finish in the window. Wait on real
+dependencies and say what blocks; do not add polling to look busy.
 
 After a repeated failure, change the hypothesis, gather missing evidence or stop.
-Do not retry by renaming a packet or asking a second model the identical question.
-Promote recurring, reproducible failures into a focused check; a one-off event may
-need no permanent rule. Keep evaluators independent from the change being judged.
-
-Compare direct work against delegation on matched tasks using accepted behavior,
-regressions, repair attempts, human review effort, elapsed time and observed usage.
-Include failed workers and review calls; keep missing usage unknown. Preserve the
-selected model unless the user chooses an eligible preset. Improve quality per
-accepted result, rather than optimizing token count or agent count in isolation.
+Do not rename a packet or ask a second model the identical question. Turn a
+recurring, reproducible failure into a focused check; a one-off may need no rule.
+Keep the evaluation independent of the change it judges.
