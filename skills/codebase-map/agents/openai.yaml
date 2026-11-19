@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codebase Map"
+  short_description: "Trace code dependencies with source-backed graphs"
+  default_prompt: "Use $codebase-map to map this repository and trace the impact of this change."

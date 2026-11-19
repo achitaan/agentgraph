@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "limits": {"max_calls": 8, "max_retries": 2, "max_active_workers": 1, "max_tokens": null},
+  "worker_subagent_tools": "disabled",
+  "roles": {
+    "coordinator": {"can_dispatch": true, "sandbox": null, "presets": {}},
+    "implementer": {
+      "can_dispatch": false,
+      "sandbox": "workspace-write",
+      "presets": {
+        "standard": {"model": null},
+        "fast": {"model": "gpt-6-luna"}
+      }
+    },
+    "investigator": {
+      "can_dispatch": false,
+      "sandbox": "read-only",
+      "presets": {
+        "standard": {"model": null},
+        "astra": {"model": "gpt-6-astra"}
+      }
+    },
+    "reviewer": {
+      "can_dispatch": false,
+      "sandbox": "read-only",
+      "presets": {"standard": {"model": null}}
+    }
+  }
+}

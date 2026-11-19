@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "parser-attempt-1",
+  "packet": "parser-fix",
+  "requester": {"role": "coordinator", "depth": 0},
+  "role": "implementer",
+  "objective": "Fix the verified empty-input parser failure.",
+  "scope": {"paths": ["src/parser.py", "tests/test_parser.py"], "resources": ["parser-test-db"], "bounded": true, "consequence": "low", "uncertainty": "low"},
+  "depends_on": ["parser-investigation"],
+  "acceptance_check": "Run the parser regression and affected consumer checks.",
+  "evidence": [],
+  "context": {
+    "snapshot": "Illustrative only: replace with the inspected revision and worktree state.",
+    "summary": "Investigation isolated an empty-input branch. Confirm the source before editing.",
+    "references": [{"path": "src/parser.py", "start_line": 1, "end_line": 40, "reason": "Inspect guard and decoder order."}],
+    "failed_approaches": ["A caller-only guard did not cover another decoder consumer."]
+  }
+}

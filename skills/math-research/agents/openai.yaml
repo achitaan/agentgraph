@@ -1,0 +1,6 @@
+interface:
+  display_name: "Math Research"
+  short_description: "Find proof mechanisms, simplify arguments, verify scope"
+  default_prompt: "Use $math-research to find the controlling mechanism, complete the exact proof or counterexample, and state any unresolved gap."
+policy:
+  allow_implicit_invocation: true

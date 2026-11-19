@@ -1,0 +1,4 @@
+interface:
+  display_name: "Engineering Delivery"
+  short_description: "Plan substantial work and verify useful increments"
+  default_prompt: "Use $engineering-delivery to plan and implement this feature in verified increments."

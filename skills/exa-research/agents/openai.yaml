@@ -1,0 +1,11 @@
+interface:
+  display_name: "Exa Research"
+  short_description: "Discover public sources and synthesize cited findings"
+  default_prompt: "Use $exa-research to investigate this question and write a brief with evidence, limitations, and citations."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "exa"
+      description: "Public web search, filtered search, and page retrieval"
+      transport: "streamable_http"
+      url: "https://mcp.exa.ai/mcp?tools=web_search_exa%2Cweb_fetch_exa%2Cweb_search_advanced_exa"

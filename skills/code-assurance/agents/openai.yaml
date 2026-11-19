@@ -1,0 +1,4 @@
+interface:
+  display_name: "Code Assurance"
+  short_description: "Investigate bugs and challenge code with evidence"
+  default_prompt: "Use $code-assurance to review this change and test its important failure cases."

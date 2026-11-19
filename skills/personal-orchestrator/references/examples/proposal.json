@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "parser-attempt-1",
+  "packet": "parser-fix",
+  "requester": {"role": "coordinator", "depth": 0},
+  "role": "implementer",
+  "objective": "Fix the reproduced parser failure within the named files.",
+  "scope": {"paths": ["src/parser.py", "tests/test_parser.py"], "bounded": true, "consequence": "low", "uncertainty": "low"},
+  "acceptance_check": "python -m unittest tests.test_parser",
+  "evidence": []
+}

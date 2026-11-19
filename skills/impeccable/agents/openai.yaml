@@ -1,0 +1,4 @@
+interface:
+  display_name: "Impeccable UI Quality"
+  short_description: "Audit and polish existing web interfaces"
+  default_prompt: "Use $impeccable to audit this interface for accessibility, responsive behavior, and consistency."
