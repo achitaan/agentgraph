@@ -59,6 +59,13 @@
     const camera = { x: 0, y: 0, scale: 1, initialized: false, touched: false, width: 0, height: 0 };
     const pointers = new Map();
     let drag = null, pinch = null, suppressClick = false;
+    // Drawing loops: only when the host can write the structure. A click arms an agent and a second
+    // click (or one drag) asks for "the second checks the first"; a hold opens the details instead.
+    const setLoop = options.actions && typeof options.actions.setLoop === 'function' ? options.actions.setLoop : null;
+    if (setLoop) root.dataset.agLoops = 'draw';
+    const HOLD_MS = 350, STILL_PX = 6, UNDO_STEPS = 10;
+    let armed = '', press = null, hovered = '';
+    const pendingLoops = new Map(), freshLoops = new Set(), loopErrors = new Map(), loopHistory = [], drawnLoopViews = new Map(), timers = new Set();
     let layoutSignature = '', layoutFrame = null, resizeFrame = null, generation = 0, renderStamp = '';
     let arrangement = root.clientWidth > 0 && root.clientWidth <= 650 ? 'compact' : 'wide';
     let agentsByName = new Map(), stepsByAgent = new Map(), stepsById = new Map(), nodeOwners = new Map(), shownAgents = new Map();
@@ -126,7 +133,9 @@
     edgeLayer.append(spokeLayer, escalationLayer, flowLayer);
     const nodeLayer = svg('g', { class: 'ag-nodes' });
     const loopLayer = svg('g', { class: 'ag-loops' });
-    stage.append(edgeLayer, loopLayer, nodeLayer); drawing.append(defs, stage);
+    const wire = svg('line', { class: 'ag-wire', 'aria-hidden': 'true' });
+    wire.style.display = 'none';
+    stage.append(edgeLayer, loopLayer, wire, nodeLayer); drawing.append(defs, stage);
     const empty = el('div', 'ag-empty', 'Loading');
     viewport.append(drawing, empty);
     const panCue = el('button', 'ag-pan-cue');
@@ -383,6 +392,15 @@
       const isSeat = agent => agent.parent ? agent.parent !== hubName : agent.name.startsWith('councillor-');
       return a && b && !(a.group === 'hub' && isSeat(b)) && !(b.group === 'hub' && isSeat(a)) && (!isSeat(a) || a.parent === b.name) && (!isSeat(b) || b.parent === a.name);
     }
+    // An agent that can be either end of a drawn loop: shown, not the hub, not a council seat.
+    function loopEnd(name) {
+      const agent = shownAgents.get(name);
+      return !!agent && agent.name !== hubName && agent.group !== 'hub' && !(agent.parent ? agent.parent !== hubName : agent.name.startsWith('councillor-'));
+    }
+    function later(fn, ms) {
+      const timer = setTimeout(() => { timers.delete(timer); if (alive) fn(); }, ms);
+      timers.add(timer); return timer;
+    }
     function canvasFlows() {
       const loopPairs = new Set(canvasLoops().map(loop => connectionKey(loop.worker, loop.evaluator)));
       return flows().filter(f => f.from !== hubName && f.to !== hubName && allowedConnection(f.from, f.to) && !(['data', 'feedback'].includes(f.kind) && loopPairs.has(connectionKey(f.from, f.to))));
@@ -394,6 +412,7 @@
     }
     function cancelInteraction() {
       if (drag || pinch || pointers.size) suppressClick = true;
+      cancelPress(); if (!armed) wire.style.display = 'none';
       drag = null; pinch = null;
       const captured = Array.from(pointers.keys()); pointers.clear();
       captured.forEach(id => { if (viewport.hasPointerCapture(id)) viewport.releasePointerCapture(id); });
@@ -688,7 +707,9 @@
         node.classList.toggle('ag-council-lead', visibleAgents.some(a => a.parent === agent.name));
         node.querySelector('.ag-agent-name').textContent = displayName(agent);
         node.querySelector('.ag-agent-work').textContent = work;
-        node.querySelector('title').textContent = agent.name;
+        node.querySelector('title').textContent = loopErrors.get(agent.name) || agent.name;
+        node.dataset.armed = String(armed === agent.name);
+        if (setLoop && loopEnd(agent.name)) node.setAttribute('aria-keyshortcuts', 'Enter C Escape'); else node.removeAttribute('aria-keyshortcuts');
         node.setAttribute('aria-label', agent.name + (busy ? ', working' + (work ? ', ' + work : '') : ', idle') + (alerts.has(agent.name) ? ', ' + alerts.get(agent.name) : ''));
         positionNode(agent.name);
         labelsChanged = measureLabels(node, p) || labelsChanged;
@@ -780,7 +801,45 @@
         } else if (view.count) { view.count.remove(); view.count = null; }
       });
       loopViews.forEach((view, id) => { if (!shown.has(id)) { view.group.remove(); loopViews.delete(id); } });
+      updateDrawnLoops();
       updateWorkLoops();
+    }
+    // Loops drawn in the structure ("check checks work"), as the same slim leaf. A pair the graph
+    // already loops on is drawn by the graph's loop, which moves while work moves; a drawn loop at
+    // rest is still. A loop being asked for is dimmed until the host answers.
+    function drawnLoops() { return (snapshot?.structure?.loops || []).filter(loop => loop && loop.source === 'drawn' && typeof loop.work === 'string' && typeof loop.check === 'string'); }
+    function loopKey(work, check) { return JSON.stringify([work, check]); }
+    function hasDrawnLoop(work, check) { return drawnLoops().some(loop => loop.work === work && loop.check === check); }
+    function updateDrawnLoops() {
+      const graphPairs = new Set(canvasLoops().map(loop => loopKey(loop.worker, loop.evaluator)));
+      const wanted = new Map(drawnLoops().map(loop => [loopKey(loop.work, loop.check), { work: loop.work, check: loop.check, pending: false }]));
+      pendingLoops.forEach((on, key) => {
+        const [work, check] = JSON.parse(key);
+        if (on && !wanted.has(key)) wanted.set(key, { work, check, pending: true });
+        else if (wanted.has(key)) wanted.get(key).pending = true;
+      });
+      const shown = new Set();
+      wanted.forEach((loop, key) => {
+        const a = positions.get(loop.work), b = positions.get(loop.check);
+        if (!a || !b || !loopEnd(loop.work) || !loopEnd(loop.check) || (graphPairs.has(key) && !loop.pending)) return;
+        shown.add(key);
+        let view = drawnLoopViews.get(key);
+        if (!view) {
+          const group = svg('g', { class: 'ag-drawn-loop', 'data-drawn-loop': loop.work + '~' + loop.check, 'aria-hidden': 'true' });
+          const halves = ['forward', 'return'].map(half => svg('path', { class: 'ag-loop-half', 'data-loop': 'drawn:' + loop.work + '~' + loop.check, 'data-loop-half': half, pathLength: 1, 'marker-end': 'url(#' + uid + '-loop)' }));
+          group.append(...halves); loopLayer.append(group);
+          view = { group, halves, loop }; drawnLoopViews.set(key, view);
+        }
+        view.loop = loop;
+        const geometry = reviewGeometry(a, b);
+        view.halves[0].setAttribute('d', geometry.forward); view.halves[1].setAttribute('d', geometry.back);
+        view.group.dataset.pending = String(loop.pending);
+        if (!loop.pending && freshLoops.has(key)) {
+          freshLoops.delete(key); view.group.dataset.fresh = 'true';
+          later(() => { delete view.group.dataset.fresh; }, 400);
+        }
+      });
+      drawnLoopViews.forEach((view, key) => { if (!shown.has(key)) { view.group.remove(); drawnLoopViews.delete(key); } });
     }
     function updateWorkLoops() {
       const shown = new Set();
@@ -814,8 +873,10 @@
       workLoopViews.forEach((view, agent) => { if (!shown.has(agent)) { view.group.remove(); workLoopViews.delete(agent); } });
     }
     function highlight() {
-      nodes.forEach((node, key) => { const active = !!selected && ['agent', 'work-loop'].includes(selected.type) && selected.key === key; node.dataset.selected = String(active); node.setAttribute('aria-pressed', String(active)); });
+      // With loop drawing the pressed state is the armed one: the agent waiting for its checker.
+      nodes.forEach((node, key) => { const active = !!selected && ['agent', 'work-loop'].includes(selected.type) && selected.key === key; node.dataset.selected = String(active); node.setAttribute('aria-pressed', String(setLoop ? armed === key : active)); });
       const selecting = !!selected && ['agent', 'work-loop'].includes(selected.type);
+      drawnLoopViews.forEach(view => { view.group.dataset.related = String(selecting && [view.loop.work, view.loop.check].includes(selected.key)); });
       edgeLayer.dataset.selecting = String(selecting);
       lines.forEach(pair => {
         const related = selecting && (pair.edge.from === selected.key || pair.edge.to === selected.key);
@@ -1203,6 +1264,112 @@
       if (focusedStep) Array.from(detailScroll.querySelectorAll('[data-step]')).find(row => row.dataset.step === focusedStep)?.querySelector('summary').focus({ preventScroll: true });
     }
 
+    function stagePoint(clientX, clientY) {
+      const rect = viewport.getBoundingClientRect();
+      return { x: (clientX - rect.left - camera.x) / camera.scale, y: (clientY - rect.top - camera.y) / camera.scale };
+    }
+    function agentAt(clientX, clientY) {
+      const point = stagePoint(clientX, clientY);
+      let found = '', best = Infinity;
+      visibleAgents.forEach(agent => {
+        const p = positions.get(agent.name);
+        if (!p || !nodes.has(agent.name)) return;
+        const distance = Math.hypot(point.x - p.x, point.y - p.y);
+        if (distance <= p.r + 8 && distance < best) { best = distance; found = agent.name; }
+      });
+      return found;
+    }
+    function showWire(from, x, y) {
+      const p = positions.get(from);
+      if (!p) { wire.style.display = 'none'; return; }
+      [['x1', p.x], ['y1', p.y], ['x2', x], ['y2', y]].forEach(([key, value]) => wire.setAttribute(key, value));
+      wire.style.display = '';
+    }
+    // Only a valid end is highlighted under the pointer; the hub, a seat and the agent itself are not.
+    function aim(name, source) {
+      const next = name && source && name !== source && loopEnd(name) && loopEnd(source) ? name : '';
+      if (next === hovered) return;
+      const old = nodes.get(hovered);
+      if (old) delete old.dataset.target;
+      hovered = next;
+      if (hovered && nodes.get(hovered)) nodes.get(hovered).dataset.target = 'true';
+    }
+    function setTitle(name) {
+      const title = nodes.get(name)?.querySelector('title');
+      if (title) title.textContent = loopErrors.get(name) || name;
+    }
+    function markArmed() {
+      nodes.forEach((node, key) => { node.dataset.armed = String(armed === key); });
+      highlight();
+    }
+    function arm(name) {
+      armed = name; loopErrors.delete(name); setTitle(name);
+      const p = positions.get(name);
+      if (p) showWire(name, p.x, p.y);
+      aim('', ''); markArmed();
+    }
+    function disarm() {
+      armed = ''; wire.style.display = 'none'; aim('', '');
+      markArmed();
+    }
+    function cancelPress() {
+      if (!press) return;
+      clearTimeout(press.timer); timers.delete(press.timer); press = null;
+    }
+    function refuseLoop(work, error) {
+      const message = text(error && typeof error === 'object' && 'message' in error ? error.message : error).replace(/\s+/g, ' ').trim() || 'The loop could not be changed';
+      loopErrors.set(work, message); setTitle(work);
+      const node = nodes.get(work);
+      if (node) { node.dataset.shake = 'true'; later(() => { delete node.dataset.shake; }, 400); }
+    }
+    // Ask the host for "check checks work" (on) or its removal; the next snapshot shows the result.
+    function askLoop(work, check, on, remember) {
+      const key = loopKey(work, check);
+      if (pendingLoops.has(key)) return Promise.resolve(false);
+      pendingLoops.set(key, on); loopErrors.delete(work); setTitle(work); updateLoops(); highlight();
+      let answer;
+      try { answer = Promise.resolve(setLoop(work, check, on)); } catch (error) { answer = Promise.reject(error); }
+      return answer.then(async () => {
+        if (!alive) return false;
+        if (remember) { loopHistory.push({ work, check, on }); if (loopHistory.length > UNDO_STEPS) loopHistory.shift(); }
+        if (on) freshLoops.add(key);
+        if (pending) await pending; // a snapshot asked for before the change may not show it
+        await refresh();
+        pendingLoops.delete(key);
+        if (alive && snapshot) { updateLoops(); highlight(); }
+        return true;
+      }, error => {
+        if (!alive) return false;
+        pendingLoops.delete(key); freshLoops.delete(key);
+        if (snapshot) { updateLoops(); highlight(); }
+        refuseLoop(work, error);
+        return false;
+      });
+    }
+    function completeLoop(work, check) {
+      disarm();
+      if (!work || !check || work === check || !loopEnd(work) || !loopEnd(check)) return;
+      askLoop(work, check, !hasDrawnLoop(work, check), true);
+    }
+    function undoLoop() {
+      const last = loopHistory.pop();
+      if (last) askLoop(last.work, last.check, !last.on, false).then(done => { if (!done && alive) loopHistory.push(last); });
+    }
+    // A click (or Enter) on an agent while loops can be drawn.
+    function pressAgent(name) {
+      if (armed) {
+        if (name === armed || !loopEnd(name)) disarm();
+        else completeLoop(armed, name);
+        return;
+      }
+      if (loopEnd(name)) arm(name);
+      else activateAgent(name, nodes.get(name)); // the hub and council seats open their details
+    }
+    function focusNext(name, step) {
+      const list = Array.from(nodes.values()).filter(node => node.isConnected), index = list.indexOf(nodes.get(name));
+      if (list.length) list[(index + step + list.length) % list.length].focus({ preventScroll: true });
+    }
+
     listen(close, 'click', closeDetails);
     listen(runDetails, 'click', () => select('run', '', runDetails));
     listen(usage, 'click', () => select('run', '', usage));
@@ -1222,7 +1389,14 @@
       const link = event.target.closest('[data-flow-peer]');
       if (link) { select('agent', link.dataset.flowPeer, nodes.get(link.dataset.flowPeer)); detailScroll.scrollTop = 0; }
     });
-    listen(root, 'keydown', event => { if (event.key === 'Escape' && selected) { event.preventDefault(); closeDetails(); } });
+    listen(root, 'keydown', event => {
+      if (setLoop && event.key === 'Escape' && (armed || press)) { event.preventDefault(); cancelPress(); disarm(); return; }
+      if (setLoop && (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'z') {
+        if (loopHistory.length) { event.preventDefault(); undoLoop(); }
+        return;
+      }
+      if (event.key === 'Escape' && selected) { event.preventDefault(); closeDetails(); }
+    });
     listen(detailScroll, 'toggle', event => {
       const row = event.target;
       if (row.open) lazySteps.get(row)?.();
@@ -1250,7 +1424,13 @@
       const inspect = event.target.closest('[data-agent-inspect]');
       if (inspect) { select('agent', inspect.dataset.agentInspect, nodes.get(inspect.dataset.agentInspect)); return; }
       const node = event.target.closest('[data-agent]');
-      if (node && !suppressClick) activateAgent(node.dataset.agent, node, event.shiftKey);
+      if (node && !suppressClick) { if (setLoop) pressAgent(node.dataset.agent); else activateAgent(node.dataset.agent, node, event.shiftKey); }
+    });
+    // Moving between agents with the keyboard while one is armed draws the line to the focused one.
+    listen(nodeLayer, 'focusin', event => {
+      const node = event.target.closest('[data-agent]'), p = node && positions.get(node.dataset.agent);
+      if (!setLoop || !armed || !p) return;
+      showWire(armed, p.x, p.y); aim(node.dataset.agent, armed);
     });
     listen(loopLayer, 'click', event => {
       const work = event.target.closest('[data-work-loop-id]');
@@ -1268,6 +1448,12 @@
       const loop = event.target.closest('[data-loop-id]');
       if (loop && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); select('loop', loop.dataset.loopId, loop); return; }
       const node = event.target.closest('[data-agent]');
+      if (node && setLoop && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        const key = node.dataset.agent;
+        if ((event.key === 'Enter' || event.key === ' ') && armed) { event.preventDefault(); pressAgent(key); return; }
+        if (event.key.toLowerCase() === 'c' && !event.shiftKey) { event.preventDefault(); if (armed === key) disarm(); else if (loopEnd(key)) arm(key); return; }
+        if (!event.shiftKey && event.key.startsWith('Arrow')) { event.preventDefault(); focusNext(key, event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1); return; }
+      }
       if (node && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); activateAgent(node.dataset.agent, node, event.shiftKey); return; }
       if (node && event.shiftKey && event.key.startsWith('Arrow')) {
         const p = positions.get(node.dataset.agent);
@@ -1300,6 +1486,18 @@
         const [a, b] = Array.from(pointers.values()), rect = viewport.getBoundingClientRect();
         pinch = { distance: Math.hypot(a.x - b.x, a.y - b.y), scale: camera.scale, x: ((a.x + b.x) / 2 - rect.left - camera.x) / camera.scale, y: ((a.y + b.y) / 2 - rect.top - camera.y) / camera.scale };
         drag = null; suppressClick = true;
+        cancelPress();
+      } else if (pointers.size === 1 && setLoop && event.target.closest('[data-agent]')) {
+        // On an agent a press is a click (arm or connect), a hold (details) or a drag (connect), never a move.
+        // The hub and council seats cannot be connected, so a drag that starts on them pans, as before.
+        const node = event.target.closest('[data-agent]'), key = node.dataset.agent, id = event.pointerId;
+        cancelPress(); drag = null; suppressClick = false;
+        press = { id, key, startX: event.clientX, startY: event.clientY, cameraX: camera.x, cameraY: camera.y, moved: false, held: false, timer: null };
+        press.timer = later(() => {
+          if (!press || press.id !== id || press.moved) return;
+          press.held = true; disarm(); activateAgent(key, node);
+        }, HOLD_MS);
+        node.focus({ preventScroll: true });
       } else if (pointers.size === 1) {
         const node = event.target.closest('[data-agent]'), p = node && positions.get(node.dataset.agent), loop = event.target.closest('[data-loop-id], [data-work-loop-id]');
         if (p) stopLayout();
@@ -1311,6 +1509,7 @@
       viewport.setPointerCapture(event.pointerId);
     });
     listen(viewport, 'pointermove', event => {
+      if (setLoop && armed && !press) { const point = stagePoint(event.clientX, event.clientY); showWire(armed, point.x, point.y); aim(agentAt(event.clientX, event.clientY), armed); }
       if (!pointers.has(event.pointerId)) return;
       pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
       if (pinch && pointers.size >= 2) {
@@ -1319,6 +1518,21 @@
         camera.x = (a.x + b.x) / 2 - rect.left - pinch.x * camera.scale;
         camera.y = (a.y + b.y) / 2 - rect.top - pinch.y * camera.scale;
         camera.touched = true; transform(); return;
+      }
+      if (press && press.id === event.pointerId) {
+        if (!press.moved && Math.hypot(event.clientX - press.startX, event.clientY - press.startY) <= STILL_PX) return;
+        if (!press.moved) { press.moved = true; clearTimeout(press.timer); timers.delete(press.timer); }
+        if (press.held) return;
+        suppressClick = true;
+        if (!loopEnd(press.key)) {
+          drag = { id: press.id, key: null, startX: press.startX, startY: press.startY, x: press.cameraX, y: press.cameraY, moved: false };
+          press = null; disarm();
+        } else {
+          if (armed && armed !== press.key) disarm();
+          const point = stagePoint(event.clientX, event.clientY);
+          showWire(press.key, point.x, point.y); aim(agentAt(event.clientX, event.clientY), press.key);
+          return;
+        }
       }
       if (!drag || drag.id !== event.pointerId) return;
       const dx = event.clientX - drag.startX, dy = event.clientY - drag.startY;
@@ -1329,6 +1543,20 @@
     });
     function pointerUp(event) {
       if (!pointers.has(event.pointerId)) return;
+      if (press && press.id === event.pointerId) {
+        const current = press; cancelPress();
+        if (event.type === 'pointerup' && !pinch && !current.held) {
+          if (!current.moved) pressAgent(current.key);
+          else {
+            const to = agentAt(event.clientX, event.clientY);
+            if (to && to !== current.key && loopEnd(current.key) && loopEnd(to)) completeLoop(current.key, to);
+            else disarm();
+          }
+        } else if (current.moved) disarm();
+        suppressClick = true;
+      }
+      // A click on empty canvas (or on a loop) while an agent is armed cancels it.
+      if (event.type === 'pointerup' && armed && drag && !drag.moved && !drag.key && !pinch) disarm();
       if (event.type === 'pointerup' && drag && !drag.moved && drag.key && !pinch) { activateAgent(drag.key, nodes.get(drag.key), event.shiftKey); suppressClick = true; }
       if (event.type === 'pointerup' && drag?.loopKey && !drag.moved && !pinch) { select(drag.loopType, drag.loopKey, (drag.loopType === 'work-loop' ? workLoopViews : loopViews).get(drag.loopKey)?.group); suppressClick = true; }
       if (drag?.key && drag.moved) { if (arrangement === 'compact') { clampPan(); transform(); } else fitView(false); }
@@ -1340,10 +1568,11 @@
     function render(data) {
       const previousTeam = activeTeam;
       snapshot = { ...data, agents: prepareRoster(data) };
-      const stamp = JSON.stringify([data.agents, data.graph, data.warnings, data.totals, data.escalation, data.root?.wear]);
+      const stamp = JSON.stringify([data.agents, data.graph, data.warnings, data.totals, data.escalation, data.root?.wear, data.structure]);
       if (stamp !== renderStamp) { renderStamp = stamp; renderRevision++; }
       indexSteps();
       if (activeTeam !== previousTeam) { rememberTeam(previousTeam); restoreTeam(activeTeam); }
+      if (armed && !loopEnd(armed)) disarm();
       const graph = data.graph;
       runDetails.dataset.notices = String(data.warnings.length + (graph ? graph.problems.length : 0) > 0 || !!data.learning?.due);
       renderActivity();
@@ -1423,6 +1652,8 @@
       pointers.forEach((_, id) => { if (viewport.hasPointerCapture(id)) viewport.releasePointerCapture(id); });
       pointers.clear(); drag = null; pinch = null; suppressClick = false;
       viewport.dataset.dragging = 'false';
+      cancelPress(); armed = ''; hovered = ''; wire.style.display = 'none';
+      pendingLoops.clear(); freshLoops.clear(); loopErrors.clear(); loopHistory.length = 0; drawnLoopViews.clear();
       selected = null; selectedOrigin = null; initialSelection = ''; highlightedStep = ''; detailSignature = '';
       teamChoice = null; activeTeam = 'main'; teamChoices = []; layoutSignature = ''; renderStamp = '';
       arrangement = root.clientWidth > 0 && root.clientWidth <= 650 ? 'compact' : 'wide';
@@ -1443,9 +1674,9 @@
     refresh();
     return { refresh, reset, destroy() {
       if (!alive) return;
-      alive = false; generation++; stopLayout(); if (resizeFrame !== null) cancelAnimationFrame(resizeFrame); clearInterval(timer); resize.disconnect(); schemeObserver.disconnect(); cleanups.forEach(fn => fn());
+      alive = false; generation++; stopLayout(); if (resizeFrame !== null) cancelAnimationFrame(resizeFrame); clearInterval(timer); timers.forEach(clearTimeout); timers.clear(); resize.disconnect(); schemeObserver.disconnect(); cleanups.forEach(fn => fn());
       pointers.forEach((_, id) => { if (viewport.hasPointerCapture(id)) viewport.releasePointerCapture(id); });
-      pointers.clear(); teamViews.clear(); root.replaceChildren(); root.classList.remove('agentgraph', 'ag-compact', 'ag-canvas-compact', 'ag-details-open'); root.style.removeProperty('--ag-sheet-height'); root.style.removeProperty('--ag-header-height'); delete root.dataset.state; delete root.dataset.team; delete root.dataset.agScheme; delete root.dataset.agSchemeSource; delete root.dataset.agMotion;
+      pointers.clear(); teamViews.clear(); root.replaceChildren(); root.classList.remove('agentgraph', 'ag-compact', 'ag-canvas-compact', 'ag-details-open'); root.style.removeProperty('--ag-sheet-height'); root.style.removeProperty('--ag-header-height'); delete root.dataset.state; delete root.dataset.team; delete root.dataset.agScheme; delete root.dataset.agSchemeSource; delete root.dataset.agMotion; delete root.dataset.agLoops;
     } };
   }
   window.AgentGraph = { mount };

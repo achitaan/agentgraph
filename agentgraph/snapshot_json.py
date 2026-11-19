@@ -145,6 +145,85 @@ def _active_graph(graphs: list[TaskGraph], sessions: list[Session], task: str | 
 
 
 STRUCTURE_DIR = ORCHESTRATION_GRAPH_DIR.parent.parent / "structure"
+SETTING_KEYS = ("pool", "escalates_to", "checks", "seats", "checked_by")
+HEAD_BYTES = 4096  # only the start of an agent's file is read for its settings and description
+SETTING_LINES = 12
+
+
+def read_settings(data: bytes) -> tuple[list[tuple[str, str]], list[str], int]:
+    """The settings at the top of an agent's file, as the graph reads them: from
+    the first HEAD_BYTES bytes, split with `str.splitlines`, at most
+    SETTING_LINES lines; blank or `---` lines before the first setting are
+    skipped, a blank line after one closes them, and the first line that is not
+    `key: value` with a known key starts the description. A `checked_by` line
+    after the description is therefore description text, not a setting.
+    Returns the (key, value) pairs in order, the lines read, and the index of
+    the description's first line."""
+    lines = data[:HEAD_BYTES].decode("utf-8", "replace").splitlines()
+    settings: list[tuple[str, str]] = []
+    prose_from = len(lines)  # where the description starts; none when the file is all settings
+    for index, line in enumerate(lines[:SETTING_LINES]):
+        key, sep, value = line.partition(":")
+        key, value = key.strip().lower(), value.strip().strip("`'\"")
+        if line.strip() in ("", "---"):
+            if settings:
+                prose_from = index + 1
+                break  # a blank line closes the settings
+            continue
+        if not sep or not value or key not in SETTING_KEYS:
+            prose_from = index
+            break  # the settings end at the first line of prose
+        settings.append((key, value))
+    return settings, lines, prose_from
+
+
+def checked_by_names(settings: list[tuple[str, str]]) -> list[str]:
+    """Every name on the `checked_by` lines among these settings, in order, once each."""
+    names: list[str] = []
+    for key, value in settings:
+        if key == "checked_by":
+            names.extend(name for name in setting_names(value) if name not in names)
+    return names
+
+
+def setting_names(value: str) -> list[str]:
+    """The agent names in a `checked_by` value: comma-separated, quotes and backticks dropped."""
+    names: list[str] = []
+    for part in value.split(","):
+        name = part.strip().strip("`'\"").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _drawn_loops(shape: dict) -> None:
+    """Turn the raw `checked_by` settings into `loops` (work, check) pairs and
+    `warnings`: an unknown name, the agent itself, the hub or a council seat at
+    either end is ignored with a warning, never an error."""
+    known = shape["group_of"]
+
+    def problem(name: str) -> str:
+        if any(name.startswith(prefix) and name != lead for lead, prefix in shape["seats"].items()):
+            return "is a council seat"
+        if name not in known:
+            return "is not an agent in the structure folder"
+        if known[name] == "hub":
+            return "is the hub"
+        return ""
+
+    loops: set[tuple[str, str]] = set()
+    for work, checkers in shape["checked_by"].items():
+        reason = problem(work)
+        if reason:
+            shape["warnings"].append(f"structure: checked_by in {work} ignored: {work} {reason}")
+            continue
+        for check in checkers:
+            reason = "is the agent itself" if check == work else problem(check)
+            if reason:
+                shape["warnings"].append(f"structure: {work} checked_by {check} ignored: {check} {reason}")
+            else:
+                loops.add((work, check))
+    shape["loops"] = sorted(loops)
 
 
 def load_structure(directory: Path | None = None) -> dict | None:
@@ -152,14 +231,17 @@ def load_structure(directory: Path | None = None) -> dict | None:
     order (a leading number and dash set the order and are dropped), one `.md`
     file per agent. A file may start with `key: value` lines: `pool` (a number),
     `escalates_to` (an agent), `checks: all`, `seats` (a name prefix whose agents
-    sit round this one). The text after the settings is the agent's description,
-    kept as `about`. None when the folder does not exist or holds no group."""
+    sit round this one), `checked_by` (agents that check this one's work, round
+    after round: the drawn loops, kept as `loops` pairs of (work, check)). The
+    text after the settings is the agent's description, kept as `about`. None
+    when the folder does not exist or holds no group."""
     root = Path(directory) if directory is not None else STRUCTURE_DIR
     try:
         folders = sorted(path for path in root.iterdir() if path.is_dir() and not path.name.startswith("."))[:50]
     except OSError:
         return None
-    shape: dict = {"groups": [], "titles": {}, "group_of": {}, "pool": {}, "escalation": [], "checkers": set(), "seats": {}, "about": {}}
+    shape: dict = {"groups": [], "titles": {}, "group_of": {}, "pool": {}, "escalation": [], "checkers": set(), "seats": {}, "about": {},
+                   "files": {}, "checked_by": {}, "loops": [], "warnings": []}
     for folder in folders:
         group = re.sub(r"^\d+[-_]", "", folder.name)
         if not group or group in shape["titles"]:
@@ -175,26 +257,13 @@ def load_structure(directory: Path | None = None) -> dict | None:
             if name in shape["group_of"]:
                 continue
             shape["group_of"][name] = group
+            shape["files"][name] = path
             try:
                 with path.open("rb") as stream:
-                    head = stream.read(4096).decode("utf-8", "replace")
+                    settings, lines, prose_from = read_settings(stream.read(HEAD_BYTES))
             except OSError:
                 continue
-            seen = False
-            lines = head.splitlines()
-            prose_from = len(lines)  # where the description starts; none when the file is all settings
-            for index, line in enumerate(lines[:12]):
-                key, sep, value = line.partition(":")
-                key, value = key.strip().lower(), value.strip().strip("`'\"")
-                if line.strip() in ("", "---"):
-                    if seen:
-                        prose_from = index + 1
-                        break  # a blank line closes the settings
-                    continue
-                if not sep or not value or key not in ("pool", "escalates_to", "checks", "seats"):
-                    prose_from = index
-                    break  # the settings end at the first line of prose
-                seen = True
+            for key, value in settings:
                 if key == "pool" and value.isdigit():
                     shape["pool"][name] = int(value)
                 elif key == "escalates_to":
@@ -203,10 +272,15 @@ def load_structure(directory: Path | None = None) -> dict | None:
                     shape["checkers"].add(name)
                 elif key == "seats":
                     shape["seats"][name] = value
+            if any(key == "checked_by" for key, _ in settings):
+                shape["checked_by"][name] = checked_by_names(settings)
             about = " ".join(" ".join(lines[prose_from:]).split())
             if about:
                 shape["about"][name] = about[:600]
-    return shape if shape["groups"] else None
+    if not shape["groups"]:
+        return None
+    _drawn_loops(shape)
+    return shape
 
 
 class _Shape:
@@ -246,6 +320,23 @@ class _Shape:
 
     def checks(self, name: str) -> bool:
         return name in (self.structure["checkers"] if self.structure else contract.CHECKERS)
+
+    @property
+    def warnings(self) -> list[str]:
+        return list(self.structure.get("warnings", [])) if self.structure else []
+
+    def loops(self, listed: list[dict], hub: str | None) -> list[dict]:
+        """Every loop: the drawn ones (`checked_by`, all of them, listed or not),
+        then a checker's (`checks: all`) over every other listed agent that is
+        not the hub, a council seat or another checker."""
+        drawn = [{"work": work, "check": check, "source": "drawn"}
+                 for work, check in (self.structure.get("loops", []) if self.structure else [])]
+        workers = [agent["name"] for agent in listed
+                   if agent["group"] != "hub" and agent["name"] != hub and not agent["parent"] and not agent["checks"]]
+        default = [{"work": work, "check": checker["name"], "source": "default"}
+                   for checker in listed if checker["checks"] and checker["group"] != "hub" and checker["name"] != hub
+                   for work in workers if work != checker["name"]]
+        return drawn + sorted(default, key=lambda loop: (loop["work"], loop["check"]))
 
     @property
     def escalation(self):
@@ -319,9 +410,10 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
     handoffs: set[tuple[str, str]] = set()
     busy_ids = {session.id for session in sessions if session.busy and session.id is not None}
     graph_doc = _graph_document(active, busy_ids, handoffs) if active is not None else None
+    listed = [agent for agents in grouped.values() for agent in agents]
     return _json_safe({
         "version": 1, "generated": snapshot.now, "source": source,
-        "warnings": [*snapshot.warnings, *selection_warnings],
+        "warnings": [*snapshot.warnings, *selection_warnings, *shape.warnings],
         "team": contract.team_of(root.agent or "") if root is not None else "main",
         "totals": {"sessions": len(sessions), "running": sum(bool(s.busy) for s in sessions),
                    "cost": sum(s.cost for s in sessions), "tokens_in": sum(s.tokens_in for s in sessions),
@@ -329,11 +421,11 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
         "root": {**_session_document(root), "agent": root.agent, "directory": root.directory,
                  "wear": root.wear}
         if root is not None else None,
-        "structure": {"source": "folder" if structure else "builtin"},
+        "structure": {"source": "folder" if structure else "builtin", "loops": shape.loops(listed, root_name)},
         "groups": [{"id": group, "title": shape.title(group),
                     "agents": [agent["name"] for agent in agents]}
                    for group, agents in grouped.items()],
-        "agents": [agent for agents in grouped.values() for agent in agents],
+        "agents": listed,
         "escalation": [{"from": a, "to": b, "used": (a, b) in handoffs}
                        for a, b in shape.escalation if a in names and b in names],
         "graph": graph_doc,

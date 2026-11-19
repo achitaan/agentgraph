@@ -103,6 +103,8 @@ Event (`events` is append-only, newest last):
 
 `~/.config/opencode/orchestration/bin/agentgraph check` (run from the project, or with `--dir PATH`; `--task NAME` checks only the graph whose `task` is that name, and does not validate the others) reads the JSON strictly and prints every problem. It exits 0 when all graphs are sound, 1 when any has a problem, and 2 when a file cannot be read or the directory or task named does not exist.
 
+It also enforces the loops drawn in the structure folder (`checked_by` lines, see `structure/README.md`; `--structure DIR` reads another folder, and exits 2 when that folder does not exist or holds no group folder; a missing default folder just means no drawn loops): every `implement` or `design` node that has not passed, whose agent has drawn checkers, needs for each checker a `gate` node run by that checker whose `feedback_to` names the node. A missing one is a problem, such as `n12 (impl-openai) has no check by reviewer: the structure says reviewer checks impl-openai`. Passed nodes are exempt, and with no drawn loops nothing changes.
+
 It reports:
 
 - Size: more than 1000 nodes, 2000 events or 200 objectives, or more than 200 entries in any list inside a node (`depends_on`, `scope`, `changed_paths`, `feedback_to`, `artifacts`, `inputs`, `tiers`) or in an objective's `nodes`. Readers keep the first entries up to these limits and drop repeated `depends_on` and `feedback_to` entries.

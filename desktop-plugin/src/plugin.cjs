@@ -6,7 +6,8 @@
  *
  * The desktop app evaluates that one file in two processes (see the GUI plugin guide, "One file, two processes"):
  *   - every window runs `setup`: the panel, the "+" menu item, the command and the styles;
- *   - the Electron main process runs `main`: an Ipc that runs the Python snapshot command.
+ *   - the Electron main process runs `main`: an Ipc that runs the Python snapshot command, and the structure
+ *     command that draws or removes a loop between two agents (`agentgraph structure link|unlink`).
  * The host evaluates the bundle as `Function("require", "module", "exports", code)`, so `__dirname` and
  * `__filename` do not exist, and `require` only knows the modules the app shares. Keep each process's code inside
  * its own setup; module scope must stay safe in both.
@@ -40,6 +41,9 @@ const SNAPSHOT_MAX_BYTES = 8 * 1024 * 1024;
 const DEFAULT_INTERVAL_MS = 4000;
 const ERROR_MAX_CHARS = 300;
 const SESSION_ID = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$/;
+const AGENT_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
+const LOOP_TIMEOUT_MS = 10000;
+const LOOP_MAX_BYTES = 1024 * 1024;
 
 const HOST_CSS = [
   ".agentgraph-desktop-panel,.agentgraph-desktop-view{box-sizing:border-box;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden}",
@@ -117,6 +121,12 @@ function snapshotIpc(pluginId) {
         // (including an error document) crosses the bridge without a schema for its whole shape.
         snapshot: {
           input: Schema.Struct({ directory: Schema.String, session: Schema.String }),
+          output: Schema.String,
+        },
+        // Draw (on) or remove (off) the loop "check checks work" in the structure folder. Output: JSON text,
+        // {"loops": [...]} with the drawn loops afterwards, or {"error": "..."}.
+        setLoop: {
+          input: Schema.Struct({ work: Schema.String, check: Schema.String, on: Schema.Boolean }),
           output: Schema.String,
         },
       },
@@ -252,6 +262,76 @@ function createSnapshotRunner(deps) {
   };
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Main process: run `python3 -P -m agentgraph.structure link|unlink WORK CHECK --json` without a shell
+
+function createLoopRunner(deps) {
+  // deps: { execFile, path, env, home, python, demo, signal, timeoutMs, maxBytes }
+  const fail = (message) => ({ error: oneLine(message) });
+
+  function run(work, check, on) {
+    return new Promise((resolve) => {
+      const args = ["-P", "-m", "agentgraph.structure", on ? "link" : "unlink", "--json", work, check];
+      const options = {
+        cwd: deps.home,
+        env: Object.assign({}, deps.env, { PYTHONPATH: deps.home, PYTHONIOENCODING: "utf-8" }),
+        encoding: "utf8",
+        timeout: deps.timeoutMs,
+        killSignal: "SIGKILL",
+        maxBuffer: deps.maxBytes,
+        windowsHide: true,
+      };
+      if (deps.signal) options.signal = deps.signal;
+      const finish = (error, stdout, stderr) => {
+        const last = String(stdout || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).pop();
+        let doc;
+        try {
+          doc = last ? JSON.parse(last) : undefined;
+        } catch (_) {
+          doc = undefined;
+        }
+        if (isPlainObject(doc) && typeof doc.error === "string" && doc.error) return fail(doc.error);
+        if (!error && isPlainObject(doc) && Array.isArray(doc.loops)) return { loops: doc.loops };
+        if (error && error.code === "ENOENT")
+          return fail("Python was not found at " + deps.python + ". Set options.python in opencode.json to a Python 3.11 or newer executable.");
+        if (error && error.killed && error.signal) return fail("The structure command did not finish in time.");
+        // The same hint as the snapshot: Apple's /usr/bin/python3 (3.9) is often first on the app's PATH.
+        if (error && /Unknown option:[ \t]+-P\b/i.test(stderr || ""))
+          return fail("Python 3.11 or newer is required. Set options.python to a newer executable; " + deps.python + " does not support -P.");
+        const detail = String(stderr || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).pop();
+        return fail("The structure command failed" + (detail ? ": " + detail : "."));
+      };
+      try {
+        deps.execFile(deps.python, args, options, (error, stdout, stderr) => {
+          try {
+            resolve(finish(error, stdout, stderr));
+          } catch (failure) {
+            resolve(fail(errorMessage(failure)));
+          }
+        });
+      } catch (error) {
+        resolve(fail("Could not start Python: " + errorMessage(error)));
+      }
+    });
+  }
+
+  let queue = Promise.resolve();
+  return {
+    // Never rejects: failures become { error }. One change at a time, in the order asked.
+    setLoop(input) {
+      if (!isPlainObject(input)) return Promise.resolve(fail("Bad loop request."));
+      const { work, check, on } = input;
+      if (typeof work !== "string" || !AGENT_NAME.test(work) || typeof check !== "string" || !AGENT_NAME.test(check))
+        return Promise.resolve(fail("The loop needs two agent names."));
+      if (typeof on !== "boolean") return Promise.resolve(fail("Bad loop request."));
+      if (deps.demo) return Promise.resolve(fail("The demo cannot change the structure."));
+      const next = queue.then(() => run(work, check, on));
+      queue = next.catch(() => {});
+      return next;
+    },
+  };
+}
+
 function nonEmptyString(value) {
   return typeof value === "string" && value.trim() !== "";
 }
@@ -282,8 +362,21 @@ function main(ctx) {
     maxBytes: SNAPSHOT_MAX_BYTES,
   });
 
+  const loops = createLoopRunner({
+    execFile: childProcess.execFile,
+    path,
+    env: process.env,
+    home,
+    python,
+    demo: options.demo === true,
+    signal: ctx.signal,
+    timeoutMs: LOOP_TIMEOUT_MS,
+    maxBytes: LOOP_MAX_BYTES,
+  });
+
   ctx.provide(snapshotIpc(ctx.id), {
     snapshot: (input) => runner.snapshot(input).then((doc) => JSON.stringify(doc)),
+    setLoop: (input) => loops.setLoop(input).then((doc) => JSON.stringify(doc)),
   });
 
   if (ctx.log && typeof ctx.log.write === "function") {
@@ -360,6 +453,23 @@ function renderPanel(ctx, solid, props) {
     }
   };
 
+  // Drawing a loop in the view writes the structure folder through the main process. The demo writes nothing,
+  // so it gets no setLoop and the view only shows the loops.
+  const setLoop = async (work, check, on) => {
+    if (!alive) throw new Error("The panel is closed.");
+    const text = await ctx.main(snapshotIpc(ctx.id)).setLoop({ work, check, on }, { signal: ctx.signal });
+    let doc;
+    try {
+      doc = JSON.parse(text);
+    } catch (_) {
+      throw new Error("The structure command did not answer with JSON.");
+    }
+    if (!isPlainObject(doc) || doc.error || !Array.isArray(doc.loops))
+      throw new Error(oneLine(isPlainObject(doc) && doc.error ? doc.error : "The loop could not be changed."));
+    return doc.loops;
+  };
+  const actions = ctx.options && ctx.options.demo === true ? undefined : { setLoop };
+
   const showSessionToast = (sessionID, copied) => {
     try {
       const toast = ctx.toast;
@@ -423,7 +533,7 @@ function renderPanel(ctx, solid, props) {
     target.className = "agentgraph-desktop-view";
     host.appendChild(target);
     try {
-      handle = view.mount(target, { fetchSnapshot, intervalMs, onOpenSession });
+      handle = view.mount(target, actions ? { fetchSnapshot, intervalMs, onOpenSession, actions } : { fetchSnapshot, intervalMs, onOpenSession });
     } catch (error) {
       host.removeChild(target);
       showMessage(host, ctx.t("message.viewFailed", { error: oneLine(errorMessage(error)) }));

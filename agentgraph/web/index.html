@@ -21,7 +21,16 @@
         if (params.has(key)) request.set(key, params.get(key));
       }
       const query = request.size ? '?' + request.toString() : '';
+      // Drawing a loop between two agents writes the structure folder; the demo writes nothing.
+      const setLoop = async (work, check, on) => {
+        const response = await fetch('/api/structure/loop', { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ work, check, on }) });
+        let data = null;
+        try { data = await response.json(); } catch (_) { /* the status says it */ }
+        if (!response.ok || !data || data.error) throw new Error(data?.error || 'The loop could not be changed (' + response.status + ')');
+        return data.loops;
+      };
       window.AgentGraph.mount(root, {
+        actions: params.has('demo') ? undefined : { setLoop },
         fetchSnapshot: async () => {
           const response = await fetch('/api/snapshot' + query, { cache: 'no-store' });
           const body = await response.text();

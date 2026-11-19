@@ -8,6 +8,7 @@
 #   agentgraph improved ...         mark that a prompt improvement was applied
 #   agentgraph serve [--port N]     the same view as a local web page (http://127.0.0.1:4747/)
 #   agentgraph snapshot             the data behind the view, as one line of JSON
+#   agentgraph structure loops      the drawn loops (link WORK CHECK / unlink WORK CHECK: draw or remove "CHECK checks WORK")
 #   agentgraph cost [--session ID]  where one chat's money went, and what would have made it cheaper
 #   agentgraph cost --trend         cost per turn over time, split at each change to the cost settings
 # -P: do not put the current directory on the import path, so a project that
@@ -32,6 +33,9 @@ case "$1" in
   snapshot)
     shift
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.snapshot_json "$@" ;;
+  structure)
+    shift
+    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.structure "$@" ;;
   *)
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph "$@" ;;
 esac

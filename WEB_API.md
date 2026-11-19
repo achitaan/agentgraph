@@ -68,6 +68,7 @@ Rules:
 - `agents` lists every agent in the active configured roster, plus an agent outside it only while one of its sessions is busy and its name is not in the config's `disabled_agents`, so live work is never invisible (`"configured": false`, model and effort taken from its newest session, or `""`; its group is looked up as below, so an unknown name is `build`). An agent that appears only in finished sessions or only in graph nodes is not listed. `totals` still count every session. Order: by group in the order of `groups`, then roster order.
 - `nodes[].busy` is true only when the node's status is `running` and its `session` is busy now. A session is often reused for several nodes (rework runs on the same session), so a busy session alone does not make a finished node busy.
 - `structure.source` is `folder` when the team's shape was read from the `structure/` folder (see `structure/README.md`), else `builtin`. With a folder, `groups` are its sub-folders in name order (`hub` first), an agent's `group`, `pool`, `checks` and `parent`, and the `escalation` routes, come from the files in it, and an interface lays the groups out in that order. Change the folder and the next snapshot changes with it.
+- `structure.loops` lists who checks whom, as `{"work": A, "check": B, "source": S}` ("B checks A's work, round after round, until it passes"). `source: "drawn"` comes from a `checked_by: B` line in A's file (every drawn loop, whether or not its agents are listed), first, in name order; `agentgraph check` enforces them (see `GRAPH_FORMAT.md`). `source: "default"` follows: one pair for each listed agent with `checks: all` and each other listed agent that is not the hub, a council seat or another checker. A `checked_by` name that is unknown, the agent itself, the hub or a council seat is left out and reported in `warnings`, never as an error. Without a folder there are no drawn loops.
 - `agents[].about` is the agent's description: the text of its file in the `structure/` folder after the settings lines, whitespace collapsed to single spaces, at most 600 characters. It is `""` when the file has no text, when the agent has no file (a councillor seat, an agent outside the folder), and whenever `structure.source` is `builtin` or the source is the demo. An interface shows it as plain text (never markup), first in the agent's details, and shows nothing when it is empty.
 - `skills` (live sources only) lists the installed skills: `name` and a one-line `description`. Which agent may load which is `agents[].skills`.
 - `learning` (live sources only; may be `null`) is what the ledger has stored for the active preset: `total` and `pending` counts of the user's notes, `due` (a prompt change is due), `runs`, `improvements`, `last_improvement`, the newest `notes` (`time`, `agent`, `task`, `text` in the user's own words), `lessons`, the applied `changes` newest first (`time`, `summary`, `file`), `trend` (`before` and `after` the latest change: `runs`, `first_pass_rate`, `mean_attempts`; or `null`), and per agent `agents[name]` = `steps`, `first_pass_rate`, `mean_attempts` over recorded runs.
@@ -114,12 +115,14 @@ Rules:
 
 - `agentgraph snapshot [--demo] [--dir PATH] [--session ID] [--task NAME]` prints the document as one line of JSON and exits 0. On an internal error it prints `{"version": 1, "error": "<message>"}` and exits 1.
 - `agentgraph serve [--port N] [--demo] [--dir PATH] [--session ID] [--open]` starts the web server (default port 4747) and prints its address. It listens on `127.0.0.1` only.
+- `agentgraph structure loops [--json]` lists the drawn loops (`--json`: `{"loops": [...]}`, the shape of `structure.loops`). `agentgraph structure link WORK CHECK [--json]` draws "CHECK checks WORK" and `agentgraph structure unlink WORK CHECK [--json]` removes it. They edit only the `checked_by` line of WORK's file (adding the line, or deleting it when it empties), keep every other byte, write a temporary file next to it and rename it over the original, and change nothing when repeated. They refuse, with a message and exit 1 (with `--json`, `{"error": "..."}` on stdout), an unknown agent, WORK equal to CHECK, the hub at either end and a council seat at either end. They also refuse, leaving it untouched, a file they cannot edit safely: a symlink, text that is not UTF-8, a line break other than `\n` or `\r\n`, or settings the snapshot's reader (first 4096 bytes, `str.splitlines`, first 12 lines) would not read as exactly the intended `checked_by` names with every other setting unchanged. A `checked_by` line after the description is description text, not a setting. `--structure DIR` names another folder (for tests). Never runs git.
 
 ## 3. The server
 
 - `GET /` and `GET /index.html` serve `agentgraph/web/index.html`. `GET /app.js`, `GET /style.css` and other files directly inside `agentgraph/web/` are served by name. Nothing outside that directory is ever served.
 - `GET /api/snapshot` returns the document. Query parameters: `demo=1` (sample data), `task=NAME`. `Cache-Control: no-store`.
-- Only `GET` and `HEAD`. A request whose `Host` header is not `127.0.0.1:<port>` or `localhost:<port>` is refused with 403, so another site cannot reach it through DNS rebinding. No CORS headers are sent.
+- `POST /api/structure/loop` with the JSON body `{"work": A, "check": B, "on": true|false}` draws (`on`) or removes the loop "B checks A", exactly like `agentgraph structure link|unlink`, and answers `{"loops": [...]}` (the drawn loops afterwards). It is refused with `{"error": "..."}`: 403 for a client that is not loopback, an `Origin` header (when present) other than `http://` plus the request's own `Host`, or a demo server; 415 for a body that is not `application/json`; 411 or 413 for a missing, empty or oversized (over 4096 bytes) body; 400 for a body that is not that object or for names the command refuses. Any other method on this path is 405 with `Allow: POST`.
+- Every other path takes only `GET` and `HEAD` (405 otherwise). A request whose `Host` header is not `127.0.0.1:<port>` or `localhost:<port>` is refused with 403, so another site cannot reach it through DNS rebinding. No CORS headers are sent.
 
 ## 4. The interface script
 
@@ -133,6 +136,17 @@ Rules:
 //   Called only from the "Open session" button in an agent's details, with its newest busy session
 //   (for the hub, its newest working subagent). Clicking an agent always opens its details; the
 //   graph never gives way to another view on its own.
+// options.actions.setLoop: optional (work, check, on) => Promise. Asks the host to draw (on) or remove
+//   (off) the loop "check checks work"; resolves when done (the next snapshot shows it), rejects with an
+//   Error whose message is shown as the agent's tooltip. A host that cannot write passes no setLoop.
+//   With it: a click on an agent arms it and a click on a second agent (or one drag from the first to
+//   the second) completes the loop, or removes it when it is already drawn; the same agent, the empty
+//   canvas or Escape cancels; a hold (350 ms, moving at most 6 px) opens the details, as a click does
+//   without setLoop; the hub and council seats are never ends, and a click on the hub opens its details.
+//   Ctrl/Cmd+Z undoes the last ten loop changes made in the view. Keyboard: Enter opens the details, `c`
+//   arms the focused agent, Tab and the arrow keys move between agents, Enter on a second agent
+//   completes, Escape cancels; `aria-pressed` marks the armed agent. Without setLoop, drawn loops are
+//   still shown and everything else behaves as before.
 // options.motion: "full" (default) or "none" for a still picture (tests, screenshots). The system's
 //   reduced-motion setting is always honoured.
 // options.scheme: "auto" (default; follows a data-color-scheme on an ancestor or the document element,
@@ -148,5 +162,6 @@ window.AgentGraph.mount(root, options)
 - It keeps everything inside `root`: no writes to `document.body`, no global listeners that outlive `destroy()`, no globals other than `window.AgentGraph`.
 - All of its CSS is in `agentgraph/web/style.css`, and every selector is scoped under the class `agentgraph` (which `mount` puts on `root`), so it cannot restyle a host application. No external fonts, images or scripts.
 - It never uses `innerHTML` (or anything else that parses markup) with text from the document.
-- `index.html` loads `style.css` and `app.js` and calls `AgentGraph.mount(document.getElementById("root"), { fetchSnapshot: () => fetch("/api/snapshot" + location.search).then(r => r.json()) })`.
-- The desktop plugin bundles the same `app.js` and `style.css` and passes a `fetchSnapshot` that asks its main process for the document.
+- Drawn loops (`structure.loops` with `source: "drawn"`) are curved arcs like `graph.loops`, still at rest. A pair the graph already loops on is drawn only by the graph's loop, which moves while work moves. While a `setLoop` request runs its arc is dimmed; a new loop draws in once (about 300 ms); a refused one disappears and the armed agent shakes once. No text is added to the graph.
+- `index.html` loads `style.css` and `app.js` and calls `AgentGraph.mount(document.getElementById("root"), { fetchSnapshot: () => fetch("/api/snapshot" + location.search).then(r => r.json()), actions: { setLoop } })`, where `setLoop` posts to `/api/structure/loop`; with `?demo` it passes no `actions`.
+- The desktop plugin bundles the same `app.js` and `style.css` and passes a `fetchSnapshot` that asks its main process for the document, and an `actions.setLoop` that asks its main process to run `python3 -P -m agentgraph.structure link|unlink --json WORK CHECK` (no `actions` when its `demo` option is set).

@@ -136,7 +136,8 @@ class SnapshotDocumentTests(unittest.TestCase):
                 return snapshot_json.snapshot_document(demo_snapshot(1000), "demo", structure=snapshot_json.load_structure(root))
             doc = document()
             agents = {agent["name"]: agent for agent in doc["agents"]}
-            self.assertEqual(doc["structure"], {"source": "folder"})
+            # The structure also carries its loops (drawn and `checks: all`); tests/test_structure.py covers them.
+            self.assertEqual((doc["structure"]["source"], sorted(doc["structure"])), ("folder", ["loops", "source"]))
             self.assertEqual([group["id"] for group in doc["groups"]], ["hub", "council", "build", "check"])
             self.assertEqual((agents["reviewer"]["group"], agents["reviewer"]["checks"]), ("check", True))
             self.assertEqual((agents["impl-openai"]["pool"], agents["impl-claude"]["pool"]), (3, None))
@@ -157,7 +158,7 @@ class SnapshotDocumentTests(unittest.TestCase):
             self.assertEqual(doc["groups"][-1], {"id": "scouts", "title": "Scouts", "agents": ["explorer"]})
         # Without a structure the built-in table is used, unchanged.
         plain = snapshot_json.snapshot_document(demo_snapshot(1000), "demo")
-        self.assertEqual(plain["structure"], {"source": "builtin"})
+        self.assertEqual((plain["structure"]["source"], sorted(plain["structure"])), ("builtin", ["loops", "source"]))
         self.assertEqual([group["id"] for group in plain["groups"]], ["hub", "understand", "decide", "council", "build", "verify"])
 
     def test_an_agent_carries_the_description_from_its_structure_file(self):

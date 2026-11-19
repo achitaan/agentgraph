@@ -333,6 +333,11 @@ function windowContext(definition, overrides = {}) {
     main(token) {
       calls.push({ op: "main", token });
       return {
+        setLoop: async (input, options) => {
+          calls.push({ op: "setLoop", input: JSON.parse(JSON.stringify(input)), options });
+          if (input.check === "orchestrator") return JSON.stringify({ error: "orchestrator is the hub; the hub cannot be part of a loop" });
+          return JSON.stringify({ loops: input.on ? [{ work: input.work, check: input.check, source: "drawn" }] : [] });
+        },
         snapshot: async (input, options) => {
           calls.push({ op: "snapshot", input: JSON.parse(JSON.stringify(input)), options });
           if (overrides.reject) throw new Error("main is not running");
@@ -414,7 +419,7 @@ function mainContext(options) {
 }
 
 let handler;
-await check("main registers exactly one Ipc (<id>.snapshot) with a snapshot method", async () => {
+await check("main registers exactly one Ipc (<id>.snapshot) with snapshot and setLoop methods", async () => {
   const definition = resolveDefault(mainLoad.module.exports);
   const m = mainContext({ home: ORCHESTRATION });
   const cleanup = await definition.main(m.ctx);
@@ -425,7 +430,11 @@ await check("main registers exactly one Ipc (<id>.snapshot) with a snapshot meth
   assert.equal(token.kind, "ipc");
   assert.equal(token.id, `${PLUGIN_ID}.snapshot`);
   assert.ok(token.id === m.ctx.id || token.id.startsWith(`${m.ctx.id}.`), "Ipc id is under the plugin id");
-  assert.deepEqual(Object.keys(token.spec.methods), ["snapshot"]);
+  assert.deepEqual(Object.keys(token.spec.methods), ["snapshot", "setLoop"]);
+  assert.deepEqual(Object.keys(token.spec.methods.setLoop.input.fields), ["work", "check", "on"]);
+  assert.equal(token.spec.methods.setLoop.input.fields.on._tag, "Boolean");
+  assert.equal(token.spec.methods.setLoop.output._tag, "String");
+  assert.ok(typeof impl.setLoop === "function");
   assert.equal(token.spec.methods.snapshot.input._tag, "Struct");
   assert.deepEqual(Object.keys(token.spec.methods.snapshot.input.fields).sort(), ["directory", "session"]);
   assert.equal(token.spec.methods.snapshot.output._tag, "String");
@@ -846,6 +855,101 @@ await check("sidebar host and mount element fill their container without enforci
   } finally {
     rendered.dispose();
   }
+});
+
+function structureHashes() {
+  const root = path.join(ORCHESTRATION, "structure");
+  const out = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else out.push(full + " " + fs.readFileSync(full).toString("base64"));
+    }
+  };
+  walk(root);
+  return out.join("\n");
+}
+
+await check("setLoop runs `python3 -P -m agentgraph.structure link|unlink --json WORK CHECK` in home, one line back; bad input and the demo spawn nothing", async () => {
+  const before = structureHashes();
+  const python = path.join(TMP, "fake-structure-python");
+  fs.writeFileSync(python, `#!/bin/sh\nif [ "$7" = orchestrator ]; then printf '{"error": "orchestrator is the hub"}\\n'; exit 1; fi\nif [ "$4" = link ]; then printf 'note\\n{"loops": [{"work": "%s", "check": "%s", "source": "drawn"}]}\\n' "$6" "$7"; else printf '{"loops": []}\\n'; fi\n`, { mode: 0o700 });
+  const log = [];
+  const loaded = loadMain(CODE, log);
+  const m = mainContext({ home: ORCHESTRATION, python });
+  resolveDefault(loaded.module.exports).main(m.ctx);
+  const impl = m.provided[0].impl;
+  const linked = JSON.parse(await impl.setLoop({ work: "impl-openai", check: "reviewer", on: true }));
+  assert.deepEqual(linked, { loops: [{ work: "impl-openai", check: "reviewer", source: "drawn" }] });
+  assert.equal(log.length, 1);
+  assert.equal(log[0].file, python);
+  assert.deepEqual(log[0].args, ["-P", "-m", "agentgraph.structure", "link", "--json", "impl-openai", "reviewer"]);
+  assert.equal(log[0].cwd, ORCHESTRATION);
+  assert.deepEqual(JSON.parse(await impl.setLoop({ work: "impl-openai", check: "reviewer", on: false })), { loops: [] });
+  assert.deepEqual(log[1].args, ["-P", "-m", "agentgraph.structure", "unlink", "--json", "impl-openai", "reviewer"]);
+  assert.deepEqual(JSON.parse(await impl.setLoop({ work: "impl-openai", check: "orchestrator", on: true })), { error: "orchestrator is the hub" });
+  log.length = 0;
+  for (const input of [null, { work: "--structure", check: "reviewer", on: true }, { work: "impl-openai", check: "a b", on: true }, { work: "impl-openai", check: "reviewer", on: "yes" }, { work: "", check: "reviewer", on: true }]) {
+    const bad = JSON.parse(await impl.setLoop(input));
+    assert.equal(typeof bad.error, "string", JSON.stringify(input));
+  }
+  const demo = mainContext({ home: ORCHESTRATION, python, demo: true });
+  resolveDefault(loaded.module.exports).main(demo.ctx);
+  assert.match(JSON.parse(await demo.provided[0].impl.setLoop({ work: "impl-openai", check: "reviewer", on: true })).error, /demo/);
+  assert.equal(log.length, 0, "invalid requests and the demo spawn nothing");
+  assert.equal(structureHashes(), before, "the real structure folder changed");
+});
+
+await check("setLoop refuses a name starting with '-' and gives the Python 3.11 hint when Python rejects -P", async () => {
+  const before = structureHashes();
+  const old = path.join(TMP, "old-structure-python");
+  fs.writeFileSync(old, `#!/bin/sh\necho "Unknown option: -P" >&2\necho "usage: python3 [option] ..." >&2\nexit 2\n`, { mode: 0o700 });
+  const log = [];
+  const loaded = loadMain(CODE, log);
+  const m = mainContext({ home: ORCHESTRATION, python: old });
+  resolveDefault(loaded.module.exports).main(m.ctx);
+  const impl = m.provided[0].impl;
+  for (const input of [{ work: "-impl-openai", check: "reviewer", on: true }, { work: "impl-openai", check: "-reviewer", on: false }, { work: "impl-openai", check: "-P", on: true }]) {
+    const bad = JSON.parse(await impl.setLoop(input));
+    assert.match(bad.error, /two agent names/, JSON.stringify(input));
+  }
+  assert.equal(log.length, 0, "a name starting with '-' reached the command line");
+  const hint = JSON.parse(await impl.setLoop({ work: "impl-openai", check: "reviewer", on: true }));
+  assert.equal(log.length, 1);
+  assert.match(hint.error, /Python 3\.11 or newer is required/);
+  assert.ok(hint.error.includes(old) && hint.error.includes("options.python") && !hint.error.includes("\n"), hint.error);
+  assert.equal(structureHashes(), before, "the real structure folder changed");
+});
+
+await check("panel render: the view gets actions.setLoop, which asks main and turns an error into a rejection; the demo passes none", async () => {
+  const definition = windowLoad.gui.defined[0];
+  const session = { key: "srv\nses_a", id: "ses_a", directory: ORCHESTRATION };
+  const props = { get session() { return session; }, screen: {} };
+  const w = windowContext(definition, { session });
+  definition.setup(w.ctx);
+  const rendered = windowLoad.solid.runWithOwner(() => value(w.added[1].item).render(props));
+  const call = mountCalls[mountCalls.length - 1];
+  assert.equal(typeof call.options.actions?.setLoop, "function");
+  const loops = await call.options.actions.setLoop("impl-openai", "reviewer", true);
+  assert.deepEqual(JSON.parse(JSON.stringify(loops)), [{ work: "impl-openai", check: "reviewer", source: "drawn" }]);
+  const asked = w.calls.filter((c) => c.op === "setLoop");
+  assert.deepEqual(asked.map((c) => c.input), [{ work: "impl-openai", check: "reviewer", on: true }]);
+  assert.equal(w.calls.filter((c) => c.op === "main").at(-1).token.id, `${PLUGIN_ID}.snapshot`);
+  let message = "";
+  try {
+    await call.options.actions.setLoop("impl-openai", "orchestrator", true);
+  } catch (error) {
+    message = error.message;
+  }
+  assert.equal(message, "orchestrator is the hub; the hub cannot be part of a loop");
+  rendered.dispose();
+
+  const demo = windowContext(definition, { session, options: { demo: true } });
+  definition.setup(demo.ctx);
+  const r2 = windowLoad.solid.runWithOwner(() => value(demo.added[1].item).render(props));
+  assert.equal(mountCalls[mountCalls.length - 1].options.actions, undefined, "the demo can draw loops");
+  r2.dispose();
 });
 
 await check("panel render: main-process rejection becomes an error document; a throwing view shows text only", async () => {

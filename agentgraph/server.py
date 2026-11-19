@@ -13,11 +13,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote
 
+from . import structure
 from .demo import demo_snapshot
 from .snapshot_json import learning_document, load_structure, skills_document, snapshot_document
 from .sources import ORCHESTRATION_GRAPH_DIR, build_snapshot
 
 _HOST = "127.0.0.1"
+_LOOP_PATH = "/api/structure/loop"
+_LOOPBACK = frozenset({"127.0.0.1", "::1"})
+_LOOP_BODY_LIMIT = 4096
 _TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -47,8 +51,11 @@ def _read_static(directory: Path, filename: str) -> bytes:
 def make_server(
     port: int, *, demo: bool = False, graph_dir: Path | None = None,
     session: str | None = None, cwd: Path | None = None, web_dir: Path | None = None,
+    structure_dir: Path | None = None,
 ) -> ThreadingHTTPServer:
-    """Bind a server; the caller is responsible for running and closing it."""
+    """Bind a server; the caller is responsible for running and closing it.
+    `structure_dir` is the folder `POST /api/structure/loop` edits (default: the
+    orchestration's own `structure/`)."""
     directory = (web_dir if web_dir is not None else Path(__file__).with_name("web")).resolve()
 
     class Handler(BaseHTTPRequestHandler):
@@ -73,13 +80,63 @@ def make_server(
                     self.request_version = "HTTP/1.0"
                 self.send_error(403)
                 return False
-            if self.command not in ("GET", "HEAD"):
+            allowed = ("POST",) if self.path.partition("?")[0] == _LOOP_PATH else ("GET", "HEAD")
+            if self.command not in allowed:
                 self.send_response(405)
-                self.send_header("Allow", "GET, HEAD")
+                self.send_header("Allow", ", ".join(allowed))
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return False
             return True
+
+        def _refuse(self, status: int, message: str):
+            self._reply(status, "application/json", json.dumps({"error": message}).encode("utf-8"))
+
+        def do_POST(self):
+            # Only this page may change the structure: a loopback client, a JSON body, and an
+            # Origin (browsers always send one on a POST) that is this server's own.
+            if self.client_address[0] not in _LOOPBACK:
+                self._refuse(403, "only a local client may change the structure")
+                return
+            origins = self.headers.get_all("Origin", [])
+            if origins and (len(origins) != 1 or origins[0] != "http://" + self.headers["Host"]):
+                self._refuse(403, "the request did not come from this page")
+                return
+            if self.headers.get_content_type() != "application/json" or len(self.headers.get_all("Content-Type", [])) != 1:
+                self._refuse(415, "the body must be JSON")
+                return
+            if self.headers.get("Transfer-Encoding"):
+                self._refuse(411, "the body needs a Content-Length")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", ""))
+            except ValueError:
+                self._refuse(411, "the body needs a Content-Length")
+                return
+            if not 0 < length <= _LOOP_BODY_LIMIT:
+                self._refuse(413, "the body is empty or too large")
+                return
+            try:
+                request = json.loads(self.rfile.read(length).decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                self._refuse(400, "the body is not valid JSON")
+                return
+            if (not isinstance(request, dict) or not isinstance(request.get("work"), str)
+                    or not isinstance(request.get("check"), str) or not isinstance(request.get("on"), bool)):
+                self._refuse(400, 'expected {"work": agent, "check": agent, "on": true or false}')
+                return
+            if demo:
+                self._refuse(403, "the demo cannot change the structure")
+                return
+            try:
+                _, loops = structure.set_loop(request["work"], request["check"], request["on"], structure_dir)
+            except structure.StructureError as exc:
+                self._refuse(400, str(exc))
+                return
+            except OSError as exc:
+                self._refuse(500, f"could not change the structure: {exc}")
+                return
+            self._reply(200, "application/json", json.dumps({"loops": loops}).encode("utf-8"))
 
         def _reply(self, status: int, content_type: str, body: bytes):
             self.send_response(status)
@@ -101,7 +158,7 @@ def make_server(
                                               session_graph_dir=None if graph_dir else ORCHESTRATION_GRAPH_DIR)
                 document = snapshot_document(snapshot, "demo" if use_demo else "live", task,
                                              session=None if use_demo else session,
-                                             structure=None if use_demo else load_structure())
+                                             structure=None if use_demo else load_structure(structure_dir))
                 if not use_demo:
                     document["learning"] = learning_document()
                     document["skills"] = skills_document()

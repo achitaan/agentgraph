@@ -17,6 +17,8 @@ from .contract import (
     NODE_TYPES, VERDICTS, TaskGraph, objective_coverage, shape_advice, validate,
 )
 from .sources import find_graph_dir, graph_files, graph_from_raw, read_graph_text
+from .snapshot_json import load_structure
+from .structure import drawn_loops
 
 
 _NODE_STRINGS = ("id", "type", "agent", "goal", "done_when", "status")
@@ -205,12 +207,32 @@ def read_graph(path: Path) -> tuple[TaskGraph | None, list[str]]:
     return _graph_and_issues(raw, path)
 
 
-def _graph_and_issues(raw: dict, path: Path) -> tuple[TaskGraph, list[str]]:
+def loop_problems(graph: TaskGraph, loops) -> list[str]:
+    """Drawn loops (`checked_by` in the structure folder) that the graph does not
+    honour: every `implement` or `design` node that has not passed, whose agent
+    has drawn checkers, needs a `gate` node run by each checker whose
+    `feedback_to` names it. `loops` holds (work, check) pairs."""
+    checkers: dict[str, list[str]] = {}
+    for work, check in loops:
+        checkers.setdefault(work, [])
+        if check not in checkers[work]:
+            checkers[work].append(check)
+    if not checkers:
+        return []
+    gates = {(node.agent, target) for node in graph.nodes if node.type == "gate" for target in node.feedback_to}
+    return [f"{node.id} ({node.agent}) has no check by {check}: the structure says {check} checks {node.agent}"
+            for node in graph.nodes
+            if node.type in ("implement", "design") and node.status != "passed"
+            for check in checkers.get(node.agent, [])
+            if (check, node.id) not in gates]
+
+
+def _graph_and_issues(raw: dict, path: Path, loops=()) -> tuple[TaskGraph, list[str]]:
     issues = _raw_issues(raw)
     graph = graph_from_raw(raw, path)
     if issues:
         return graph, issues
-    issues = validate(graph)
+    issues = validate(graph) + loop_problems(graph, loops)
     for node in graph.nodes:
         if node.type not in NODE_TYPES:
             issues.append(f"{node.id} has unknown type {node.type!r}")
@@ -231,7 +253,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentgraph check", description=__doc__.splitlines()[0])
     parser.add_argument("--dir", type=Path, help="directory of graph JSON files (default: nearest .opencode/graph)")
     parser.add_argument("--task", metavar="NAME", help="check only the graph with this declared task name")
+    parser.add_argument("--structure", type=Path, metavar="DIR",
+                        help="structure folder whose drawn loops the graphs must honour (default: the orchestration's own)")
     args = parser.parse_args(argv)
+    # A missing default folder means no drawn loops; a folder named on the command line must exist,
+    # so a mistyped path cannot turn the loop checks off without a word.
+    if args.structure is not None and load_structure(args.structure) is None:
+        _print(f"structure folder {args.structure} does not exist or holds no group folder")
+        return 2
+    loops = [(loop["work"], loop["check"]) for loop in drawn_loops(args.structure)]
 
     discovery_warnings: list[str] = []
     try:
@@ -262,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         if raw is not None:
             if args.task is not None and raw.get("task") != args.task:
                 continue  # Another task's graph: never validated, so it cannot slow this check.
-            graph, issues = _graph_and_issues(raw, path)
+            graph, issues = _graph_and_issues(raw, path, loops)
         if graph is None:
             # A non-object is readable JSON with a schema problem; preserve
             # the CLI's distinction between it and a read or decode failure.
