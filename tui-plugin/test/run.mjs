@@ -682,7 +682,12 @@ test("options: defaults, minimum interval, mode", () => {
 // A tiny reactive core shared by the two stub modules: signals re-run the computations that read them.
 globalThis.__agentgraphStub = (() => {
   let listener = null;
+  const cleanups = [];
   return {
+    cleanups,
+    onCleanup(fn) {
+      cleanups.push(fn);
+    },
     createSignal(value) {
       const subs = new Set();
       const read = () => {
@@ -712,7 +717,7 @@ globalThis.__agentgraphStub = (() => {
 })();
 
 const STUBS = {
-  "solid-js": "const s = globalThis.__agentgraphStub; export const createSignal = (v) => s.createSignal(v);",
+  "solid-js": "const s = globalThis.__agentgraphStub; export const createSignal = (v) => s.createSignal(v); export const onCleanup = (fn) => s.onCleanup(fn);",
   "@opentui/solid": [
     "const s = globalThis.__agentgraphStub;",
     "export function createElement(tag) { return { tag, props: {}, children: [] }; }",
@@ -952,6 +957,360 @@ test("plugin: a host without ui.slot, theme or renderer does not throw", () => {
   assert.equal(typeof stop, "function");
   stop();
   assert.doesNotThrow(() => tui.setup(undefined)());
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// The panel and its command
+
+function makePanelHost(options = {}, { session = true, current, keymap = true, panel = true, toast = true } = {}) {
+  const { ctx, state } = makeHost(options);
+  Object.assign(state, { layers: [], unlayered: 0, opened: [], closed: 0, toasts: [], currentName: current });
+  if (keymap) {
+    ctx.keymap = {
+      layer(factory) {
+        const layer = factory();
+        state.layers.push(layer);
+        return () => (state.unlayered += 1);
+      },
+    };
+  }
+  if (panel) {
+    ctx.ui.panel = {
+      open(name, opts) {
+        if (!session) return false;
+        state.opened.push({ name, opts });
+        state.currentName = name;
+        return true;
+      },
+      current: () => (state.currentName ? { name: state.currentName } : undefined),
+      close() {
+        state.closed += 1;
+        state.currentName = undefined;
+      },
+    };
+  }
+  if (toast) ctx.ui.toast = { show: (t) => state.toasts.push(t) };
+  const command = () => state.layers.flatMap((l) => l.commands || []).find((c) => c.id === "agentgraph.graph");
+  const panelClaim = () => state.claims.find((c) => c.append === "session.panel");
+  return { ctx, state, command, panelClaim };
+}
+
+const makePanel = (extra = {}) => {
+  const calls = { full: 0, close: 0 };
+  return Object.assign({ name: "agentgraph.graph", sessionID: "ses_p", width: 80, toggleFullscreen: () => (calls.full += 1), close: () => (calls.close += 1) }, extra, { calls });
+};
+
+test("panel: the command is registered with id, title, slash name and alias", () => {
+  const { ctx, state, command } = makePanelHost();
+  const stop = tui.setup(ctx);
+  try {
+    assert.equal(state.layers.length, 1);
+    assert.equal(state.layers[0].mode, "global");
+    const c = command();
+    assert.equal(c.id, "agentgraph.graph");
+    assert.equal(c.title, "Agent graph");
+    assert.equal(c.palette, true);
+    assert.deepEqual(c.slash, { name: "graph", aliases: ["agents"] });
+    assert.equal(typeof c.run, "function");
+    // the sidebar slot and the panel slot
+    assert.equal(state.claims.length, 2);
+    assert.equal(state.claims[0].replace, "sidebar.content");
+    assert.deepEqual(Object.keys(state.claims[1]).sort(), ["append", "render"]);
+  } finally {
+    stop();
+  }
+});
+
+test("panel: running the command opens the panel, running it again closes it", () => {
+  const { ctx, state, command } = makePanelHost();
+  const stop = tui.setup(ctx);
+  try {
+    command().run();
+    assert.deepEqual(state.opened, [{ name: "agentgraph.graph", opts: undefined }]);
+    assert.equal(state.closed, 0);
+    command().run();
+    assert.equal(state.closed, 1);
+    assert.equal(state.opened.length, 1);
+    command().run();
+    assert.equal(state.opened.length, 2);
+    // another plugin's panel is current: open ours, do not close theirs
+    state.currentName = "other.panel";
+    command().run();
+    assert.equal(state.opened.length, 3);
+    assert.equal(state.closed, 1);
+    assert.equal(state.toasts.length, 0);
+  } finally {
+    stop();
+  }
+});
+
+test("panel: outside a session the command toasts once and opens nothing", () => {
+  const { ctx, state, command } = makePanelHost({}, { session: false });
+  const stop = tui.setup(ctx);
+  try {
+    command().run();
+    assert.equal(state.opened.length, 0);
+    assert.equal(state.closed, 0);
+    assert.equal(state.toasts.length, 1);
+    assert.equal(typeof state.toasts[0].message, "string");
+    assert.ok(state.toasts[0].message.length > 0 && state.toasts[0].message.length < 60);
+  } finally {
+    stop();
+  }
+  // no toast function: nothing throws
+  const bare = makePanelHost({}, { session: false, toast: false });
+  const stopBare = tui.setup(bare.ctx);
+  assert.doesNotThrow(() => bare.command().run());
+  stopBare();
+});
+
+test("panel: a failing host open does not throw into the host", () => {
+  const { ctx, command } = makePanelHost();
+  ctx.ui.panel.open = () => {
+    throw new Error("boom");
+  };
+  const stop = tui.setup(ctx);
+  try {
+    assert.doesNotThrow(() => command().run());
+  } finally {
+    stop();
+  }
+});
+
+const demoPython = fakePython("panel-demo-python", `cat "${path.join(here, "fixtures", "demo.json")}"`);
+
+test("panel: other panel names render nothing; its own name draws the four-block view; width follows and is capped", async () => {
+  const { ctx, state, panelClaim } = makePanelHost({ python: demoPython });
+  const stop = tui.setup(ctx);
+  try {
+    const other = panelClaim().render(makePanel({ name: "other.panel" }));
+    assert.deepEqual(screen(other), []);
+
+    const [width, setWidth] = createSignal(80);
+    const [name, setName] = createSignal("other.panel");
+    const panel = makePanel();
+    Object.defineProperties(panel, { width: { get: () => width() }, name: { get: () => name() } });
+    const view = panelClaim().render(panel);
+    assert.deepEqual(screen(view), []);
+    setName("agentgraph.graph");
+    assert.deepEqual(screen(view), ["Loading"]);
+    await waitFor(() => screen(view).length > 5, 5000, "panel snapshot");
+    const widthOf = (i) => R.displayWidth(screen(view)[i]);
+    const barIndex = () => screen(view).findIndex((l) => /^[━─]+$/.test(l));
+    assert.match(screen(view)[0], /^◉ orchestrator .*\d+\/\d+$/);
+    assert.ok(barIndex() > 0, "progress bar");
+    assert.ok(screen(view).some((l) => l.trim() === ""), "blocks are separated by a blank line");
+    assert.equal(widthOf(0), 80);
+    assert.equal(widthOf(barIndex()), 80);
+    // wider panel, wider lines
+    setWidth(100);
+    assert.equal(widthOf(0), 100);
+    assert.equal(widthOf(barIndex()), 100);
+    // the cap holds
+    setWidth(300);
+    assert.equal(widthOf(0), 100);
+    assert.equal(widthOf(barIndex()), 100);
+    // never narrower than the sidebar
+    setWidth(10);
+    assert.equal(widthOf(0), 37);
+    setWidth(undefined);
+    assert.equal(widthOf(0), 37);
+    // at the sidebar's width, the same lines as the sidebar draws
+    setWidth(37);
+    const sidebarView = state.claims[0].render({ sessionID: "ses_p" });
+    await waitFor(() => screen(sidebarView).length > 5, 5000, "sidebar snapshot");
+    const spin = (l) => l.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, "*");
+    assert.deepEqual(screen(view).map(spin), screen(sidebarView).map(spin));
+    // the name changes away: nothing is drawn
+    setName("other.panel");
+    assert.deepEqual(screen(view), []);
+  } finally {
+    stop();
+  }
+  assert.equal(P.panelWidth({ width: 120.9 }), 100);
+  assert.equal(P.panelWidth({ width: 50.7 }), 50);
+  assert.equal(P.panelWidth(null), 37);
+});
+
+test("panel: the panel session is polled; closing it stops its timers; the sidebar keeps polling", async () => {
+  fs.writeFileSync(pluginLog, "");
+  const { ctx, state, panelClaim } = makePanelHost();
+  const stop = tui.setup(ctx);
+  try {
+    const sideView = state.claims[0].render({ sessionID: "ses_side" });
+    await waitFor(() => screen(sideView).includes("○ w-ses_side"), 5000, "sidebar snapshot");
+    const withSidebar = new Set(activeIntervals);
+    globalThis.__agentgraphStub.cleanups.length = 0;
+    const view = panelClaim().render(makePanel({ sessionID: "ses_panel" }));
+    assert.equal(globalThis.__agentgraphStub.cleanups.length, 1, "registered a cleanup with the host");
+    assert.ok([...activeIntervals].some((h) => !withSidebar.has(h)), "panel poll timer started");
+    await waitFor(() => screen(view).includes("○ w-ses_panel"), 5000, "panel snapshot");
+    await sleep(2300);
+    const log = () => fs.readFileSync(pluginLog, "utf8").trim().split("\n");
+    assert.ok(log().filter((l) => l === "ses_panel").length >= 3, "panel polled: " + log().join(","));
+    // the host disposes the panel
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    for (const h of activeIntervals) assert.ok(withSidebar.has(h), "a panel timer survived the close");
+    const before = log().filter((l) => l === "ses_panel").length;
+    await sleep(1300);
+    assert.equal(log().filter((l) => l === "ses_panel").length, before, "panel polled after close");
+    assert.ok(log().filter((l) => l === "ses_side").length >= 1, "sidebar still polls");
+  } finally {
+    stop();
+  }
+});
+
+test("panel: f toggles full screen, q closes, only while it is this plugin's panel", () => {
+  const { ctx, state, panelClaim } = makePanelHost();
+  const stop = tui.setup(ctx);
+  try {
+    const panel = makePanel();
+    const before = state.layers.length;
+    panelClaim().render(panel);
+    assert.equal(state.layers.length, before + 1);
+    const layer = state.layers[before];
+    assert.equal(layer.mode, undefined, "no mode: active only while the panel owns input");
+    const f = layer.commands.find((c) => c.bind === "f");
+    const q = layer.commands.find((c) => c.bind === "q");
+    assert.equal(layer.commands.length, 2);
+    assert.equal(f.enabled(), true);
+    f.run();
+    assert.equal(panel.calls.full, 1);
+    assert.equal(panel.calls.close, 0);
+    q.run();
+    assert.equal(panel.calls.close, 1);
+    assert.equal(panel.calls.full, 1);
+    // another plugin's panel: the keys are not ours
+    const foreign = makePanel({ name: "other.panel" });
+    const n = state.layers.length;
+    panelClaim().render(foreign);
+    const keys = state.layers[n].commands;
+    assert.ok(keys.every((c) => c.enabled() === false));
+    // a throwing action is swallowed
+    const bad = makePanel({ toggleFullscreen() { throw new Error("boom"); } });
+    panelClaim().render(bad);
+    const m = state.layers.length - 1;
+    assert.doesNotThrow(() => state.layers[m].commands.find((c) => c.bind === "f").run());
+  } finally {
+    stop();
+  }
+});
+
+test("panel: closing removes its f/q layer once; the plugin's cleanup then does not remove it again", () => {
+  const { ctx, state, panelClaim } = makePanelHost();
+  const stop = tui.setup(ctx);
+  globalThis.__agentgraphStub.cleanups.length = 0;
+  panelClaim().render(makePanel({ sessionID: "ses_keys" }));
+  assert.equal(state.unlayered, 0);
+  const closers = globalThis.__agentgraphStub.cleanups.splice(0);
+  for (const fn of closers) fn();
+  assert.equal(state.unlayered, 1, "the f/q layer is removed when the panel closes");
+  for (const fn of closers) fn();
+  assert.equal(state.unlayered, 1, "closing twice is harmless");
+  // a second mount adds a second layer; the plugin's cleanup removes it, and the command layer
+  panelClaim().render(makePanel({ sessionID: "ses_keys" }));
+  assert.equal(state.layers.length, 3);
+  stop();
+  assert.equal(state.unlayered, 3);
+  stop();
+  assert.equal(state.unlayered, 3);
+  globalThis.__agentgraphStub.cleanups.length = 0;
+});
+
+test("panel: after it closes, a late fetch is dropped and a re-run view does not restart the timers", async () => {
+  fs.writeFileSync(pluginLog, "");
+  const { ctx, panelClaim } = makePanelHost();
+  const stop = tui.setup(ctx);
+  try {
+    const [name, setName] = createSignal("agentgraph.graph");
+    const panel = makePanel({ sessionID: "ses_slow" });
+    Object.defineProperty(panel, "name", { get: () => name() });
+    globalThis.__agentgraphStub.cleanups.length = 0;
+    const base = new Set(activeIntervals);
+    const view = panelClaim().render(panel);
+    await waitFor(() => fs.readFileSync(pluginLog, "utf8").includes("ses_slow"), 3000, "slow fetch started");
+    const withPanel = [...activeIntervals].filter((h) => !base.has(h));
+    assert.ok(withPanel.length >= 1, "panel timers running");
+    // close while the fetch is in flight
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    assert.ok([...activeIntervals].every((h) => base.has(h) || !withPanel.includes(h)), "panel timers stopped");
+    // the host re-runs the view after disposal: still no timers
+    setName("other.panel");
+    setName("agentgraph.graph");
+    const afterRerun = [...activeIntervals].filter((h) => !base.has(h));
+    assert.deepEqual(afterRerun, [], "a re-run view restarted a timer");
+    await sleep(1200); // the slow process finishes
+    assert.ok(!screen(view).some((l) => l.includes("slowagent")), "late result was drawn: " + screen(view).join(" | "));
+    assert.deepEqual([...activeIntervals].filter((h) => !base.has(h)), [], "the late result started a timer");
+    // mounting it again starts it again
+    globalThis.__agentgraphStub.cleanups.length = 0;
+    const view2 = panelClaim().render(makePanel({ sessionID: "ses_again" }));
+    await waitFor(() => screen(view2).includes("○ w-ses_again"), 5000, "remounted snapshot");
+    assert.ok([...activeIntervals].some((h) => !base.has(h)), "remounted panel polls");
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+  } finally {
+    stop();
+  }
+});
+
+test("panel: the panel shows no title, hint or key legend, and no green", async () => {
+  const { ctx, panelClaim } = makePanelHost();
+  const stop = tui.setup(ctx);
+  try {
+    const view = panelClaim().render(makePanel({ sessionID: "ses_legend" }));
+    await waitFor(() => screen(view).includes("○ w-ses_legend"), 5000, "panel snapshot");
+    const all = screen(view).join("\n");
+    assert.ok(!/fullscreen|full screen|close|\bq\b|\bf\b|Agent graph|agentgraph/i.test(all), all);
+    const hub = view.children[0].children[0];
+    assert.equal(hub.props.fg, "#d08040");
+  } finally {
+    stop();
+  }
+});
+
+test("panel: a host without keymap, ui.panel, toast or onCleanup still loads and fills the sidebar", () => {
+  for (const extra of [{ keymap: false }, { panel: false }, { keymap: false, panel: false, toast: false }]) {
+    const { ctx, state } = makePanelHost({}, extra);
+    const stop = tui.setup(ctx);
+    assert.equal(state.claims[0].replace, "sidebar.content");
+    assert.equal(state.claims.length, extra.panel === false ? 1 : 2);
+    assert.equal(state.layers.length, extra.keymap === false || extra.panel === false ? 0 : 1);
+    assert.doesNotThrow(() => state.claims[0].render({ sessionID: "ses_a" }));
+    stop();
+  }
+  // no panel: no command either, because there is nothing for it to open
+  const noPanel = makePanelHost({}, { panel: false });
+  const stopNoPanel = tui.setup(noPanel.ctx);
+  assert.equal(noPanel.command(), undefined);
+  stopNoPanel();
+  // a host whose keymap.layer throws
+  const { ctx, state } = makePanelHost();
+  ctx.keymap.layer = () => {
+    throw new Error("no layer");
+  };
+  const stop = tui.setup(ctx);
+  assert.equal(state.claims[0].replace, "sidebar.content");
+  assert.doesNotThrow(() => state.claims[1].render(makePanel({ sessionID: "ses_a" })));
+  stop();
+});
+
+test("panel: cleanup removes the slots, the command layer and the timers", async () => {
+  fs.writeFileSync(pluginLog, "");
+  const { ctx, state, panelClaim } = makePanelHost();
+  const before = new Set(activeIntervals);
+  const stop = tui.setup(ctx);
+  panelClaim().render(makePanel({ sessionID: "ses_clean" }));
+  state.claims[0].render({ sessionID: "ses_clean" });
+  await waitFor(() => fs.readFileSync(pluginLog, "utf8").includes("ses_clean"), 3000, "fetch");
+  stop();
+  stop();
+  for (const h of activeIntervals) assert.ok(before.has(h), "an interval survived cleanup");
+  assert.equal(state.unslotted, 2);
+  // the command layer and the panel's f/q layer, though the host never ran onCleanup; twice is harmless
+  assert.equal(state.unlayered, 2);
+  const calls = fs.readFileSync(pluginLog, "utf8").trim().split("\n").length;
+  await sleep(1300);
+  assert.equal(fs.readFileSync(pluginLog, "utf8").trim().split("\n").length, calls, "fetched after cleanup");
 });
 
 // ---------------------------------------------------------------------------------------------------------------

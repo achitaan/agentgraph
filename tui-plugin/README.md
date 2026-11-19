@@ -1,6 +1,6 @@
 # agentgraph-tui
 
-The agent graph of the current OpenCode session, as text, in the terminal sidebar. It is the terminal sibling of
+The agent graph of the current OpenCode session, as text, in the terminal sidebar and, on demand, in a session panel. It is the terminal sibling of
 `../desktop-plugin/` and reads the same snapshot document (`../WEB_API.md`, section 1).
 
 ## What it shows
@@ -44,6 +44,22 @@ Four blocks, one blank line between them; an empty block is left out.
 - Nothing animates unless something works: the frame timer runs only while the hub or any agent is busy.
 - Live things use the theme's warning or accent colour (whichever is nearer terracotta). A green one is never used:
   if both are green, live things are the plain text colour in bold.
+
+## The panel
+
+The host hides the sidebar on terminals narrower than about 120 columns. For those, and whenever you want a bigger
+view, the same four blocks open as a session panel:
+
+- Command `agentgraph.graph`, title `Agent graph`, in the command palette, or type `/graph` (alias `/agents`). It
+  toggles: it closes the panel if this plugin's panel is the open one, otherwise it opens it. Outside a session
+  there is nothing to show, so it only shows a short toast.
+- While the panel has the keyboard: `f` toggles full screen, `q` closes it. The panel itself has no title, hints or
+  key legend.
+- Widths: the text follows the panel's width, never narrower than the sidebar's 37 columns and never wider than
+  100, so lines do not stretch across a huge terminal. The host keeps narrow terminals in full screen by itself.
+- It watches the panel's session with the same runner and `intervalMs` as the sidebar, starts when the panel opens
+  and stops when it closes or the plugin is disposed.
+- A host without `ui.panel`, `keymap.layer` or `ui.toast` gets the sidebar only, as before.
 
 ## Enable
 
@@ -101,7 +117,7 @@ the session changed is dropped. The cleanup stops both timers and kills a runnin
   (`createSignal`) and node built-ins, the same specifiers the installed `oh-my-opencode-slim` TUI plugin
   (`dist/tui2.js`) imports. Default-exports a plain `{ id, setup }` object, as that plugin does; it does not load
   `@opencode/plugin` at run time.
-- `src/plugin.js`: the slot, timers, theme mapping and session handling, written against injected host functions.
+- `src/plugin.js`: the slots (sidebar, panel), the command, timers, theme mapping and session handling, written against injected host functions.
 - `src/render.js`: pure rendering, `render(snapshot, { width, frame, now })` → lines of `{ text, tone }` spans.
 - `src/runner.js`: the snapshot process runner.
 - `test/run.mjs`: `node tui-plugin/test/run.mjs` (plain node, exits non-zero on failure). `test/fixtures/demo.json`
@@ -120,6 +136,12 @@ None of this has run inside a real OpenCode TUI. Specifically unverified:
   form in `cli.json` is assumed.
 - The theme shape: it reads `theme.text` (`default`, `muted`/`subdued`), `theme.warning`, `theme.accent`,
   `theme.error`, as strings or `{ r, g, b }` colours. Unknown shapes fall back to the host's default text colour.
+- The panel: that `context.ui.slot({ append: "session.panel" })`, `ui.panel.open/current/close` and `keymap.layer`
+  behave as the V2 guide says; that `panel.width` is the usable text width (if it includes padding, lines are
+  clipped by that much); that `current()` returns an object with a `name`; that a `keymap.layer` made inside the
+  panel's render without `mode` is dropped when the panel closes and its commands honour `enabled`; that
+  `onCleanup` from `solid-js` runs when the host disposes the contribution (it is what stops the panel's timers);
+  that the toast variant `"info"` exists.
 - Bold through the `attributes: 1` text property (OpenTUI `TextAttributes.BOLD`), used only for a green-only theme.
 - That a row of `<text>` elements inside a `<box flexDirection="row">` draws on one line without wrapping.
 - Spawning a child process from the TUI process (the installed example does it; this plugin was only run under node).
