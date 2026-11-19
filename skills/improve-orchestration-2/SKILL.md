@@ -18,7 +18,7 @@ Constants (all under `~/.config/opencode/`):
 - **The skill map:** an agent's `skills` list under `presets.<P>` (add a skill an agent kept needing, remove one it never used or misused). Use only skill names that exist under `skills/`.
 - **A skill:** one `SKILL.md` or reference file under `skills/<name>/`, this skill included. Skills are shared by every preset, so say so in the proposal, and keep the edit true for all of them. Never rename a skill or change what it is for.
 
-Out of bounds: AGENTS.md, opencode.json, every other preset, the base `oh-my-opencode-slim/*_append.md` files (shared by all presets), skill scripts and data files, the original ledger, plus models, effort levels, permissions and the roster. If evidence says one of those is the problem, say so in the proposal and stop.
+Out of bounds: AGENTS.md, opencode.json (apart from the two cost settings in "Cost settings" below, which are shared by every preset), every other preset, the base `oh-my-opencode-slim/*_append.md` files (shared by all presets), skill scripts and data files, the original ledger, plus models, effort levels, permissions and the roster. If evidence says one of those is the problem, say so in the proposal and stop.
 
 ## Procedure
 
@@ -45,3 +45,18 @@ Out of bounds: AGENTS.md, opencode.json, every other preset, the base `oh-my-ope
 - No automatic timers, scheduled jobs or base-prompt edits without user approval. Recording authorized run evidence and feedback in the private ledger does not itself change the prompts.
 - Do not import or load the base `improve-orchestration` skill or reference original paths; they would reintroduce the shared ledger.
 - Keep the files short: every sentence is read on every run, so prefer deletions and merges when a file has grown.
+
+## Cost settings
+
+Two settings in `~/.config/opencode/opencode.json` may be proposed in the same way as a prompt edit, and nothing else in that file:
+
+- `compaction.buffer`: how early a long chat is summarized. A larger value compacts earlier, which costs less and forgets more.
+- `providers.anthropic.models.<model>.settings.cache.ttl`: how long the provider keeps a chat's context cached, `"5m"` or `"1h"`. An hour costs more to write and saves a full rewrite after each pause.
+
+The evidence is `agentgraph cost --trend` (the same numbers are under `cost` in `agentgraph signals`). It splits recent chats into periods at each settings change and reports, for each, dollars per turn, the share spent on cold turns, and what pauses cost.
+
+- Propose a change only when the periods being compared each have a few hundred turns, or when the user asks.
+- Dollars per turn higher after a change than before it: propose reverting that change.
+- A cold share above about a third, mostly pauses: propose the one-hour cache for that model, or earlier compaction.
+- The user says the agent forgot things after a summary: propose later compaction (a smaller buffer), and say what it is expected to cost.
+- One setting per proposal, with the before and after values and the numbers from both periods. Back the file up before applying, then run `agentgraph cost` once so the settings log records the change.

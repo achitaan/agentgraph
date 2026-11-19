@@ -24,7 +24,7 @@ All paths are under `~/.config/opencode/`.
 | One other agent's behaviour | `oh-my-opencode-slim/<agent>_append.md` (create it if it does not exist) |
 | A fact about one project or one kind of task | `orchestration/LESSONS.md`, not a prompt |
 
-Out of bounds: models, effort levels, permissions and the agent roster. Those are the user's choices. If the evidence says one of them is the problem, say so in the proposal and stop there.
+Out of bounds: models, effort levels, permissions, the agent roster, and `opencode.json` apart from the two cost settings below. Those are the user's choices. If the evidence says one of them is the problem, say so in the proposal and stop there.
 
 ## Procedure
 
@@ -74,6 +74,21 @@ Out of bounds: models, effort levels, permissions and the agent roster. Those ar
 - The base files are read on every run, so every sentence costs tokens forever. If a file has grown past what you can explain line by line, propose a deletion or a merge as the improvement.
 - Procedures that only matter sometimes belong in a skill, loaded when needed, not in a prompt that is always read.
 - `LESSONS.md` holds lessons that are specific. When the same lesson has been written there for two different projects, it is general: propose moving it into a base prompt and delete it from the lessons file.
+
+## Cost settings
+
+Two settings in `~/.config/opencode/opencode.json` may be proposed in the same way as a prompt edit, and nothing else in that file:
+
+- `compaction.buffer`: how early a long chat is summarized. A larger value compacts earlier, which costs less and forgets more.
+- `providers.anthropic.models.<model>.settings.cache.ttl`: how long the provider keeps a chat's context cached, `"5m"` or `"1h"`. An hour costs more to write and saves a full rewrite after each pause.
+
+The evidence is `agentgraph cost --trend` (the same numbers are under `cost` in `agentgraph signals`). It splits recent chats into periods at each settings change and reports, for each, dollars per turn, the share spent on cold turns, and what pauses cost.
+
+- Propose a change only when the periods being compared each have a few hundred turns, or when the user asks.
+- Dollars per turn higher after a change than before it: propose reverting that change.
+- A cold share above about a third, mostly pauses: propose the one-hour cache for that model, or earlier compaction.
+- The user says the agent forgot things after a summary: propose later compaction (a smaller buffer), and say what it is expected to cost.
+- One setting per proposal, with the before and after values and the numbers from both periods. Back the file up before applying, then run `agentgraph cost` once so the settings log records the change.
 
 ## Skills and the toolkit repository
 
