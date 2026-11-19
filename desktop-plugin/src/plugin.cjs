@@ -402,7 +402,7 @@ function renderPanel(ctx, solid, props) {
         const server = session?.server?.id;
         const tabs = ctx.tabs;
         if (typeof server === "string" && server && typeof tabs?.open === "function") {
-          const result = tabs.open({ server, id: sessionID }, { focus: true });
+          const result = tabs.open({ server, id: sessionID }, { focus: false });
           Promise.resolve(result).catch(() => { if (alive) copyOrShowSessionID(sessionID); });
           return true;
         }

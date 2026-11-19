@@ -728,7 +728,7 @@ await check("a view without reset is destroyed and its replacement fetches the n
   assert.equal(typeof callbacks[1], "function", "the remount also gets the callback");
   assert.equal(callbacks[1]({ agent: "impl-openai", sessionID: "ses_b" }), false, "the new panel's own session stays in the view");
   assert.equal(callbacks[1]({ agent: "impl-openai", sessionID: "ses_child" }), true);
-  assert.deepEqual(tabCalls, [{ target: { server: "server_b", id: "ses_child" }, options: { focus: true } }]);
+  assert.deepEqual(tabCalls, [{ target: { server: "server_b", id: "ses_child" }, options: { focus: false } }]);
   rendered.dispose();
   assert.deepEqual(lifecycle, ["mount", "destroy", "mount", "destroy"]);
 });
@@ -763,7 +763,7 @@ await check("a working agent opens its session in a focused tab using the panel'
   await withOpenSession(sessionActions(calls), (open, switchProps) => {
     switchProps({ id: "ses_current", directory: ORCHESTRATION, server: { id: "server_current" } });
     assert.equal(open({ agent: "impl-openai", sessionID: "ses_child" }), true);
-    assert.deepEqual(calls, [["open", { server: "server_current", id: "ses_child" }, { focus: true }]]);
+    assert.deepEqual(calls, [["open", { server: "server_current", id: "ses_child" }, { focus: false }]]);
   });
 });
 
