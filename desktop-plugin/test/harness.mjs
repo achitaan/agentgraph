@@ -257,9 +257,19 @@ function loadMain(code, spawnLog, { timeoutMs } = {}) {
   const unexpected = [];
   const countingChildProcess = Object.assign({}, childProcess, {
     execFile(file, args, options, callback) {
-      spawnLog.push({ file, args, cwd: options.cwd, timeout: options.timeout });
+      const entry = { file, args, cwd: options.cwd, timeout: options.timeout, stdin: "" };
+      spawnLog.push(entry);
       // Exercise Node's real timeout and kill without waiting the full production timeout.
-      return childProcess.execFile(file, args, timeoutMs === undefined ? options : { ...options, timeout: timeoutMs }, callback);
+      const child = childProcess.execFile(file, args, timeoutMs === undefined ? options : { ...options, timeout: timeoutMs }, callback);
+      // Record what the plugin sends on stdin (the flow instruction), without changing it.
+      if (child && child.stdin) {
+        const end = child.stdin.end.bind(child.stdin);
+        child.stdin.end = (chunk, ...rest) => {
+          if (typeof chunk === "string") entry.stdin += chunk;
+          return end(chunk, ...rest);
+        };
+      }
+      return child;
     },
   });
   const table = {
@@ -333,10 +343,18 @@ function windowContext(definition, overrides = {}) {
     main(token) {
       calls.push({ op: "main", token });
       return {
-        setLoop: async (input, options) => {
-          calls.push({ op: "setLoop", input: JSON.parse(JSON.stringify(input)), options });
-          if (input.check === "orchestrator") return JSON.stringify({ error: "orchestrator is the hub; the hub cannot be part of a loop" });
-          return JSON.stringify({ loops: input.on ? [{ work: input.work, check: input.check, source: "drawn" }] : [] });
+        flow: async (input, options) => {
+          calls.push({ op: "flow", input: JSON.parse(JSON.stringify(input)), options });
+          if (input.path.includes("orchestrator reviewer impl-openai")) return JSON.stringify({ error: "the hub orchestrator can only start or end a flow" });
+          if (input.op !== "add") return JSON.stringify({ flows: [] });
+          const flow = { id: input.path.split(" ").join("-"), path: input.path.split(" "), text: input.text || "Made.", source: "drawn" };
+          return JSON.stringify({ flow, flows: [flow] });
+        },
+        skills: async (input, options) => {
+          calls.push({ op: "skills", input: JSON.parse(JSON.stringify(input)), options });
+          if (input.agent === "councillor-a") return JSON.stringify({ error: "Council seats are model calls defined in the council's own table." });
+          const skills = input.op === "all" ? ["*"] : input.op === "add" ? ["alpha", input.skill] : ["alpha"];
+          return JSON.stringify({ agent: input.agent, skills, warnings: input.op === "remove" ? ["task-profiles.md: still named."] : [], changed: true, message: "restart" });
         },
         snapshot: async (input, options) => {
           calls.push({ op: "snapshot", input: JSON.parse(JSON.stringify(input)), options });
@@ -419,7 +437,7 @@ function mainContext(options) {
 }
 
 let handler;
-await check("main registers exactly one Ipc (<id>.snapshot) with snapshot and setLoop methods", async () => {
+await check("main registers exactly one Ipc (<id>.snapshot) with snapshot, flow and skills methods", async () => {
   const definition = resolveDefault(mainLoad.module.exports);
   const m = mainContext({ home: ORCHESTRATION });
   const cleanup = await definition.main(m.ctx);
@@ -430,11 +448,16 @@ await check("main registers exactly one Ipc (<id>.snapshot) with snapshot and se
   assert.equal(token.kind, "ipc");
   assert.equal(token.id, `${PLUGIN_ID}.snapshot`);
   assert.ok(token.id === m.ctx.id || token.id.startsWith(`${m.ctx.id}.`), "Ipc id is under the plugin id");
-  assert.deepEqual(Object.keys(token.spec.methods), ["snapshot", "setLoop"]);
-  assert.deepEqual(Object.keys(token.spec.methods.setLoop.input.fields), ["work", "check", "on"]);
-  assert.equal(token.spec.methods.setLoop.input.fields.on._tag, "Boolean");
-  assert.equal(token.spec.methods.setLoop.output._tag, "String");
-  assert.ok(typeof impl.setLoop === "function");
+  // Round 2: the skills method joined snapshot and flow.
+  assert.deepEqual(Object.keys(token.spec.methods), ["snapshot", "flow", "skills"]);
+  assert.deepEqual(Object.keys(token.spec.methods.skills.input.fields), ["op", "agent", "skill"]);
+  assert.ok(Object.values(token.spec.methods.skills.input.fields).every((field) => field._tag === "String"));
+  assert.equal(token.spec.methods.skills.output._tag, "String");
+  assert.ok(typeof impl.skills === "function");
+  assert.deepEqual(Object.keys(token.spec.methods.flow.input.fields), ["op", "id", "path", "text"]);
+  assert.ok(Object.values(token.spec.methods.flow.input.fields).every((field) => field._tag === "String"));
+  assert.equal(token.spec.methods.flow.output._tag, "String");
+  assert.ok(typeof impl.flow === "function");
   assert.equal(token.spec.methods.snapshot.input._tag, "Struct");
   assert.deepEqual(Object.keys(token.spec.methods.snapshot.input.fields).sort(), ["directory", "session"]);
   assert.equal(token.spec.methods.snapshot.output._tag, "String");
@@ -871,37 +894,54 @@ function structureHashes() {
   return out.join("\n");
 }
 
-await check("setLoop runs `python3 -P -m agentgraph.structure link|unlink --json WORK CHECK` in home, one line back; bad input and the demo spawn nothing", async () => {
+await check("flow runs `python3 -P -m agentgraph.structure flow add|text|remove ... --json` in home with the text on stdin, one line back; bad input and the demo spawn nothing", async () => {
   const before = structureHashes();
   const python = path.join(TMP, "fake-structure-python");
-  fs.writeFileSync(python, `#!/bin/sh\nif [ "$7" = orchestrator ]; then printf '{"error": "orchestrator is the hub"}\\n'; exit 1; fi\nif [ "$4" = link ]; then printf 'note\\n{"loops": [{"work": "%s", "check": "%s", "source": "drawn"}]}\\n' "$6" "$7"; else printf '{"loops": []}\\n'; fi\n`, { mode: 0o700 });
+  // Echo the arguments and stdin back as the flow, so the test sees exactly what the command got.
+  fs.writeFileSync(python, `#!/bin/sh
+shift 3
+case "$*" in *"orchestrator reviewer impl-openai"*) printf '{"error": "the hub orchestrator can only start or end a flow"}\\n'; exit 1;; esac
+input=$(cat)
+if [ "$2" = remove ]; then printf '{"flows": []}\\n'; exit 0; fi
+printf 'note\\n{"flow": {"id": "f", "path": ["a", "b"], "text": "%s"}, "flows": [], "notes": ["%s"]}\\n' "$input" "$*"
+`, { mode: 0o700 });
   const log = [];
   const loaded = loadMain(CODE, log);
   const m = mainContext({ home: ORCHESTRATION, python });
   resolveDefault(loaded.module.exports).main(m.ctx);
   const impl = m.provided[0].impl;
-  const linked = JSON.parse(await impl.setLoop({ work: "impl-openai", check: "reviewer", on: true }));
-  assert.deepEqual(linked, { loops: [{ work: "impl-openai", check: "reviewer", source: "drawn" }] });
+  const added = JSON.parse(await impl.flow({ op: "add", id: "", path: "impl-openai verifier impl-openai", text: "Check it; $(touch x) `id`" }));
+  assert.deepEqual(added, { flow: { id: "f", path: ["a", "b"], text: "Check it; $(touch x) `id`" }, flows: [], notes: ["flow add impl-openai verifier impl-openai --text-file - --json"] });
   assert.equal(log.length, 1);
   assert.equal(log[0].file, python);
-  assert.deepEqual(log[0].args, ["-P", "-m", "agentgraph.structure", "link", "--json", "impl-openai", "reviewer"]);
+  assert.deepEqual(log[0].args, ["-P", "-m", "agentgraph.structure", "flow", "add", "impl-openai", "verifier", "impl-openai", "--text-file", "-", "--json"]);
+  assert.equal(log[0].stdin, "Check it; $(touch x) `id`");
   assert.equal(log[0].cwd, ORCHESTRATION);
-  assert.deepEqual(JSON.parse(await impl.setLoop({ work: "impl-openai", check: "reviewer", on: false })), { loops: [] });
-  assert.deepEqual(log[1].args, ["-P", "-m", "agentgraph.structure", "unlink", "--json", "impl-openai", "reviewer"]);
-  assert.deepEqual(JSON.parse(await impl.setLoop({ work: "impl-openai", check: "orchestrator", on: true })), { error: "orchestrator is the hub" });
+  const generated = JSON.parse(await impl.flow({ op: "add", id: "", path: "researcher impl-claude", text: "  " }));
+  assert.deepEqual(log[1].args, ["-P", "-m", "agentgraph.structure", "flow", "add", "researcher", "impl-claude", "--json"], "a blank text asks for the generated one");
+  assert.equal(generated.flow.text, "");
+  JSON.parse(await impl.flow({ op: "text", id: "impl-openai-verifier", path: "", text: "New text\nsecond line" }));
+  assert.deepEqual(log[2].args, ["-P", "-m", "agentgraph.structure", "flow", "text", "impl-openai-verifier", "--text-file", "-", "--json"]);
+  assert.equal(log[2].stdin, "New text\nsecond line");
+  assert.deepEqual(JSON.parse(await impl.flow({ op: "remove", id: "impl-openai-verifier", path: "", text: "" })), { flows: [] });
+  assert.deepEqual(log[3].args, ["-P", "-m", "agentgraph.structure", "flow", "remove", "impl-openai-verifier", "--json"]);
+  assert.deepEqual(JSON.parse(await impl.flow({ op: "add", id: "", path: "orchestrator reviewer impl-openai", text: "" })), { error: "the hub orchestrator can only start or end a flow" });
   log.length = 0;
-  for (const input of [null, { work: "--structure", check: "reviewer", on: true }, { work: "impl-openai", check: "a b", on: true }, { work: "impl-openai", check: "reviewer", on: "yes" }, { work: "", check: "reviewer", on: true }]) {
-    const bad = JSON.parse(await impl.setLoop(input));
+  for (const input of [null, { op: "add", id: "", path: "impl-openai", text: "" }, { op: "add", id: "", path: "impl-openai --structure", text: "" }, { op: "add", id: "", path: "impl-openai  reviewer", text: "" },
+    { op: "add", id: "x", path: "impl-openai reviewer", text: "" }, { op: "add", id: "", path: Array(21).fill("reviewer").join(" "), text: "" }, { op: "text", id: "-f", path: "", text: "x" },
+    { op: "text", id: "Upper", path: "", text: "x" }, { op: "text", id: "f", path: "a b", text: "x" }, { op: "remove", id: "f", path: "", text: "x" }, { op: "link", id: "f", path: "", text: "" },
+    { op: "add", path: "a b", text: "" }, { op: "text", id: "f", path: "", text: "x".repeat(8001) }, { op: "text", id: "f", path: "", text: "a\0b" }]) {
+    const bad = JSON.parse(await impl.flow(input));
     assert.equal(typeof bad.error, "string", JSON.stringify(input));
   }
   const demo = mainContext({ home: ORCHESTRATION, python, demo: true });
   resolveDefault(loaded.module.exports).main(demo.ctx);
-  assert.match(JSON.parse(await demo.provided[0].impl.setLoop({ work: "impl-openai", check: "reviewer", on: true })).error, /demo/);
+  assert.match(JSON.parse(await demo.provided[0].impl.flow({ op: "add", id: "", path: "impl-openai reviewer", text: "" })).error, /demo/);
   assert.equal(log.length, 0, "invalid requests and the demo spawn nothing");
   assert.equal(structureHashes(), before, "the real structure folder changed");
 });
 
-await check("setLoop refuses a name starting with '-' and gives the Python 3.11 hint when Python rejects -P", async () => {
+await check("flow refuses a name starting with '-' and gives the Python 3.11 hint when Python rejects -P", async () => {
   const before = structureHashes();
   const old = path.join(TMP, "old-structure-python");
   fs.writeFileSync(old, `#!/bin/sh\necho "Unknown option: -P" >&2\necho "usage: python3 [option] ..." >&2\nexit 2\n`, { mode: 0o700 });
@@ -910,19 +950,49 @@ await check("setLoop refuses a name starting with '-' and gives the Python 3.11 
   const m = mainContext({ home: ORCHESTRATION, python: old });
   resolveDefault(loaded.module.exports).main(m.ctx);
   const impl = m.provided[0].impl;
-  for (const input of [{ work: "-impl-openai", check: "reviewer", on: true }, { work: "impl-openai", check: "-reviewer", on: false }, { work: "impl-openai", check: "-P", on: true }]) {
-    const bad = JSON.parse(await impl.setLoop(input));
-    assert.match(bad.error, /two agent names/, JSON.stringify(input));
+  for (const path of ["-impl-openai reviewer", "impl-openai -reviewer", "impl-openai -P", "impl-openai --text-file"]) {
+    const bad = JSON.parse(await impl.flow({ op: "add", id: "", path, text: "" }));
+    assert.match(bad.error, /agent names/, path);
   }
   assert.equal(log.length, 0, "a name starting with '-' reached the command line");
-  const hint = JSON.parse(await impl.setLoop({ work: "impl-openai", check: "reviewer", on: true }));
+  const hint = JSON.parse(await impl.flow({ op: "add", id: "", path: "impl-openai reviewer", text: "Check." }));
   assert.equal(log.length, 1);
   assert.match(hint.error, /Python 3\.11 or newer is required/);
   assert.ok(hint.error.includes(old) && hint.error.includes("options.python") && !hint.error.includes("\n"), hint.error);
   assert.equal(structureHashes(), before, "the real structure folder changed");
 });
 
-await check("panel render: the view gets actions.setLoop, which asks main and turns an error into a rejection; the demo passes none", async () => {
+await check("flow with the real command in a copied home: add with stdin text, change it, remove it, and the copy is back as it was", async () => {
+  const before = structureHashes();
+  const home = path.join(TMP, "flow-home");
+  fs.cpSync(path.join(ORCHESTRATION, "agentgraph"), path.join(home, "agentgraph"), { recursive: true, filter: (source) => !source.includes("__pycache__") && !source.includes(path.sep + "web" + path.sep) });
+  fs.cpSync(path.join(ORCHESTRATION, "structure"), path.join(home, "structure"), { recursive: true });
+  const copied = () => fs.readdirSync(path.join(home, "structure")).sort().join(",");
+  const start = copied();
+  const loaded = loadMain(CODE, []);
+  const m = mainContext({ home, python: "python3" });
+  resolveDefault(loaded.module.exports).main(m.ctx);
+  const impl = m.provided[0].impl;
+  const added = JSON.parse(await impl.flow({ op: "add", id: "", path: "impl-openai reviewer impl-openai", text: "Review it.\n\tThen again; $(id)" }));
+  assert.ok(added.flow && added.flow.id, JSON.stringify(added));
+  assert.equal(added.flow.text, "Review it.\n\tThen again; $(id)");
+  assert.deepEqual(added.flow.path, ["impl-openai", "reviewer", "impl-openai"]);
+  const changed = JSON.parse(await impl.flow({ op: "text", id: added.flow.id, path: "", text: "" }));
+  assert.ok(changed.flow && changed.flow.text && changed.flow.text !== added.flow.text, "a blank text did not give the generated one: " + JSON.stringify(changed));
+  // Round 2: "A A" is an agent's loop on itself (one per agent); the same agent twice inside a longer path is refused.
+  const refused = JSON.parse(await impl.flow({ op: "add", id: "", path: "impl-openai reviewer reviewer", text: "" }));
+  assert.match(refused.error, /follows itself/);
+  const own = JSON.parse(await impl.flow({ op: "add", id: "", path: "impl-openai impl-openai", text: "" }));
+  assert.deepEqual(own.flow && own.flow.path, ["impl-openai", "impl-openai"], JSON.stringify(own));
+  assert.equal(own.flow.text, "impl-openai checks its own work against the task's evaluation and repeats until it passes.");
+  assert.match(JSON.parse(await impl.flow({ op: "add", id: "", path: "impl-openai impl-openai", text: "" })).error, /already has/);
+  assert.equal(JSON.parse(await impl.flow({ op: "remove", id: own.flow.id, path: "", text: "" })).flows.length, 1);
+  assert.deepEqual(JSON.parse(await impl.flow({ op: "remove", id: added.flow.id, path: "", text: "" })), { flows: [] });
+  assert.equal(copied(), start, "the copied structure folder is not back as it was");
+  assert.equal(structureHashes(), before, "the real structure folder changed");
+});
+
+await check("panel render: the view gets actions.flow, which asks main and turns an error into a rejection; the demo passes none", async () => {
   const definition = windowLoad.gui.defined[0];
   const session = { key: "srv\nses_a", id: "ses_a", directory: ORCHESTRATION };
   const props = { get session() { return session; }, screen: {} };
@@ -930,26 +1000,124 @@ await check("panel render: the view gets actions.setLoop, which asks main and tu
   definition.setup(w.ctx);
   const rendered = windowLoad.solid.runWithOwner(() => value(w.added[1].item).render(props));
   const call = mountCalls[mountCalls.length - 1];
-  assert.equal(typeof call.options.actions?.setLoop, "function");
-  const loops = await call.options.actions.setLoop("impl-openai", "reviewer", true);
-  assert.deepEqual(JSON.parse(JSON.stringify(loops)), [{ work: "impl-openai", check: "reviewer", source: "drawn" }]);
-  const asked = w.calls.filter((c) => c.op === "setLoop");
-  assert.deepEqual(asked.map((c) => c.input), [{ work: "impl-openai", check: "reviewer", on: true }]);
+  assert.equal(typeof call.options.actions?.flow, "function");
+  const answer = await call.options.actions.flow({ op: "add", path: ["impl-openai", "reviewer"] });
+  assert.deepEqual(JSON.parse(JSON.stringify(answer)), { flow: { id: "impl-openai-reviewer", path: ["impl-openai", "reviewer"], text: "Made.", source: "drawn" }, flows: [{ id: "impl-openai-reviewer", path: ["impl-openai", "reviewer"], text: "Made.", source: "drawn" }] });
+  await call.options.actions.flow({ op: "text", id: "impl-openai-reviewer", text: "New." });
+  await call.options.actions.flow({ op: "remove", id: "impl-openai-reviewer" });
+  const asked = w.calls.filter((c) => c.op === "flow");
+  assert.deepEqual(asked.map((c) => c.input), [
+    { op: "add", id: "", path: "impl-openai reviewer", text: "" },
+    { op: "text", id: "impl-openai-reviewer", path: "", text: "New." },
+    { op: "remove", id: "impl-openai-reviewer", path: "", text: "" },
+  ]);
   assert.equal(w.calls.filter((c) => c.op === "main").at(-1).token.id, `${PLUGIN_ID}.snapshot`);
-  let message = "";
-  try {
-    await call.options.actions.setLoop("impl-openai", "orchestrator", true);
-  } catch (error) {
-    message = error.message;
-  }
-  assert.equal(message, "orchestrator is the hub; the hub cannot be part of a loop");
+  const failure = async (request) => {
+    try {
+      await call.options.actions.flow(request);
+    } catch (error) {
+      return error.message;
+    }
+    return "";
+  };
+  assert.equal(await failure({ op: "add", path: ["orchestrator", "reviewer", "impl-openai"] }), "the hub orchestrator can only start or end a flow");
+  const count = w.calls.filter((c) => c.op === "flow").length;
+  assert.equal(await failure({ op: "add", path: ["impl-openai reviewer", "impl-hard"] }), "Bad flow request.");
+  assert.equal(await failure(null), "Bad flow request.");
+  assert.equal(w.calls.filter((c) => c.op === "flow").length, count, "a bad request reached main");
   rendered.dispose();
 
   const demo = windowContext(definition, { session, options: { demo: true } });
   definition.setup(demo.ctx);
   const r2 = windowLoad.solid.runWithOwner(() => value(demo.added[1].item).render(props));
-  assert.equal(mountCalls[mountCalls.length - 1].options.actions, undefined, "the demo can draw loops");
+  assert.equal(mountCalls[mountCalls.length - 1].options.actions, undefined, "the demo can draw flows");
   r2.dispose();
+});
+
+await check("panel render: the view gets actions.skills, which asks main's skills method and turns an error into a rejection", async () => {
+  const definition = windowLoad.gui.defined[0];
+  const session = { key: "srv\nses_a", id: "ses_a", directory: ORCHESTRATION };
+  const props = { get session() { return session; }, screen: {} };
+  const w = windowContext(definition, { session });
+  definition.setup(w.ctx);
+  const rendered = windowLoad.solid.runWithOwner(() => value(w.added[1].item).render(props));
+  const call = mountCalls[mountCalls.length - 1];
+  assert.equal(typeof call.options.actions?.skills, "function");
+  const added = await call.options.actions.skills({ agent: "impl-openai", skill: "beta", on: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(added)).skills, ["alpha", "beta"]);
+  const removed = await call.options.actions.skills({ agent: "impl-openai", skill: "beta", on: false });
+  assert.deepEqual(JSON.parse(JSON.stringify(removed)).warnings, ["task-profiles.md: still named."]);
+  await call.options.actions.skills({ agent: "impl-openai", all: true });
+  assert.deepEqual(w.calls.filter((c) => c.op === "skills").map((c) => c.input), [
+    { op: "add", agent: "impl-openai", skill: "beta" },
+    { op: "remove", agent: "impl-openai", skill: "beta" },
+    { op: "all", agent: "impl-openai", skill: "" },
+  ]);
+  const failure = async (request) => {
+    try {
+      await call.options.actions.skills(request);
+    } catch (error) {
+      return error.message;
+    }
+    return "";
+  };
+  assert.match(await failure({ agent: "councillor-a", all: true }), /council's own table/);
+  const count = w.calls.filter((c) => c.op === "skills").length;
+  for (const bad of [null, { agent: "impl-openai" }, { agent: "-x", all: true }, { agent: "impl-openai", skill: "-f", on: true }, { agent: "impl openai", all: true }, { agent: "impl-openai", skill: 3, on: false }])
+    assert.equal(await failure(bad), "Bad skills request.", JSON.stringify(bad));
+  assert.equal(w.calls.filter((c) => c.op === "skills").length, count, "a bad skills request reached main");
+  rendered.dispose();
+});
+
+await check("skills runs `python3 -P -m agentgraph.skillset add|remove|all ... --json` in home without a shell; a name starting with '-' and the demo spawn nothing", async () => {
+  const python = path.join(TMP, "fake-skillset-python");
+  fs.writeFileSync(python, `#!/bin/sh
+shift 3
+case "$2" in councillor-*) printf '{"error": "Council seats are model calls defined in the council\\u0027s own table; the plugin does not read skills for them."}\\n'; exit 1;; esac
+printf 'noise\\n{"agent": "%s", "preset": "p", "skills": ["%s"], "warnings": [], "changed": true, "message": "%s"}\\n' "$2" "$3" "$*"
+`, { mode: 0o700 });
+  const log = [];
+  const loaded = loadMain(CODE, log);
+  const m = mainContext({ home: ORCHESTRATION, python });
+  resolveDefault(loaded.module.exports).main(m.ctx);
+  const impl = m.provided[0].impl;
+  const added = JSON.parse(await impl.skills({ op: "add", agent: "impl-openai", skill: "code-assurance" }));
+  assert.deepEqual(added, { agent: "impl-openai", skills: ["code-assurance"], warnings: [], changed: true, message: "add impl-openai code-assurance --json" });
+  assert.equal(log.length, 1);
+  assert.equal(log[0].file, python);
+  assert.deepEqual(log[0].args, ["-P", "-m", "agentgraph.skillset", "add", "impl-openai", "code-assurance", "--json"]);
+  assert.equal(log[0].cwd, ORCHESTRATION);
+  await impl.skills({ op: "remove", agent: "impl-openai", skill: "code-assurance" });
+  assert.deepEqual(log[1].args, ["-P", "-m", "agentgraph.skillset", "remove", "impl-openai", "code-assurance", "--json"]);
+  await impl.skills({ op: "all", agent: "orchestrator", skill: "" });
+  assert.deepEqual(log[2].args, ["-P", "-m", "agentgraph.skillset", "all", "orchestrator", "--json"]);
+  assert.match(JSON.parse(await impl.skills({ op: "all", agent: "councillor-fable", skill: "" })).error, /council's own table/);
+  log.length = 0;
+  for (const input of [null, { op: "add", agent: "-impl-openai", skill: "x" }, { op: "add", agent: "impl-openai", skill: "-x" }, { op: "add", agent: "impl-openai", skill: "--config" },
+    { op: "add", agent: "impl openai", skill: "x" }, { op: "add", agent: "impl-openai", skill: "a b" }, { op: "all", agent: "impl-openai", skill: "x" }, { op: "show", agent: "impl-openai", skill: "" },
+    { op: "add", agent: "impl-openai" }, { op: "remove", agent: "impl-openai", skill: "" }]) {
+    const bad = JSON.parse(await impl.skills(input));
+    assert.equal(typeof bad.error, "string", JSON.stringify(input));
+  }
+  const demo = mainContext({ home: ORCHESTRATION, python, demo: true });
+  resolveDefault(loaded.module.exports).main(demo.ctx);
+  assert.match(JSON.parse(await demo.provided[0].impl.skills({ op: "all", agent: "impl-openai", skill: "" })).error, /demo/);
+  assert.equal(log.length, 0, "invalid requests and the demo spawn nothing");
+});
+
+await check("flow counts the instruction limit in characters: 2000 emoji (4000 UTF-16 units) go to the command, 2001 do not", async () => {
+  const python = path.join(TMP, "fake-structure-python");
+  const log = [];
+  const loaded = loadMain(CODE, log);
+  const m = mainContext({ home: ORCHESTRATION, python });
+  resolveDefault(loaded.module.exports).main(m.ctx);
+  const impl = m.provided[0].impl;
+  await impl.flow({ op: "text", id: "f", path: "", text: "\u{1F600}".repeat(2000) });
+  assert.equal(log.length, 1, "2000 characters were refused");
+  assert.equal(Array.from(log[0].stdin).length, 2000);
+  const refused = JSON.parse(await impl.flow({ op: "text", id: "f", path: "", text: "\u{1F600}".repeat(2001) }));
+  assert.match(refused.error, /2000 characters/);
+  assert.equal(log.length, 1, "2001 characters reached the command");
 });
 
 await check("panel render: main-process rejection becomes an error document; a throwing view shows text only", async () => {

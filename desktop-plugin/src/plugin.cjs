@@ -7,7 +7,8 @@
  * The desktop app evaluates that one file in two processes (see the GUI plugin guide, "One file, two processes"):
  *   - every window runs `setup`: the panel, the "+" menu item, the command and the styles;
  *   - the Electron main process runs `main`: an Ipc that runs the Python snapshot command, and the structure
- *     command that draws or removes a loop between two agents (`agentgraph structure link|unlink`).
+ *     command that adds a flow through agents, changes its instruction or removes it (`agentgraph structure flow`),
+ *     and the skills command that adds or removes one of an agent's skills or gives it all (`agentgraph skills`).
  * The host evaluates the bundle as `Function("require", "module", "exports", code)`, so `__dirname` and
  * `__filename` do not exist, and `require` only knows the modules the app shares. Keep each process's code inside
  * its own setup; module scope must stay safe in both.
@@ -42,8 +43,13 @@ const DEFAULT_INTERVAL_MS = 4000;
 const ERROR_MAX_CHARS = 300;
 const SESSION_ID = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$/;
 const AGENT_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
-const LOOP_TIMEOUT_MS = 10000;
-const LOOP_MAX_BYTES = 1024 * 1024;
+const FLOW_ID = /^[a-z0-9][a-z0-9-]{0,79}$/;
+const SKILL_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/;
+const FLOW_STEPS_LIMIT = 20;
+// The command's own limit, counted the same way: in characters (code points), not UTF-16 units.
+const FLOW_TEXT_MAX_CHARS = 2000;
+const FLOW_TIMEOUT_MS = 10000;
+const FLOW_MAX_BYTES = 1024 * 1024;
 
 const HOST_CSS = [
   ".agentgraph-desktop-panel,.agentgraph-desktop-view{box-sizing:border-box;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden}",
@@ -123,10 +129,19 @@ function snapshotIpc(pluginId) {
           input: Schema.Struct({ directory: Schema.String, session: Schema.String }),
           output: Schema.String,
         },
-        // Draw (on) or remove (off) the loop "check checks work" in the structure folder. Output: JSON text,
-        // {"loops": [...]} with the drawn loops afterwards, or {"error": "..."}.
-        setLoop: {
-          input: Schema.Struct({ work: Schema.String, check: Schema.String, on: Schema.Boolean }),
+        // Add a flow, change its instruction or remove it in the structure folder. Input: op ("add", "text" or
+        // "remove"), id ("" for add), path (the agents separated by single spaces; "" unless add) and text (the
+        // instruction, "" for the generated one; sent to the command on stdin). Output: JSON text,
+        // {"flow"?, "flows": [...], "notes"?} afterwards, or {"error": "..."}.
+        flow: {
+          input: Schema.Struct({ op: Schema.String, id: Schema.String, path: Schema.String, text: Schema.String }),
+          output: Schema.String,
+        },
+        // Change one agent's skills in the plugin's preset file. Input: op ("add", "remove" or "all"), agent, and
+        // skill ("" for all). Output: JSON text, {"agent", "skills": [...], "warnings": [...], "changed", "message"},
+        // or {"error": "..."}.
+        skills: {
+          input: Schema.Struct({ op: Schema.String, agent: Schema.String, skill: Schema.String }),
           output: Schema.String,
         },
       },
@@ -262,70 +277,149 @@ function createSnapshotRunner(deps) {
   };
 }
 
-// ---------------------------------------------------------------------------------------------------------------
-// Main process: run `python3 -P -m agentgraph.structure link|unlink WORK CHECK --json` without a shell
+// Run one python command without a shell, its stdin from request.stdin; the last line of its output is JSON, and
+// `accept` turns a successful document into the answer (null: not one). Never rejects: failures become { error }.
+function runCommand(deps, request, label, accept) {
+  const fail = (message) => ({ error: oneLine(message) });
+  return new Promise((resolve) => {
+    const options = {
+      cwd: deps.home,
+      env: Object.assign({}, deps.env, { PYTHONPATH: deps.home, PYTHONIOENCODING: "utf-8" }),
+      encoding: "utf8",
+      timeout: deps.timeoutMs,
+      killSignal: "SIGKILL",
+      maxBuffer: deps.maxBytes,
+      windowsHide: true,
+    };
+    if (deps.signal) options.signal = deps.signal;
+    const finish = (error, stdout, stderr) => {
+      const last = String(stdout || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).pop();
+      let doc;
+      try {
+        doc = last ? JSON.parse(last) : undefined;
+      } catch (_) {
+        doc = undefined;
+      }
+      if (isPlainObject(doc) && typeof doc.error === "string" && doc.error) return fail(doc.error);
+      const answer = !error && isPlainObject(doc) ? accept(doc) : null;
+      if (answer) return answer;
+      if (error && error.code === "ENOENT")
+        return fail("Python was not found at " + deps.python + ". Set options.python in opencode.json to a Python 3.11 or newer executable.");
+      if (error && error.killed && error.signal) return fail(label + " did not finish in time.");
+      // The same hint as the snapshot: Apple's /usr/bin/python3 (3.9) is often first on the app's PATH.
+      if (error && /Unknown option:[ \t]+-P\b/i.test(stderr || ""))
+        return fail("Python 3.11 or newer is required. Set options.python to a newer executable; " + deps.python + " does not support -P.");
+      const detail = String(stderr || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).pop();
+      return fail(label + " failed" + (detail ? ": " + detail : "."));
+    };
+    try {
+      const child = deps.execFile(deps.python, request.args, options, (error, stdout, stderr) => {
+        try {
+          resolve(finish(error, stdout, stderr));
+        } catch (failure) {
+          resolve(fail(errorMessage(failure)));
+        }
+      });
+      // A command that exits before reading stdin must not crash the main process with EPIPE.
+      if (child && child.stdin) {
+        child.stdin.on("error", () => {});
+        child.stdin.end(request.stdin, "utf8");
+      }
+    } catch (error) {
+      resolve(fail("Could not start Python: " + errorMessage(error)));
+    }
+  });
+}
 
-function createLoopRunner(deps) {
+// ---------------------------------------------------------------------------------------------------------------
+// Main process: run `python3 -P -m agentgraph.structure flow add|text|remove ... --json` without a shell; the
+// instruction goes to the command on stdin (`--text-file -`), never on the command line.
+
+function createFlowRunner(deps) {
   // deps: { execFile, path, env, home, python, demo, signal, timeoutMs, maxBytes }
   const fail = (message) => ({ error: oneLine(message) });
 
-  function run(work, check, on) {
-    return new Promise((resolve) => {
-      const args = ["-P", "-m", "agentgraph.structure", on ? "link" : "unlink", "--json", work, check];
-      const options = {
-        cwd: deps.home,
-        env: Object.assign({}, deps.env, { PYTHONPATH: deps.home, PYTHONIOENCODING: "utf-8" }),
-        encoding: "utf8",
-        timeout: deps.timeoutMs,
-        killSignal: "SIGKILL",
-        maxBuffer: deps.maxBytes,
-        windowsHide: true,
-      };
-      if (deps.signal) options.signal = deps.signal;
-      const finish = (error, stdout, stderr) => {
-        const last = String(stdout || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).pop();
-        let doc;
-        try {
-          doc = last ? JSON.parse(last) : undefined;
-        } catch (_) {
-          doc = undefined;
-        }
-        if (isPlainObject(doc) && typeof doc.error === "string" && doc.error) return fail(doc.error);
-        if (!error && isPlainObject(doc) && Array.isArray(doc.loops)) return { loops: doc.loops };
-        if (error && error.code === "ENOENT")
-          return fail("Python was not found at " + deps.python + ". Set options.python in opencode.json to a Python 3.11 or newer executable.");
-        if (error && error.killed && error.signal) return fail("The structure command did not finish in time.");
-        // The same hint as the snapshot: Apple's /usr/bin/python3 (3.9) is often first on the app's PATH.
-        if (error && /Unknown option:[ \t]+-P\b/i.test(stderr || ""))
-          return fail("Python 3.11 or newer is required. Set options.python to a newer executable; " + deps.python + " does not support -P.");
-        const detail = String(stderr || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).pop();
-        return fail("The structure command failed" + (detail ? ": " + detail : "."));
-      };
-      try {
-        deps.execFile(deps.python, args, options, (error, stdout, stderr) => {
-          try {
-            resolve(finish(error, stdout, stderr));
-          } catch (failure) {
-            resolve(fail(errorMessage(failure)));
-          }
-        });
-      } catch (error) {
-        resolve(fail("Could not start Python: " + errorMessage(error)));
-      }
-    });
+  // The request -> the command's arguments and its stdin, or { error }. Every name and id is checked here, so
+  // nothing that starts with "-" (or holds a space) reaches the command line.
+  function command(input) {
+    if (!isPlainObject(input)) return fail("Bad flow request.");
+    const { op, id, path, text } = input;
+    if (![op, id, path, text].every((value) => typeof value === "string")) return fail("Bad flow request.");
+    if (text.includes("\0")) return fail("Bad flow request.");
+    if (Array.from(text).length > FLOW_TEXT_MAX_CHARS) return fail("The instruction is longer than " + FLOW_TEXT_MAX_CHARS + " characters.");
+    const base = ["-P", "-m", "agentgraph.structure", "flow"];
+    if (op === "add") {
+      const names = path.split(" ");
+      if (id || names.length < 2 || names.length > FLOW_STEPS_LIMIT || !names.every((name) => AGENT_NAME.test(name)))
+        return fail("A flow needs two to " + FLOW_STEPS_LIMIT + " agent names.");
+      return text.trim()
+        ? { args: base.concat(["add"], names, ["--text-file", "-", "--json"]), stdin: text }
+        : { args: base.concat(["add"], names, ["--json"]), stdin: "" };
+    }
+    if (op === "text" || op === "remove") {
+      if (!FLOW_ID.test(id) || path) return fail("The flow needs a valid id.");
+      if (op === "remove" && text) return fail("Bad flow request.");
+      return op === "text"
+        ? { args: base.concat(["text", id, "--text-file", "-", "--json"]), stdin: text }
+        : { args: base.concat(["remove", id, "--json"]), stdin: "" };
+    }
+    return fail("Bad flow request.");
   }
+
+  const run = (request) => runCommand(deps, request, "The structure command", (doc) => {
+    if (!Array.isArray(doc.flows)) return null;
+    const answer = { flows: doc.flows };
+    if (isPlainObject(doc.flow)) answer.flow = doc.flow;
+    if (Array.isArray(doc.notes)) answer.notes = doc.notes;
+    return answer;
+  });
 
   let queue = Promise.resolve();
   return {
     // Never rejects: failures become { error }. One change at a time, in the order asked.
-    setLoop(input) {
-      if (!isPlainObject(input)) return Promise.resolve(fail("Bad loop request."));
-      const { work, check, on } = input;
-      if (typeof work !== "string" || !AGENT_NAME.test(work) || typeof check !== "string" || !AGENT_NAME.test(check))
-        return Promise.resolve(fail("The loop needs two agent names."));
-      if (typeof on !== "boolean") return Promise.resolve(fail("Bad loop request."));
+    flow(input) {
+      const request = command(input);
+      if (request.error) return Promise.resolve(request);
       if (deps.demo) return Promise.resolve(fail("The demo cannot change the structure."));
-      const next = queue.then(() => run(work, check, on));
+      const next = queue.then(() => run(request));
+      queue = next.catch(() => {});
+      return next;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Main process: run `python3 -P -m agentgraph.skillset add|remove AGENT SKILL --json` or `all AGENT --json` without a
+// shell. The command keeps its own default files (the plugin's preset file and SKILLS.md, with a backup).
+
+function createSkillRunner(deps) {
+  const fail = (message) => ({ error: oneLine(message) });
+  // Every name is checked here, so nothing that starts with "-" (or holds a space) reaches the command line.
+  function command(input) {
+    if (!isPlainObject(input)) return fail("Bad skills request.");
+    const { op, agent, skill } = input;
+    if (![op, agent, skill].every((value) => typeof value === "string")) return fail("Bad skills request.");
+    if (!AGENT_NAME.test(agent)) return fail("The skills change needs a valid agent name.");
+    const base = ["-P", "-m", "agentgraph.skillset"];
+    if (op === "all") return skill ? fail("Bad skills request.") : { args: base.concat(["all", agent, "--json"]), stdin: "" };
+    if (op === "add" || op === "remove") {
+      if (!SKILL_NAME.test(skill)) return fail("The skills change needs a valid skill name.");
+      return { args: base.concat([op, agent, skill, "--json"]), stdin: "" };
+    }
+    return fail("Bad skills request.");
+  }
+  const run = (request) => runCommand(deps, request, "The skills command", (doc) => {
+    if (typeof doc.agent !== "string" || !Array.isArray(doc.skills)) return null;
+    return { agent: doc.agent, skills: doc.skills, warnings: Array.isArray(doc.warnings) ? doc.warnings : [], changed: doc.changed !== false, message: typeof doc.message === "string" ? doc.message : "" };
+  });
+  let queue = Promise.resolve();
+  return {
+    // Never rejects: failures become { error }. One change at a time, in the order asked.
+    skills(input) {
+      const request = command(input);
+      if (request.error) return Promise.resolve(request);
+      if (deps.demo) return Promise.resolve(fail("The demo cannot change skills."));
+      const next = queue.then(() => run(request));
       queue = next.catch(() => {});
       return next;
     },
@@ -362,7 +456,7 @@ function main(ctx) {
     maxBytes: SNAPSHOT_MAX_BYTES,
   });
 
-  const loops = createLoopRunner({
+  const flows = createFlowRunner({
     execFile: childProcess.execFile,
     path,
     env: process.env,
@@ -370,13 +464,26 @@ function main(ctx) {
     python,
     demo: options.demo === true,
     signal: ctx.signal,
-    timeoutMs: LOOP_TIMEOUT_MS,
-    maxBytes: LOOP_MAX_BYTES,
+    timeoutMs: FLOW_TIMEOUT_MS,
+    maxBytes: FLOW_MAX_BYTES,
+  });
+
+  const skills = createSkillRunner({
+    execFile: childProcess.execFile,
+    path,
+    env: process.env,
+    home,
+    python,
+    demo: options.demo === true,
+    signal: ctx.signal,
+    timeoutMs: FLOW_TIMEOUT_MS,
+    maxBytes: FLOW_MAX_BYTES,
   });
 
   ctx.provide(snapshotIpc(ctx.id), {
     snapshot: (input) => runner.snapshot(input).then((doc) => JSON.stringify(doc)),
-    setLoop: (input) => loops.setLoop(input).then((doc) => JSON.stringify(doc)),
+    flow: (input) => flows.flow(input).then((doc) => JSON.stringify(doc)),
+    skills: (input) => skills.skills(input).then((doc) => JSON.stringify(doc)),
   });
 
   if (ctx.log && typeof ctx.log.write === "function") {
@@ -453,22 +560,52 @@ function renderPanel(ctx, solid, props) {
     }
   };
 
-  // Drawing a loop in the view writes the structure folder through the main process. The demo writes nothing,
-  // so it gets no setLoop and the view only shows the loops.
-  const setLoop = async (work, check, on) => {
+  // Drawing a flow in the view writes the structure folder through the main process. The demo writes nothing,
+  // so it gets no flow action and the view only shows the flows.
+  const flow = async (request) => {
     if (!alive) throw new Error("The panel is closed.");
-    const text = await ctx.main(snapshotIpc(ctx.id)).setLoop({ work, check, on }, { signal: ctx.signal });
+    if (!isPlainObject(request)) throw new Error("Bad flow request.");
+    const path = Array.isArray(request.path) ? request.path : [];
+    // The path crosses the bridge as names joined by single spaces, so a name may not hold any space itself.
+    if (!path.every((name) => typeof name === "string" && /^\S+$/.test(name))) throw new Error("Bad flow request.");
+    const input = {
+      op: String(request.op || ""),
+      id: typeof request.id === "string" ? request.id : "",
+      path: path.join(" "),
+      text: typeof request.text === "string" ? request.text : "",
+    };
+    const text = await ctx.main(snapshotIpc(ctx.id)).flow(input, { signal: ctx.signal });
     let doc;
     try {
       doc = JSON.parse(text);
     } catch (_) {
       throw new Error("The structure command did not answer with JSON.");
     }
-    if (!isPlainObject(doc) || doc.error || !Array.isArray(doc.loops))
-      throw new Error(oneLine(isPlainObject(doc) && doc.error ? doc.error : "The loop could not be changed."));
-    return doc.loops;
+    if (!isPlainObject(doc) || doc.error || !Array.isArray(doc.flows))
+      throw new Error(oneLine(isPlainObject(doc) && doc.error ? doc.error : "The flow could not be changed."));
+    return doc;
   };
-  const actions = ctx.options && ctx.options.demo === true ? undefined : { setLoop };
+  // A skill change in an agent's details runs the skills command through the main process; names cross the
+  // bridge as they are, so one holding a space or starting with "-" is refused here and again in main.
+  const skills = async (request) => {
+    if (!alive) throw new Error("The panel is closed.");
+    if (!isPlainObject(request)) throw new Error("Bad skills request.");
+    const all = request.all === true;
+    const input = { op: all ? "all" : request.on === true ? "add" : request.on === false ? "remove" : "", agent: request.agent, skill: all ? "" : request.skill };
+    if (!input.op || ![input.agent, input.skill].every((name) => typeof name === "string" && !/\s/.test(name) && !name.startsWith("-")))
+      throw new Error("Bad skills request.");
+    const text = await ctx.main(snapshotIpc(ctx.id)).skills(input, { signal: ctx.signal });
+    let doc;
+    try {
+      doc = JSON.parse(text);
+    } catch (_) {
+      throw new Error("The skills command did not answer with JSON.");
+    }
+    if (!isPlainObject(doc) || doc.error || !Array.isArray(doc.skills))
+      throw new Error(oneLine(isPlainObject(doc) && doc.error ? doc.error : "The skills could not be changed."));
+    return doc;
+  };
+  const actions = ctx.options && ctx.options.demo === true ? undefined : { flow, skills };
 
   const showSessionToast = (sessionID, copied) => {
     try {
