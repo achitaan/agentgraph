@@ -627,3 +627,9 @@ export function render(snapshot, options = {}) {
 export function toText(lines) {
   return lines.map((line) => line.map((s) => s.text).join("")).join("\n");
 }
+
+// Shared with the full-panel scene (src/scene.js); not part of the list's behaviour.
+export {
+  isObject, list, busyCount, finiteNumber, rounds, validAgents, findHub, hubWorking, currentGoal, agentCost,
+  numberSpans, spinnerGlyph, wearParts, needsEntries, needsLine,
+};

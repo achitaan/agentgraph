@@ -9,9 +9,18 @@
  * On hosts with session panels it also contributes the panel "agentgraph.graph" (same view, drawn at the panel's
  * width) and the command "agentgraph.graph" (slash /graph, alias /agents) that opens and closes it. Every host
  * function is feature-detected; a host without them gets the sidebar only.
+ *
+ * The panel draws the orbit (src/scene.js) when it has at least 64 columns and 22 rows, and the list otherwise; its
+ * size is measured from the panel's own box (OpenTUI `onSizeChange`, `width`, `height`), because the documented
+ * panel input has no height. `g` switches between the two while the panel owns input, and `d` between the orbit's
+ * 2D view (the ring from above, braille dots) and its 3D view (a turning figure in depth characters).
+ *
+ * AGENTGRAPH_TUI_DEMO=1 in the TUI's environment draws a moving demo document instead of running Python.
  */
 import { render, isAnimated, truncate as truncateText } from "./render.js";
+import { scene, sceneFits, frameInterval, changeAt } from "./scene.js";
 import { createSnapshotRunner, errorDocument, errorMessage, oneLine } from "./runner.js";
+import { createDemoRunner, DEMO_INTERVAL_MS } from "./demo.js";
 
 export const PLUGIN_ID = "agentgraph-tui";
 export const SLOT = "sidebar.content";
@@ -154,6 +163,22 @@ export function themeTones(theme) {
   return { plain: { fg: plain, bold: false }, muted: { fg: muted, bold: false }, accent, danger };
 }
 
+// The orbit's colours from the theme: { dark, muted }. The background decides dark or light (dark unless it is
+// clearly light, or unknown); the muted colour dims resting agents and far parts.
+export function sceneColors(theme, tones) {
+  let dark = true;
+  try {
+    const t = theme && typeof theme === "object" ? theme : {};
+    const b = t.background;
+    const bg = b && typeof b === "object" && !("r" in b) && !b.buffer ? b.base ?? b.default ?? b.panel : b;
+    const rgb = toRgb(colorProp(bg) || colorProp(t.bg) || colorProp(t.backgroundPanel));
+    if (rgb) dark = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2] < 128;
+  } catch (_) {
+    dark = true;
+  }
+  return { dark, muted: colorProp(tones && tones.muted && tones.muted.fg) || (dark ? "#808080" : "#8c8c8c") };
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Session id from the slot props, else from the router (as the installed example does).
 
@@ -183,9 +208,40 @@ export function panelWidth(panel) {
 
 // ---------------------------------------------------------------------------------------------------------------
 
-// host: { createElement, insert, setProp, createSignal, onCleanup?, spawn, fs, os, path, env, timers? }
+// The demo switch: AGENTGRAPH_TUI_DEMO set to anything but "" or "0".
+export function demoRequested(env) {
+  const value = env && typeof env === "object" ? env.AGENTGRAPH_TUI_DEMO : undefined;
+  return typeof value === "string" && value.trim() !== "" && value.trim() !== "0";
+}
+
+// The size of a measured OpenTUI node, or null while it has not been laid out.
+export function measuredSize(node) {
+  try {
+    const width = Math.floor(Number(node && node.width));
+    const height = Math.floor(Number(node && node.height));
+    return width > 0 && height > 0 ? { width, height } : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function lineKey(line) {
+  let key = "";
+  for (const span of line) key += span.tone + "\u0001" + (span.color || "") + "\u0001" + span.text + "\u0002";
+  return key;
+}
+
+// host: { createElement, insert, setProp, createSignal, onCleanup?, spawn, fs, os, path, env, timers?, now?, demoFile? }
 export function createPlugin(host) {
   const timers = host.timers || { setInterval, clearInterval };
+  const clock = () => {
+    try {
+      const t = typeof host.now === "function" ? Number(host.now()) : Date.now();
+      return Number.isFinite(t) ? t : Date.now();
+    } catch (_) {
+      return Date.now();
+    }
+  };
 
   function element(tag, props, children = []) {
     const node = host.createElement(tag);
@@ -201,7 +257,8 @@ export function createPlugin(host) {
       { flexDirection: "row", width: "100%", flexShrink: 0 },
       line.map((span) => {
         const tone = tones[span.tone] || tones.plain;
-        return element("text", { fg: colorProp(tone.fg), attributes: tone.bold ? BOLD : undefined, wrapMode: "none", flexShrink: 0 }, [span.text]);
+        const own = span.color ? colorProp(span.color) : undefined; // the orbit's group colours
+        return element("text", { fg: own || colorProp(tone.fg), attributes: !own && tone.bold ? BOLD : undefined, wrapMode: "none", flexShrink: 0 }, [span.text]);
       }),
     );
   }
@@ -226,15 +283,19 @@ export function createPlugin(host) {
   function setup(ctx, secondOptions) {
     ctx = ctx || {};
     const options = resolveOptions(isPlainObject(ctx.options) ? ctx.options : secondOptions, host);
-    const runner = createSnapshotRunner({
-      spawn: host.spawn,
-      fs: host.fs,
-      path: host.path,
-      env: host.env,
-      home: options.home,
-      python: options.python,
-      demo: options.demo,
-    });
+    const demo = demoRequested(host.env);
+    if (demo) options.intervalMs = Math.min(options.intervalMs, DEMO_INTERVAL_MS);
+    const runner = demo
+      ? createDemoRunner({ fs: host.fs, file: host.demoFile, now: clock })
+      : createSnapshotRunner({
+          spawn: host.spawn,
+          fs: host.fs,
+          path: host.path,
+          env: host.env,
+          home: options.home,
+          python: options.python,
+          demo: options.demo,
+        });
 
     const requestRender = () => {
       try {
@@ -263,20 +324,48 @@ export function createPlugin(host) {
       let current; // the session being watched
       let generation = 0;
       let spinTimer = null;
+      let spinMs = 0;
       let pollTimer = null;
       let stopped = false; // set when the panel closes; a late fetch or a re-run view must not revive the timers
+      let sceneOn = false; // the panel draws the orbit: frames at 100 ms while work moves, 250 ms (2D) or 166 ms (3D) idle
+      const sceneInterval = (doc) => {
+        try {
+          return typeof watcher.sceneInterval === "function" ? watcher.sceneInterval(doc) : frameInterval(doc);
+        } catch (_) {
+          return frameInterval(doc);
+        }
+      };
 
+      // The frame timer. The list animates only while something works (a spinner every 200 ms); the orbit always
+      // moves while it is shown. Each tick asks `beforeTick` (the orbit's painter) whether the frame changed.
       function spinner(doc) {
-        const live = !disposed && !stopped && isAnimated(doc);
-        if (live && !spinTimer) {
+        let ms = 0;
+        if (!disposed && !stopped) {
+          if (sceneOn) ms = isPlainObject(doc) && (doc.error === undefined || doc.error === null) ? sceneInterval(doc) : 0;
+          else ms = isAnimated(doc) ? SPINNER_MS : 0;
+        }
+        if (ms === spinMs && !!spinTimer === ms > 0) return;
+        if (spinTimer) timers.clearInterval(spinTimer);
+        spinTimer = null;
+        spinMs = ms;
+        if (ms) {
           spinTimer = timers.setInterval(() => {
+            try {
+              if (sceneOn && sceneInterval(state().doc) !== spinMs) spinner(state().doc); // the camera's move began or ended
+              if (typeof watcher.beforeTick === "function" && watcher.beforeTick() === false) return; // nothing changed
+            } catch (error) {
+              report("tick", error);
+            }
             setFrame((f) => f + 1);
             requestRender();
-          }, SPINNER_MS);
-        } else if (!live && spinTimer) {
-          timers.clearInterval(spinTimer);
-          spinTimer = null;
+          }, ms);
         }
+      }
+
+      function setScene(on) {
+        if (sceneOn === !!on) return;
+        sceneOn = !!on;
+        spinner(state().doc);
       }
 
       function refresh() {
@@ -288,7 +377,9 @@ export function createPlugin(host) {
           .catch((error) => errorDocument(errorMessage(error)))
           .then((doc) => {
             if (disposed || stopped || asked !== generation || session !== current) return; // late result: drop it
-            setState({ session, doc });
+            const before = state();
+            const previous = before.session === session && before.doc && before.doc !== doc ? before.doc : null;
+            setState({ session, doc, previous, at: clock() });
             spinner(doc);
             requestRender();
           });
@@ -320,6 +411,7 @@ export function createPlugin(host) {
         poll(false);
         if (spinTimer) timers.clearInterval(spinTimer);
         spinTimer = null;
+        spinMs = 0;
       }
 
       // The panel is mounted again: start from a clean slate.
@@ -329,7 +421,8 @@ export function createPlugin(host) {
         current = undefined;
       }
 
-      const watcher = { state, frame, watch, poll, stop, reopen };
+      const retime = () => spinner(state().doc);
+      const watcher = { state, frame, watch, poll, stop, reopen, setScene, retime, beforeTick: null, sceneInterval: null };
       watchers.push(watcher);
       return watcher;
     }
@@ -350,9 +443,19 @@ export function createPlugin(host) {
         width = resolved.width || WIDTH;
         watcher.watch(session);
         const snap = watcher.state();
+        const ready = !!session && snap.session === session && !!snap.doc;
+        if (resolved.painter) {
+          const sceneSize = ready && resolved.scene ? resolved.scene : null;
+          watcher.setScene(!!sceneSize);
+          if (sceneSize) {
+            watcher.frame(); // a dependency: each tick that changed the frame draws again
+            return resolved.painter.draw(snap, sceneSize, tones);
+          }
+          resolved.painter.forget();
+        }
         let lines;
         if (!session) lines = [[{ text: "No session", tone: "muted" }]];
-        else if (snap.session !== session || !snap.doc) lines = render(null, { width });
+        else if (!ready) lines = render(null, { width });
         else lines = render(snap.doc, { width, frame: watcher.frame() });
         return lines.map((line) => lineNode(line, tones));
       } catch (error) {
@@ -387,6 +490,131 @@ export function createPlugin(host) {
           }
         }
       };
+    }
+
+    // The view chosen with `g` in the panel, remembered while the app runs.
+    const [viewMode, setViewMode] = host.createSignal("scene");
+    const toggleView = () => {
+      setViewMode((mode) => (mode === "scene" ? "list" : "scene"));
+      requestRender();
+    };
+    // The orbit's view chosen with `d`, remembered while the app runs; it opens in 2D. A switch moves the camera
+    // over CHANGE_MS from the old view to the new one.
+    const [dimension, setDimension] = host.createSignal({ view: "2d", change: null });
+    const toggleDimension = () => {
+      const cur = dimension();
+      const view = cur.view === "3d" ? "2d" : "3d";
+      setDimension({ view, change: { from: cur.view, at: clock() } });
+      for (const w of watchers) if (w.retime) w.retime(); // the timer follows the camera's move
+      requestRender();
+    };
+    // The orbit's frames: rows are reused while their text and tones stay the same, and a tick whose frame equals
+    // the last one drawn pushes nothing to the host.
+    function createPainter(watcher) {
+      let rows = []; // [{ key, node }]
+      let drawn = null; // the key of the last frame drawn
+      let prepared = null; // a frame the tick computed, for the view to use as it is
+      let colors = sceneColors(ctx.theme, null);
+      const viewOptions = () => {
+        const d = dimension();
+        return { view: d.view, change: d.change, colors };
+      };
+      const compute = (snap, size) =>
+        scene(snap.doc, Object.assign(viewOptions(), { width: size.width, height: size.height, now: clock(), previous: snap.previous ? { doc: snap.previous, at: snap.at } : undefined }));
+      watcher.sceneInterval = (doc) => frameInterval(doc, viewOptions(), clock());
+      let lastSize = null;
+      watcher.beforeTick = () => {
+        if (!lastSize) return true;
+        const snap = watcher.state();
+        if (!snap.doc) return true;
+        const lines = compute(snap, lastSize);
+        const key = lines.map(lineKey).join("\n");
+        if (key === drawn) return false;
+        prepared = { doc: snap.doc, width: lastSize.width, height: lastSize.height, lines };
+        return true;
+      };
+      return {
+        draw(snap, size, tones) {
+          lastSize = size;
+          colors = sceneColors(ctx.theme, tones);
+          let lines;
+          if (prepared && prepared.doc === snap.doc && prepared.width === size.width && prepared.height === size.height) lines = prepared.lines;
+          else lines = compute(snap, size);
+          prepared = null;
+          const keys = lines.map(lineKey);
+          const next = lines.map((line, i) => (rows[i] && rows[i].key === keys[i] ? rows[i] : { key: keys[i], node: lineNode(line, tones) }));
+          rows = next;
+          drawn = keys.join("\n");
+          return rows.map((r) => r.node);
+        },
+        forget() {
+          rows = [];
+          drawn = null;
+          prepared = null;
+          lastSize = null;
+        },
+        setTones() {
+          rows = [];
+        },
+      };
+    }
+
+    // The panel's root box fills the panel; its measured size decides between the orbit and the list.
+    function panelRender(panel, watcher, painter, isOurs, keys) {
+      try {
+        const [size, setSize] = host.createSignal(null);
+        let root = null;
+        const measure = function () {
+          try {
+            const next = measuredSize(this && typeof this === "object" && "height" in this ? this : root);
+            if (!next) return;
+            const cur = size();
+            if (cur && cur.width === next.width && cur.height === next.height) return;
+            report("panel size", `${next.width}x${next.height}`); // debug log only
+            keys.addViewKey();
+            setSize(next);
+            requestRender();
+          } catch (error) {
+            report("measure", error);
+          }
+        };
+        root = element("box", {
+          width: "100%",
+          height: "100%",
+          flexGrow: 1,
+          flexShrink: 1,
+          minHeight: 0,
+          flexDirection: "column",
+          overflow: "hidden",
+          onSizeChange: measure,
+        });
+        let themeRef = ctx.theme;
+        host.insert(root, () =>
+          makeView(
+            watcher,
+            (p) => {
+              if (!isOurs(p)) return { hidden: true };
+              watcher.poll(true); // stopped again when the panel closes (below) or the plugin is disposed
+              if (ctx.theme !== themeRef) {
+                themeRef = ctx.theme;
+                painter.setTones();
+              }
+              const known = size() || measuredSize(root);
+              const fits = !!known && viewMode() === "scene" && sceneFits(known.width, known.height);
+              return { session: sessionOf(p), width: panelWidth(p), scene: fits ? known : null, painter };
+            },
+            panel,
+          ),
+        );
+        return root;
+      } catch (error) {
+        report("render", error);
+        try {
+          return plainLine(errorMessage(error), WIDTH);
+        } catch (_) {
+          return null;
+        }
+      }
     }
 
     function sessionOf(props) {
@@ -428,28 +656,25 @@ export function createPlugin(host) {
             return false;
           }
         };
-        const panelRender = makeRender(panelWatcher, (panel) => {
-          if (!isOurs(panel)) return { hidden: true };
-          panelWatcher.poll(true); // stopped again when the panel closes (below) or the plugin is disposed
-          return { session: sessionOf(panel), width: panelWidth(panel) };
-        });
+        const painter = createPainter(panelWatcher);
         dispose(
           ctx.ui.slot({
             append: PANEL_SLOT,
             render(panel) {
+              let keys = { remove() {}, addViewKey() {} };
               try {
                 panelWatcher.reopen();
-                const dropKeys = panelKeys(panel);
+                keys = panelKeys(panel);
                 if (typeof host.onCleanup === "function") {
                   host.onCleanup(() => {
                     panelWatcher.stop();
-                    dropKeys();
+                    keys.remove();
                   });
                 }
               } catch (_) {
                 /* ignore */
               }
-              return panelRender(panel);
+              return panelRender(panel, panelWatcher, painter, isOurs, keys);
             },
           }),
         );
@@ -461,9 +686,11 @@ export function createPlugin(host) {
 
     // `f` and `q` while this plugin's panel owns input. Called from the panel's render, so the host drops the layer
     // when the panel closes. Without a mode the layer is active only while the panel owns input.
-    // Returns a function that removes the layer; it is also run by the plugin's own cleanup, and twice is harmless.
+    // Returns { remove, addViewKey }: remove() drops the layers (also run by the plugin's own cleanup; twice is
+    // harmless); addViewKey() adds the `g` layer once the panel's size is known, since only then is there an orbit
+    // to switch to.
     function panelKeys(panel) {
-      if (!ctx.keymap || typeof ctx.keymap.layer !== "function") return () => {};
+      if (!ctx.keymap || typeof ctx.keymap.layer !== "function") return { remove() {}, addViewKey() {} };
       const ours = () => {
         try {
           return panel.name === PANEL_NAME;
@@ -484,19 +711,39 @@ export function createPlugin(host) {
           { id: PANEL_NAME + ".close", bind: "q", enabled: ours, run: act("close") },
         ],
       }));
+      const unregisters = [unregister];
       let removed = false;
+      let viewKey = false;
       const remove = () => {
         if (removed) return;
         removed = true;
         panelLayers.delete(remove);
+        for (const fn of unregisters) {
+          try {
+            if (typeof fn === "function") fn();
+          } catch (_) {
+            /* ignore */
+          }
+        }
+      };
+      const addViewKey = () => {
+        if (viewKey || removed) return;
+        viewKey = true;
         try {
-          if (typeof unregister === "function") unregister();
-        } catch (_) {
-          /* ignore */
+          unregisters.push(
+            ctx.keymap.layer(() => ({
+              commands: [
+                { id: PANEL_NAME + ".view", bind: "g", enabled: ours, run: toggleView },
+                { id: PANEL_NAME + ".dimension", bind: "d", enabled: ours, run: toggleDimension },
+              ],
+            })),
+          );
+        } catch (error) {
+          report("view key", error);
         }
       };
       panelLayers.add(remove);
-      return remove;
+      return { remove, addViewKey };
     }
 
     function toggle() {

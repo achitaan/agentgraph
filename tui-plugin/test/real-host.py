@@ -22,6 +22,20 @@ throwaway one with `opencode run --standalone --model anthropic/claude-haiku-5-5
 exactly: OK"` in <scratch>/proj (about $0.004) and saves its id in session.txt.
 
 AGENTGRAPH_TUI_DEBUG=<file> is passed to the app: the plugin appends every error it swallows to that file.
+
+The orbit (the full-panel scene):
+    --demo          start the app with AGENTGRAPH_TUI_DEMO=1 (the plugin draws the saved demo document, moving,
+                    without Python), and require the 2D scene: the hub ring (the hub's glyph inside the canvas with
+                    braille dots round it and open cells beside it), at least 8 agent names over at least 6 rows on
+                    both sides of the hub, at least 3 group colours, the context chart, and two captures 1 s apart
+                    that differ. Without --demo, AGENTGRAPH_TUI_DEMO is removed from the app's environment.
+    --fullscreen    press `f` once the view shows (the panel's full-screen key), before the captures.
+    --expect-scene  require the scene without --demo (the hub ring).
+    --view3d        after the 2D captures press `d` (the orbit's 2D/3D key), wait 1 s and capture the 3D view, then
+                    again 1 s later. Requires (with --demo) at least 8 agent names, `@`, `0` and `1` inside the canvas
+                    rows and no braille there, at least 3 group colours, and two 3D captures that differ. With
+                    --expect-scene instead of --demo: the depth characters and two captures that differ. Checked
+                    only with --demo or --expect-scene.
 """
 import argparse
 import fcntl
@@ -48,6 +62,16 @@ except ImportError:
 HUB = "◉ orchestrator"
 TOAST = re.compile(r"Plugin failed|Open plugins|run opencode plugin update|Run /plugins")
 DEBUG_LOG = os.environ.get("AGENTGRAPH_TUI_DEBUG", "")
+DEMO = False  # set from --demo in main()
+BRAILLE = re.compile(r"[\u2801-\u28ff]")
+SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+# the group colours of src/scene.js (GROUP_COLORS), as pyte reports a 24-bit foreground
+GROUP_HEX = {"council": ("b39ddb", "6a4fb3"), "decide": ("7fb2ff", "2f6fd0"), "build": ("e8a07c", "ac563d"),
+             "verify": ("f28fb5", "b8336a"), "understand": ("e6c15a", "8a6d00")}
+CHART = re.compile(r"[▁▂▃▄▅▆▇█]{5}")
+# the ring agents of test/fixtures/demo.json (council seats are dots, not names)
+DEMO_NAMES = ["council", "oracle", "oracle-lite", "designer", "impl-claude", "impl-hard", "impl-openai", "reviewer",
+              "explorer", "researcher"]
 
 
 class Tracker:
@@ -181,6 +205,10 @@ class Term:
             os.environ.pop("OPENCODE_SESSION_ID", None)
             if DEBUG_LOG:
                 os.environ["AGENTGRAPH_TUI_DEBUG"] = DEBUG_LOG
+            if DEMO:
+                os.environ["AGENTGRAPH_TUI_DEMO"] = "1"
+            else:
+                os.environ.pop("AGENTGRAPH_TUI_DEMO", None)
             os.chdir(cwd)
             try:
                 os.execv(argv[0], argv)
@@ -366,25 +394,230 @@ def drive(term, args):
         term.pump(0.8)
         term.write(b"\r")
         term.wait_for(lambda ls: find_view(ls) is not None and len([v for v in find_view(ls)[2] if v]) >= 2, args.wait)
+    if args.fullscreen and find_view(term.lines()) is not None:
+        term.write(b"f")
+        term.pump(1.5)
     # toasts (plugin update notices, load warnings) draw over the right side for a few seconds: wait them out
     term.wait_for(lambda ls: not any(TOAST.search(l) for l in ls), args.settle)
     term.pump(args.keep_open)
-    # the app redraws only the cells that change: wait until two captures 1.5 s apart are the same
-    previous, end = None, time.time() + 10
-    while time.time() < end:
-        term.pump(1.5)
-        if term.lines() == previous:
-            break
-        previous = term.lines()
+    if args.demo or args.expect_scene:
+        term.pump(2.0)  # the orbit never stands still: no waiting for a quiet screen
+    else:
+        # the app redraws only the cells that change: wait until two captures 1.5 s apart are the same
+        previous, end = None, time.time() + 10
+        while time.time() < end:
+            term.pump(1.5)
+            if term.lines() == previous:
+                break
+            previous = term.lines()
     lines = term.lines()
+    seen2d = screen_colours(term.screen)
+    term.pump(1.0)
+    second = term.lines()  # one second later
     colours = colour_runs(term.screen, find_view(lines))
+    view3d = None
+    if args.view3d and find_view(lines) is not None:
+        term.write(b"d")  # the orbit's 2D/3D key: the camera tilts over 0.7 s
+        term.pump(1.0)
+        first3 = term.lines()
+        seen3d = screen_colours(term.screen)
+        term.pump(1.0)
+        view3d = (first3, term.lines(), seen3d)
     after_q = None
     if not args.no_graph and find_view(lines) is not None:
         # `q` is this plugin's close key while its panel has the keyboard
         term.write(b"q")
         term.pump(2.0)
         after_q = term.lines()
-    return lines, colours, after_q, started
+    return lines, colours, after_q, started, second, seen2d, view3d
+
+
+def screen_colours(screen):
+    """-> {row: set of foreground colours (pyte's hex without '#') of the non-blank cells of that row}."""
+    out = {}
+    for r in range(screen.lines):
+        line = screen.buffer[r]
+        out[r] = {line[x].fg for x in range(screen.columns) if line[x].data.strip()}
+    return out
+
+
+def canvas_rows(lines, found):
+    """-> (first, last) rows of the orbit's canvas: below the hub line and its "needs you" lines, above the
+    instruments (the context chart or the spend bars), or None."""
+    row0, col0, _ = found
+    first = row0 + 1
+    while first < len(lines) and re.match(r"[!↩] ", lines[first][col0:]):
+        first += 1
+    last = first
+    for r in range(first, len(lines)):
+        tail = lines[r][col0:]
+        if CHART.search(tail) or re.search(r"━{3,}", tail):
+            break
+        last = r
+    return (first, last) if last > first else None
+
+
+def hub_ring(lines, found, rows):
+    """-> (row, col) of the hub's glyph inside the canvas with braille dots round it (the ring) and blank cells
+    either side of it (open inside), or None."""
+    _, col0, _ = found
+    for r in range(rows[0], rows[1] + 1):
+        c = lines[r].find("◉", col0 + 2)
+        if c < 0:
+            continue
+        near = sum(1 for rr in range(max(0, r - 3), min(len(lines), r + 4))
+                   for ch in lines[rr][max(0, c - 9):c + 10] if BRAILLE.match(ch) and ch not in SPIN)
+        open_inside = lines[r][c - 2:c] == "  " and lines[r][c + 1:c + 3] == "  "
+        if near >= 6 and open_inside:
+            return r, c
+    return None
+
+
+def _hue_sat(hexstr):
+    try:
+        n = int(hexstr, 16)
+    except (TypeError, ValueError):
+        return None
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", str(hexstr)):
+        return None
+    r, g, b = ((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255
+    mx, mn = max(r, g, b), min(r, g, b)
+    d = mx - mn
+    if d < 0.06:
+        return None  # a grey
+    if mx == r:
+        h = ((g - b) / d) % 6
+    elif mx == g:
+        h = (b - r) / d + 2
+    else:
+        h = (r - g) / d + 4
+    return (h * 60) % 360, d
+
+
+def group_colours(colours, rows):
+    """-> the group names whose colour is on the canvas rows: the colour of the dark or light table, full or mixed
+    toward the muted grey (a resting agent, a far part), matched by hue within 10 degrees."""
+    on = set()
+    for r in range(rows[0], rows[1] + 1):
+        on |= {str(fg).lower() for fg in colours.get(r, ())}
+    hues = {g: [_hue_sat(h)[0] for h in hexes] for g, hexes in GROUP_HEX.items()}
+    found = set()
+    for fg in on:
+        hs = _hue_sat(fg)
+        if hs is None:
+            continue
+        best = min(((min(abs(hs[0] - h), 360 - abs(hs[0] - h)), g) for g, hl in hues.items() for h in hl))
+        if best[0] <= 10:
+            found.add(best[1])
+    return sorted(found)
+
+
+def green_colours(colours, rows):
+    """-> the colours on the canvas rows with a hue between 80 and 190 degrees (green or teal: never wanted)."""
+    out = set()
+    for r in range(rows[0], rows[1] + 1):
+        for fg in colours.get(r, ()):
+            hs = _hue_sat(str(fg).lower())
+            if hs is not None and 80 <= hs[0] <= 190:
+                out.add(str(fg))
+    return sorted(out)
+
+
+def names_report(lines, found, rows, names, centre):
+    """-> (seen, left_rows, right_rows): the agent names (word-bounded, right of the view's column) on the canvas
+    rows, and the rows they are on left and right of `centre`."""
+    _, col0, _ = found
+    left, right, seen = set(), set(), []
+    for name in names:
+        pattern = re.compile(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])")
+        for r in range(rows[0], rows[1] + 1):
+            m = next((m for m in pattern.finditer(lines[r]) if m.start() >= col0), None)
+            if m is None:
+                continue
+            seen.append(name)
+            if m.end() <= centre:
+                left.add(r)
+            elif m.start() >= centre:
+                right.add(r)
+            break
+    return seen, left, right
+
+
+def scene_report(lines, names, colours=None):
+    """-> (problems, facts) for the 2D orbit on the screen: the hub ring, the agent names on both sides of it, the
+    group colours, and the context chart."""
+    found = find_view(lines)
+    problems, facts = [], []
+    if found is None:
+        return ["no hub line"], facts
+    rows = canvas_rows(lines, found)
+    if rows is None:
+        return ["no canvas rows"], facts
+    hub = hub_ring(lines, found, rows)
+    if hub is None:
+        return ["no hub ring"], facts
+    facts.append(f"canvas rows {rows[0]}-{rows[1]}; hub ring round row {hub[0]}, column {hub[1]}, open inside")
+    seen, left, right = names_report(lines, found, rows, names, hub[1])
+    facts.append(f"{len(seen)} names on {len(left | right)} rows: {len(left)} rows left of the hub, {len(right)} right")
+    if len(seen) < 8:
+        problems.append(f"only {len(seen)} agent names: {seen}")
+    if len(left | right) < 6:
+        problems.append(f"names on only {len(left | right)} rows")
+    if not left or not right:
+        problems.append("names not on both sides of the hub")
+    if colours is not None:
+        groups = group_colours(colours, rows)
+        facts.append(f"group colours on the canvas: {', '.join(groups) or 'none'}")
+        if len(groups) < 3:
+            problems.append(f"only {len(groups)} group colours")
+        green = green_colours(colours, rows)
+        if green:
+            problems.append(f"green or teal on the canvas: {green}")
+    if not any(CHART.search(l[found[1]:]) for l in lines[rows[1]:]):
+        problems.append("no context chart under the canvas")
+    else:
+        facts.append("context chart present")
+    return problems, facts
+
+
+def scene3d_report(lines, later, names, colours, demo):
+    """-> (problems, facts) for the 3D orbit: names, `@`, `0` and `1` inside the canvas rows and no braille there
+    (spinner glyphs aside), the group colours, and a later capture that differs."""
+    found = find_view(lines)
+    problems, facts = [], []
+    if found is None:
+        return ["3D: no hub line"], facts
+    rows = canvas_rows(lines, found)
+    if rows is None:
+        return ["3D: no canvas rows"], facts
+    col0 = found[1]
+    body = "".join(lines[r][col0:] for r in range(rows[0], rows[1] + 1))
+    chars = {ch: body.count(ch) for ch in "@01:.·"}
+    facts.append(f"3D canvas rows {rows[0]}-{rows[1]}: " + ", ".join(f"{ch!r} x{n}" for ch, n in chars.items()))
+    for ch in "@01":
+        if not chars[ch]:
+            problems.append(f"3D: no {ch!r} on the canvas")
+    braille = [ch for ch in body if BRAILLE.match(ch) and ch not in SPIN]
+    if braille:
+        problems.append(f"3D: {len(braille)} braille cells on the canvas (still 2D?)")
+    if demo:
+        seen, left, right = names_report(lines, found, rows, names, col0 + (len(lines[rows[0]]) - col0) // 2)
+        facts.append(f"3D: {len(seen)} names on {len(left | right)} rows")
+        if len(seen) < 8:
+            problems.append(f"3D: only {len(seen)} agent names: {seen}")
+        groups = group_colours(colours, rows)
+        facts.append(f"3D: group colours on the canvas: {', '.join(groups) or 'none'}")
+        if len(groups) < 3:
+            problems.append(f"3D: only {len(groups)} group colours")
+        green = green_colours(colours, rows)
+        if green:
+            problems.append(f"3D: green or teal on the canvas: {green}")
+    differs = lines != later
+    facts.append(f"3D: two captures 1 s apart {'differ' if differs else 'are the same'}"
+                 + (f" ({sum(a != b for a, b in zip(lines, later))} rows changed)" if differs else ""))
+    if not differs:
+        problems.append("3D: the screen did not change in 1 s")
+    return problems, facts
 
 
 QUITTING = False
@@ -407,18 +640,24 @@ def main():
     parser.add_argument("--wait", type=float, default=12.0, help="seconds to wait for the view after /graph")
     parser.add_argument("--keep-open", type=float, default=0.0, help="extra seconds before the capture")
     parser.add_argument("--settle", type=float, default=12.0, help="seconds to wait for toasts to go away")
+    parser.add_argument("--demo", action="store_true", help="AGENTGRAPH_TUI_DEMO=1: the moving demo; require the orbit")
+    parser.add_argument("--fullscreen", action="store_true", help="press f (full screen) once the view shows")
+    parser.add_argument("--expect-scene", action="store_true", help="require the orbit (the hub ring) without --demo")
+    parser.add_argument("--view3d", action="store_true", help="press d after the 2D captures and check the 3D view")
     args = parser.parse_args()
+    global DEMO
+    DEMO = args.demo
     cols, rows = (int(n) for n in args.size.lower().split("x"))
     proj = os.path.join(SCRATCH, "proj")
     os.makedirs(SCRATCH, exist_ok=True)
     session = args.session or ensure_session(args.binary, proj)
 
-    label = f"{cols}x{rows}{'-nograph' if args.no_graph else ''}"
+    label = f"{cols}x{rows}{'-nograph' if args.no_graph else ''}{'-demo' if args.demo else ''}{'-full' if args.fullscreen else ''}{'-3d' if args.view3d else ''}"
     term = None
     try:
         term = Term([args.binary, "--standalone", "-s", session, proj], proj, cols, rows, os.path.join(SCRATCH, f"raw-{label}.bin"))
         term.start()
-        lines, colours, after_q, started = drive(term, args)
+        lines, colours, after_q, started, second, seen2d, view3d = drive(term, args)
         how = term.quit()
     finally:
         if term is not None:
@@ -441,6 +680,35 @@ def main():
     if not rest:
         print(f"===== {label}: FAIL, the hub line has no view lines under it")
         return 1
+    rows_c = canvas_rows(lines, found)
+    scene_on = rows_c is not None and hub_ring(lines, found, rows_c) is not None
+    print(f"===== {label}: {'the orbit' if scene_on else 'the list'} is on screen")
+    differs = lines != second
+    print(f"===== {label}: two captures 1 s apart {'differ' if differs else 'are the same'}"
+          + (f" ({sum(a != b for a, b in zip(lines, second))} rows changed)" if differs else ""))
+    if args.demo or args.expect_scene:
+        problems, facts = scene_report(lines, DEMO_NAMES if args.demo else DEMO_NAMES + ["orchestrator"], seen2d if args.demo else None)
+        for fact in facts:
+            print(f"   scene: {fact}")
+        if not args.demo and scene_on:
+            problems = []  # a live session: its own agents, so only the hub ring is required
+        if args.demo and not differs:
+            problems.append("the screen did not change in 1 s")
+        if args.view3d:
+            if view3d is None:
+                problems.append("3D: no capture (no view on screen to press d in)")
+            else:
+                first3, later3, seen3d = view3d
+                print(f"===== {label}: 3D screen, 1 s after `d`")
+                for i, line in enumerate(first3):
+                    print(f"{i:2d}|{line}")
+                p3, f3 = scene3d_report(first3, later3, DEMO_NAMES, seen3d, args.demo)
+                for fact in f3:
+                    print(f"   scene: {fact}")
+                problems += p3
+        if problems:
+            print(f"===== {label}: FAIL, scene: " + "; ".join(problems))
+            return 1
     print(f"===== {label}: PASS, hub line and {len(rest)} more view lines")
     if after_q is not None:
         moved = find_view(after_q)
