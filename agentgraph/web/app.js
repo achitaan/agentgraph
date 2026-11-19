@@ -411,7 +411,7 @@
       if (rect.width <= 0 || viewport.clientWidth <= 0 || viewport.clientHeight <= 0) return;
       const compact = arrangement === 'compact';
       const aspect = Math.round(clamp(rect.width / rect.height, 1, 1.3) * 20) / 20;
-      const signature = JSON.stringify([arrangement, compact ? [Math.round(rect.width), Math.round(rect.height)] : aspect, hubName, agents.map(a => [a.name, a.group, a.parent]).sort()]);
+      const signature = JSON.stringify([arrangement, compact ? [Math.round(rect.width), Math.round(rect.height)] : aspect, hubName, snapshot?.structure?.source === 'folder' ? (snapshot.groups || []).map(group => group.id) : null, agents.map(a => [a.name, a.group, a.parent]).sort()]);
       if (signature === layoutSignature) return;
       layoutSignature = signature;
       stopLayout();
@@ -421,10 +421,12 @@
       agents.filter(isSeat).sort((a, b) => a.name.localeCompare(b.name)).forEach(a => { if (!seatsOf.has(a.parent)) seatsOf.set(a.parent, []); seatsOf.get(a.parent).push(a); });
       const ring = agents.filter(a => a.name !== hubName && !isSeat(a));
       const keys = Array.from(new Set(ring.map(a => a.group)));
-      const order = ['decide', 'build', 'verify', 'understand'];
-      const lead = keys.filter(key => !order.includes(key)).sort((a, b) => Number(b === 'council') - Number(a === 'council') || String(a).localeCompare(String(b)));
+      // With a structure folder the ring follows the folder order, first group at the top; otherwise the built-in order.
+      const listed = snapshot?.structure?.source === 'folder' ? (snapshot.groups || []).map(group => group.id).filter(id => keys.includes(id)) : null;
+      const order = listed ? listed.slice(1) : ['decide', 'build', 'verify', 'understand'];
+      const lead = listed ? listed.slice(0, 1) : keys.filter(key => !order.includes(key)).sort((a, b) => Number(b === 'council') - Number(a === 'council') || String(a).localeCompare(String(b)));
       const slot = compact ? 100 : SLOT;
-      const groups = [...lead, ...order.filter(key => keys.includes(key))].map(key => {
+      const groups = [...lead, ...order.filter(key => keys.includes(key)), ...(listed ? keys.filter(key => !listed.includes(key)).sort() : [])].map(key => {
         const units = ring.filter(a => a.group === key).sort((a, b) => a.name.localeCompare(b.name)).map(agent => {
           const seats = seatsOf.get(agent.name) || [], offsets = seatOffsets(seats.length);
           return { agent, seats, offsets, width: seats.length ? Math.max(slot, 2 * (offsets[0].distance + 19) + 34) : slot };
@@ -1073,7 +1075,18 @@
         if (agent.pool) badges.append(el('span', 'ag-badge', 'Pool of ' + agent.pool));
         detailScroll.append(badges);
         stats(detailScroll, usageOf(agent.sessions));
-        if (agent.skills?.length) section(detailScroll, 'Skills', agent.skills.includes('*') ? 'all' : agent.skills.slice(0, LIST_LIMIT).join(' · '));
+        if (agent.skills?.includes('*')) section(detailScroll, 'Skills', 'all' + (snapshot.skills?.length ? ' · ' + snapshot.skills.length : ''));
+        else if (agent.skills?.length) {
+          // Each skill the agent may load, with what it is for.
+          const about = new Map((snapshot.skills || []).map(skill => [skill.name, skill.description]));
+          const list = section(detailScroll, 'Skills · ' + agent.skills.length);
+          appendList(list, agent.skills, name => {
+            const row = el('div', 'ag-skill-row'); row.dataset.skill = text(name);
+            row.append(el('span', 'ag-skill-name', text(name)));
+            if (about.get(name)) row.append(el('span', 'ag-skill-about', text(about.get(name))));
+            row.title = text(about.get(name) || name); list.append(row);
+          });
+        }
         if (sessionToOpen(agent)) { const opener = el('button', 'ag-open-session', 'Open session'); opener.type = 'button'; opener.dataset.openSession = agent.name; detailScroll.append(opener); }
         const record = snapshot.learning?.agents && Object.hasOwn(snapshot.learning.agents, agent.name) ? snapshot.learning.agents[agent.name] : null;
         if (record) {

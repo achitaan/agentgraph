@@ -1091,11 +1091,15 @@
       });
     });
     await test('the information panel and the readouts use the monospace face', async () => {
-      const skilled = fixture(); skilled.agents.find(a => a.name === 'impl-openai').skills = ['engineering-delivery', 'code-assurance'];
+      const skilled = fixture(); skilled.agents.find(a => a.name === 'impl-openai').skills = ['engineering-delivery', 'code-assurance']; skilled.agents[0].skills = ['*'];
+      skilled.skills = [{ name: 'code-assurance', description: 'Review <b>code</b>' }, { name: 'sympy', description: 'Exact math' }];
       await using(skilled, root => {
         open(root, 'impl-openai');
-        const skills = [...root.querySelectorAll('.ag-detail-section')].find(item => item.querySelector('h3').textContent === 'Skills');
-        assert(skills && skills.querySelector('p').textContent === 'engineering-delivery · code-assurance', 'an agent does not list its skills');
+        const skills = [...root.querySelectorAll('.ag-detail-section')].find(item => item.querySelector('h3').textContent === 'Skills · 2');
+        assert(skills && [...skills.querySelectorAll('.ag-skill-row')].map(row => row.textContent).join('|') === 'engineering-delivery|code-assuranceReview <b>code</b>' && !skills.querySelector('b'), 'an agent does not list its skills with what they are for');
+        root.querySelector('.ag-close').click(); open(root, 'orchestrator');
+        assert([...root.querySelectorAll('.ag-detail-section')].find(item => item.querySelector('h3').textContent === 'Skills').querySelector('p').textContent === 'all · 2', 'an agent with every skill does not say so');
+        root.querySelector('.ag-close').click(); open(root, 'impl-openai');
         for (const selector of ['.ag-detail-title', '.ag-detail-section p', '.ag-usage', '.ag-activity']) assert(/monospace/.test(getComputedStyle(root.querySelector(selector)).fontFamily), selector + ' is not monospace');
         assert(!/monospace/.test(getComputedStyle(root.querySelector('.ag-agent-name')).fontFamily), 'agent names changed face');
       });
@@ -1140,6 +1144,28 @@
         assert(rows.join('|') === 'code-assuranceimpl-openai · reviewerReview <b>code</b>|sympy—Exact math' && !fold.querySelector('b'), 'skill rows are wrong: ' + rows.join('|'));
         root.querySelector('.ag-close').click(); delete data.skills; await app.refresh(); root.querySelector('.ag-run-button').click();
         assert(![...root.querySelectorAll('.ag-run-fold')].some(item => item.dataset.runFold === 'skills'), 'an empty skill list is shown');
+      });
+    });
+    await test('with a structure folder the ring follows its group order and changes when it changes', async () => {
+      const data = fixture(); data.agents = data.agents.filter(a => a.team === 'main' && !a.parent && a.name !== 'council');
+      data.agents.push(agent('scout', 'scouts'), agent('oracle', 'decide'));
+      data.structure = { source: 'folder' };
+      data.groups = [{ id: 'hub' }, { id: 'scouts' }, { id: 'build' }, { id: 'verify' }, { id: 'decide' }];
+      await using(data, async (root, app) => {
+        await resizeTo(root, 1200, 800);
+        const hub = root.querySelector('[data-agent="orchestrator"] .ag-core').getBoundingClientRect();
+        const angle = name => { const b = root.querySelector('[data-agent="' + name + '"] .ag-core').getBoundingClientRect(); return (Math.atan2(b.y + b.height / 2 - hub.y - hub.height / 2, b.x + b.width / 2 - hub.x - hub.width / 2) * 180 / Math.PI + 450) % 360; };
+        assert(angle('scout') < 20 || angle('scout') > 340, 'the first group in the folder is not at the top: ' + angle('scout').toFixed(0));
+        assert(angle('scout') < 180 ? angle('impl-claude') < angle('reviewer') && angle('reviewer') < angle('oracle') : true, 'groups do not follow the folder order clockwise');
+        const before = root.querySelector('[data-agent="oracle"]').getAttribute('transform');
+        data.groups = [{ id: 'hub' }, { id: 'decide' }, { id: 'scouts' }, { id: 'build' }, { id: 'verify' }]; await app.refresh();
+        assert(root.querySelector('[data-agent="oracle"]').getAttribute('transform') !== before && (angle('oracle') < 20 || angle('oracle') > 340), 'changing the folder order did not move the groups');
+        // Move an agent's file to a folder that is not next to its own: it must end up beside that group's agents.
+        const beside = () => { const ring = data.agents.map(a => a.name).filter(n => n !== 'orchestrator' && root.querySelector('[data-agent="' + n + '"]')).sort((a, b) => angle(a) - angle(b)); const gap = Math.abs(ring.indexOf('scout') - ring.indexOf('reviewer')); return gap === 1 || gap === ring.length - 1; };
+        assert(!beside(), 'the test needs scout and reviewer apart before the move');
+        data.agents.find(a => a.name === 'scout').group = 'verify'; await app.refresh();
+        assert(beside(), 'an agent moved to another folder did not join that group');
+        assertFits(root);
       });
     });
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
