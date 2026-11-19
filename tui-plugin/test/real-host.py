@@ -36,6 +36,14 @@ The orbit (the full-panel scene):
                     rows and no braille there, at least 3 group colours, and two 3D captures that differ. With
                     --expect-scene instead of --demo: the depth characters and two captures that differ. Checked
                     only with --demo or --expect-scene.
+
+The `g` key (orbit or list):
+    --gcheck        after the view shows (and after the keys of --pre), capture, press `g`, capture, press `g`,
+                    capture. Fails unless the second capture shows the other view than the first and the third the
+                    first's again. Prints the panel size the plugin measured (from the plugin's debug log). Use it with
+                    --demo. Not with --view3d or --fullscreen: those are the d/f checks above.
+    --pre KEYS      keys pressed one by one (1.5 s apart) before the first capture of --gcheck: `f` full screen, `d`
+                    2D/3D, `g` the view, `R` close with `q` and open the panel again with /graph.
 """
 import argparse
 import fcntl
@@ -432,6 +440,49 @@ def drive(term, args):
     return lines, colours, after_q, started, second, seen2d, view3d
 
 
+def orbit_on(lines):
+    """True when the orbit (2D or 3D) is on screen: the hub's glyph inside the canvas rows under the hub line."""
+    found = find_view(lines)
+    if found is None:
+        return False
+    rows = canvas_rows(lines, found)
+    if rows is None or rows[1] - rows[0] < 8:
+        return False
+    return any(lines[r].find("◉", found[1] + 2) >= 0 for r in range(rows[0], rows[1] + 1))
+
+
+def open_panel(term, args):
+    for ch in "/graph":
+        term.write(ch.encode())
+        term.pump(0.12)
+    term.pump(0.8)
+    term.write(b"\r")
+    term.wait_for(lambda ls: find_view(ls) is not None and len([v for v in find_view(ls)[2] if v]) >= 2, args.wait)
+
+
+def drive_g(term, args):
+    """-> (started, steps): steps = [(label, lines, orbit_on)] for the capture before `g`, after `g`, after `g` again."""
+    started = term.wait_for(lambda ls: any("ctrl+p" in l or "commands" in l for l in ls), 40)
+    term.pump(4)
+    open_panel(term, args)
+    for key in args.pre:
+        if key == "R":
+            term.write(b"q")
+            term.pump(2.0)
+            open_panel(term, args)
+        else:
+            term.write(key.encode())
+        term.pump(1.5)
+    term.wait_for(lambda ls: not any(TOAST.search(l) for l in ls), args.settle)
+    term.pump(2.0)
+    steps = [("before g", term.lines())]
+    for label in ("after g", "after g again"):
+        term.write(b"g")
+        term.pump(1.5)
+        steps.append((label, term.lines()))
+    return started, [(label, lines, orbit_on(lines)) for label, lines in steps]
+
+
 def screen_colours(screen):
     """-> {row: set of foreground colours (pyte's hex without '#') of the non-blank cells of that row}."""
     out = {}
@@ -620,6 +671,31 @@ def scene3d_report(lines, later, names, colours, demo):
     return problems, facts
 
 
+def report_g(label, args, started, how, steps):
+    print(f"===== {label} ({args.binary}, started={started}, quit={how}) panel sizes the plugin measured:")
+    sizes = []
+    try:
+        sizes = [l.split("panel size:")[1].strip() for l in open(DEBUG_LOG).read().splitlines() if "panel size:" in l]
+    except OSError:
+        pass
+    print("   " + (", ".join(sizes) or "none logged"))
+    for name, lines, orbit in steps:
+        found = find_view(lines)
+        print(f"----- {name}: {'the orbit' if orbit else ('the list' if found else 'NO VIEW')} (view column {found[1] if found else '-'})")
+        for i, line in enumerate(lines):
+            print(f"{i:2d}|{line}")
+    kinds = [orbit for _, _, orbit in steps]
+    if any(find_view(lines) is None for _, lines, _ in steps):
+        print(f"===== {label}: FAIL, no view on screen in some capture")
+        return 1
+    shown = ["orbit" if k else "list" for k in kinds]
+    if kinds[1] == kinds[0] or kinds[2] != kinds[0]:
+        print(f"===== {label}: FAIL, g did not switch the view and back: {' -> '.join(shown)}; panel {', '.join(sizes) or '?'}")
+        return 1
+    print(f"===== {label}: PASS, g switched the view and back: {' -> '.join(shown)}; panel {', '.join(sizes) or '?'}")
+    return 0
+
+
 QUITTING = False
 
 
@@ -643,20 +719,30 @@ def main():
     parser.add_argument("--demo", action="store_true", help="AGENTGRAPH_TUI_DEMO=1: the moving demo; require the orbit")
     parser.add_argument("--fullscreen", action="store_true", help="press f (full screen) once the view shows")
     parser.add_argument("--expect-scene", action="store_true", help="require the orbit (the hub ring) without --demo")
+    parser.add_argument("--gcheck", action="store_true", help="press g twice and require the view to switch and come back")
+    parser.add_argument("--pre", default="", help="keys before --gcheck's first capture: f, d, g, R (close and reopen)")
     parser.add_argument("--view3d", action="store_true", help="press d after the 2D captures and check the 3D view")
     args = parser.parse_args()
-    global DEMO
+    global DEMO, DEBUG_LOG
     DEMO = args.demo
+    if args.gcheck and not DEBUG_LOG:
+        DEBUG_LOG = os.path.join(SCRATCH, "gcheck-debug.log")
     cols, rows = (int(n) for n in args.size.lower().split("x"))
     proj = os.path.join(SCRATCH, "proj")
     os.makedirs(SCRATCH, exist_ok=True)
     session = args.session or ensure_session(args.binary, proj)
 
-    label = f"{cols}x{rows}{'-nograph' if args.no_graph else ''}{'-demo' if args.demo else ''}{'-full' if args.fullscreen else ''}{'-3d' if args.view3d else ''}"
+    label = f"{cols}x{rows}{'-nograph' if args.no_graph else ''}{'-demo' if args.demo else ''}{'-full' if args.fullscreen else ''}{'-3d' if args.view3d else ''}{'-g' + args.pre if args.gcheck else ''}"
     term = None
     try:
         term = Term([args.binary, "--standalone", "-s", session, proj], proj, cols, rows, os.path.join(SCRATCH, f"raw-{label}.bin"))
+        if DEBUG_LOG and args.gcheck:
+            open(DEBUG_LOG, "w").close()
         term.start()
+        if args.gcheck:
+            started, steps = drive_g(term, args)
+            how = term.quit()
+            return report_g(label, args, started, how, steps)
         lines, colours, after_q, started, second, seen2d, view3d = drive(term, args)
         how = term.quit()
     finally:

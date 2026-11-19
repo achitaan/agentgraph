@@ -2196,7 +2196,7 @@ test("demo: demoDocument adds a growing wear history and moving costs; the runne
 // A plugin built directly, with a clock the test controls and the demo source (no Python).
 const OT = await import("@opentui/solid");
 const solid = await import("solid-js");
-function makeScenePlugin({ demoOn = true, spawned = { n: 0 } } = {}) {
+function makeScenePlugin({ demoOn = true, spawned = { n: 0 }, screen = { width: 200, height: 60 } } = {}) {
   const clockRef = { t: 1795075000000 };
   const intervals = [];
   const plugin = P.createPlugin({
@@ -2205,6 +2205,7 @@ function makeScenePlugin({ demoOn = true, spawned = { n: 0 } } = {}) {
       spawned.n += 1;
       throw new Error("spawn called: " + args[0]);
     },
+    screenSize: () => screen,
     fs, os, path, env: demoOn ? { AGENTGRAPH_TUI_DEMO: "1" } : {}, demoFile: path.join(here, "fixtures", "demo.json"), now: () => clockRef.t,
     timers: {
       setInterval: (fn, ms) => {
@@ -2296,6 +2297,137 @@ test("panel scene: the orbit from 64x22 with a measured size, the list below it 
   } finally {
     for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
     stop();
+  }
+});
+
+// A host panel that really toggles: `presentation` flips between "panel" and "fullscreen" on toggleFullscreen, and the test
+// sets the size the host would measure afterwards.
+function fullscreenPanel(presentation = "panel") {
+  const panel = makePanel({ sessionID: "ses_demo", width: 120, presentation });
+  panel.toggleFullscreen = () => {
+    panel.calls.full += 1;
+    panel.presentation = panel.presentation === "fullscreen" ? "panel" : "fullscreen";
+  };
+  return panel;
+}
+
+test("panel scene: g always changes what is shown; too small as a side panel, it goes full screen and back", async () => {
+  const { plugin } = makeScenePlugin({ screen: { width: 160, height: 45 } });
+  const { ctx, state, panelClaim } = makePanelHost();
+  const stop = plugin.setup(ctx);
+  globalThis.__agentgraphStub.cleanups.length = 0;
+  try {
+    const panel = fullscreenPanel();
+    const view = panelClaim().render(panel);
+    await waitFor(() => screen(view).length > 5, 5000, "demo snapshot");
+    sizePanel(view, 56, 44); // the side panel of a 160-column terminal
+    assert.ok(!isOrbit(screen(view)), "the list: 56 columns are too narrow");
+    const key = (bind) => state.layers.filter((l) => (l.commands || []).some((c) => c.bind === bind)).pop().commands.find((c) => c.bind === bind);
+    key("g").run();
+    assert.equal(panel.calls.full, 1, "g asked for full screen");
+    sizePanel(view, 160, 45); // the host lays the panel out full screen
+    assert.ok(isOrbit(screen(view)), "g: the orbit");
+    key("d").run(); // d does not change what g leaves
+    key("g").run();
+    assert.equal(panel.calls.full, 2, "g back leaves the full screen that g entered");
+    assert.equal(panel.presentation, "panel");
+    sizePanel(view, 56, 44);
+    assert.ok(!isOrbit(screen(view)), "g: the list");
+    key("g").run();
+    sizePanel(view, 160, 45);
+    assert.ok(isOrbit(screen(view)), "g again: the orbit");
+    // f in between: full screen is the user's now, g to the list keeps it
+    key("f").run();
+    assert.equal(panel.calls.full, 4, "f toggled it");
+    sizePanel(view, 56, 44);
+    assert.ok(!isOrbit(screen(view)), "f left full screen: the list");
+    key("g").run();
+    sizePanel(view, 160, 45);
+    assert.ok(isOrbit(screen(view)), "g after f: the orbit");
+    key("f").run(); // the user leaves full screen while the orbit shows ...
+    sizePanel(view, 56, 44);
+    assert.ok(!isOrbit(screen(view)));
+    // ... and a panel already full screen (by f) stays so when g shows the list and the orbit again
+    key("f").run();
+    sizePanel(view, 160, 45);
+    const full = panel.calls.full;
+    key("g").run();
+    assert.ok(!isOrbit(screen(view)), "g: the list");
+    key("g").run();
+    assert.ok(isOrbit(screen(view)), "g: the orbit");
+    assert.equal(panel.calls.full, full, "g did not touch a full screen it did not enter");
+  } finally {
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    stop();
+  }
+});
+
+test("panel scene: g does nothing only when the orbit cannot fit even full screen; an unknown screen is tried and undone", async () => {
+  const keyOf = (state, bind) => state.layers.filter((l) => (l.commands || []).some((c) => c.bind === bind)).pop().commands.find((c) => c.bind === bind);
+  // a screen too small for the orbit: nothing to switch to
+  {
+    const { plugin } = makeScenePlugin({ screen: { width: 60, height: 40 } });
+    const { ctx, state, panelClaim } = makePanelHost();
+    const stop = plugin.setup(ctx);
+    globalThis.__agentgraphStub.cleanups.length = 0;
+    try {
+      const panel = fullscreenPanel();
+      const view = panelClaim().render(panel);
+      await waitFor(() => screen(view).length > 5, 5000, "demo snapshot");
+      sizePanel(view, 40, 39);
+      keyOf(state, "g").run();
+      assert.equal(panel.calls.full, 0, "no full screen that would not help");
+      assert.ok(!isOrbit(screen(view)));
+    } finally {
+      for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+      stop();
+    }
+  }
+  // already full screen and too small: nothing either
+  {
+    const { plugin } = makeScenePlugin({ screen: { width: 60, height: 40 } });
+    const { ctx, state, panelClaim } = makePanelHost();
+    const stop = plugin.setup(ctx);
+    globalThis.__agentgraphStub.cleanups.length = 0;
+    try {
+      const panel = fullscreenPanel("fullscreen");
+      const view = panelClaim().render(panel);
+      await waitFor(() => screen(view).length > 5, 5000, "demo snapshot");
+      sizePanel(view, 60, 40);
+      keyOf(state, "g").run();
+      assert.equal(panel.calls.full, 0);
+      assert.ok(!isOrbit(screen(view)));
+    } finally {
+      for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+      stop();
+    }
+  }
+  // the screen's size is unknown: g tries full screen; when the panel measures too small it goes back
+  {
+    const { plugin } = makeScenePlugin({ screen: null });
+    const { ctx, state, panelClaim } = makePanelHost();
+    const stop = plugin.setup(ctx);
+    globalThis.__agentgraphStub.cleanups.length = 0;
+    try {
+      const panel = fullscreenPanel();
+      const view = panelClaim().render(panel);
+      await waitFor(() => screen(view).length > 5, 5000, "demo snapshot");
+      sizePanel(view, 56, 44);
+      keyOf(state, "g").run();
+      assert.equal(panel.calls.full, 1, "tried");
+      sizePanel(view, 60, 40);
+      assert.equal(panel.calls.full, 2, "and undone");
+      assert.equal(panel.presentation, "panel");
+      assert.ok(!isOrbit(screen(view)));
+      // and when it does fit, it stays
+      keyOf(state, "g").run();
+      sizePanel(view, 120, 40);
+      assert.equal(panel.calls.full, 3);
+      assert.ok(isOrbit(screen(view)));
+    } finally {
+      for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+      stop();
+    }
   }
 });
 

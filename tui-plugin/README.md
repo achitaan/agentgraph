@@ -96,8 +96,14 @@ Keys, while the panel has the keyboard:
 | --- | --- |
 | `f` | full screen on and off |
 | `q` | close the panel |
-| `g` | orbit or list (remembered while the app runs) |
+| `g` | orbit or list (remembered while the app runs); see below for a panel too small for the orbit |
 | `d` | the orbit's 2D or 3D view (remembered while the app runs; it opens in 2D) |
+
+`g` always changes what the panel shows. The side panel of an ordinary terminal is about 56 columns wide, too
+narrow for the orbit, so it opens on the list; there `g` goes full screen and shows the orbit, and `g` again returns
+to the list and leaves full screen (only if `g` entered it; `f` is yours and `g` never takes you out of it). Only
+when the orbit would not fit even full screen (the terminal is smaller than 64 columns by 22 rows) does `g` do
+nothing.
 
 **2D** is the ring seen from above, in braille dots (a dot is about square, so the geometry comes out round). The
 hub is a ring outline with open space inside; it breathes by one dot while work moves. The agents sit on a larger
@@ -351,7 +357,8 @@ python3 tui-plugin/test/real-host.py --size 160x45
 python3 tui-plugin/test/real-host.py --size 90x40
 python3 tui-plugin/test/real-host.py --size 160x45 --no-graph
 python3 tui-plugin/test/real-host.py --size 120x40 --demo --fullscreen --view3d
-python3 tui-plugin/test/real-host.py --size 160x45 --demo --view3d
+python3 tui-plugin/test/real-host.py --size 160x45 --demo --view3d   # fails: the side panel is 56 columns wide, so the list shows; add --fullscreen
+python3 tui-plugin/test/real-host.py --size 160x45 --demo --gcheck [--pre f|g|gd|d|R|gR]
 ```
 
 - `--demo`: runs the app with `AGENTGRAPH_TUI_DEMO=1` and requires the 2D orbit: the hub ring (the hub's glyph inside
@@ -363,6 +370,10 @@ python3 tui-plugin/test/real-host.py --size 160x45 --demo --view3d
 - `--view3d`: after the 2D captures presses `d`, waits 1 s and captures the 3D view, then again 1 s later. With
   `--demo` it requires at least 8 names, `@`, `0` and `1` inside the canvas rows and no braille there, at least 3
   group colours and none green or teal, and the two 3D captures to differ.
+- `--gcheck`: presses `g`, captures, presses `g` again, captures; fails unless the first press changed between orbit
+  and list and the second changed it back. It prints the panel size the plugin measured (from its debug log; sizes
+  come in order, so `56x44, 160x45` is a side panel and then full screen). `--pre KEYS` presses keys first: `f`, `d`,
+  `g`, and `R` (close with `q`, reopen with `/graph`). Use it with `--demo`, not with `--fullscreen` or `--view3d`.
 
 The script always starts the app with `--standalone`, and so must anyone who drives the app by hand for a test. A
 launch without it attaches to the user's shared background service, and when the versions differ it restarts that
@@ -377,8 +388,7 @@ cannot be caught.
 
 - `{ prepend: "sidebar.content" }`; that the returned cleanup of `ui.slot` and `keymap.layer` is called.
 - That `onCleanup` from `solid-js` runs when the host disposes the panel (it is what stops the panel's timers).
-- That the panel's key commands honour `enabled` (`f`, `d` and `q` were pressed in the panel and worked; `g` was not
-  pressed in the real host, only in the tests).
+- That the panel's key commands honour `enabled` (`f`, `d`, `g` and `q` were pressed in the panel and worked; `g` by `--gcheck`).
 - The light palette on screen (the real host's theme was dark). The demo's stuck agents were drawn, but their
   danger colour on screen was not read.
 - The `[path, options]` form in `cli.json` (`setup` gets an `options` object; only the default options were run).

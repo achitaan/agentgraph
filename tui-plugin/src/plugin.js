@@ -494,9 +494,16 @@ export function createPlugin(host) {
 
     // The view chosen with `g` in the panel, remembered while the app runs.
     const [viewMode, setViewMode] = host.createSignal("scene");
-    const toggleView = () => {
-      setViewMode((mode) => (mode === "scene" ? "list" : "scene"));
-      requestRender();
+    // The terminal's size, which is the panel's size in full screen; null when the host does not say.
+    const screenSize = () => {
+      try {
+        const out = typeof host.screenSize === "function" ? host.screenSize() : globalThis.process && globalThis.process.stdout;
+        const width = Math.floor(Number(out && (out.width !== undefined ? out.width : out.columns)));
+        const height = Math.floor(Number(out && (out.height !== undefined ? out.height : out.rows)));
+        return width > 0 && height > 0 ? { width, height } : null;
+      } catch (_) {
+        return null;
+      }
     };
     // The orbit's view chosen with `d`, remembered while the app runs; it opens in 2D. A switch moves the camera
     // over CHANGE_MS from the old view to the new one.
@@ -571,7 +578,8 @@ export function createPlugin(host) {
             const cur = size();
             if (cur && cur.width === next.width && cur.height === next.height) return;
             report("panel size", `${next.width}x${next.height}`); // debug log only
-            keys.addViewKey();
+            keys.addViewKey(() => size() || measuredSize(root));
+            keys.sized(next);
             setSize(next);
             requestRender();
           } catch (error) {
@@ -661,7 +669,7 @@ export function createPlugin(host) {
           ctx.ui.slot({
             append: PANEL_SLOT,
             render(panel) {
-              let keys = { remove() {}, addViewKey() {} };
+              let keys = { remove() {}, addViewKey() {}, sized() {} };
               try {
                 panelWatcher.reopen();
                 keys = panelKeys(panel);
@@ -686,17 +694,73 @@ export function createPlugin(host) {
 
     // `f` and `q` while this plugin's panel owns input. Called from the panel's render, so the host drops the layer
     // when the panel closes. Without a mode the layer is active only while the panel owns input.
-    // Returns { remove, addViewKey }: remove() drops the layers (also run by the plugin's own cleanup; twice is
+    // Returns { remove, addViewKey, sized }: remove() drops the layers (also run by the plugin's own cleanup; twice is
     // harmless); addViewKey() adds the `g` layer once the panel's size is known, since only then is there an orbit
     // to switch to.
     function panelKeys(panel) {
-      if (!ctx.keymap || typeof ctx.keymap.layer !== "function") return { remove() {}, addViewKey() {} };
+      if (!ctx.keymap || typeof ctx.keymap.layer !== "function") return { remove() {}, addViewKey() {}, sized() {} };
       const ours = () => {
         try {
           return panel.name === PANEL_NAME;
         } catch (_) {
           return false;
         }
+      };
+      // `g` shows the orbit and the panel is too small for it as it is, but the screen is not: `g` goes full screen.
+      // enteredFullscreen: it was `g` that did, so `g` back to the list leaves full screen again.
+      let enteredFullscreen = false;
+      let unverified = false; // the screen's size was not known: check the orbit fits once the panel is measured
+      const fullscreenNow = () => {
+        try {
+          return panel.presentation === "fullscreen";
+        } catch (_) {
+          return false;
+        }
+      };
+      const fullscreenToggle = () => {
+        try {
+          if (typeof panel.toggleFullscreen === "function") {
+            panel.toggleFullscreen();
+            return true;
+          }
+        } catch (_) {
+          /* ignore */
+        }
+        return false;
+      };
+      const leaveFullscreen = () => {
+        if (enteredFullscreen && fullscreenNow()) fullscreenToggle();
+        enteredFullscreen = false;
+        unverified = false;
+      };
+      // `g` always changes what the panel shows, unless the orbit cannot fit even full screen.
+      const switchView = (currentSize) => {
+        const known = currentSize();
+        const orbitShown = viewMode() === "scene" && !!known && sceneFits(known.width, known.height);
+        if (orbitShown) {
+          setViewMode("list");
+          leaveFullscreen();
+        } else if (known && sceneFits(known.width, known.height)) {
+          setViewMode("scene");
+        } else if (fullscreenNow()) {
+          // already full screen and still too small: nothing to show
+        } else {
+          const screen = screenSize();
+          if (!screen || sceneFits(screen.width, screen.height)) {
+            if (fullscreenToggle()) {
+              enteredFullscreen = true;
+              unverified = !screen;
+              setViewMode("scene");
+            }
+          }
+        }
+        requestRender();
+      };
+      // The panel was measured: when `g` guessed that full screen would fit and it does not, go back.
+      const sized = (next) => {
+        if (!unverified || !enteredFullscreen || !fullscreenNow()) return;
+        unverified = false;
+        if (!sceneFits(next.width, next.height)) leaveFullscreen();
       };
       const act = (name) => () => {
         try {
@@ -707,7 +771,15 @@ export function createPlugin(host) {
       };
       const unregister = ctx.keymap.layer(() => ({
         commands: [
-          { id: PANEL_NAME + ".fullscreen", bind: "f", enabled: ours, run: act("toggleFullscreen") },
+          {
+            id: PANEL_NAME + ".fullscreen",
+            bind: "f",
+            enabled: ours,
+            run: () => {
+              enteredFullscreen = false; // full screen is the user's now: `g` no longer leaves it
+              act("toggleFullscreen")();
+            },
+          },
           { id: PANEL_NAME + ".close", bind: "q", enabled: ours, run: act("close") },
         ],
       }));
@@ -726,14 +798,14 @@ export function createPlugin(host) {
           }
         }
       };
-      const addViewKey = () => {
+      const addViewKey = (currentSize) => {
         if (viewKey || removed) return;
         viewKey = true;
         try {
           unregisters.push(
             ctx.keymap.layer(() => ({
               commands: [
-                { id: PANEL_NAME + ".view", bind: "g", enabled: ours, run: toggleView },
+                { id: PANEL_NAME + ".view", bind: "g", enabled: ours, run: () => switchView(currentSize) },
                 { id: PANEL_NAME + ".dimension", bind: "d", enabled: ours, run: toggleDimension },
               ],
             })),
@@ -743,7 +815,7 @@ export function createPlugin(host) {
         }
       };
       panelLayers.add(remove);
-      return { remove, addViewKey };
+      return { remove, addViewKey, sized };
     }
 
     function toggle() {
