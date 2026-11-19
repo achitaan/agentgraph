@@ -1030,6 +1030,109 @@
         delete data.root.context; data.totals.cost = 0;
       });
     });
+    const wearFixture = (extra = {}) => {
+      const data = fixture(); data.totals = { sessions: 1, running: 1, cost: 431.4, tokens_in: 2100000, tokens_out: 310000 };
+      data.root = { agent: 'orchestrator', context: 125000, wear: { context: 125000, window: 1000000, window_known: true, compact_at: 250000, summaries: 2, turns: 659, turns_since_summary: 40,
+        history: [30000, 90000, 180000, 240000, 60000, 125000], per_turn: { start: 0.07, recent: 0.31 }, level: 'long', ...extra } };
+      return data;
+    };
+    const colour = (root, value) => { const probe = document.createElement('i'); probe.style.color = value; root.append(probe); const found = getComputedStyle(probe).color; probe.remove(); return found; };
+    await test('the readout shows the context as a bar, a dot per summary, and says it in words', async () => {
+      await using(wearFixture(), async root => {
+        const usage = root.querySelector('.ag-usage'), track = usage.querySelector('.ag-wear-bar'), fill = track.querySelector('i');
+        const box = track.getBoundingClientRect();
+        assert(Math.abs(box.width - 56) < .6 && Math.abs(box.height - 4) < .6 && getComputedStyle(track).borderTopLeftRadius === '2px', 'the bar is not 56 by 4 with rounded ends: ' + box.width + 'x' + box.height);
+        assert(Math.abs(fill.getBoundingClientRect().width - 28) < .6, 'half way to the summary does not fill half the bar: ' + fill.getBoundingClientRect().width);
+        assert(usage.textContent === '$431.402.1M↑ 310k↓125k2' && !usage.textContent.includes('ctx'), 'the readout text is wrong: ' + usage.textContent);
+        const kids = [...usage.querySelectorAll('.ag-usage-context > *')].map(item => item.className);
+        assert(kids.join(',') === 'ag-wear-bar,ag-wear-number,ag-wear-dots,ag-wear-count', 'the bar, the number, the dots and the count are not in that order: ' + kids);
+        assert(usage.querySelectorAll('.ag-wear-dots i').length === 2 && usage.querySelector('.ag-wear-count').textContent === '2', 'two summaries are not two dots and a 2');
+        assert(usage.title === 'context 125k of 250k before the next summary · summarized 2 times · 659 turns', 'the tooltip is wrong: ' + usage.title);
+        const frame = root.getBoundingClientRect(), edge = usage.getBoundingClientRect();
+        assert(frame.right - edge.right <= 12 && edge.top - frame.top <= 12 && usage.tagName === 'BUTTON', 'the readout is no longer a button at the top right');
+        assert(getComputedStyle(fill).animationName === 'none' && getComputedStyle(fill).transitionDuration === '0s', 'the bar moves');
+        usage.click();
+        assert(!root.querySelector('.ag-detail').hidden && root.querySelector('[data-run-section="wear"]'), 'the readout does not open the session block');
+      });
+    });
+    await test('the bar changes colour at 60% and 85% of the way to the summary, in light and dark', async () => {
+      for (const scheme of ['light', 'dark']) {
+        const seen = [];
+        for (const [context, step] of [[149999, 'low'], [150000, 'mid'], [212499, 'mid'], [212500, 'high'], [900000, 'high']]) {
+          const data = wearFixture({ context }); data.root.context = context;
+          await using(data, root => {
+            const track = root.querySelector('.ag-wear-bar'), fill = track.querySelector('i');
+            assert(track.dataset.step === step, scheme + ' ' + context + ' should be ' + step + ' but is ' + track.dataset.step);
+            seen.push([step, getComputedStyle(fill).backgroundColor, getComputedStyle(track).backgroundColor]);
+            if (context === 900000) assert(Math.abs(fill.getBoundingClientRect().width - 56) < .6, 'a context past the summary point overflows the bar');
+            const expected = { low: ['--ag-muted', '--ag-divider'], mid: ['--ag-work', '--ag-divider'], high: ['--ag-ink', '--ag-work'] }[step];
+            assert(getComputedStyle(fill).backgroundColor === colour(root, 'var(' + expected[0] + ')') && getComputedStyle(track).backgroundColor === colour(root, 'var(' + expected[1] + ')'), scheme + ' ' + step + ' uses the wrong colours');
+          }, { scheme });
+        }
+        const fills = new Set(seen.map(item => item[0] + item[1] + item[2]));
+        assert(fills.size === 3, scheme + ': the three steps are not three looks');
+      }
+    });
+    await test('the readout draws a dot per summary up to five, then the count', async () => {
+      for (const [summaries, dots, count] of [[0, 0, ''], [1, 1, '1'], [5, 5, '5'], [7, 5, '7'], [40, 5, '40']]) {
+        await using(wearFixture({ summaries }), root => {
+          assert(root.querySelectorAll('.ag-wear-dots i').length === dots, summaries + ' summaries should be ' + dots + ' dots');
+          assert((root.querySelector('.ag-wear-count')?.textContent || '') === count, summaries + ' summaries should show "' + count + '"');
+          if (!summaries) assert(!root.querySelector('.ag-wear-dots'), 'dots with no summary');
+          if (dots) { const d = root.querySelector('.ag-wear-dots i').getBoundingClientRect(); assert(Math.abs(d.width - 4) < .6 && getComputedStyle(root.querySelector('.ag-wear-dots i')).borderTopLeftRadius !== '0px', 'a dot is not small and round'); }
+        });
+      }
+      await using(wearFixture({ summaries: 1, turns: 1 }), root => assert(root.querySelector('.ag-usage').title === 'context 125k of 250k before the next summary · summarized 1 time · 1 turn', 'singular tooltip is wrong: ' + root.querySelector('.ag-usage').title));
+      await using(wearFixture({ summaries: 0, turns: 12 }), root => assert(root.querySelector('.ag-usage').title === 'context 125k of 250k before the next summary · not summarized yet · 12 turns', 'unsummarized tooltip is wrong'));
+      await using(wearFixture({ compact_at: null, window_known: false }), root => {
+        assert(root.querySelector('.ag-usage').title.startsWith('context 125k of 1.0M window (assumed) · '), 'a session without automatic summaries is described wrong: ' + root.querySelector('.ag-usage').title);
+        assert(Math.abs(root.querySelector('.ag-wear-bar i').getBoundingClientRect().width - 7) < .6, 'the track is not the window without a summary point');
+      });
+    });
+    await test('the session block draws the context history and the plain facts, and says when the session is worn', async () => {
+      const data = wearFixture({ summaries: 3, level: 'worn' });
+      await using(data, async (root, app) => {
+        root.querySelector('.ag-usage').click();
+        const block = root.querySelector('[data-run-section="wear"]'), lines = [...block.querySelectorAll('.ag-wear-fact')].map(item => item.textContent);
+        const chart = block.querySelector('svg.ag-wear-chart'), poly = chart.querySelector('polyline.ag-wear-history'), last = chart.querySelector('circle.ag-wear-last');
+        assert(block.querySelector('h3').textContent === 'Session' && poly.getAttribute('points').split(' ').length === 6, 'the history chart is missing or has the wrong number of points');
+        assert(getComputedStyle(poly).stroke === colour(root, 'var(--ag-muted)') && getComputedStyle(poly).fill === 'none' && getComputedStyle(last).fill === colour(root, 'var(--ag-work)'), 'the history is not in the muted ink with the last point in the work colour');
+        const ys = poly.getAttribute('points').split(' ').map(point => Number(point.split(',')[1])), lastPoint = poly.getAttribute('points').split(' ').pop().split(',');
+        assert(ys[3] === Math.min(...ys) && last.getAttribute('cx') === lastPoint[0] && last.getAttribute('cy') === lastPoint[1], 'the chart is not scaled to the peak, or the last point is off the line');
+        assert(lines.join('|') === 'context now 125k · next summary at 250k|summarized 3 times|early work has been condensed 3 times; details from the start may be gone|659 turns in all · 40 since the last summary|cost per turn $0.07 at the start · $0.31 now', 'the facts are wrong: ' + lines.join('|'));
+        assert(/monospace/.test(getComputedStyle(block.querySelector('.ag-wear-fact')).fontFamily), 'the session block is not monospace');
+        assert(!block.querySelector('b, i, a') && block.textContent.indexOf('<') < 0, 'unexpected markup in the block');
+        data.root.wear.level = 'long'; data.root.wear.summaries = 2; data.root.wear.per_turn = { start: null, recent: 0.5 }; data.root.wear.turns_since_summary = null; await app.refresh();
+        const later = [...root.querySelectorAll('[data-run-section="wear"] .ag-wear-fact')].map(item => item.textContent);
+        assert(later.join('|') === 'context now 125k · next summary at 250k|summarized 2 times|659 turns in all|cost per turn $0.50 now', 'a null value still has a line, or the worn sentence stayed: ' + later.join('|'));
+        data.root.wear.per_turn = { start: null, recent: null }; data.root.wear.summaries = 0; data.root.wear.compact_at = null; data.root.wear.history = [5]; await app.refresh();
+        const bare = [...root.querySelectorAll('[data-run-section="wear"] .ag-wear-fact')].map(item => item.textContent);
+        assert(bare.join('|') === 'context now 125k · window 1.0M · no automatic summary|not summarized yet|659 turns in all', 'the minimal block is wrong: ' + bare.join('|'));
+        assert(!root.querySelector('.ag-wear-chart polyline') && root.querySelector('.ag-wear-chart circle'), 'a one point history should be a dot only');
+        data.root.wear.history = []; await app.refresh();
+        assert(!root.querySelector('.ag-wear-chart'), 'an empty history still draws a chart');
+      });
+    });
+    await test('without root.wear the readout is exactly what it was, and a narrow panel drops the bar before the dollars', async () => {
+      const old = fixture(); old.totals = { sessions: 2, running: 1, cost: 431.4, tokens_in: 2100000, tokens_out: 310000 }; old.root = { agent: 'orchestrator', context: 566380 };
+      for (const wear of [undefined, null, 'x', { level: 'fresh' }]) {
+        const data = JSON.parse(JSON.stringify(old)); if (wear !== undefined) data.root.wear = wear;
+        await using(data, root => {
+          const usage = root.querySelector('.ag-usage');
+          assert(usage.textContent === '$431.402.1M↑ 310k↓ctx 566k' && !usage.querySelector('.ag-wear-bar') && !usage.hasAttribute('title'), 'the old readout changed for wear=' + JSON.stringify(wear) + ': ' + usage.textContent);
+          usage.click(); assert(!root.querySelector('[data-run-section="wear"]'), 'a session block without wear');
+        });
+      }
+      const data = wearFixture();
+      await using(data, async (root, app) => {
+        await resizeTo(root, 320, 600);
+        assert(getComputedStyle(root.querySelector('.ag-usage-tokens')).display === 'none' && root.querySelector('.ag-wear-bar').getClientRects().length, 'at 320 the tokens should go and the bar stay');
+        await resizeTo(root, 280, 600);
+        assert(!root.querySelector('.ag-wear-bar').getClientRects().length && root.querySelector('.ag-usage-cost').getClientRects().length && root.querySelector('.ag-wear-number').getClientRects().length, 'at 280 the bar should go and the dollars stay');
+        delete data.root.wear; await app.refresh();
+        assert(root.querySelector('.ag-usage').textContent.endsWith('ctx 125k') && !root.querySelector('.ag-usage').title, 'dropping wear does not restore the old readout');
+      });
+    });
     await test('what needs the user is counted, marked on the agent and one click away', async () => {
       const data = workLoopFixture(); data.graph.nodes.push(step('blocked-step', 'impl-claude', { status: 'blocked' })); data.graph.loops[0].state = 'sent_back';
       await using(data, async (root, app) => {

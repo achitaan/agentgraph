@@ -21,6 +21,7 @@ from .contract import GRAPH_LIMITS, MAX_NODE_LIST
 
 CONFIG_DIR = Path.home() / ".config" / "opencode"
 DB_PATH = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+MODELS_CACHE = Path.home() / ".cache" / "opencode" / "models.json"
 MAX_GRAPH_BYTES = 2 * 1024 * 1024
 MAX_GRAPH_FILES = 200
 
@@ -492,8 +493,10 @@ def _connect(db_path) -> sqlite3.Connection:
     return sqlite3.connect(uri, uri=True, timeout=1.0)
 
 
-def _read_sessions(db_path: Path, pick=None) -> list[Session]:
-    """`pick` chooses, from all sessions, the ones whose context is worth reading."""
+def _read_sessions(db_path: Path, pick=None, wear=None) -> list[Session]:
+    """`pick` chooses, from all sessions, the ones whose context is worth reading.
+    `wear`, when given, is called with the connection and the first picked session
+    (the root) to attach its `wear`."""
     conn = _connect(db_path)
     try:
         present = {row[1] for row in conn.execute("PRAGMA table_info(session_v2)")}
@@ -501,7 +504,10 @@ def _read_sessions(db_path: Path, pick=None) -> list[Session]:
         rows = conn.execute(f"SELECT {_COLUMNS}{extra} FROM session_v2").fetchall()
         sessions = [_session(r) for r in rows]
         if pick is not None:
-            _fill_context(conn, pick(sessions))
+            chosen = pick(sessions)
+            _fill_context(conn, chosen)
+            if wear is not None and chosen:
+                wear(conn, chosen[0])
     finally:
         conn.close()
     return sessions
@@ -527,11 +533,194 @@ def _fill_context(conn: sqlite3.Connection, sessions: list[Session]) -> None:
         pass
 
 
-def _read_checked(db_path: Path, pick=None) -> tuple[list[Session] | None, list[str]]:
+# --- wear: how long and how full the root session has grown ------------------
+
+DEFAULT_WINDOW = 1_000_000
+HISTORY_POINTS = 60
+PER_TURN_SLICE = 20
+FRESH_SHARE = 0.6
+WORN_SUMMARIES = 3
+
+_MODELS_MEMO: dict[str, tuple[int, int, dict]] = {}
+
+
+def _positive_int(value) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value) if value > 0 and value == value and value != float("inf") else None
+
+
+def _read_json(path: Path | None):
+    try:
+        return json.loads(Path(path).read_text()) if path is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _models_contexts(path: Path | None) -> dict:
+    """`{provider: {model id: context window}}` from the models catalogue, parsed
+    again only when the file's modification time or size changes."""
+    if path is None:
+        return {}
+    try:
+        info = Path(path).stat()
+    except OSError:
+        return {}
+    key = str(path)
+    memo = _MODELS_MEMO.get(key)
+    if memo and memo[:2] == (info.st_mtime_ns, info.st_size):
+        return memo[2]
+    table: dict = {}
+    raw = _read_json(path)
+    if isinstance(raw, dict):
+        for provider, entry in raw.items():
+            models = entry.get("models") if isinstance(entry, dict) else None
+            if not isinstance(models, dict):
+                continue
+            found = {}
+            for model_id, model in models.items():
+                limit = model.get("limit") if isinstance(model, dict) else None
+                window = _positive_int(limit.get("context")) if isinstance(limit, dict) else None
+                if window:
+                    found[model_id] = window
+            if found:
+                table[provider] = found
+    _MODELS_MEMO[key] = (info.st_mtime_ns, info.st_size, table)
+    return table
+
+
+def _config_window(config, provider: str | None, model_id: str) -> int | None:
+    entries = config.get("providers") if isinstance(config, dict) else None
+    if not isinstance(entries, dict):
+        return None
+    names = [provider] if provider in entries else ([] if provider else list(entries))
+    for name in names:
+        models = entries[name].get("models") if isinstance(entries[name], dict) else None
+        model = models.get(model_id) if isinstance(models, dict) else None
+        limit = model.get("limit") if isinstance(model, dict) else None
+        window = _positive_int(limit.get("context")) if isinstance(limit, dict) else None
+        if window:
+            return window
+    return None
+
+
+def context_window(config, models_cache: Path | None, provider: str | None, model_id: str) -> tuple[int, bool]:
+    """(window, known): from `providers.<provider>.models.<id>.limit.context` in the
+    opencode config, then from the models catalogue, else 1,000,000 and not known."""
+    if model_id:
+        window = _config_window(config, provider, model_id)
+        if window:
+            return window, True
+        table = _models_contexts(models_cache)
+        for name in ([provider] if provider in table else ([] if provider else list(table))):
+            if model_id in table[name]:
+                return table[name][model_id], True
+    return DEFAULT_WINDOW, False
+
+
+def compaction_point(config, window: int) -> int | None:
+    """Where OpenCode next summarizes: the window minus the buffer; None when
+    `compaction.auto` is false. A numeric buffer is a token count (ignored when it is
+    not below the window), a string like "20%" a share of the window, and absent
+    (or unusable) means 15% of the window and at least 16,000."""
+    compaction = config.get("compaction") if isinstance(config, dict) else None
+    if not isinstance(compaction, dict):
+        compaction = {}
+    if compaction.get("auto") is False:
+        return None
+    raw = compaction.get("buffer")
+    buffer = None
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        if 0 <= raw < window:
+            buffer = int(raw)
+    elif isinstance(raw, str):
+        match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*%\s*", raw)
+        if match and 0 <= float(match.group(1)) < 100:
+            buffer = int(window * float(match.group(1)) / 100)
+    if buffer is None:
+        buffer = min(max(16_000, int(window * 0.15)), window // 2)
+    return window - buffer
+
+
+_WEAR_QUERY = (
+    "SELECT json_extract(data, '$.tokens.input', '$.tokens.cache.read', '$.tokens.cache.write', '$.cost'), "
+    "json_extract(data, '$.model.id', '$.model.providerID'), seq FROM session_message "
+    "WHERE session_id = ? AND type = 'assistant' AND json_valid(data) ORDER BY seq"
+)
+
+
+def _buckets(values: list[int], count: int = HISTORY_POINTS) -> list[int]:
+    """At most `count` numbers: each bucket of neighbouring turns keeps its largest."""
+    if len(values) <= count:
+        return list(values)
+    size = len(values)
+    return [max(values[i * size // count:(i + 1) * size // count]) for i in range(count)]
+
+
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def session_wear(conn: sqlite3.Connection, session_id: str, config, models_cache: Path | None) -> dict | None:
+    """How full and how worn a session is, or None when it made no model calls."""
+    calls: list[tuple[int, float, int]] = []  # (context, cost, seq)
+    turns = 0
+    seqs: list[int] = []
+    model: tuple = (None, None)
+    for packed, ids, seq in conn.execute(_WEAR_QUERY, (session_id,)):
+        turns += 1
+        seqs.append(seq)
+        try:
+            tokens_in, cache_read, cache_write, cost = json.loads(packed)
+        except Exception:  # noqa: BLE001
+            continue
+        if tokens_in is None:
+            continue
+        calls.append((int(_num(tokens_in) + _num(cache_read) + _num(cache_write)), _num(cost), seq))
+        try:
+            found = json.loads(ids)
+            if isinstance(found, list) and isinstance(found[0], str) and found[0]:
+                model = (found[0], found[1] if isinstance(found[1], str) else None)
+        except Exception:  # noqa: BLE001
+            pass
+    if not calls:
+        return None
+    if model[0] is None:
+        row = conn.execute("SELECT model FROM session_v2 WHERE id = ?", (session_id,)).fetchone()
+        try:
+            data = json.loads(row[0]) if row and isinstance(row[0], str) else None
+            if isinstance(data, dict) and isinstance(data.get("id"), str):
+                model = (data["id"], data.get("providerID") if isinstance(data.get("providerID"), str) else None)
+        except Exception:  # noqa: BLE001
+            pass
+    window, known = context_window(config, models_cache, model[1], model[0] or "")
+    compact_at = compaction_point(config, window)
+    summary_seqs = [row[0] for row in conn.execute(
+        "SELECT seq FROM session_message WHERE session_id = ? AND type = 'compaction' ORDER BY seq", (session_id,))]
+    summaries = len(summary_seqs)
+    since = sum(seq > summary_seqs[-1] for seq in seqs) if summaries else turns
+    context = calls[-1][0]
+    span = PER_TURN_SLICE if len(calls) >= 2 * PER_TURN_SLICE else len(calls) // 2
+    costs = [cost for _, cost, _ in calls]
+    per_turn = {"start": _mean(costs[:span]), "recent": _mean(costs[-span:]) if span else None}
+    if summaries >= WORN_SUMMARIES:
+        level = "worn"
+    elif summaries == 0 and context < FRESH_SHARE * (compact_at if compact_at else window):
+        level = "fresh"
+    else:
+        level = "long"
+    return {
+        "context": context, "window": window, "window_known": known, "compact_at": compact_at,
+        "summaries": summaries, "turns": turns, "turns_since_summary": since,
+        "history": _buckets([item[0] for item in calls]), "per_turn": per_turn, "level": level,
+    }
+
+
+def _read_checked(db_path: Path, pick=None, wear=None) -> tuple[list[Session] | None, list[str]]:
     try:
         if not Path(db_path).exists():
             return None, [f"sessions: database not found: {db_path}"]
-        return _read_sessions(Path(db_path), pick), []
+        return _read_sessions(Path(db_path), pick, wear), []
     except Exception as exc:  # noqa: BLE001
         return None, [f"sessions: cannot read database: {exc}"]
 
@@ -642,9 +831,13 @@ def build_snapshot(
     cwd: Path | None = None,
     now: float | None = None,
     session_graph_dir: Path | None = None,
+    models_cache: Path | None = None,
 ) -> Snapshot:
     """`session_graph_dir` is a second folder searched only for graphs that
-    belong to the requested session or one of its ancestors."""
+    belong to the requested session or one of its ancestors. The root session's
+    `wear` reads `opencode.json` from `config_dir`, and the models catalogue from
+    `models_cache` (by default the user's OpenCode cache, but only for the real
+    config folder, so a snapshot built from a test folder never reads it)."""
     cwd = Path(cwd) if cwd else Path.cwd()
     discovery_warnings: list[str] = []
     if graph_dir is None:
@@ -673,7 +866,17 @@ def build_snapshot(
         picked["warnings"] += more
         return ([found_root] if found_root is not None else []) + found
 
-    sessions_all, w3 = _read_checked(db_path, pick)
+    if models_cache is None and Path(config_dir) == CONFIG_DIR:
+        models_cache = MODELS_CACHE
+
+    def wear(conn: sqlite3.Connection, root_session: Session) -> None:
+        try:
+            root_session.wear = session_wear(conn, root_session.id, _read_json(Path(config_dir) / "opencode.json"),
+                                             models_cache)
+        except Exception:  # noqa: BLE001
+            pass
+
+    sessions_all, w3 = _read_checked(db_path, pick, wear)
     root, sessions = picked["root"], picked["sessions"]
     w3 += picked["warnings"]
     if sessions_all is not None:

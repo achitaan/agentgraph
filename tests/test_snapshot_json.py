@@ -39,7 +39,8 @@ class SnapshotDocumentTests(unittest.TestCase):
                     self.assertEqual(doc["graphs"], [])
                     self.assertTrue(all(group["agents"] == [] for group in doc["groups"]))
                     continue
-                self.assertKeys(doc["root"], session_keys + " agent directory")
+                self.assertKeys(doc["root"], session_keys + " agent directory wear")
+                self.assertIsNone(doc["root"]["wear"])
                 self.assertEqual(len(doc["agents"]), 14)
                 for agent in doc["agents"]:
                     self.assertKeys(agent, "name group model effort pool configured checks skills busy sessions team parent")
@@ -648,6 +649,32 @@ class SnapshotDocumentTests(unittest.TestCase):
         doc = snapshot_json.snapshot_document(Snapshot(3, graphs=[graph]), "live")
         self.assertEqual(doc["graph"]["problems"], contract.validate(graph))
         self.assertEqual([node["wave"] for node in doc["graph"]["nodes"]], [0, 0])
+
+
+class RootWearTests(unittest.TestCase):
+    def snapshot(self, **attrs):
+        root = Session("root", None, "orchestrator", "Root", "M", "high", False, 1.0, 2.0)
+        for name, value in attrs.items():
+            setattr(root, name, value)
+        return Snapshot(1000, root=root)
+
+    def test_wear_is_passed_through_on_the_root_only(self):
+        wear = {"context": 5, "window": 10, "level": "fresh"}
+        doc = snapshot_json.snapshot_document(self.snapshot(wear=wear), "live")
+        self.assertEqual(doc["root"]["wear"], wear)
+        for agent in doc["agents"]:
+            for session in agent["sessions"]:
+                self.assertNotIn("wear", session)
+
+    def test_wear_is_null_without_it(self):
+        doc = snapshot_json.snapshot_document(self.snapshot(), "live")
+        self.assertIn("wear", doc["root"])
+        self.assertIsNone(doc["root"]["wear"])
+
+    def test_non_finite_numbers_in_wear_become_null(self):
+        doc = snapshot_json.snapshot_document(
+            self.snapshot(wear={"per_turn": {"start": float("nan"), "recent": 0.5}}), "live")
+        self.assertEqual(doc["root"]["wear"]["per_turn"], {"start": None, "recent": 0.5})
 
 
 class SnapshotCommandTests(unittest.TestCase):

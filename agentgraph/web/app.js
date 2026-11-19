@@ -21,6 +21,22 @@
   }
   function text(value) { return value == null ? '' : typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value); }
   function cost(value) { return '$' + (Number(value) || 0).toFixed(2); }
+  // How full and how worn the root session is, from `root.wear`; null when the snapshot has none.
+  function wearOf(root) {
+    const wear = root && root.wear;
+    if (!wear || typeof wear !== 'object' || !Number.isFinite(Number(wear.context)) || wear.context == null) return null;
+    const positive = value => (value != null && Number(value) > 0 ? Number(value) : 0);
+    const context = Math.max(0, Number(wear.context)), limit = positive(wear.compact_at) || positive(wear.window) || 1000000;
+    const share = Math.min(1, context / limit), summaries = Math.max(0, Math.floor(Number(wear.summaries) || 0));
+    return { wear, context, limit, share, summaries, step: share >= 0.85 ? 'high' : share >= 0.6 ? 'mid' : 'low', toNext: positive(wear.compact_at) > 0 };
+  }
+  function plural(count, one, many) { return count + ' ' + (count === 1 ? one : many); }
+  function wearTip(info) {
+    const wear = info.wear, turns = Math.max(0, Math.floor(Number(wear.turns) || 0));
+    return ['context ' + amount(info.context) + ' of ' + amount(info.limit) + (info.toNext ? ' before the next summary' : wear.window_known === false ? ' window (assumed)' : ' window'),
+      info.summaries ? 'summarized ' + plural(info.summaries, 'time', 'times') : 'not summarized yet',
+      turns ? plural(turns, 'turn', 'turns') : ''].filter(Boolean).join(' · ');
+  }
   function amount(value) { const n = Number(value) || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(n >= 1e5 ? 0 : 1) + 'k' : String(Math.round(n)); }
   function named(labels, value) { return Object.hasOwn(labels, value) ? labels[value] : text(value); }
   function state(value) { return named(STATES, value); }
@@ -131,6 +147,18 @@
     usage.type = 'button'; usage.hidden = true; usage.setAttribute('aria-label', 'Usage');
     const usageCost = el('span', 'ag-usage-cost'), usageTokens = el('span', 'ag-usage-tokens'), usageContext = el('span', 'ag-usage-context');
     usage.append(usageCost, usageTokens, usageContext);
+    // The context bar: the track is the distance to the next summary, the fill is the context now.
+    function renderWear(info) {
+      const fill = el('i'), track = el('span', 'ag-wear-bar'), parts = [track, el('span', 'ag-wear-number', amount(info.context))];
+      track.dataset.step = info.step; fill.style.width = (info.share * 100).toFixed(1) + '%'; track.append(fill);
+      if (info.summaries) {
+        const dots = el('span', 'ag-wear-dots');
+        for (let i = 0; i < Math.min(5, info.summaries); i++) dots.append(el('i'));
+        parts.push(dots, el('span', 'ag-wear-count', String(info.summaries)));
+      }
+      usageContext.dataset.level = String(info.wear.level || '');
+      usageContext.replaceChildren(...parts);
+    }
     network.append(status, usage, viewport, controls);
     const detail = el('aside', 'ag-detail');
     detail.hidden = true; detail.setAttribute('aria-label', 'Details');
@@ -153,8 +181,10 @@
       if (!snapshot) return;
       usageCost.textContent = cost(snapshot.totals?.cost);
       usageTokens.textContent = amount(snapshot.totals?.tokens_in) + '↑ ' + amount(snapshot.totals?.tokens_out) + '↓';
-      usageContext.hidden = !snapshot.root?.context;
-      usageContext.textContent = snapshot.root?.context ? 'ctx ' + amount(snapshot.root.context) : '';
+      const info = wearOf(snapshot.root);
+      usageContext.hidden = !info && !snapshot.root?.context;
+      if (info) { renderWear(info); usage.title = wearTip(info); }
+      else { delete usageContext.dataset.level; usage.removeAttribute('title'); usageContext.textContent = snapshot.root?.context ? 'ctx ' + amount(snapshot.root.context) : ''; }
     }
     // Agents the user should look at: a step that failed, is blocked or stalled,
     // a work loop that is stuck, or work a reviewer sent back.
@@ -889,6 +919,29 @@
       item.classList.add('ag-run-section'); item.dataset.runSection = key;
       return item;
     }
+    // One block for the root session: a line chart of the context over its turns, then plain facts.
+    function renderWearDetail(info) {
+      const wear = info.wear, section = runSection('Session', 'wear');
+      const history = (Array.isArray(wear.history) ? wear.history : []).map(Number).filter(Number.isFinite).slice(-60);
+      if (history.length) {
+        const width = 240, height = 44, top = Math.max(info.limit * (info.toNext ? 1 : 0), ...history, 1);
+        const point = (value, index) => [history.length > 1 ? index / (history.length - 1) * (width - 6) + 3 : width / 2, height - 3 - Math.max(0, value) / top * (height - 6)];
+        const chart = svg('svg', { class: 'ag-wear-chart', viewBox: '0 0 ' + width + ' ' + height, preserveAspectRatio: 'none', role: 'img', 'aria-label': 'Context over the session' });
+        const points = history.map(point);
+        if (points.length > 1) chart.append(svg('polyline', { class: 'ag-wear-history', points: points.map(item => item[0].toFixed(1) + ',' + item[1].toFixed(1)).join(' ') }));
+        chart.append(svg('circle', { class: 'ag-wear-last', cx: points[points.length - 1][0].toFixed(1), cy: points[points.length - 1][1].toFixed(1), r: 2.5 }));
+        section.append(chart);
+      }
+      const fact = value => section.append(el('p', 'ag-wear-fact', value));
+      fact('context now ' + amount(info.context) + (info.toNext ? ' · next summary at ' + amount(info.limit) : ' · window ' + amount(info.limit) + (wear.window_known === false ? ' (assumed)' : '') + ' · no automatic summary'));
+      fact(info.summaries ? 'summarized ' + plural(info.summaries, 'time', 'times') : 'not summarized yet');
+      if (wear.level === 'worn') fact('early work has been condensed ' + info.summaries + ' times; details from the start may be gone');
+      const turns = Number(wear.turns), since = Number(wear.turns_since_summary);
+      if (wear.turns != null && Number.isFinite(turns)) fact(plural(turns, 'turn', 'turns') + ' in all' + (info.summaries && wear.turns_since_summary != null && Number.isFinite(since) ? ' · ' + since + ' since the last summary' : ''));
+      const per = wear.per_turn || {}, start = per.start == null ? NaN : Number(per.start), recent = per.recent == null ? NaN : Number(per.recent);
+      const costs = [Number.isFinite(start) ? cost(start) + ' at the start' : '', Number.isFinite(recent) ? cost(recent) + ' now' : ''].filter(Boolean);
+      if (costs.length) fact('cost per turn ' + costs.join(' · '));
+    }
     function runRow(parent, item) {
       const actionable = item.step || item.review || item.work;
       const row = el(actionable ? 'button' : 'div', 'ag-run-item');
@@ -924,6 +977,8 @@
         choice.value = activeTeam; field.append(el('span', '', 'Team'), choice); detailScroll.append(field);
       }
       stats(detailScroll, { cost: snapshot.totals?.cost, sent: snapshot.totals?.tokens_in, received: snapshot.totals?.tokens_out, context: snapshot.root?.context || 0 });
+      const wearInfo = wearOf(snapshot.root);
+      if (wearInfo) renderWearDetail(wearInfo);
       const learning = snapshot.learning;
       if (learning) {
         const lesson = runSection('Learning', 'learning');
@@ -1263,7 +1318,7 @@
     function render(data) {
       const previousTeam = activeTeam;
       snapshot = { ...data, agents: prepareRoster(data) };
-      const stamp = JSON.stringify([data.agents, data.graph, data.warnings, data.totals, data.escalation]);
+      const stamp = JSON.stringify([data.agents, data.graph, data.warnings, data.totals, data.escalation, data.root?.wear]);
       if (stamp !== renderStamp) { renderStamp = stamp; renderRevision++; }
       indexSteps();
       if (activeTeam !== previousTeam) { rememberTeam(previousTeam); restoreTeam(activeTeam); }

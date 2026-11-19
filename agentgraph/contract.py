@@ -129,6 +129,7 @@ class Session:
     tokens_out: int = 0
     directory: str = ""
     context: int | None = None  # tokens in the context window at the last model call
+    wear: dict | None = None  # root session only: context window use and how often it was summarized
 
 
 @dataclass

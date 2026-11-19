@@ -313,7 +313,8 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
         "totals": {"sessions": len(sessions), "running": sum(bool(s.busy) for s in sessions),
                    "cost": sum(s.cost for s in sessions), "tokens_in": sum(s.tokens_in for s in sessions),
                    "tokens_out": sum(s.tokens_out for s in sessions)},
-        "root": {**_session_document(root), "agent": root.agent, "directory": root.directory}
+        "root": {**_session_document(root), "agent": root.agent, "directory": root.directory,
+                 "wear": root.wear}
         if root is not None else None,
         "structure": {"source": "folder" if structure else "builtin"},
         "groups": [{"id": group, "title": shape.title(group),

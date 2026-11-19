@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from agentgraph import sources
 from agentgraph.sources import (
     build_snapshot,
     find_graph_dir,
@@ -694,6 +695,250 @@ class Snapshots(unittest.TestCase):
             snap = build_snapshot(base / "nocfg", base / "nodir", base / "no.db", now=1.0)
             self.assertIsNone(snap.root)
             self.assertTrue(snap.warnings)
+
+
+MESSAGE_SCHEMA = (
+    "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INT, "
+    "time_created INT, time_updated INT, data TEXT)"
+)
+
+
+class Wear(unittest.TestCase):
+    """The root session's wear, from temporary files and a temporary database only."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.db = self.dir / "o.db"
+        make_db(self.db, [row("root")])
+        conn = sqlite3.connect(self.db)
+        conn.execute(MESSAGE_SCHEMA)
+        conn.commit()
+        conn.close()
+        self.seq = 0
+        sources._MODELS_MEMO.clear()
+
+    def add(self, kind, data):
+        self.seq += 1
+        conn = sqlite3.connect(self.db)
+        conn.execute("INSERT INTO session_message VALUES (?,?,?,?,?,?,?)",
+                     (f"m{self.seq}", "root", kind, self.seq, 0, 0, data if isinstance(data, str) else json.dumps(data)))
+        conn.commit()
+        conn.close()
+
+    def call(self, context, cost=0.0, model="m1", provider="p1"):
+        """One assistant message whose prompt is `context` tokens (2 fresh, the rest cache)."""
+        self.add("assistant", {"tokens": {"input": 2, "output": 5, "cache": {"read": context - 3, "write": 1}},
+                               "cost": cost, "model": {"id": model, "providerID": provider}})
+
+    def summarize(self):
+        self.add("compaction", {"summary": "s", "reason": "auto"})
+
+    def config(self, **fields):
+        (self.dir / "opencode.json").write_text(json.dumps(fields))
+
+    def catalogue(self, window, provider="p1", model="m1"):
+        path = self.dir / "models.json"
+        path.write_text(json.dumps({provider: {"models": {model: {"limit": {"context": window}}}}}))
+        return path
+
+    def wear(self, cache=None):
+        config = None
+        try:
+            config = json.loads((self.dir / "opencode.json").read_text())
+        except OSError:
+            pass
+        conn = sqlite3.connect(self.db)
+        try:
+            return sources.session_wear(conn, "root", config, cache)
+        finally:
+            conn.close()
+
+    def test_no_model_calls_is_none(self):
+        self.assertIsNone(self.wear())
+        self.add("user", {"text": "hi"})
+        self.add("assistant", {"time": {"created": 1}, "content": []})  # started, no tokens yet
+        self.add("assistant", "not json")
+        self.assertIsNone(self.wear())
+
+    def test_window_lookup_order(self):
+        self.call(100)
+        cache = self.catalogue(500_000)
+        # Config first, then the catalogue, else 1,000,000 and not known.
+        self.config(providers={"p1": {"models": {"m1": {"limit": {"context": 200_000}}}}})
+        self.assertEqual((self.wear(cache)["window"], self.wear(cache)["window_known"]), (200_000, True))
+        self.config(providers={"p1": {"models": {"other": {"limit": {"context": 1}}}}})
+        self.assertEqual((self.wear(cache)["window"], self.wear(cache)["window_known"]), (500_000, True))
+        self.config()
+        self.assertEqual((self.wear(cache)["window"], self.wear(cache)["window_known"]), (500_000, True))
+        for missing in (None, self.dir / "none.json"):
+            wear = self.wear(missing)
+            self.assertEqual((wear["window"], wear["window_known"]), (1_000_000, False))
+        # A provider that does not match does not borrow another provider's model.
+        self.config(providers={"p2": {"models": {"m1": {"limit": {"context": 7}}}}})
+        self.assertEqual(self.wear()["window"], 1_000_000)
+        (self.dir / "bad.json").write_text("{nope")
+        self.assertEqual(self.wear(self.dir / "bad.json")["window"], 1_000_000)
+
+    def test_catalogue_is_parsed_again_only_when_the_file_changes(self):
+        self.call(100)
+        cache = self.catalogue(300_000)
+        with patch.object(sources, "_read_json", wraps=sources._read_json) as read:
+            self.assertEqual(self.wear(cache)["window"], 300_000)
+            self.assertEqual(self.wear(cache)["window"], 300_000)
+            self.assertEqual(read.call_count, 1)
+            cache.write_text(json.dumps({"p1": {"models": {"m1": {"limit": {"context": 400_000}}, "pad": {}}}}))
+            self.assertEqual(self.wear(cache)["window"], 400_000)
+
+    def test_model_falls_back_to_the_session_row(self):
+        self.add("assistant", {"tokens": {"input": 2, "cache": {"read": 5, "write": 1}}})
+        self.config(providers={"anthropic": {"models": {"claude-fable-5-2-fast": {"limit": {"context": 900}}}}})
+        self.assertEqual(self.wear()["window"], 900)
+
+    def test_buffer_forms(self):
+        self.call(100)
+        window = {"providers": {"p1": {"models": {"m1": {"limit": {"context": 1_000_000}}}}}}
+        cases = [
+            ({}, 850_000),                                   # absent: 15%
+            ({"compaction": {}}, 850_000),
+            ({"compaction": {"buffer": 750_000}}, 250_000),  # a token count
+            ({"compaction": {"buffer": "20%"}}, 800_000),    # a share
+            ({"compaction": {"buffer": "2.5%"}}, 975_000),
+            ({"compaction": {"buffer": 1_000_000}}, 850_000),   # not below the window: ignored
+            ({"compaction": {"buffer": 5_000_000}}, 850_000),
+            ({"compaction": {"buffer": "banana"}}, 850_000),
+            ({"compaction": {"buffer": True}}, 850_000),
+            ({"compaction": {"buffer": -5}}, 850_000),
+            ({"compaction": {"auto": True, "buffer": 100_000}}, 900_000),
+            ({"compaction": "nope"}, 850_000),
+        ]
+        for extra, expected in cases:
+            with self.subTest(extra=extra):
+                self.config(**window, **extra)
+                self.assertEqual(self.wear()["compact_at"], expected)
+
+    def test_default_buffer_is_at_least_16000(self):
+        self.call(100)
+        self.config(providers={"p1": {"models": {"m1": {"limit": {"context": 40_000}}}}})
+        self.assertEqual(self.wear()["compact_at"], 24_000)  # 15% would be 6,000
+
+    def test_auto_false_has_no_compaction_point(self):
+        self.call(100)
+        self.config(compaction={"auto": False, "buffer": 10})
+        wear = self.wear()
+        self.assertIsNone(wear["compact_at"])
+        self.assertEqual(wear["level"], "fresh")
+
+    def test_summaries_and_turns(self):
+        for _ in range(3):
+            self.call(100)
+        self.summarize()
+        self.call(50)
+        self.add("assistant", {"time": {"created": 1}, "content": []})  # a turn still in progress
+        self.summarize()
+        self.call(60)
+        self.call(70)
+        wear = self.wear()
+        self.assertEqual((wear["summaries"], wear["turns"], wear["turns_since_summary"]), (2, 7, 2))
+        self.assertEqual(wear["context"], 70)
+        self.call(80)
+        self.assertEqual(self.wear()["turns_since_summary"], 3)
+
+    def test_no_summary_means_every_turn_is_since_the_summary(self):
+        self.call(10)
+        self.call(20)
+        wear = self.wear()
+        self.assertEqual((wear["summaries"], wear["turns"], wear["turns_since_summary"]), (0, 2, 2))
+
+    def test_history_is_bucketed_to_sixty_keeping_the_largest(self):
+        for value in (10, 20, 15):
+            self.call(value)
+        self.assertEqual(self.wear()["history"], [10, 20, 15])
+        self.seq = 0
+        conn = sqlite3.connect(self.db)
+        conn.execute("DELETE FROM session_message")
+        conn.commit()
+        conn.close()
+        values = [1000 + (i % 7) * 3 + i for i in range(150)]
+        values[40] = 9999  # a peak inside a bucket survives
+        for value in values:
+            self.call(value)
+        history = self.wear()["history"]
+        self.assertEqual(len(history), 60)
+        self.assertEqual(max(history), 9999)
+        self.assertEqual(history[-1], max(values[-3:]))
+        self.assertEqual(history[0], max(values[:2]))
+        exact = [1000 + i for i in range(60)]
+        self.assertEqual(sources._buckets(exact), exact)
+        self.assertEqual(len(sources._buckets(list(range(61)))), 60)
+
+    def test_history_shows_the_drop_at_a_summary(self):
+        for value in (100, 200, 300):
+            self.call(value)
+        self.summarize()
+        for value in (40, 50):
+            self.call(value)
+        self.assertEqual(self.wear()["history"], [100, 200, 300, 40, 50])
+
+    def test_per_turn_over_the_first_and_last_twenty(self):
+        for i in range(50):
+            self.call(100, cost=1.0 if i < 20 else 5.0 if i < 30 else 3.0)
+        wear = self.wear()
+        self.assertAlmostEqual(wear["per_turn"]["start"], 1.0)
+        self.assertAlmostEqual(wear["per_turn"]["recent"], 3.0)
+
+    def test_per_turn_uses_what_exists_under_forty_turns(self):
+        self.call(10, cost=1.0)
+        self.assertEqual(self.wear()["per_turn"], {"start": None, "recent": None})
+        for cost in (2.0, 3.0, 9.0):
+            self.call(10, cost=cost)
+        # four turns: the first two against the last two
+        self.assertEqual(self.wear()["per_turn"], {"start": 1.5, "recent": 6.0})
+
+    def test_levels(self):
+        window = {"providers": {"p1": {"models": {"m1": {"limit": {"context": 1_000_000}}}}},
+                  "compaction": {"buffer": 750_000}}  # compact at 250,000
+        self.config(**window)
+        self.call(149_999)
+        self.assertEqual(self.wear()["level"], "fresh")
+        self.call(150_000)
+        self.assertEqual(self.wear()["level"], "long")
+        self.config(providers=window["providers"], compaction={"auto": False})  # 60% of the window
+        self.assertEqual(self.wear()["level"], "fresh")
+        self.config(**window)
+        self.call(10)
+        self.summarize()
+        self.assertEqual(self.wear()["level"], "long")
+        self.summarize()
+        self.assertEqual(self.wear()["level"], "long")
+        self.summarize()
+        self.assertEqual(self.wear()["level"], "worn")
+        self.call(5)
+        self.assertEqual(self.wear()["level"], "worn")
+
+    def test_build_snapshot_attaches_wear_to_the_root_from_its_own_config(self):
+        self.call(200_000, cost=0.5)
+        self.summarize()
+        self.call(60_000, cost=0.25)
+        cfg = self.dir / "cfg"
+        cfg.mkdir()
+        (cfg / "opencode.json").write_text(json.dumps(
+            {"providers": {"p1": {"models": {"m1": {"limit": {"context": 400_000}}}}}, "compaction": {"buffer": "25%"}}))
+        snap = build_snapshot(cfg, self.dir / "nograph", self.db, root_id="root", now=1.0)
+        self.assertEqual(snap.root.wear["window"], 400_000)
+        self.assertEqual(snap.root.wear["compact_at"], 300_000)
+        self.assertEqual((snap.root.wear["context"], snap.root.wear["summaries"]), (60_000, 1))
+        self.assertEqual(snap.root.context, 60_000)
+
+    def test_a_database_without_messages_still_loads(self):
+        conn = sqlite3.connect(self.db)
+        conn.execute("DROP TABLE session_message")
+        conn.commit()
+        conn.close()
+        snap = build_snapshot(self.dir / "cfg", self.dir / "nograph", self.db, root_id="root", now=1.0)
+        self.assertEqual(snap.root.id, "root")
+        self.assertIsNone(getattr(snap.root, "wear", None))
 
 
 if __name__ == "__main__":
