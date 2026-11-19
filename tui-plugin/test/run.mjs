@@ -28,86 +28,119 @@ process.on("exit", () => fs.rmSync(tmp, { recursive: true, force: true }));
 // Rendering
 
 const text = (doc, width = 37, frame = 0) => R.toText(R.render(doc, { width, frame })).split("\n");
-const A = (name, group, busy = 0, parent = "") => ({ name, group, busy, parent, sessions: [] });
-const D = (agents, graph = null, rootAgent = "orchestrator") => ({
-  version: 1, source: "live", warnings: [], root: { agent: rootAgent }, groups: [], agents, graph,
+const A = (name, group, busy = 0, parent = "", cost = undefined) => ({
+  name, group, busy, parent, sessions: cost === undefined ? [] : [{ id: "s_" + name, cost, tokens_in: 1, tokens_out: 1, busy: busy > 0 }],
 });
+const D = (agents, graph = null, rootAgent = "orchestrator", extra = {}) => Object.assign({
+  version: 1, source: "live", warnings: [], root: { agent: rootAgent }, groups: [], agents, graph,
+}, extra);
 const G = (extra = {}) => Object.assign({ progress: { passed: 0, total: 0 }, nodes: [], loops: [], work_loops: [] }, extra);
+const T = (cost, tokens_in, tokens_out) => ({ sessions: 1, running: 0, cost, tokens_in, tokens_out });
 const allDocs = [];
 const keep = (doc) => (allDocs.push(doc), doc);
+// "left" at the left edge, "right" at the right edge of a line `w` columns wide.
+const pad = (left, right, w = 37) => left + " ".repeat(w - R.displayWidth(left) - R.displayWidth(right)) + right;
 
 test("demo document at width 37", () => {
   assert.deepEqual(text(keep(demo), 37), [
-    "⠋ orchestrator        ━━━━────── 4/11",
+    pad("◉ orchestrator ⠋", "4/11"),
+    "━━━━━━━━━━━━━────────────────────────",
+    "$6.57  12.0k↑ 70.9k↓",
     "",
-    "○ council",
-    "  ○ fable",
-    "  ○ astra",
-    "  ○ carbon",
+    "! impl-claude stuck ↻5",
+    "! reviewer stuck",
+    "↩ impl-open… sent back ↻3 by reviewer",
     "",
-    "○ oracle",
-    "○ oracle-lite",
+    pad("⠋ impl-claude ↻5", "$1.35"),
+    "  Apply the limiter in the middlewar…",
+    pad("⠙ designer", "$0.09"),
+    "  429 error page and retry-after mes…",
     "",
-    "○ impl-openai ↻3 ⇄ reviewer",
-    "● impl-claude ↻5 ⇄ reviewer Apply th…",
-    "○ impl-hard",
-    "● designer ⇄ reviewer 429 error page…",
-    "",
+    "○ council fable astra carbon",
+    "○ oracle oracle-lite",
+    "○ impl-openai impl-hard",
     "○ reviewer",
-    "",
-    "○ explorer ⇄ oracle",
-    "○ researcher",
+    "○ explorer researcher",
   ]);
 });
 
-test("demo document at width 20", () => {
-  assert.deepEqual(text(demo, 20), [
-    "⠋ orchestrator  4/11",
+test("demo document at width 24", () => {
+  assert.deepEqual(text(demo, 24), [
+    "◉ orchestrator ⠋    4/11",
+    "━━━━━━━━━───────────────",
+    "$6.57  12.0k↑ 70.9k↓",
     "",
-    "○ council",
-    "  ○ fable",
-    "  ○ astra",
-    "  ○ carbon",
+    "! impl-claude stuck ↻5",
+    "! reviewer stuck",
+    "↩ im… sent back ↻3 by r…",
     "",
-    "○ oracle",
-    "○ oracle-lite",
+    "⠋ impl-claude ↻5   $1.35",
+    "  Apply the limiter in…",
+    "⠙ designer         $0.09",
+    "  429 error page and re…",
     "",
-    "○ impl-op… ↻3 ⇄ rev…",
-    "● impl-cl… ↻5 ⇄ rev…",
-    "○ impl-hard",
-    "● designer ⇄ review…",
-    "",
+    "○ council fable astra",
+    "  carbon",
+    "○ oracle oracle-lite",
+    "○ impl-openai impl-hard",
     "○ reviewer",
-    "",
-    "○ explorer ⇄ oracle",
-    "○ researcher",
+    "○ explorer researcher",
   ]);
 });
 
-test("demo tones: live things are accent, idle muted, waiting work loop muted, active review loop accent", () => {
+test("demo tones", () => {
   const lines = R.render(demo, { width: 37, frame: 0 });
-  const span = (row, t) => lines[row].find((s) => s.text === t);
-  assert.equal(span(0, "⠋").tone, "accent");
-  assert.equal(span(0, "━━━━").tone, "accent");
-  assert.equal(span(0, "──────").tone, "muted");
-  assert.equal(span(2, "○").tone, "muted");
-  assert.equal(span(10, "↻3").tone, "muted"); // impl-openai: state waiting
-  assert.equal(span(10, "⇄ reviewer").tone, "accent"); // sent_back is active
-  assert.equal(span(11, "●").tone, "accent");
-  assert.equal(span(11, "↻5").tone, "accent");
-  assert.equal(span(17, "⇄ oracle").tone, "muted"); // closed
+  const tone = (row, t) => (lines[row].find((s) => s.text === t) || {}).tone;
+  assert.equal(tone(0, "◉"), "accent");
+  assert.equal(tone(0, "⠋"), "accent");
+  assert.equal(tone(0, "orchestrator"), "plain");
+  assert.equal(tone(0, "4"), "plain");
+  assert.equal(tone(0, "/11"), "muted");
+  assert.equal(tone(1, "━".repeat(13)), "accent");
+  assert.equal(tone(1, "─".repeat(24)), "muted");
+  assert.equal(tone(2, "$6.57"), "plain");
+  assert.equal(tone(2, "12.0"), "plain");
+  assert.equal(tone(2, "k"), "muted");
+  assert.equal(tone(2, "↑"), "muted");
+  assert.equal(tone(4, "! impl-claude stuck ↻5"), "danger");
+  assert.equal(tone(5, "! reviewer stuck"), "danger");
+  assert.equal(tone(6, "↩ impl-open… sent back ↻3 by reviewer"), "accent");
+  assert.equal(tone(8, "⠋"), "accent");
+  assert.equal(tone(8, "impl-claude"), "plain");
+  assert.equal(tone(8, " ↻5"), "accent");
+  assert.equal(tone(8, "$1.35"), "muted");
+  assert.equal(tone(9, "Apply the limiter in the middlewar…"), "muted");
+  assert.equal(tone(13, "○ council fable astra carbon"), "muted");
   for (const line of lines) for (const s of line) assert.ok(R.TONES.includes(s.tone), s.tone);
+  assert.ok(!R.TONES.includes("success") && !R.TONES.includes("green"));
 });
 
-test("spinner advances with frame while the hub works", () => {
-  assert.equal(text(demo, 37, 1)[0][0], "⠙");
-  assert.equal(text(demo, 37, 10)[0][0], "⠋");
+test("spinners: hub and each working agent, offset by index, advancing with frame", () => {
+  assert.equal(text(demo, 37, 1)[0], "◉ orchestrator ⠙                 4/11");
+  assert.equal(text(demo, 37, 1)[8].slice(0, 2), "⠙ ");
+  assert.equal(text(demo, 37, 1)[10].slice(0, 2), "⠹ ");
+  assert.equal(text(demo, 37, 9)[10].slice(0, 2), "⠋ ");
+  assert.equal(text(demo, 37, 10)[0].slice(0, 16), "◉ orchestrator ⠋");
   assert.equal(R.isAnimated(demo), true);
+});
+
+test("nothing animates when nothing works", () => {
+  const idle = keep(D([A("orchestrator", "hub"), A("explorer", "understand")], G({ progress: { passed: 1, total: 2 } })));
+  assert.equal(R.isAnimated(idle), false);
+  assert.deepEqual(text(idle, 37, 0), text(idle, 37, 5));
+  assert.equal(text(idle)[0].includes("⠋"), false);
+  assert.equal(R.isAnimated(D([A("orchestrator", "hub"), A("w", "build", 1)])), true); // a non-hub agent works
+  assert.equal(R.isAnimated(D([A("orchestrator", "hub", 1)])), true);
+  assert.equal(R.isAnimated(D([A("orchestrator", "hub"), A("w", "build", 0)], null, "orchestrator", { root: { agent: "orchestrator", busy: true } })), false);
+  assert.equal(R.isAnimated(D([], null)), false);
+  assert.equal(R.isAnimated({ version: 1, error: "x" }), false);
+  assert.equal(R.isAnimated(null), false);
 });
 
 test("loading, error, empty", () => {
   assert.deepEqual(text(null), ["Loading"]);
   assert.deepEqual(text(undefined), ["Loading"]);
+  assert.equal(R.render(null)[0][0].tone, "muted");
   assert.deepEqual(text(keep({ version: 1, error: "Python was not found at /x" })), ["Python was not found at /x"]);
   assert.deepEqual(R.render({ version: 1, error: "x" })[0][0].tone, "danger");
   assert.deepEqual(
@@ -116,158 +149,318 @@ test("loading, error, empty", () => {
   );
   assert.deepEqual(text(keep(D([]))), ["No agents"]);
   assert.equal(R.render(D([]))[0][0].tone, "muted");
-  assert.equal(R.isAnimated({ version: 1, error: "x" }), false);
+  assert.deepEqual(text(keep({ version: 1, error: "boom", agents: [A("orchestrator", "hub", 1)], totals: T(1, 1, 1) })), ["boom"]);
 });
 
-test("no graph, idle hub", () => {
-  const doc = keep(D([A("orchestrator", "hub"), A("explorer", "understand")]));
-  assert.deepEqual(text(doc), ["○ orchestrator", "", "○ explorer"]);
-  assert.equal(R.isAnimated(doc), false);
+test("Run block alone: idle hub, no graph, no totals", () => {
+  assert.deepEqual(text(keep(D([A("orchestrator", "hub")]))), ["◉ orchestrator"]);
+  assert.equal(R.render(D([A("orchestrator", "hub")]))[0][0].tone, "muted");
 });
 
-test("busy hub with progress", () => {
-  const doc = keep(D([A("orchestrator", "hub", 1)], G({ progress: { passed: 3, total: 8 } })));
-  assert.deepEqual(text(doc, 37, 0), ["⠋ orchestrator         ━━━━────── 3/8"]);
-  assert.deepEqual(text(doc, 37, 1), ["⠙ orchestrator         ━━━━────── 3/8"]);
-  assert.deepEqual(text(doc, 20, 0), ["⠋ orchestrator   3/8"]);
+test("blocks are omitted when empty; the rest are separated by one blank line", () => {
+  const hubOnly = keep(D([A("orchestrator", "hub", 1)], G({ progress: { passed: 3, total: 8 } }), "orchestrator", { totals: T(1.5, 500, 20) }));
+  assert.deepEqual(text(hubOnly, 37, 0), [
+    pad("◉ orchestrator ⠋", "3/8"),
+    "━━━━━━━━━━━━━━───────────────────────",
+    "$1.50  500↑ 20↓",
+  ]);
+  // Run + Idle
+  assert.deepEqual(text(keep(D([A("orchestrator", "hub"), A("explorer", "understand")]))), ["◉ orchestrator", "", "○ explorer"]);
+  // Run + Working (nothing idle)
+  assert.deepEqual(text(keep(D([A("orchestrator", "hub"), A("w", "build", 1, "", 2)]))), [
+    "◉ orchestrator", "", pad("⠋ w", "$2.00"),
+  ]);
+  // Run + Needs you (nothing else)
+  assert.deepEqual(
+    text(keep(D([A("orchestrator", "hub"), A("w", "build")], G({ work_loops: [{ agent: "w", rounds: 1, state: "waiting", active: false }] })))),
+    ["◉ orchestrator", "", "? w waiting", "", "○ w"],
+  );
+  // all four
+  assert.deepEqual(
+    text(keep(D(
+      [A("orchestrator", "hub"), A("w", "build", 1, "", 1), A("v", "verify"), A("x", "build")],
+      G({ work_loops: [{ agent: "x", rounds: 1, state: "waiting", active: false }] }),
+    ))),
+    ["◉ orchestrator", "", "? x waiting", "", pad("⠋ w", "$1.00"), "", "○ x", "○ v"],
+  );
 });
 
-test("hub is the root's agent, even when another hub agent is listed", () => {
-  const doc = keep(D([A("orchestrator", "hub", 1), A("lead", "hub", 0), A("reviewer", "verify")], null, "lead"));
-  assert.deepEqual(text(doc), ["○ lead", "", "● orchestrator", "", "○ reviewer"]);
+test("hub is the root's agent, even when another hub agent is listed; a hub-less document uses root", () => {
+  const doc = keep(D([A("orchestrator", "hub", 1, "", 3), A("lead", "hub", 0), A("reviewer", "verify")], null, "lead"));
+  assert.deepEqual(text(doc), ["◉ lead", "", pad("⠋ orchestrator", "$3.00"), "", "○ reviewer"]);
+  const none = keep(D([A("explorer", "understand")], null, "orchestrator", { root: { agent: "orchestrator", busy: true } }));
+  assert.deepEqual(text(none), ["◉ orchestrator ⠋", "", "○ explorer"]);
+  assert.equal(R.isAnimated(none), true);
 });
 
-test("council with seats", () => {
-  const doc = keep(D(
-    [A("orchestrator", "hub", 1), A("councillor-fable", "council", 1, "council"), A("councillor-astra", "council", 0, "council"), A("council", "council", 1)],
-    G({
-      progress: { passed: 0, total: 2 },
-      nodes: [
-        { id: "a", agent: "councillor-fable", busy: true, status: "running", goal: "Weigh option A" },
-        { id: "b", agent: "council", busy: true, status: "running", goal: "Synthesize" },
-      ],
-    }),
-  ));
-  assert.deepEqual(text(doc), [
-    "⠋ orchestrator         ────────── 0/2",
-    "",
-    "● council Synthesize",
-    "  ● fable Weigh option A",
-    "  ○ astra",
+test("spend line: dollars, tokens, units muted, context only when known", () => {
+  const spend = (totals, root = { agent: "orchestrator" }) =>
+    text(D([A("orchestrator", "hub")], null, "orchestrator", { totals, root }))[1];
+  assert.equal(spend(T(431.4, 2100000, 310000)), "$431.40  2.1M↑ 310k↓");
+  assert.equal(spend(T(431.4, 2100000, 310000), { agent: "orchestrator", context: 124000 }), "$431.40  2.1M↑ 310k↓  ctx 124k");
+  assert.equal(spend(T(431.4, 2100000, 310000), { agent: "orchestrator", context: null }), "$431.40  2.1M↑ 310k↓");
+  assert.equal(spend(T(0, 0, 0)), "$0.00  0↑ 0↓");
+  assert.equal(spend(T(0.999, 999, 1000)), "$1.00  999↑ 1.0k↓");
+  assert.equal(spend(T(1234.5, 999999, 1000000)), "$1234.50  1.0M↑ 1.0M↓");
+  assert.equal(spend(T(5, 12400, 99999)), "$5.00  12.4k↑ 100k↓");
+  assert.equal(spend(T(5, 12345678, 999499)), "$5.00  12.3M↑ 999k↓");
+  assert.equal(spend(T(5, 12400, 310000), { agent: "orchestrator", context: 950 }), "$5.00  12.4k↑ 310k↓  ctx 950");
+  // no totals at all: no spend line
+  assert.deepEqual(text(D([A("orchestrator", "hub")], null, "orchestrator", { totals: undefined })), ["◉ orchestrator"]);
+  // context never shown without the field
+  assert.ok(!text(demo).some((l) => l.includes("ctx")));
+  // spans: number plain, unit and arrow muted
+  const spans = R.render(D([A("orchestrator", "hub")], null, "orchestrator", { totals: T(1, 12400, 950), root: { agent: "orchestrator", context: 124000 } }))[1];
+  assert.deepEqual(spans.map((s) => [s.text, s.tone]), [
+    ["$1.00", "plain"], ["  ", "plain"], ["12.4", "plain"], ["k", "muted"], ["↑", "muted"], [" ", "plain"],
+    ["950", "plain"], ["↓", "muted"], ["  ", "plain"], ["ctx ", "muted"], ["124", "plain"], ["k", "muted"],
   ]);
 });
 
-test("seats without a listed lead stay at top level with their short name", () => {
-  const doc = keep(D([A("orchestrator", "hub"), A("councillor-fable", "council", 0, "")]));
-  assert.deepEqual(text(doc), ["○ orchestrator", "", "○ fable"]);
+test("formatTokens and formatDollars at the boundaries", () => {
+  const cases = [
+    [0, "0"], [7, "7"], [999, "999"], [1000, "1.0k"], [1049, "1.0k"], [1050, "1.1k"], [9999, "10.0k"], [12400, "12.4k"],
+    [99949, "99.9k"], [99999, "100k"], [310000, "310k"], [999499, "999k"], [999999, "1.0M"], [1000000, "1.0M"],
+    [2100000, "2.1M"], [99999999, "100M"], [-5, "0"], [NaN, "0"],
+  ];
+  for (const [n, s] of cases) assert.equal(R.formatTokens(n), s, String(n));
+  assert.equal(R.formatDollars(0), "$0.00");
+  assert.equal(R.formatDollars(431.4), "$431.40");
+  assert.equal(R.formatDollars(0.004), "$0.00");
+  assert.equal(R.formatDollars(undefined), "$0.00");
 });
 
-test("group order: council, decide, build, verify, understand, then unknown groups", () => {
+test("right alignment at width 37: run count and agent cost end at the right edge", () => {
+  const lines = text(demo, 37);
+  for (const row of [0, 8, 10]) assert.equal(R.displayWidth(lines[row]), 37, lines[row]);
+  assert.ok(lines[0].endsWith(" 4/11"));
+  assert.ok(lines[8].endsWith("$1.35"));
+  assert.equal(R.displayWidth(lines[1]), 37); // the bar spans the full width
+  const wide = text(keep(D([A("orchestrator", "hub", 1), A("w", "build", 1, "", 1234.5)], G({ progress: { passed: 10, total: 12 } }))), 37);
+  assert.equal(wide[0], "◉ orchestrator ⠋                10/12");
+  assert.equal(wide[1], "━".repeat(31) + "─".repeat(6));
+  assert.equal(wide[3], pad("⠋ w", "$1234.50"));
+});
+
+test("progress bar rounding: never full before done, never empty once started", () => {
+  const bar = (passed, total, width = 20) =>
+    text(D([A("orchestrator", "hub")], G({ progress: { passed, total } })), width)[1];
+  assert.equal(bar(0, 5), "─".repeat(20));
+  assert.equal(bar(5, 5), "━".repeat(20));
+  assert.equal(bar(199, 200), "━".repeat(19) + "─");
+  assert.equal(bar(1, 200), "━" + "─".repeat(19));
+});
+
+test("Needs you: each kind, text and tone", () => {
+  const agents = [A("orchestrator", "hub"), A("a", "build"), A("b", "build"), A("c", "build"), A("d", "build"), A("e", "build"), A("ev", "verify")];
+  const one = (graph) => text(D(agents, G(graph)));
+  assert.deepEqual(one({ work_loops: [{ agent: "a", rounds: 4, state: "stuck", active: false }] }).slice(2, 3), ["! a stuck ↻4"]);
+  assert.deepEqual(one({ work_loops: [{ agent: "a", rounds: 1, state: "stuck", active: false }] }).slice(2, 3), ["! a stuck"]);
+  assert.deepEqual(one({ nodes: [{ id: "n", agent: "b", status: "failed", attempts: 1 }] }).slice(2, 3), ["! b stuck"]);
+  assert.deepEqual(one({ nodes: [{ id: "n", agent: "b", status: "blocked", attempts: 3 }] }).slice(2, 3), ["! b stuck ↻3"]);
+  assert.deepEqual(one({ nodes: [{ id: "n", agent: "b", status: "running", busy: true, stalled: true, attempts: 1 }] }).slice(2, 3), ["! b stuck"]);
+  assert.deepEqual(
+    one({ loops: [{ worker: "c", evaluator: "ev", rounds: 3, state: "sent_back", active: true }] }).slice(2, 3),
+    ["↩ c sent back ↻3 by ev"],
+  );
+  assert.deepEqual(
+    one({ loops: [{ worker: "c", evaluator: "ev", rounds: 1, state: "sent_back", active: true }] }).slice(2, 3),
+    ["↩ c sent back by ev"],
+  );
+  assert.deepEqual(one({ work_loops: [{ agent: "d", rounds: 2, state: "waiting", active: false }] }).slice(2, 3), ["? d waiting"]);
+  // not urgent: working, checking, closed, passed
+  const calm = one({
+    nodes: [{ id: "n", agent: "e", status: "passed" }, { id: "m", agent: "d", status: "running", busy: true, stalled: false }],
+    loops: [{ worker: "c", evaluator: "ev", rounds: 2, state: "working", active: true }, { worker: "a", evaluator: "ev", rounds: 2, state: "closed", active: false }],
+    work_loops: [{ agent: "b", rounds: 2, state: "working", active: true }],
+  });
+  assert.ok(!calm.some((l) => l.startsWith("!") || l.startsWith("↩") || l.startsWith("?")), calm.join("|"));
+  // tones
+  const toned = R.render(D(agents, G({
+    work_loops: [{ agent: "a", rounds: 2, state: "stuck" }, { agent: "d", rounds: 2, state: "waiting" }],
+    loops: [{ worker: "c", evaluator: "ev", rounds: 2, state: "sent_back" }],
+  })), { width: 37 });
+  assert.deepEqual(toned.slice(2, 5).map((l) => [l[0].text, l[0].tone]), [
+    ["! a stuck ↻2", "danger"], ["↩ c sent back ↻2 by ev", "accent"], ["? d waiting", "plain"],
+  ]);
+});
+
+test("Needs you: most urgent first, one line per agent, unlisted agents skipped", () => {
+  const agents = [A("orchestrator", "hub"), A("w1", "build"), A("w2", "build"), A("w3", "build"), A("w4", "build"), A("w5", "build"), A("ev", "verify")];
+  const doc = keep(D(agents, G({
+    nodes: [
+      { id: "1", agent: "w2", status: "failed", attempts: 1 },
+      { id: "2", agent: "w2", status: "blocked", attempts: 1 }, // same agent again: no second line
+      { id: "3", agent: "ghost", status: "failed", attempts: 1 }, // not listed
+      { id: "4", agent: "user", status: "blocked", attempts: 1 }, // not listed
+    ],
+    work_loops: [
+      { agent: "w4", rounds: 2, state: "waiting", active: false },
+      { agent: "w1", rounds: 6, state: "stuck", active: false },
+      { agent: "w2", rounds: 3, state: "stuck", active: false }, // stuck loop outranks its failed nodes
+      { agent: "w5", rounds: 2, state: "waiting", active: false },
+      { agent: "ghost", rounds: 2, state: "stuck", active: false },
+    ],
+    loops: [
+      { worker: "w3", evaluator: "ev", rounds: 2, state: "sent_back", active: true },
+      { worker: "w4", evaluator: "ev", rounds: 2, state: "sent_back", active: true }, // w4 also waits: the sent-back line wins
+      { worker: "w5", evaluator: "ghost", rounds: 2, state: "sent_back", active: true }, // evaluator not listed
+    ],
+  })));
+  assert.deepEqual(text(doc).slice(1, 6), [
+    "",
+    "! w1 stuck ↻6",
+    "! w2 stuck ↻3",
+    "↩ w3 sent back ↻2 by ev",
+    "↩ w4 sent back ↻2 by ev",
+  ]);
+  assert.deepEqual(text(doc).slice(6, 9), ["? w5 waiting", "", "○ w1 w2 w3 w4 w5"]);
+});
+
+test("Needs you: at most 5 lines, then +N more", () => {
+  const names = ["a1", "a2", "a3", "a4", "a5", "a6", "a7"];
+  const agents = [A("orchestrator", "hub"), ...names.map((n) => A(n, "build"))];
+  const six = keep(D(agents, G({ work_loops: names.slice(0, 6).map((n, i) => ({ agent: n, rounds: 2 + i, state: "stuck" })) })));
+  assert.deepEqual(text(six).slice(0, 8), [
+    "◉ orchestrator", "", "! a1 stuck ↻2", "! a2 stuck ↻3", "! a3 stuck ↻4", "! a4 stuck ↻5", "! a5 stuck ↻6", "+1 more",
+  ]);
+  assert.equal(R.render(six)[7][0].tone, "muted");
+  const exactly = keep(D(agents, G({ work_loops: names.slice(0, 5).map((n) => ({ agent: n, rounds: 2, state: "stuck" })) })));
+  assert.ok(!text(exactly).some((l) => l.includes("more")));
+  assert.equal(text(exactly).filter((l) => l.startsWith("!")).length, 5);
+  const seven = keep(D(agents, G({ work_loops: names.map((n) => ({ agent: n, rounds: 2, state: "stuck" })) })));
+  assert.equal(text(seven)[7], "+2 more");
+});
+
+test("Needs you: long names shrink, never past the width", () => {
+  const long = "impl-supercalifragilisticexpialidocious";
+  const doc = keep(D([A("orchestrator", "hub"), A(long, "build"), A("reviewer-with-a-very-long-name", "verify")], G({
+    loops: [{ worker: long, evaluator: "reviewer-with-a-very-long-name", rounds: 12, state: "sent_back" }],
+    work_loops: [{ agent: "reviewer-with-a-very-long-name", rounds: 12, state: "stuck" }],
+  })));
+  assert.deepEqual(text(doc).slice(2, 4), ["! reviewer-with-a-very-lon… stuck ↻12", "↩ impl-su… sent back ↻12 by reviewer…"]);
+});
+
+test("Working: most expensive first, loop count from 2 rounds, goal only with a busy step", () => {
+  const doc = keep(D(
+    [A("orchestrator", "hub", 1, "", 9), A("w-cheap", "build", 1, "", 0.5), A("w-rich", "build", 2, "", 12.34), A("w-free", "verify", 1), A("sleeper", "build", 0, "", 99)],
+    G({
+      nodes: [
+        { id: "1", agent: "w-rich", status: "running", busy: true, goal: "Do the thing" },
+        { id: "2", agent: "w-cheap", status: "pending", busy: false, goal: "Not started" },
+        { id: "3", agent: "w-free", status: "running", busy: false, goal: "Running but quiet" },
+      ],
+      work_loops: [
+        { agent: "w-cheap", rounds: 2, state: "working", active: true },
+        { agent: "w-rich", rounds: 1, state: "working", active: true },
+      ],
+    }),
+  ));
+  assert.deepEqual(text(doc, 37, 0).slice(2, 9), [
+    pad("⠋ w-rich", "$12.34"),
+    "  Do the thing",
+    pad("⠙ w-cheap ↻2", "$0.50"),
+    pad("⠹ w-free", "$0.00"),
+    "  Running but quiet",
+    "",
+    "○ sleeper",
+  ]);
+});
+
+test("Working: long name and goal at width 20 and 37", () => {
+  const long = "impl-supercalifragilisticexpialidocious";
+  const doc = keep(D([A("orchestrator", "hub"), A(long, "build", 1, "", 1.25)], G({
+    nodes: [{ id: "n", agent: long, busy: true, status: "running", goal: "Apply the limiter in the middleware chain and update every route" }],
+    work_loops: [{ agent: long, rounds: 12, state: "working", active: true }],
+  })));
+  assert.deepEqual(text(doc, 37).slice(2, 4), [pad("⠋ impl-supercalifragilisti… ↻12", "$1.25"), "  Apply the limiter in the middlewar…"]);
+  assert.deepEqual(text(doc, 20).slice(2, 4), ["⠋ impl-su… ↻12 $1.25", "  Apply the limiter…"]);
+});
+
+test("Idle: group order, one line per group, hub and working agents left out", () => {
   const doc = keep(D([
     A("orchestrator", "hub"), A("explorer", "understand"), A("oracle", "decide"), A("council", "council"),
-    A("impl-openai", "build"), A("reviewer", "verify"), A("odd", "elsewhere"),
+    A("impl-openai", "build"), A("reviewer", "verify"), A("odd", "elsewhere"), A("busy", "build", 1, "", 0.1),
   ]));
-  assert.deepEqual(text(doc), [
-    "○ orchestrator", "", "○ council", "", "○ oracle", "", "○ impl-openai", "", "○ reviewer", "", "○ explorer", "", "○ odd",
+  assert.deepEqual(text(doc).slice(4), [
+    "○ council", "○ oracle", "○ impl-openai", "○ reviewer", "○ explorer", "○ odd",
   ]);
 });
 
-test("each loop state", () => {
-  const doc = keep(D(
-    [A("orchestrator", "hub"), A("impl-openai", "build"), A("impl-claude", "build", 1), A("impl-hard", "build"), A("designer", "build"), A("reviewer", "verify")],
-    G({
-      nodes: [{ id: "n1", agent: "impl-claude", busy: true, status: "running", goal: "Fix it" }],
-      work_loops: [
-        { agent: "impl-claude", nodes: ["n1"], rounds: 3, state: "working", active: true },
-        { agent: "impl-openai", nodes: ["n2"], rounds: 2, state: "stuck", active: false },
-        { agent: "impl-hard", nodes: ["n3"], rounds: 1, state: "working", active: true },
-        { agent: "designer", nodes: ["n4"], rounds: 0, state: "stuck", active: false },
-        { agent: "ghost", nodes: ["n5"], rounds: 4, state: "working", active: true },
-      ],
-      loops: [
-        { id: "impl-claude~reviewer", worker: "impl-claude", evaluator: "reviewer", rounds: 3, state: "working", active: true },
-        { id: "impl-openai~reviewer", worker: "impl-openai", evaluator: "reviewer", rounds: 2, state: "closed", active: false },
-        { id: "impl-hard~ghost", worker: "impl-hard", evaluator: "ghost", rounds: 2, state: "checking", active: true },
-        { id: "ghost~reviewer", worker: "ghost", evaluator: "reviewer", rounds: 2, state: "checking", active: true },
-      ],
-    }),
-  ));
-  assert.deepEqual(text(doc), [
-    "○ orchestrator",
-    "",
-    "○ impl-openai ↻2! ⇄ reviewer",
-    "● impl-claude ↻3 ⇄ reviewer Fix it",
-    "○ impl-hard",
-    "○ designer ↻!",
-    "",
-    "○ reviewer",
-  ]);
-  const lines = R.render(doc, { width: 37 });
-  assert.equal(lines[2].find((s) => s.text === "↻2!").tone, "danger");
-  assert.equal(lines[2].find((s) => s.text === "⇄ reviewer").tone, "muted");
-  assert.equal(lines[3].find((s) => s.text === "↻3").tone, "accent");
-  assert.equal(lines[3].find((s) => s.text === "⇄ reviewer").tone, "accent");
-  assert.equal(lines[5].find((s) => s.text === "↻!").tone, "danger");
+test("Idle: a council lead comes first, seats use their short names", () => {
+  const doc = keep(D([
+    A("orchestrator", "hub"), A("councillor-fable", "council", 0, "council"), A("councillor-astra", "council", 0, "council"),
+    A("council", "council"), A("councillor-carbon", "council", 0, "council"),
+  ]));
+  assert.deepEqual(text(doc).slice(2), ["○ council fable astra carbon"]);
+  // seats without a listed lead
+  assert.deepEqual(text(keep(D([A("orchestrator", "hub"), A("councillor-fable", "council", 0, "")]))).slice(2), ["○ fable"]);
+  // a working seat moves to Working with its short name; the rest stay idle
+  assert.deepEqual(
+    text(keep(D([A("orchestrator", "hub"), A("council", "council"), A("councillor-fable", "council", 1, "council", 0.2), A("councillor-astra", "council", 0, "council")]))).slice(2),
+    [pad("⠋ fable", "$0.20"), "", "○ council astra"],
+  );
 });
 
-test("names and goals too long for 37 columns", () => {
-  const longHub = "orchestrator-with-an-extremely-long-name-x";
-  const doc = keep(D(
-    [A(longHub, "hub", 1), A("impl-claude", "build", 1), A("impl-supercalifragilisticexpialidocious", "build", 1), A("reviewer-with-a-very-long-name", "verify")],
-    G({
-      progress: { passed: 1, total: 3 },
-      nodes: [
-        { id: "n1", agent: "impl-claude", busy: true, status: "running", goal: "Apply the limiter in the middleware chain and update every route" },
-        { id: "n2", agent: "impl-supercalifragilisticexpialidocious", busy: false, status: "running", goal: "Something long" },
-      ],
-      work_loops: [{ agent: "impl-supercalifragilisticexpialidocious", nodes: ["n2"], rounds: 12, state: "working", active: true }],
-      loops: [{ id: "x", worker: "impl-supercalifragilisticexpialidocious", evaluator: "reviewer-with-a-very-long-name", rounds: 12, state: "working", active: true }],
-    }),
-    longHub,
-  ));
-  assert.deepEqual(text(doc), [
-    "⠋ orchestrator-with-an-extremely… 1/3",
-    "",
-    "● impl-claude Apply the limiter in t…",
-    "● impl-supercalifragilist… ↻12 ⇄ rev…",
-    "",
-    "○ reviewer-with-a-very-long-name",
+test("Idle: wraps onto an indented line; truncates only as a last resort", () => {
+  const doc = keep(D([
+    A("orchestrator", "hub"),
+    ...["alpha-one", "beta-two", "gamma-three", "delta-four", "epsilon-five"].map((n) => A(n, "build")),
+    A("zz", "verify"),
+  ]));
+  assert.deepEqual(text(doc).slice(2), [
+    "○ alpha-one beta-two gamma-three",
+    "  delta-four epsilon-five",
+    "○ zz",
   ]);
+  const fit = keep(D([A("orchestrator", "hub"), A("a".repeat(17), "build"), A("b".repeat(17), "build")]));
+  assert.deepEqual(text(fit).slice(2), ["○ " + "a".repeat(17) + " " + "b".repeat(17)]); // exactly 37
+  const over = keep(D([A("orchestrator", "hub"), A("a".repeat(17), "build"), A("b".repeat(18), "build")]));
+  assert.deepEqual(text(over).slice(2), ["○ " + "a".repeat(17), "  " + "b".repeat(18)]);
+  const huge = keep(D([A("orchestrator", "hub"), A("x".repeat(50), "build")]));
+  assert.deepEqual(text(huge).slice(2), ["○ " + "x".repeat(34) + "…"]);
 });
 
 test("wide characters and escape sequences in untrusted text", () => {
   const doc = keep(D(
-    [A("orchestrator", "hub"), A("evil\u001b[31mred\u0007", "build", 1)],
+    [A("orchestrator", "hub"), A("evil\u001b[31mred\u0007", "build", 1, "", 0.5)],
     G({ nodes: [{ id: "n", agent: "evil\u001b[31mred\u0007", busy: true, status: "running", goal: "修复中间件链中的限流器问题并更新全部路由" }] }),
   ));
   const lines = text(doc);
-  assert.equal(lines[2], "● evilred 修复中间件链中的限流器问题…");
-  assert.equal(R.displayWidth(lines[2]), 37);
+  assert.equal(lines[2], pad("⠋ evilred", "$0.50"));
+  assert.equal(lines[3], "  修复中间件链中的限流器问题并更新全…");
+  assert.equal(R.displayWidth(lines[3]), 37);
 });
 
-test("width 20 for hand-made documents", () => {
+test("width 20 for a hand-made document", () => {
   const doc = keep(D(
-    [A("orchestrator", "hub", 1), A("council", "council", 1), A("councillor-carbon", "council", 0, "council"), A("impl-claude", "build", 1)],
+    [A("orchestrator", "hub", 1), A("council", "council", 1, "", 3), A("councillor-carbon", "council", 0, "council"), A("impl-claude", "build", 1, "", 1.25)],
     G({
       progress: { passed: 2, total: 5 },
       nodes: [{ id: "n", agent: "impl-claude", busy: true, status: "running", goal: "Apply the limiter" }],
       work_loops: [{ agent: "impl-claude", nodes: ["n"], rounds: 2, state: "working", active: true }],
     }),
+    "orchestrator",
+    { totals: T(1.5, 5200, 14100) },
   ));
   assert.deepEqual(text(doc, 20), [
-    "⠋ orchestrator   2/5",
+    "◉ orchestrator ⠋ 2/5",
+    "━━━━━━━━────────────",
+    "$1.50  5.2k↑ 14.1k↓",
     "",
-    "● council",
-    "  ○ carbon",
+    "⠋ council      $3.00",
+    "⠙ impl-cla… ↻2 $1.25",
+    "  Apply the limiter",
     "",
-    "● impl-claude ↻2",
-  ].map((l) => l));
+    "○ carbon",
+  ]);
 });
 
 test("every line fits its width (all documents, many widths)", () => {
   const widths = [37, 30, 24, 20, 16, 12, 8, 5, 3, 2, 1];
+  const withContext = D([A("orchestrator", "hub", 1)], null, "orchestrator", { totals: T(431.4, 2100000, 310000), root: { agent: "orchestrator", context: 124000 } });
   let checked = 0;
-  for (const doc of [...allDocs, null]) {
+  for (const doc of [...allDocs, demo, withContext, null]) {
     for (const width of widths) {
       for (const frame of [0, 3]) {
         for (const line of R.render(doc, { width, frame })) {
@@ -277,7 +470,7 @@ test("every line fits its width (all documents, many widths)", () => {
       }
     }
   }
-  assert.ok(checked > 200);
+  assert.ok(checked > 400);
 });
 
 test("display width and truncate", () => {
@@ -634,10 +827,11 @@ test("plugin: renders normal, error and missing-session documents; follows sessi
   try {
     assert.deepEqual(screen(view), ["Loading"]);
     await waitFor(() => screen(view).includes("○ w-ses_a"), 5000, "first snapshot");
-    assert.match(screen(view)[0], /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] orchestrator$/);
+    assert.match(screen(view)[0], /^◉ orchestrator [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]$/);
     // the hub works: the spinner advances
-    const first = screen(view)[0][0];
-    await waitFor(() => screen(view)[0][0] !== first, 2000, "spinner frame");
+    const last = (l) => l[l.length - 1];
+    const first = last(screen(view)[0]);
+    await waitFor(() => last(screen(view)[0]) !== first, 2000, "spinner frame");
     // colours come from the theme; the accent is never the green one
     const hubMark = view.children[0].children[0];
     assert.equal(hubMark.props.fg, "#d08040");
@@ -669,6 +863,49 @@ test("plugin: renders normal, error and missing-session documents; follows sessi
     const bad = state.claims[0].render({ get sessionID() { throw new Error("boom"); } });
     assert.deepEqual(screen(bad), ["No session"]);
     assert.doesNotThrow(() => state.claims[0].render(undefined));
+  } finally {
+    stop();
+  }
+  for (const h of activeIntervals) assert.ok(before.has(h), "an interval survived cleanup");
+});
+
+const timerPython = fakePython("timer-python", `
+sid=""
+for a in "$@"; do case "$a" in --session=*) sid="\${a#--session=}";; esac; done
+doc() { printf '{"version":1,"root":{"agent":"orchestrator"},"agents":[{"name":"orchestrator","group":"hub","busy":%s,"parent":"","sessions":[]},{"name":"worker","group":"build","busy":%s,"parent":"","sessions":[]}],"graph":null,"warnings":[]}\\n' "$1" "$2"; }
+case "$sid" in
+  ses_idle) doc 0 0;;
+  ses_worker) doc 0 1;;
+  ses_hub) doc 1 0;;
+  ses_flip) if [ -f "${path.join(tmp, "flip.flag")}" ]; then doc 0 0; else touch "${path.join(tmp, "flip.flag")}"; doc 0 1; fi;;
+esac`);
+
+test("plugin: the frame timer runs only while the hub or any agent works", async () => {
+  fs.rmSync(path.join(tmp, "flip.flag"), { force: true });
+  const { ctx, state } = makeHost({ python: timerPython, intervalMs: 1000 });
+  const before = new Set(activeIntervals);
+  const stop = tui.setup(ctx);
+  const running = () => [...activeIntervals].filter((h) => !before.has(h)).length; // poll timer + frame timer
+  const [sid, setSid] = createSignal("ses_idle");
+  const view = state.claims[0].render({ get sessionID() { return sid(); } });
+  try {
+    assert.equal(running(), 1, "only the poll timer before the first snapshot");
+    await waitFor(() => screen(view).includes("○ worker"), 5000, "idle snapshot");
+    assert.equal(running(), 1, "nothing works: no frame timer");
+    setSid("ses_worker"); // the hub is idle, a non-hub agent works
+    await waitFor(() => screen(view).some((l) => l.startsWith("⠋ worker")), 5000, "worker snapshot");
+    assert.equal(running(), 2, "a non-hub agent works: frame timer runs");
+    setSid("ses_idle"); // switching sessions stops it at once
+    assert.equal(running(), 1, "session change stops the frame timer");
+    await waitFor(() => screen(view).includes("○ worker"), 5000, "idle snapshot again");
+    setSid("ses_hub");
+    await waitFor(() => screen(view).some((l) => l.startsWith("◉ orchestrator ")), 5000, "hub snapshot");
+    assert.equal(running(), 2, "the hub works: frame timer runs");
+    setSid("ses_flip"); // worker busy on the first fetch, idle on the next poll
+    await waitFor(() => screen(view).some((l) => l.startsWith("⠋ worker")), 5000, "flip: busy");
+    assert.equal(running(), 2);
+    await waitFor(() => screen(view).includes("○ worker"), 5000, "flip: idle");
+    assert.equal(running(), 1, "work finished: frame timer stopped");
   } finally {
     stop();
   }

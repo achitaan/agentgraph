@@ -2,6 +2,7 @@
  * Pure text rendering of an agentgraph snapshot document (WEB_API.md section 1) for a narrow terminal sidebar.
  *
  * render(snapshot, { width, frame, now }) -> Line[]
+ *   Blocks, separated by one blank line, empty ones omitted: Run, Needs you, Working, Idle.
  *   Line = Span[] (an empty array is a blank line), Span = { text, tone }
  *   tone is one of TONES. No line is wider than `width` display columns.
  *
@@ -12,24 +13,21 @@
 export const TONES = Object.freeze(["plain", "muted", "accent", "danger"]);
 
 export const SPINNER = Object.freeze(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
-export const MARK_WORKING = "●";
+export const MARK_HUB = "◉";
 export const MARK_IDLE = "○";
 export const LOOP_MARK = "↻";
-export const REVIEW_MARK = "⇄";
-export const STUCK_SUFFIX = "!";
+export const ATTENTION = "!";
+export const SENT_BACK = "↩";
+export const WAITING = "?";
 export const BAR_FULL = "━";
 export const BAR_EMPTY = "─";
 export const ELLIPSIS = "…";
 
-// Agents other than the hub, by group, in this order; unknown groups follow in document order.
+// Idle agents by group, in this order; unknown groups follow in document order.
 export const GROUP_ORDER = Object.freeze(["council", "decide", "build", "verify", "understand"]);
 
 const DEFAULT_WIDTH = 37;
-const BAR_MAX = 10;
-const BAR_MIN = 3;
-const NAME_MIN = 6;
-const EVALUATOR_MIN = 4;
-const GOAL_MIN = 4; // columns for the goal text itself, after its leading space
+const NEEDS_MAX = 5;
 
 // ---------------------------------------------------------------------------------------------------------------
 // Display width
@@ -211,8 +209,20 @@ function busyCount(agent) {
   return Number.isFinite(n) ? n : agent && agent.busy === true ? 1 : 0;
 }
 
+function finiteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function rounds(loop) {
+  return Math.max(0, Math.floor(Number(loop && loop.rounds) || 0));
+}
+
 export function seatName(name) {
   return name.startsWith("councillor-") && name.length > "councillor-".length ? name.slice("councillor-".length) : name;
+}
+
+function validAgents(doc) {
+  return list(doc.agents).filter((a) => isObject(a) && typeof a.name === "string" && a.name);
 }
 
 function findHub(doc, agents) {
@@ -221,12 +231,17 @@ function findHub(doc, agents) {
   return hubs.find((a) => a.name === rootAgent) || hubs[0] || null;
 }
 
-// True when the hub is working (the only thing that animates).
+function hubWorking(doc, hub) {
+  if (hub) return busyCount(hub) > 0;
+  return isObject(doc.root) && doc.root.busy === true;
+}
+
+// True when anything is working: the hub or any other agent. Only then does anything animate.
 export function isAnimated(doc) {
-  if (!isObject(doc) || doc.error !== undefined && doc.error !== null) return false;
-  const agents = list(doc.agents).filter((a) => isObject(a) && typeof a.name === "string");
-  const hub = findHub(doc, agents);
-  return Boolean(hub && busyCount(hub) > 0);
+  if (!isObject(doc) || (doc.error !== undefined && doc.error !== null)) return false;
+  const agents = validAgents(doc);
+  if (!agents.length) return false;
+  return hubWorking(doc, findHub(doc, agents)) || agents.some((a) => busyCount(a) > 0);
 }
 
 function currentGoal(graph, name) {
@@ -236,6 +251,48 @@ function currentGoal(graph, name) {
   return node ? clean(node.goal) : "";
 }
 
+function agentCost(agent) {
+  let total = 0;
+  for (const s of list(agent.sessions)) {
+    const c = isObject(s) ? finiteNumber(s.cost) : null;
+    if (c !== null) total += c;
+  }
+  return total;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Number formatting
+
+// 999 -> "999", 1000 -> "1.0k", 12400 -> "12.4k", 310000 -> "310k", 999999 -> "1.0M", 2100000 -> "2.1M"
+export function formatTokens(value) {
+  const n = Math.max(0, Number(value) || 0);
+  if (n < 1000) return String(Math.round(n));
+  const units = ["k", "M", "G"];
+  let v = n / 1000;
+  let i = 0;
+  const shown = (x) => {
+    const r = Math.round(x * 10) / 10;
+    return r >= 100 ? Math.round(x) : r;
+  };
+  while (shown(v) >= 1000 && i < units.length - 1) {
+    v /= 1000;
+    i += 1;
+  }
+  const r = shown(v);
+  return (r >= 100 ? String(r) : r.toFixed(1)) + units[i];
+}
+
+export function formatDollars(value) {
+  const n = Math.max(0, Number(value) || 0);
+  return "$" + n.toFixed(2);
+}
+
+// "12.4k" -> [{12.4, plain}, {k, muted}]
+function numberSpans(text) {
+  const m = /^(.*?)([a-zA-Z]*)$/.exec(text);
+  return m[2] ? [sp(m[1], "plain"), sp(m[2], "muted")] : [sp(text, "plain")];
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Line builders
 
@@ -243,107 +300,233 @@ function sp(text, tone) {
   return { text, tone };
 }
 
-function hubLine(doc, hub, width, frame) {
-  const working = busyCount(hub) > 0;
-  const mark = working ? SPINNER[((frame % SPINNER.length) + SPINNER.length) % SPINNER.length] : MARK_IDLE;
-  let name = clean(hub.name) || "?";
+function spinnerGlyph(frame, offset = 0) {
+  return SPINNER[(((frame + offset) % SPINNER.length) + SPINNER.length) % SPINNER.length];
+}
+
+// Block 1: hub, progress, spend.
+function runBlock(doc, hub, width, frame) {
+  const working = hubWorking(doc, hub);
+  const rootName = isObject(doc.root) && typeof doc.root.agent === "string" ? doc.root.agent : "";
+  const name = clean(hub ? hub.name : rootName) || "?";
   const graph = isObject(doc.graph) ? doc.graph : null;
   const progress = graph && isObject(graph.progress) ? graph.progress : null;
   const total = progress ? Math.max(0, Math.floor(Number(progress.total) || 0)) : 0;
   const passed = progress ? Math.min(total, Math.max(0, Math.floor(Number(progress.passed) || 0))) : 0;
+  const lines = [];
 
-  const head = [sp(mark, working ? "accent" : "muted"), sp(" ", "plain")];
-  if (!total) return [...head, sp(truncate(name, width - 2), "plain")];
+  // line 1
+  const count = total ? [sp(String(passed), "plain"), sp("/" + total, "muted")] : [];
+  const countW = total ? displayWidth(`${passed}/${total}`) : 0;
+  const tail = working ? 2 : 0; // " <spinner>"
+  let room = width - 2 - tail - (countW ? 1 + countW : 0);
+  let showCount = countW > 0;
+  if (showCount && room < 3) {
+    showCount = false;
+    room = width - 2 - tail;
+  }
+  const shown = truncate(name, Math.max(1, room));
+  const line = [sp(MARK_HUB, working ? "accent" : "muted"), sp(" ", "plain"), sp(shown, "plain")];
+  if (working) line.push(sp(" ", "plain"), sp(spinnerGlyph(frame), "accent"));
+  if (showCount) {
+    const gap = width - lineWidth(line) - countW;
+    line.push(sp(" ".repeat(Math.max(1, gap)), "plain"), ...count);
+  }
+  lines.push(line);
 
-  const count = `${passed}/${total}`;
-  const countW = displayWidth(count);
-  let nameW = displayWidth(name);
-  // Room after "<mark> <name>": " <bar> <count>" with a bar of at least BAR_MIN, else " <count>".
-  if (2 + nameW + 1 + countW > width) {
-    nameW = Math.max(Math.min(nameW, NAME_MIN), width - 2 - 1 - countW);
-    name = truncate(name, nameW);
-    nameW = displayWidth(name);
+  // line 2
+  if (total) {
+    let filled = Math.round((width * passed) / total);
+    if (passed > 0) filled = Math.max(1, filled);
+    if (passed < total) filled = Math.min(filled, width - 1);
+    const bar = [];
+    if (filled > 0) bar.push(sp(BAR_FULL.repeat(filled), "accent"));
+    if (width - filled > 0) bar.push(sp(BAR_EMPTY.repeat(width - filled), "muted"));
+    lines.push(bar);
   }
-  const room = width - 2 - nameW;
-  const line = [...head, sp(name, "plain")];
-  const barRoom = room - 1 - countW - 1; // spaces around the bar
-  if (barRoom >= BAR_MIN) {
-    const barW = Math.min(BAR_MAX, barRoom);
-    const filled = Math.round((barW * passed) / total);
-    const gap = room - barW - 1 - countW; // push bar and count to the right edge
-    line.push(sp(" ".repeat(Math.max(1, gap)), "plain"));
-    if (filled) line.push(sp(BAR_FULL.repeat(filled), "accent"));
-    if (barW - filled) line.push(sp(BAR_EMPTY.repeat(barW - filled), "muted"));
-    line.push(sp(" ", "plain"), sp(count, passed === total ? "plain" : "muted"));
-  } else if (room >= 1 + countW) {
-    line.push(sp(" ".repeat(Math.max(1, room - countW)), "plain"), sp(count, "muted"));
+
+  // line 3
+  const totals = isObject(doc.totals) ? doc.totals : null;
+  if (totals) {
+    const cost = finiteNumber(totals.cost);
+    const tin = finiteNumber(totals.tokens_in);
+    const tout = finiteNumber(totals.tokens_out);
+    const ctx = isObject(doc.root) ? finiteNumber(doc.root.context) : null;
+    const parts = [];
+    if (cost !== null) parts.push([sp(formatDollars(cost), "plain")]);
+    const tokens = [];
+    if (tin !== null) tokens.push([...numberSpans(formatTokens(tin)), sp("↑", "muted")]);
+    if (tout !== null) tokens.push([...numberSpans(formatTokens(tout)), sp("↓", "muted")]);
+    const tokenSpans = [];
+    tokens.forEach((t, i) => tokenSpans.push(...(i ? [sp(" ", "plain")] : []), ...t));
+    if (tokenSpans.length) parts.push(tokenSpans);
+    if (ctx !== null) parts.push([sp("ctx ", "muted"), ...numberSpans(formatTokens(ctx))]);
+    const join = (items, sep) => {
+      const out = [];
+      items.forEach((p, i) => out.push(...(i ? [sp(sep, "plain")] : []), ...p));
+      return out;
+    };
+    let spend = join(parts, "  ");
+    if (lineWidth(spend) > width && ctx !== null) spend = join(parts.slice(0, -1), "  ");
+    if (lineWidth(spend) > width) spend = join(parts.slice(0, -1).length ? parts.slice(0, -1) : parts, " ");
+    if (spend.length) lines.push(spend);
   }
-  return line;
+  return lines;
 }
 
-function loopsFor(name, graph, listed) {
-  const work = [];
-  const review = [];
-  if (!isObject(graph)) return { work, review };
-  for (const loop of list(graph.work_loops)) {
-    if (!isObject(loop) || loop.agent !== name) continue;
-    const rounds = Math.max(0, Math.floor(Number(loop.rounds) || 0));
-    const stuck = loop.state === "stuck";
-    if (!stuck && rounds < 2) continue;
-    const text = LOOP_MARK + (rounds >= 2 ? String(rounds) : "") + (stuck ? STUCK_SUFFIX : "");
-    work.push(sp(text, stuck ? "danger" : loop.active === true || loop.state === "working" ? "accent" : "muted"));
-  }
-  for (const loop of list(graph.loops)) {
-    if (!isObject(loop) || loop.worker !== name) continue;
-    if (typeof loop.evaluator !== "string" || !listed.has(loop.evaluator) || !listed.has(loop.worker)) continue;
-    review.push({ evaluator: clean(seatName(loop.evaluator)), active: loop.active === true });
-  }
-  return { work, review };
-}
-
-function agentLine(agent, doc, listed, width, { indent = "", short = false } = {}) {
+// Block 2: what needs the user, most urgent first, one line per agent.
+function needsEntries(doc, listed) {
   const graph = isObject(doc.graph) ? doc.graph : null;
-  const working = busyCount(agent) > 0;
-  const raw = clean(short ? seatName(agent.name) : agent.name) || "?";
-  const { work, review } = listed.has(agent.name) ? loopsFor(agent.name, graph, listed) : { work: [], review: [] };
-  const goal = working ? currentGoal(graph, agent.name) : "";
-
-  const fixed = displayWidth(indent) + 2; // "<mark> "
-  let nameW = displayWidth(raw);
-  const evalW = review.map((r) => displayWidth(r.evaluator));
-  let workKeep = work.length;
-  let reviewKeep = review.length;
-
-  const total = () => {
-    let t = fixed + nameW;
-    for (let i = 0; i < workKeep; i += 1) t += 1 + displayWidth(work[i].text);
-    for (let i = 0; i < reviewKeep; i += 1) t += 1 + displayWidth(REVIEW_MARK) + 1 + evalW[i];
-    return t;
+  if (!graph) return [];
+  const entries = [];
+  const seen = new Set();
+  const take = (rank, agent, make) => {
+    if (seen.has(agent)) return;
+    seen.add(agent);
+    entries.push({ rank, make });
   };
-  // Shrink in order: evaluator names, agent name (to NAME_MIN), drop review loops, drop work loops, name to 1.
-  while (total() > width) {
-    let longest = -1;
-    for (let i = 0; i < reviewKeep; i += 1) if (evalW[i] > EVALUATOR_MIN && (longest < 0 || evalW[i] > evalW[longest])) longest = i;
-    if (longest >= 0) { evalW[longest] -= 1; continue; }
-    if (nameW > NAME_MIN) { nameW -= 1; continue; }
-    if (reviewKeep) { reviewKeep -= 1; continue; }
-    if (workKeep) { workKeep -= 1; continue; }
-    if (nameW > 1) { nameW -= 1; continue; }
-    break;
-  }
+  const workRounds = (agent) => {
+    let best = 0;
+    for (const loop of list(graph.work_loops)) if (isObject(loop) && loop.agent === agent) best = Math.max(best, rounds(loop));
+    return best;
+  };
 
-  const line = [];
-  if (indent) line.push(sp(indent, "plain"));
-  line.push(sp(working ? MARK_WORKING : MARK_IDLE, working ? "accent" : "muted"), sp(" ", "plain"));
-  line.push(sp(truncate(raw, nameW), working ? "plain" : "muted"));
-  for (let i = 0; i < workKeep; i += 1) line.push(sp(" ", "plain"), work[i]);
-  for (let i = 0; i < reviewKeep; i += 1) {
-    const tone = review[i].active ? "accent" : "muted";
-    line.push(sp(" ", "plain"), sp(REVIEW_MARK + " " + truncate(review[i].evaluator, evalW[i]), tone));
+  // 0: stuck work loops
+  for (const loop of list(graph.work_loops)) {
+    if (!isObject(loop) || loop.state !== "stuck" || !listed.has(loop.agent)) continue;
+    take(0, loop.agent, () => ({ kind: "stuck", agent: loop.agent, n: workRounds(loop.agent) }));
   }
-  const left = width - lineWidth(line) - 1;
-  if (goal && left >= GOAL_MIN) line.push(sp(" ", "plain"), sp(truncate(goal, left), "muted"));
-  return line;
+  // 1: failed, blocked or stalled nodes
+  for (const node of list(graph.nodes)) {
+    if (!isObject(node) || !listed.has(node.agent)) continue;
+    if (node.status !== "failed" && node.status !== "blocked" && node.stalled !== true) continue;
+    const attempts = Math.max(0, Math.floor(Number(node.attempts) || 0));
+    take(1, node.agent, () => ({ kind: "stuck", agent: node.agent, n: Math.max(workRounds(node.agent), attempts) }));
+  }
+  // 2: review loops that sent the work back
+  for (const loop of list(graph.loops)) {
+    if (!isObject(loop) || loop.state !== "sent_back") continue;
+    if (!listed.has(loop.worker) || !listed.has(loop.evaluator)) continue;
+    take(2, loop.worker, () => ({ kind: "sent_back", agent: loop.worker, n: rounds(loop), by: loop.evaluator }));
+  }
+  // 3: reported a pass that nobody has checked
+  for (const loop of list(graph.work_loops)) {
+    if (!isObject(loop) || loop.state !== "waiting" || !listed.has(loop.agent)) continue;
+    take(3, loop.agent, () => ({ kind: "waiting", agent: loop.agent, n: rounds(loop) }));
+  }
+  return entries.sort((a, b) => a.rank - b.rank).map((e) => e.make());
+}
+
+// Shrink a list of names (longest first, never below `min`) until `total()` fits.
+function fitNames(names, fixedWidth, width, min = 3) {
+  const out = names.map((n) => clean(n) || "?");
+  const w = () => fixedWidth + out.reduce((t, n) => t + displayWidth(n), 0);
+  while (w() > width) {
+    let longest = -1;
+    for (let i = 0; i < out.length; i += 1) {
+      if (displayWidth(out[i]) > min && (longest < 0 || displayWidth(out[i]) > displayWidth(out[longest]))) longest = i;
+    }
+    if (longest < 0) break;
+    out[longest] = truncate(out[longest], displayWidth(out[longest]) - 1);
+  }
+  return out;
+}
+
+function needsLine(entry, width) {
+  const loop = entry.n >= 2 ? ` ${LOOP_MARK}${entry.n}` : "";
+  if (entry.kind === "stuck") {
+    const [name] = fitNames([entry.agent], 2 + 6 + displayWidth(loop), width, 1);
+    return [sp(`${ATTENTION} ${name} stuck${loop}`, "danger")];
+  }
+  if (entry.kind === "sent_back") {
+    const [worker, by] = fitNames([entry.agent, seatName(entry.by)], 2 + 10 + displayWidth(loop) + 4, width);
+    return [sp(`${SENT_BACK} ${worker} sent back${loop} by ${by}`, "accent")];
+  }
+  const [name] = fitNames([entry.agent], 2 + 8, width, 1);
+  return [sp(`${WAITING} ${name} waiting`, "plain")];
+}
+
+function needsBlock(doc, listed, width) {
+  const entries = needsEntries(doc, listed);
+  if (!entries.length) return [];
+  const lines = entries.slice(0, NEEDS_MAX).map((e) => needsLine(e, width));
+  if (entries.length > NEEDS_MAX) lines.push([sp(`+${entries.length - NEEDS_MAX} more`, "muted")]);
+  return lines;
+}
+
+// Block 3: working agents, most expensive first, two lines each.
+function workingBlock(doc, hub, agents, width, frame) {
+  const graph = isObject(doc.graph) ? doc.graph : null;
+  const busy = agents
+    .filter((a) => a !== hub && busyCount(a) > 0)
+    .map((a, i) => ({ a, i, cost: agentCost(a) }))
+    .sort((x, y) => y.cost - x.cost || x.i - y.i);
+  const lines = [];
+  busy.forEach(({ a, cost }, index) => {
+    const raw = clean(a.group === "council" ? seatName(a.name) : a.name) || "?";
+    let n = 0;
+    for (const loop of list(graph && graph.work_loops)) if (isObject(loop) && loop.agent === a.name) n = Math.max(n, rounds(loop));
+    let loopText = n >= 2 ? ` ${LOOP_MARK}${n}` : "";
+    let costText = formatDollars(cost);
+    // "<glyph> <name><loop>" + gap + cost
+    let room = width - 2 - displayWidth(loopText) - 1 - displayWidth(costText);
+    if (room < 4 && loopText) {
+      loopText = "";
+      room = width - 2 - 1 - displayWidth(costText);
+    }
+    if (room < 2) {
+      costText = "";
+      room = width - 2 - displayWidth(loopText);
+    }
+    const name = truncate(raw, Math.max(1, room));
+    const line = [sp(spinnerGlyph(frame, index), "accent"), sp(" ", "plain"), sp(name, "plain")];
+    if (loopText) line.push(sp(loopText, "accent"));
+    if (costText) {
+      const gap = width - lineWidth(line) - displayWidth(costText);
+      line.push(sp(" ".repeat(Math.max(1, gap)), "plain"), sp(costText, "muted"));
+    }
+    lines.push(line);
+    const goal = currentGoal(graph, a.name);
+    if (goal && width > 2) lines.push([sp("  ", "plain"), sp(truncate(goal, width - 2), "muted")]);
+  });
+  return lines;
+}
+
+// Block 4: everything idle, one line per group.
+function idleBlock(agents, hub, width) {
+  const byGroup = new Map();
+  for (const agent of agents) {
+    if (agent === hub || busyCount(agent) > 0) continue;
+    const group = typeof agent.group === "string" && agent.group ? agent.group : "build";
+    if (!byGroup.has(group)) byGroup.set(group, []);
+    byGroup.get(group).push(agent);
+  }
+  const order = GROUP_ORDER.filter((g) => byGroup.has(g));
+  for (const g of byGroup.keys()) if (!order.includes(g)) order.push(g);
+
+  const lines = [];
+  for (const group of order) {
+    let members = byGroup.get(group);
+    if (group === "council") {
+      const lead = members.find((a) => a.name === "council");
+      if (lead) members = [lead, ...members.filter((a) => a !== lead)];
+    }
+    const names = members.map((a) => clean(group === "council" ? seatName(a.name) : a.name) || "?");
+    let prefix = MARK_IDLE + " ";
+    let current = "";
+    const flush = () => {
+      lines.push([sp(prefix + current, "muted")]);
+      prefix = "  ";
+      current = "";
+    };
+    for (const raw of names) {
+      const name = truncate(raw, Math.max(1, width - 2));
+      if (current && displayWidth(prefix + current) + 1 + displayWidth(name) > width) flush();
+      current = current ? current + " " + name : name;
+    }
+    if (current) flush();
+  }
+  return lines;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -357,53 +540,27 @@ export function render(snapshot, options = {}) {
     : Number.isFinite(now) ? Math.floor(now / 120) : 0;
   const finish = (lines) => lines.map((line) => clipLine(line, width));
 
-  if (snapshot === undefined || snapshot === null) return finish([[sp("Loading", "plain")]]);
+  if (snapshot === undefined || snapshot === null) return finish([[sp("Loading", "muted")]]);
   if (!isObject(snapshot)) return finish([[sp("Bad snapshot", "danger")]]);
   if (snapshot.error !== undefined && snapshot.error !== null) {
     return finish([[sp(truncate(clean(snapshot.error) || "unknown error", width), "danger")]]);
   }
 
-  const agents = list(snapshot.agents).filter((a) => isObject(a) && typeof a.name === "string" && a.name);
+  const agents = validAgents(snapshot);
   if (!agents.length) return finish([[sp("No agents", "muted")]]);
   const listed = new Set(agents.map((a) => a.name));
+  const hub = findHub(snapshot, agents);
 
   const lines = [];
-  const hub = findHub(snapshot, agents);
-  if (hub) lines.push(hubLine(snapshot, hub, width, frame));
-
-  // Groups other than the hub's own agent.
-  const byGroup = new Map();
-  for (const agent of agents) {
-    if (agent === hub) continue;
-    const group = typeof agent.group === "string" && agent.group ? agent.group : "build";
-    if (!byGroup.has(group)) byGroup.set(group, []);
-    byGroup.get(group).push(agent);
-  }
-  const order = [];
-  if (byGroup.has("hub")) order.push("hub"); // another hub agent that is busy: right under the hub
-  for (const g of GROUP_ORDER) if (byGroup.has(g)) order.push(g);
-  for (const g of byGroup.keys()) if (!order.includes(g)) order.push(g);
-
-  for (const group of order) {
-    const members = byGroup.get(group);
-    const block = [];
-    if (group === "council") {
-      const lead = members.find((a) => a.name === "council");
-      const seats = members.filter((a) => lead && a !== lead && a.parent === lead.name);
-      const others = members.filter((a) => a !== lead && !seats.includes(a));
-      if (lead) {
-        block.push(agentLine(lead, snapshot, listed, width));
-        for (const seat of seats) block.push(agentLine(seat, snapshot, listed, width, { indent: "  ", short: true }));
-      }
-      for (const a of others) block.push(agentLine(a, snapshot, listed, width, { short: true }));
-    } else {
-      for (const a of members) block.push(agentLine(a, snapshot, listed, width));
-    }
-    if (block.length) {
-      if (lines.length) lines.push([]);
-      lines.push(...block);
-    }
-  }
+  const add = (block) => {
+    if (!block.length) return;
+    if (lines.length) lines.push([]);
+    lines.push(...block);
+  };
+  add(runBlock(snapshot, hub, width, frame));
+  add(needsBlock(snapshot, listed, width));
+  add(workingBlock(snapshot, hub, agents, width, frame));
+  add(idleBlock(agents, hub, width));
   return finish(lines);
 }
 

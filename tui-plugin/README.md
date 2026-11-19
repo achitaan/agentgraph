@@ -6,36 +6,42 @@ The agent graph of the current OpenCode session, as text, in the terminal sideba
 ## What it shows
 
 ```
-⠋ orchestrator        ━━━━────── 4/11
+◉ orchestrator ⠋                 4/11
+━━━━━━━━━━━━━────────────────────────
+$6.57  12.0k↑ 70.9k↓  ctx 124k
 
-○ council
-  ○ fable
-  ○ astra
-  ○ carbon
+! impl-claude stuck ↻5
+! reviewer stuck
+↩ impl-open… sent back ↻3 by reviewer
 
-○ oracle
-○ oracle-lite
+⠋ impl-claude ↻5                $1.35
+  Apply the limiter in the middlewar…
+⠙ designer                      $0.09
+  429 error page and retry-after mes…
 
-○ impl-openai ↻3 ⇄ reviewer
-● impl-claude ↻5 ⇄ reviewer Apply th…
-○ impl-hard
-● designer ⇄ reviewer 429 error page…
-
+○ council fable astra carbon
+○ oracle oracle-lite
+○ impl-openai impl-hard
 ○ reviewer
-
-○ explorer ⇄ oracle
-○ researcher
+○ explorer researcher
 ```
 
-- First line: the hub (the agent running this session). A spinner while it works, then the run's progress bar and
-  `passed/total` when there is a graph.
-- Then every other agent, grouped (blank line between groups) in this order: council (lead, seats indented under it,
-  `councillor-` removed), decide, build, verify, understand.
-- `●` working, `○` idle. A working agent shows its current step's goal, shortened to fit.
-- `↻N` a work loop that has gone round N ≥ 2 times; `↻N!` (or `↻!`) a stuck one.
-- `⇄ name` a review loop with that evaluator, on the worker's line; highlighted while it is active.
+Four blocks, one blank line between them; an empty block is left out.
+
+- **Run**: the hub (`◉`, a spinner after the name while it works), `passed/total` on the right, a progress bar across
+  the width, then spend: dollars, tokens in `↑` and out `↓`, and `ctx` (tokens in the hub's context window) when the
+  snapshot has it. Tokens read `950`, `12.4k`, `2.1M`.
+- **Needs you** (only when something does; at most 5, then `+N more`), most urgent first, one line per agent:
+  `! name stuck ↻N` (a stuck work loop, or a failed, blocked or stalled step), `↩ name sent back ↻N by evaluator`
+  (a review loop that sent the work back), `? name waiting` (reported a pass, nobody has checked it). An agent that
+  is both sent back and waiting shows the sent-back line only.
+- **Working**: agents that are busy (not the hub), most expensive first. Name, `↻N` once its work loop is on round
+  2 or more, the agent's total cost on the right, and its current step below.
+- **Idle**: everything else, dimmed, one line per group (council, decide, build, verify, understand, others); the
+  council lead first, seats by their short name; long groups wrap onto an indented line.
 - An error document is one line of error text. `Loading` before the first snapshot, `No agents` when there are none,
   `No session` outside a session.
+- Nothing animates unless something works: the frame timer runs only while the hub or any agent is busy.
 - Live things use the theme's warning or accent colour (whichever is nearer terracotta). A green one is never used:
   if both are green, live things are the plain text colour in bold.
 
@@ -86,7 +92,7 @@ the session changed is dropped. The cleanup stops both timers and kills a runnin
 - Text only; no mouse actions.
 - The host shows the sidebar only when the terminal is wider than about 120 columns, and never in a subagent's own
   session.
-- Glyph widths assume a terminal that draws `● ○ ━ ─ ↻ ⇄ ⠋` one column wide (East Asian "ambiguous" width set to
+- Glyph widths assume a terminal that draws `◉ ○ ━ ─ ↻ ↩ ↑ ↓ ⠋` one column wide (East Asian "ambiguous" width set to
   narrow, the default almost everywhere).
 
 ## Files
