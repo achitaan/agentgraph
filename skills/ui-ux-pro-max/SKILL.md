@@ -328,7 +328,7 @@ The bundled scripts require Python 3 (standard library only — no third-party p
 python3 --version || python --version
 ```
 
-If Python is not installed, **do not install it yourself**. Stop and ask the user to install Python 3 using their preferred method (e.g. from [python.org](https://www.python.org/downloads/) or their OS package manager), then continue once it is available. Never run package-manager or system-modifying commands (`sudo`, `brew`, `apt`, `winget`, etc.) on the user's machine for this skill.
+If Python is not installed, **do not install it yourself**. Stop and report that Python 3 is missing and that it must be installed (e.g. from [python.org](https://www.python.org/downloads/) or the OS package manager) before the scripts can run. Never run package-manager or system-modifying commands (`sudo`, `brew`, `apt`, `winget`, etc.) on the user's machine for this skill.
 
 If the user prefers not to install Python, skip the CLI searches and rely on the Quick Reference sections above.
 
@@ -380,7 +380,7 @@ Extract key information from user request:
 - **Target audience**: C-end consumer users; consider age group, usage context (commute, leisure, work)
 - **Style keywords**: playful, vibrant, minimal, dark mode, content-first, immersive, etc.
 - **Stack**: whatever the user is actually building with — infer it from the project
-  (package.json, existing files, explicit request) or ask. Then load its rules with
+  (package.json, existing files, explicit request) or report that it is unknown. Then load its rules with
   `--stack <name>` (see "Available Stacks"). Do not assume React Native.
 - **Platform**: web or native app. Several sections below are scoped to App UI
   (iOS/Android/React Native/Flutter) and do not apply to desktop-web work —
@@ -615,7 +615,7 @@ python3 ~/.agents/skills/ui-ux-pro-max/scripts/search.py "fintech crypto" --desi
 For web/desktop work, apply the relevant Quick Reference sections and focused searches. The device, Dynamic Type, touch-target, and safe-area checks below apply only to native/mobile app UI.
 
 - Run focused searches only for concerns present in the interface, for example `"keyboard focus modal" --domain ux`
-- Run through Quick Reference **§1–§3** (CRITICAL + HIGH) as a final review
+- Run through Quick Reference **§1–§3** (CRITICAL + HIGH) as a self-check before reporting
 - Test on 375px (small phone) and landscape orientation
 - Verify behavior with **reduced-motion** enabled and **Dynamic Type** at largest size
 - Check dark mode contrast independently (don't assume light mode values work)

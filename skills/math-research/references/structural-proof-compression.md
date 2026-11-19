@@ -1,6 +1,6 @@
 # Finding structure in an existing proof
 
-Use when the user wants a conceptual replacement for a calculation-heavy, certificate-heavy, or pieced-together proof. For clearer exposition along the same route, use `math-proof-writing`.
+Use when the user wants a conceptual replacement for a calculation-heavy, certificate-heavy, or pieced-together proof. Clearer exposition along the same route is outside this skill.
 
 A structural improvement replaces work with a mechanism that explains and generates the needed estimates. Preserve the exact theorem and the old proof's evidence status. A rigorous computational proof is valid evidence; the task is to find a simpler route, not to presume one exists.
 

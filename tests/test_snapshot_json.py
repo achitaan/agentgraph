@@ -243,6 +243,36 @@ class SnapshotDocumentTests(unittest.TestCase):
                          ("hub", False, 0))
         self.assertNotIn("orchestrator", agents)
 
+    def test_the_hub_carries_its_skills_like_any_agent(self):
+        # "*" is kept as written (the view expands it from `skills`), a list is kept in order
+        # (an empty one too), and a hub outside the roster may load every skill.
+        for root_name, listed, expected in (("orchestrator", ["*"], ["*"]),
+                                            ("orchestrator", ["humanizer", "grilling"], ["humanizer", "grilling"]),
+                                            ("orchestrator", [], []),
+                                            ("build", None, ["*"]), ("plan", None, ["*"])):
+            with self.subTest(root_name=root_name, listed=listed):
+                snap = demo_snapshot(1000)
+                snap.root.agent = root_name
+                if listed is not None:
+                    next(agent for agent in snap.roster if agent.name == "orchestrator").skills = list(listed)
+                doc = snapshot_json.snapshot_document(snap, "demo")
+                hub = doc["groups"][0]["agents"][0]
+                self.assertEqual(hub, root_name)
+                self.assertEqual(next(a for a in doc["agents"] if a["name"] == hub)["skills"], expected)
+
+    def test_only_the_hub_outside_the_roster_gets_every_skill(self):
+        snap = demo_snapshot(1000)
+        snap.root.agent = "build"
+        snap.sessions += [replace(snap.root, id="outsider", agent="stranger", parent_id=snap.root.id, busy=True)]
+        for agent in snap.roster:
+            agent.skills = ["code-assurance"] if agent.name != "council" else []
+        doc = snapshot_json.snapshot_document(snap, "demo")
+        skills = {agent["name"]: agent["skills"] for agent in doc["agents"]}
+        self.assertEqual(skills["build"], ["*"])        # the hub, not in the roster
+        self.assertEqual(skills["stranger"], [])        # a worker outside the roster stays as it was
+        self.assertEqual(skills["council"], [])         # an empty roster list stays empty
+        self.assertEqual(skills["reviewer"], ["code-assurance"])
+
     def test_user_or_a_disabled_agent_cannot_be_the_hub(self):
         for root_name, disabled in (("user", []), ("observer", ["observer"])):
             with self.subTest(root_name=root_name):

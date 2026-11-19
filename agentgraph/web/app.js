@@ -1132,8 +1132,28 @@
         if (agent.pool) badges.append(el('span', 'ag-badge', 'Pool of ' + agent.pool));
         detailScroll.append(badges);
         stats(detailScroll, usageOf(agent.sessions));
-        if (agent.skills?.includes('*')) section(detailScroll, 'Skills', 'all' + (snapshot.skills?.length ? ' · ' + snapshot.skills.length : ''));
-        else if (agent.skills?.length) {
+        if (agent.skills?.includes('*')) {
+          // "all" is every installed skill: say so, and let the reader open what that is.
+          const everything = snapshot.skills || [];
+          const all = section(detailScroll, 'Skills', 'all' + (everything.length ? ' · ' + everything.length : ''));
+          if (everything.length) {
+            const fold = el('details', 'ag-run-fold ag-skill-fold'); fold.dataset.runFold = 'agent-skills'; fold.open = openFolds.has('agent-skills');
+            const summary = el('summary'); summary.append(el('span', '', 'Installed skills'), el('span', 'ag-fold-count', String(everything.length)));
+            fold.append(summary);
+            const fill = () => {
+              if (fold.querySelector('.ag-fold-body')) return;
+              const body = el('div', 'ag-fold-body');
+              appendList(body, everything, skill => {
+                const row = el('div', 'ag-skill-row'); row.dataset.skill = text(skill.name);
+                row.append(el('span', 'ag-skill-name', text(skill.name)), el('span', 'ag-skill-about', text(skill.description)));
+                row.title = text(skill.description || skill.name); body.append(row);
+              });
+              fold.append(body);
+            };
+            lazySteps.set(fold, fill); if (fold.open) fill();
+            all.append(fold);
+          }
+        } else if (agent.skills?.length) {
           // Each skill the agent may load, with what it is for.
           const about = new Map((snapshot.skills || []).map(skill => [skill.name, skill.description]));
           const list = section(detailScroll, 'Skills · ' + agent.skills.length);

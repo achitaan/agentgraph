@@ -343,6 +343,7 @@
 .agentgraph .ag-run-fold[open] > summary::after { content: '−'; }
 .agentgraph .ag-fold-body { padding-bottom: 14px; }
 .agentgraph .ag-fold-body .ag-detail-section { padding: 12px 0; }
+.agentgraph .ag-skill-fold { margin-top: 8px; }
 @keyframes ag-handoff { to { stroke-dashoffset: -64; } }
 @keyframes ag-loop-travel { to { stroke-dashoffset: -26; } }
 @keyframes ag-work-turn { to { stroke-dashoffset: -22; } }

@@ -1,6 +1,6 @@
 ---
 name: math-research
-description: "Discover, repair, refute, or structurally simplify mathematical proofs, especially hard or unknown-answer problems in OR/MS, optimization, probability, learning, games, and economic theory. Use when the missing work is a proof mechanism, construction, valid reduction, or global argument. Use math-proof-writing for exposition along an unchanged mathematical route."
+description: "Discover, repair, refute, or structurally simplify mathematical proofs, especially hard or unknown-answer problems in OR/MS, optimization, probability, learning, games, and economic theory. Use when the missing work is a proof mechanism, construction, valid reduction, or global argument. Not needed for writing up a proof whose mathematical route is already settled."
 ---
 
 # Math Research

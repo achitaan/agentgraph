@@ -304,10 +304,12 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
             model, effort = (related[0].model, related[0].effort) if related else ("", "")
             agent = Agent(name, model or "", effort or "", shape.group_of(name), contract.POOL.get(name))
         group = "hub" if name == root_name else shape.group_of(name or "")
+        # A root agent the roster does not list (OpenCode's own `build` or `plan`) is not filtered
+        # by the plugin, so it may load every skill; any other agent keeps its roster list.
         grouped[group].append({
             "name": name, "group": group, "model": agent.model, "effort": agent.effort,
             "pool": shape.pool(name, agent.pool), "configured": configured, "checks": shape.checks(name),
-            "skills": list(agent.skills), "about": shape.about(name),
+            "skills": ["*"] if name == root_name and not configured else list(agent.skills), "about": shape.about(name),
             "team": contract.team_of(name or ""), "parent": shape.parent_of(name or "", names),
             "busy": sum(bool(session.busy) for session in related),
             "sessions": [_session_document(session) for session in related],

@@ -4,7 +4,7 @@ The skills come from the personal Codex toolkit (`achitaan/codex-personal-toolki
 
 ## Which agent may load which skill
 
-Set in `~/.config/opencode/oh-my-opencode-slim.json`, the same in every preset. An agent sees only the skills listed for it; the orchestrator sees all. Each agent's details in the graph view list its skills.
+Set in `~/.config/opencode/oh-my-opencode-slim.json`, the same in every preset. An agent sees only the skills listed for it; the orchestrator sees all. Each agent's details in the graph view list its skills; for the orchestrator they say `all · N` and open to the name and description of every installed skill.
 
 | Agent | Skills |
 |---|---|

@@ -40,7 +40,7 @@ Core scripts require Python 3.10+ and its standard library. The optional agent r
 3. **Obstruction:** what premise, construction, identity, or witness would settle the first failed step?
 4. **Evidence:** what has actually been proved or checked, and does it cover the original theorem?
 
-Reference files supply specific methods only when needed. Use [discovery](references/proof-idea-generator.md) for a missing object, [structural compression](references/structural-proof-compression.md) for a replacement proof, and the [domain router](references/proof-router.md) for a relevant mathematical playbook. A fixed proof with clearer prose belongs to `math-proof-writing`.
+Reference files supply specific methods only when needed. Use [discovery](references/proof-idea-generator.md) for a missing object, [structural compression](references/structural-proof-compression.md) for a replacement proof, and the [domain router](references/proof-router.md) for a relevant mathematical playbook. A fixed proof that only needs clearer prose is outside this skill.
 
 Structural simplification must reduce mathematical obligations. A shared budget, recurrence, potential, or symmetry can replace many calculations; simply naming the old calculation does not. Keep the valid old proof until the replacement covers the same claim and downstream uses.
 
@@ -108,7 +108,7 @@ https://github.com/jmf-enigma/math-research
 说明新机制为什么成立，以及真正省去了哪些计算和分类。
 ```
 
-[主文件](SKILL.md)负责目标、机制、障碍、证据四个判断；[具体方法](references/proof-router.md)按需读取。只改变表达、不改变数学路线时，使用 `math-proof-writing`。
+[主文件](SKILL.md)负责目标、机制、障碍、证据四个判断；[具体方法](references/proof-router.md)按需读取。只改变表达、不改变数学路线时，不属于本技能。
 
 ## 结构简化
 

@@ -19,7 +19,7 @@ Every skill in the toolkit, what was done with it for OpenCode, and which agents
 | `research-summarizer` | reworded | `researcher` | Summaries of supplied sources for the researcher. |
 | `context7-mcp` | keep | `explorer` | Library docs; only `explorer` has that tool. |
 | `design-taste-frontend` | reworded | `designer` | Original visual direction: designer. |
-| `ui-ux-pro-max` | keep | `designer` | App interfaces and design-system reference data: designer. |
+| `ui-ux-pro-max` | reworded | `designer` | App interfaces and design-system reference data: designer. |
 | `impeccable` | reworded | `designer` | Audit and polish of an existing interface: designer. |
 | `clone-any-website` | reworded | `designer` | Measured reconstruction of a site: designer. |
 | `playwright-cli` | reworded | `designer`, `verifier` | Browser evidence: the designer builds with it and the verifier checks interface items with it. |
@@ -40,20 +40,26 @@ Every skill in the toolkit, what was done with it for OpenCode, and which agents
 
 Verdicts: **keep** is unchanged from the Codex toolkit; **reworded** had host, model or delegation wording replaced (every replacement is in [OPENCODE-CHANGES.md](OPENCODE-CHANGES.md)); **rewritten** was substantially changed for this setup.
 
-Counts: 9 kept, 21 reworded, 3 rewritten, 33 in all. `shopify-ruby` is kept out of the toolkit as a separate, employer-specific skill.
+Counts: 8 kept, 22 reworded, 3 rewritten, 33 in all. `shopify-ruby` is kept out of the toolkit as a separate, employer-specific skill.
 
 A second pass removed from 13 worker-loaded skills the instructions a worker here cannot follow (asking the user, committing or resetting history, global installs, attempt caps, a self-review as the final check, pointers to skills that are not installed). The same limits are stated once in every worker's prompt ("Skills serve the brief"), so a skill added later is covered too.
 
 2026-11-19: the user asked for `oracle-lite` and `oracle` to share one skill list and to differ by angle (the oracle works a question in depth; `oracle-lite` challenges the framing and the plan). `oracle-lite` therefore gained `math-research`, `sympy` and `experimental-design`.
 
+## Fixed 2026-11-19
+
+Wording only; what each skill teaches is unchanged. Backups are in `~/.config/opencode/backups/2026-11-19-pre-leftovers/`.
+
+- `math-research`: the description's last sentence no longer points at `math-proof-writing` (not installed). Before: "Use math-proof-writing for exposition along an unchanged mathematical route." After: "Not needed for writing up a proof whose mathematical route is already settled." Three more mentions, in `references/structural-proof-compression.md` (line 3) and `README.md` (lines 43 and 111), were reworded the same way.
+- `ui-ux-pro-max`: three lines. A missing Python 3 now means "report that it is missing and that it must be installed" instead of asking the user; "or ask" (which stack) became "or report that it is unknown"; the checklist is "a self-check before reporting" instead of "a final review". This skill lives in `~/.agents/skills/`, which OpenCode also reads (skills page, Discovery table), and `sync.sh` does not carry it, so the repository copy (`skills/ui-ux-pro-max/`) is kept by hand and was updated with these three lines.
+- `playwright-cli`: "record user actions in the browser" now says "record the actions performed in the automated browser session".
+- The orchestrator's details in the graph view now show its skills: `all · N` and a closed fold with every installed skill (see `WEB_API.md`). A root agent the roster does not list (OpenCode's own `build` or `plan`) is given `*` in the snapshot, because the plugin does not filter it.
+
+`allowed-tools` (`sympy`, `experimental-design`, `playwright-cli`): not removed. The OpenCode V2 skills page (`https://opencode.ai/v2/docs/skills`, read 2026-11-19) lists the frontmatter fields it reads: `name`, `description`, `metadata.opencode/autoinvoke` and `disable-model-invocation`; it says V2 "accepts portability fields such as `license` and `compatibility` but does not interpret them", and it does not mention `allowed-tools` at all. So the documentation does not list `allowed-tools` as a field OpenCode V2 reads; whether the installed build ignores it was not tested, and the page is for V2 only.
+
 ## Left for a later pass
 
-Found by the audit or the verifier and not changed, because the rule in every worker prompt already covers them or the decision is the user's:
+Not changed, because the rule in every worker prompt already covers them or the decision is the user's:
 
-- `math-research`: its description still points at `math-proof-writing`, which is not installed. Changing a description changes when the skill is chosen.
-- `math-research`: `scripts/proof_loop.py` defaults to three iterations and launches the Codex CLI. The skill now says only the orchestrator decides to run it.
+- `math-research`: `scripts/proof_loop.py` defaults to three iterations and launches the Codex CLI. The skill now says only the orchestrator decides to run it; the scripts were out of scope for a wording pass.
 - `supabase`, `exa-research`, `context7-mcp`, `experimental-design`, `sympy`, `design-taste-frontend`: lines that fetch web pages or documentation. A worker without that tool reports the need.
-- `ui-ux-pro-max`: three lines ask the user or call its checklist a final review. It lives outside the OpenCode skills folder, so `sync.sh` does not carry it.
-- `playwright-cli`: "record user actions" could be read as needing a person.
-- `sympy`, `experimental-design`, `playwright-cli`: an `allowed-tools` frontmatter field from another host. It appears to be ignored here; that was not tested.
-

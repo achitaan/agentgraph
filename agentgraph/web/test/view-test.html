@@ -1265,6 +1265,35 @@
         assert(![...root.querySelectorAll('.ag-run-fold')].some(item => item.dataset.runFold === 'skills'), 'an empty skill list is shown');
       });
     });
+    await test('the hub lists its skills in its details: every one for "*", its own list, or nothing', async () => {
+      const skillsOf = root => [...root.querySelectorAll('.ag-detail-section')].filter(item => /^Skills/.test(item.querySelector('h3').textContent));
+      const data = fixture(); data.agents[0].skills = ['*'];
+      data.skills = [{ name: 'code-assurance', description: 'Review <b>code</b>' }, { name: 'sympy', description: 'Exact math' }];
+      await using(data, async (root, app) => {
+        open(root, 'orchestrator');
+        let [all] = skillsOf(root);
+        assert(skillsOf(root).length === 1 && all.querySelector('p').textContent === 'all · 2', 'the hub with every skill does not say all · 2');
+        let fold = all.querySelector('details.ag-skill-fold');
+        assert(fold && !fold.open && fold.querySelector('.ag-fold-count').textContent === '2' && !fold.querySelector('.ag-skill-row'), 'the catalogue is not a closed fold with a count');
+        assert(!root.querySelector('svg').textContent.includes('code-assurance'), 'a skill name appears in the graph area');
+        fold.open = true; await sleep(30);
+        const rows = [...fold.querySelectorAll('.ag-skill-row')];
+        assert(rows.map(row => row.textContent).join('|') === 'code-assuranceReview <b>code</b>|sympyExact math' && !fold.querySelector('b'), 'the catalogue rows are wrong: ' + rows.map(row => row.textContent).join('|'));
+        assert(rows[0].title === 'Review <b>code</b>' && rows[1].title === 'Exact math', 'a row has no description as its tooltip');
+        assert(/monospace/.test(getComputedStyle(rows[0]).fontFamily) && /monospace/.test(getComputedStyle(fold.querySelector('summary')).fontFamily), 'the catalogue is not monospace');
+        await app.refresh(); open(root, 'orchestrator'); fold = skillsOf(root)[0].querySelector('details.ag-skill-fold');
+        assert(fold.open && fold.querySelectorAll('.ag-skill-row').length === 2, 'the catalogue closes when the data is refreshed');
+        root.querySelector('.ag-close').click();
+        data.agents[0].skills = ['code-assurance'];
+        await app.refresh(); open(root, 'orchestrator');
+        [all] = skillsOf(root);
+        assert(skillsOf(root).length === 1 && all.querySelector('h3').textContent === 'Skills · 1' && !all.querySelector('details') && [...all.querySelectorAll('.ag-skill-row')].map(row => row.textContent).join('|') === 'code-assuranceReview <b>code</b>', 'the hub with a short list does not list it like an agent');
+        root.querySelector('.ag-close').click();
+        data.agents[0].skills = [];
+        await app.refresh(); open(root, 'orchestrator');
+        assert(skillsOf(root).length === 0, 'a hub with no skills shows a skills section');
+      });
+    });
     await test('with a structure folder the ring follows its group order and changes when it changes', async () => {
       const data = fixture(); data.agents = data.agents.filter(a => a.team === 'main' && !a.parent && a.name !== 'council');
       data.agents.push(agent('scout', 'scouts'), agent('oracle', 'decide'));
