@@ -43,7 +43,7 @@ class SnapshotDocumentTests(unittest.TestCase):
                 self.assertIsNone(doc["root"]["wear"])
                 self.assertEqual(len(doc["agents"]), 14)
                 for agent in doc["agents"]:
-                    self.assertKeys(agent, "name group model effort pool configured checks skills busy sessions team parent")
+                    self.assertKeys(agent, "name group model effort pool configured checks skills about busy sessions team parent")
                     self.assertEqual(agent["team"], "main")
                     self.assertEqual(agent["parent"], "council" if agent["name"].startswith("councillor-") else "")
                     for session in agent["sessions"]:
@@ -159,6 +159,29 @@ class SnapshotDocumentTests(unittest.TestCase):
         plain = snapshot_json.snapshot_document(demo_snapshot(1000), "demo")
         self.assertEqual(plain["structure"], {"source": "builtin"})
         self.assertEqual([group["id"] for group in plain["groups"]], ["hub", "understand", "decide", "council", "build", "verify"])
+
+    def test_an_agent_carries_the_description_from_its_structure_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            def agent_file(rel, text=""):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text)
+            agent_file("00-hub/orchestrator.md", "Plans the work.\nThen dispatches it.\n")
+            agent_file("10-build/impl-openai.md", "pool: 3\nescalates_to: impl-claude\n\nBuilds bounded work.  It hands back changes: a diff.\n")
+            agent_file("10-build/impl-claude.md", "pool: 2\n")
+            agent_file("10-build/reviewer.md")
+            shape = snapshot_json.load_structure(root)
+            self.assertEqual(shape["about"], {"orchestrator": "Plans the work. Then dispatches it.",
+                                              "impl-openai": "Builds bounded work. It hands back changes: a diff."})
+            self.assertEqual(shape["pool"], {"impl-openai": 3, "impl-claude": 2})
+            doc = snapshot_json.snapshot_document(demo_snapshot(1000), "demo", structure=shape)
+            about = {agent["name"]: agent["about"] for agent in doc["agents"]}
+            self.assertEqual(about["orchestrator"], "Plans the work. Then dispatches it.")
+            self.assertEqual(about["impl-openai"], "Builds bounded work. It hands back changes: a diff.")
+            self.assertEqual((about["impl-claude"], about["reviewer"], about["designer"]), ("", "", ""))
+        plain = snapshot_json.snapshot_document(demo_snapshot(1000), "demo")
+        self.assertEqual({agent["about"] for agent in plain["agents"]}, {""})
 
     def test_skills_are_listed_with_their_descriptions(self):
         import tempfile

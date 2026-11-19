@@ -1,1 +1,1 @@
-Plans, splits the work into a graph, dispatches, accepts results. Whoever runs the session sits here.
+Plans the task, splits it into a graph of independent steps and dispatches each step to the agent that fits. It does small edits itself and accepts or rejects what comes back. Whoever runs the session sits here, and it hands the user the verified result.

@@ -1207,6 +1207,22 @@
         assert(!/monospace/.test(getComputedStyle(root.querySelector('.ag-agent-name')).fontFamily), 'agent names changed face');
       });
     });
+    await test('an agent with a description shows it first in its details, in the muted monospace; one without shows none', async () => {
+      const described = fixture(); described.agents.find(a => a.name === 'impl-openai').about = 'Takes bounded tasks <b>fast</b>. Hands back changes.';
+      described.agents.find(a => a.name === 'impl-openai').skills = ['code-assurance']; described.skills = [{ name: 'code-assurance', description: 'Review code' }];
+      await using(described, root => {
+        open(root, 'impl-openai');
+        const scroll = root.querySelector('.ag-detail-scroll'), about = scroll.querySelectorAll('.ag-detail-about');
+        assert(about.length === 1 && about[0].textContent === 'Takes bounded tasks <b>fast</b>. Hands back changes.' && !about[0].querySelector('b'), 'the description is missing or not plain text');
+        assert(scroll.children[0].classList.contains('ag-detail-title') && scroll.children[1] === about[0], 'the description is not the first line after the title');
+        assert(about[0].compareDocumentPosition(scroll.querySelector('.ag-detail-badges')) & Node.DOCUMENT_POSITION_FOLLOWING && about[0].compareDocumentPosition(scroll.querySelector('.ag-skill-row')) & Node.DOCUMENT_POSITION_FOLLOWING, 'the description is not before the other lines and the skills');
+        const style = getComputedStyle(about[0]);
+        assert(/monospace/.test(style.fontFamily) && style.color === getComputedStyle(root.querySelector('.ag-eyebrow')).color && style.whiteSpace === 'normal', 'the description is not muted wrapped monospace');
+        assert(!root.querySelector('svg').textContent.includes('bounded tasks'), 'a description appears in the graph area');
+        root.querySelector('.ag-close').click(); open(root, 'impl-claude');
+        assert(!root.querySelector('.ag-detail-about'), 'an agent without a description shows an element for it');
+      });
+    });
     await test('the outer loop round the centre shows every note and opens the learning panel', async () => {
       const data = fixture();
       data.learning = { total: 5, pending: 2, due: true, runs: 3, improvements: 1, last_improvement: 10, lessons: ['Review early'], trend: { before: { runs: 2, first_pass_rate: 0.25, mean_attempts: 2.5 }, after: { runs: 1, first_pass_rate: 0.5, mean_attempts: 1.5 } }, changes: [{ time: Date.now() / 1000 - 7200, summary: 'Ask for small diffs', file: 'impl.md' }],

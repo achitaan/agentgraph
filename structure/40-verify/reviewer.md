@@ -1,1 +1,1 @@
-Judges the whole change once, independently.
+Reads a finished change independently, looking for bugs, risks and gaps against its intent. The orchestrator runs it once after substantial or risky work, such as multi-file changes, security or data migrations. It hands back findings ranked by severity and a verdict: confirmed, refuted or unverifiable.

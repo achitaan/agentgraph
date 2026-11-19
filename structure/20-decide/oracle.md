@@ -1,1 +1,1 @@
-Hard design, algorithm and debugging questions.
+The deep adviser for hard design, algorithm, mathematics and debugging questions. Its angle is depth: it works the problem through from first principles and commits to one recommendation. The orchestrator asks it when a wrong plan is costly, and it hands back that recommendation with its reasoning.

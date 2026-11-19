@@ -10,4 +10,6 @@ This folder is the shape of the agent team, and the graph is drawn from it.
   - `checks: all`: it checks every other agent's work, so the graph links it to all of them;
   - `seats: councillor-`: agents whose names start with this sit in a circle round it.
 
+The text after the settings is the agent's description: two or three plain sentences on what it does, when the orchestrator uses it and what it hands back, under 320 characters, with no model names (models come from the preset). It is carried in the snapshot as `agents[].about` and shown first in the agent's details in the graph view. `tests/test_structure_descriptions.py` checks it.
+
 Which agents exist, and their models and skills, still come from the active preset in `oh-my-opencode-slim.json`: an agent with a file here and no entry there is not drawn. Without this folder the graph uses its built-in table.

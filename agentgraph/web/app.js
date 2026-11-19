@@ -1123,7 +1123,9 @@
       } else if (selected.type === 'agent') {
         eyebrow.textContent = 'Agent';
         if (!agent) { detailScroll.append(el('h2', 'ag-detail-title', 'Unavailable')); return; }
-        detailScroll.append(el('h2', 'ag-detail-title', agent.name), el('p', 'ag-detail-intro', agent.model || '—'));
+        detailScroll.append(el('h2', 'ag-detail-title', agent.name));
+        if (agent.about) detailScroll.append(el('p', 'ag-detail-about', text(agent.about)));
+        detailScroll.append(el('p', 'ag-detail-intro', agent.model || '—'));
         const badges = el('div', 'ag-detail-badges');
         badges.append(el('span', 'ag-badge', agent.busy ? agent.busy + ' active' : 'Idle'));
         if (agent.effort) badges.append(el('span', 'ag-badge', agent.effort + ' effort'));

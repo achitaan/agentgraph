@@ -260,6 +260,7 @@
 .agentgraph .ag-detail-scroll > *, .agentgraph .ag-detail-section li { overflow-wrap: anywhere; }
 .agentgraph .ag-detail-title { margin: 0 0 6px; font: 18px/1.2 Georgia, 'Times New Roman', serif; letter-spacing: -.02em; overflow-wrap: anywhere; }
 .agentgraph .ag-detail-intro { margin: 0 0 10px; color: var(--ag-intro); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.agentgraph .ag-detail-about { margin: 0 0 12px; color: var(--ag-muted); font-size: 11px; line-height: 1.55; white-space: normal; overflow-wrap: anywhere; }
 .agentgraph .ag-detail-badges { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 14px; }
 .agentgraph .ag-badge { background: var(--ag-badge-bg); padding: 2px 6px; border-radius: 4px; color: var(--ag-badge-ink); font-size: 10px; }
 .agentgraph .ag-detail-section { padding: 11px 0; border-top: 1px solid var(--ag-divider); }

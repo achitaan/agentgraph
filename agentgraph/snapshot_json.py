@@ -152,13 +152,14 @@ def load_structure(directory: Path | None = None) -> dict | None:
     order (a leading number and dash set the order and are dropped), one `.md`
     file per agent. A file may start with `key: value` lines: `pool` (a number),
     `escalates_to` (an agent), `checks: all`, `seats` (a name prefix whose agents
-    sit round this one). None when the folder does not exist or holds no group."""
+    sit round this one). The text after the settings is the agent's description,
+    kept as `about`. None when the folder does not exist or holds no group."""
     root = Path(directory) if directory is not None else STRUCTURE_DIR
     try:
         folders = sorted(path for path in root.iterdir() if path.is_dir() and not path.name.startswith("."))[:50]
     except OSError:
         return None
-    shape: dict = {"groups": [], "titles": {}, "group_of": {}, "pool": {}, "escalation": [], "checkers": set(), "seats": {}}
+    shape: dict = {"groups": [], "titles": {}, "group_of": {}, "pool": {}, "escalation": [], "checkers": set(), "seats": {}, "about": {}}
     for folder in folders:
         group = re.sub(r"^\d+[-_]", "", folder.name)
         if not group or group in shape["titles"]:
@@ -176,18 +177,22 @@ def load_structure(directory: Path | None = None) -> dict | None:
             shape["group_of"][name] = group
             try:
                 with path.open("rb") as stream:
-                    head = stream.read(2048).decode("utf-8", "replace")
+                    head = stream.read(4096).decode("utf-8", "replace")
             except OSError:
                 continue
             seen = False
-            for line in head.splitlines()[:12]:
+            lines = head.splitlines()
+            prose_from = len(lines)  # where the description starts; none when the file is all settings
+            for index, line in enumerate(lines[:12]):
                 key, sep, value = line.partition(":")
                 key, value = key.strip().lower(), value.strip().strip("`'\"")
                 if line.strip() in ("", "---"):
                     if seen:
+                        prose_from = index + 1
                         break  # a blank line closes the settings
                     continue
                 if not sep or not value or key not in ("pool", "escalates_to", "checks", "seats"):
+                    prose_from = index
                     break  # the settings end at the first line of prose
                 seen = True
                 if key == "pool" and value.isdigit():
@@ -198,6 +203,9 @@ def load_structure(directory: Path | None = None) -> dict | None:
                     shape["checkers"].add(name)
                 elif key == "seats":
                     shape["seats"][name] = value
+            about = " ".join(" ".join(lines[prose_from:]).split())
+            if about:
+                shape["about"][name] = about[:600]
     return shape if shape["groups"] else None
 
 
@@ -232,6 +240,9 @@ class _Shape:
             return contract.parent_of(name, names)
         return next((lead for lead, prefix in self.structure["seats"].items()
                      if name.startswith(prefix) and name != lead and lead in names), "")
+
+    def about(self, name: str) -> str:
+        return self.structure["about"].get(name, "") if self.structure else ""
 
     def checks(self, name: str) -> bool:
         return name in (self.structure["checkers"] if self.structure else contract.CHECKERS)
@@ -296,7 +307,7 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
         grouped[group].append({
             "name": name, "group": group, "model": agent.model, "effort": agent.effort,
             "pool": shape.pool(name, agent.pool), "configured": configured, "checks": shape.checks(name),
-            "skills": list(agent.skills),
+            "skills": list(agent.skills), "about": shape.about(name),
             "team": contract.team_of(name or ""), "parent": shape.parent_of(name or "", names),
             "busy": sum(bool(session.busy) for session in related),
             "sessions": [_session_document(session) for session in related],
