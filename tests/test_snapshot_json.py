@@ -150,6 +150,11 @@ class SnapshotDocumentTests(unittest.TestCase):
             (root / "memory-fast").mkdir()
             (root / "oh-my-opencode-slim.json").write_text(json.dumps({"preset": "fast"}))
             self.assertEqual(snapshot_json.learning_document(root, root)["total"], 0)
+            # ultra-fast keeps its ledger under a historical name, the one its improvement skill writes to.
+            (root / "memory-o2").mkdir()
+            (root / "memory-o2" / "feedback.jsonl").write_text(json.dumps({"time": 9.0, "text": "n", "agent": "a", "task": "t"}) + "\n")
+            (root / "oh-my-opencode-slim.json").write_text(json.dumps({"preset": "ultra-fast"}))
+            self.assertEqual(snapshot_json.learning_document(root, root)["total"], 1)
 
     def test_an_idle_root_outside_the_roster_is_still_the_hub(self):
         snap = demo_snapshot(1000)

@@ -229,6 +229,10 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
     })
 
 
+# The ledger each preset's improvement skill writes to, where it is not memory-<preset>.
+_LEDGER_HOMES = {"ultra-fast": "memory-o2"}
+
+
 def learning_document(home_root: Path | None = None, config_dir: Path | None = None) -> dict | None:
     """What the ledger has stored for the active preset: the user's notes in
     their own words, whether a prompt change is due, and each agent's record
@@ -242,7 +246,7 @@ def learning_document(home_root: Path | None = None, config_dir: Path | None = N
             preset = str(config.get("preset") or "")
         except Exception:  # noqa: BLE001
             pass
-        home = root / f"memory-{preset}"
+        home = root / _LEDGER_HOMES.get(preset, f"memory-{preset}")
         if not preset or "/" in preset or not home.is_dir():
             home = root / "memory"
         if not home.is_dir():
