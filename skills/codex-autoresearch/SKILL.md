@@ -11,7 +11,7 @@ Improve a repository through repeated, reversible experiments:
 
 `hypothesize -> change -> measure -> learn -> keep or revert -> repeat`
 
-Codex chooses hypotheses and makes code changes. The control script owns measurement, commits, rollback, and the event history.
+The agent chooses hypotheses and makes code changes. The control script owns measurement, commits, rollback, and the event history.
 
 ## Respond To The Request
 
@@ -42,4 +42,4 @@ Before starting or resuming an experiment, read the applicable workflow unless i
 - Validate state through the control script on entry or resume. Use recorded experiments rather than guessing from conversation.
 - Surface command and state errors with their diagnostic paths. Never bypass validation, fabricate metrics, or reconstruct missing events.
 
-Foreground continuation belongs to the official Codex Goal. Background continuation belongs to the detached controller. An already launched background worker follows its supplied experiment contract, without starting a new launch flow.
+Foreground continuation belongs to the session's goal (in OpenCode, a goal set for the orchestrator's session; in Codex, the official Codex Goal). Background continuation belongs to the detached controller, which launches the Codex CLI: use it only where that CLI is installed. An already launched background worker follows its supplied experiment contract, without starting a new launch flow.
