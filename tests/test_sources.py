@@ -644,6 +644,19 @@ class Snapshots(unittest.TestCase):
             snap = build_snapshot(base / "cfg", gd, db, root_id="r2", now=1.0)
             self.assertEqual(snap.root.id, "r2")
 
+    def test_roster_carries_each_agents_skills(self):
+        with tempfile.TemporaryDirectory() as t:
+            cfg = Path(t)
+            (cfg / "oh-my-opencode-slim.json").write_text(json.dumps({"preset": "p", "presets": {"p": {
+                "orchestrator": {"model": "a/b", "variant": "high", "skills": ["*"]},
+                "impl-openai": {"model": "a/b", "skills": ["engineering-delivery", 7, "code-assurance"]},
+                "reviewer": {"model": "a/b", "skills": "code-assurance"},
+                "explorer": {"model": "a/b"}}}}))
+            roster, _ = load_roster(cfg)
+            skills = {agent.name: agent.skills for agent in roster}
+            self.assertEqual(skills, {"orchestrator": ["*"], "impl-openai": ["engineering-delivery", "code-assurance"],
+                                      "reviewer": [], "explorer": []})
+
     def test_session_graphs_are_found_in_a_second_folder_only_when_owned(self):
         with tempfile.TemporaryDirectory() as t:
             base = Path(t).resolve()

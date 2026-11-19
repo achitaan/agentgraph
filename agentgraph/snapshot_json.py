@@ -197,6 +197,7 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
         grouped[group].append({
             "name": name, "group": group, "model": agent.model, "effort": agent.effort,
             "pool": agent.pool, "configured": configured, "checks": name in contract.CHECKERS,
+            "skills": list(agent.skills),
             "team": contract.team_of(name or ""), "parent": contract.parent_of(name or "", names),
             "busy": sum(bool(session.busy) for session in related),
             "sessions": [_session_document(session) for session in related],
@@ -255,6 +256,13 @@ def learning_document(home_root: Path | None = None, config_dir: Path | None = N
             "notes": [{"time": item.get("time"), "agent": str(item.get("agent") or ""), "task": str(item.get("task") or ""),
                        "text": str(item.get("text") or "")[:400]} for item in notes[:50]],
             "lessons": [str(item["text"])[:400] for item in report["lessons"][:20]],
+            # Prompt changes already applied, newest first, and how runs went before and after the latest.
+            "changes": [{"time": item.get("time"), "summary": str(item.get("summary") or "")[:300],
+                         "file": ", ".join(map(str, item["file"])) if isinstance(item.get("file"), list)
+                         else str(item.get("file") or "")}
+                        for item in report.get("improvements", [])[-20:]][::-1],
+            "trend": {side: {key: metrics.get(key) for key in ("runs", "first_pass_rate", "mean_attempts")}
+                      for side, metrics in report["trend"].items()} if report.get("trend") else None,
             "agents": {name: {"steps": stats["nodes"], "first_pass_rate": stats["first_pass_rate"],
                               "mean_attempts": stats["mean_attempts"]}
                        for name, stats in list(report["agents"].items())[:100]},

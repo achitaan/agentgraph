@@ -108,6 +108,7 @@ class Agent:
     effort: str  # e.g. "high"
     group: str  # one of GROUPS
     pool: int | None = None  # standing pool size, if any
+    skills: list[str] = field(default_factory=list)  # skills it may load; ["*"] means all
 
 
 @dataclass

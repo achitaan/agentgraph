@@ -42,7 +42,7 @@ class SnapshotDocumentTests(unittest.TestCase):
                 self.assertKeys(doc["root"], session_keys + " agent directory")
                 self.assertEqual(len(doc["agents"]), 14)
                 for agent in doc["agents"]:
-                    self.assertKeys(agent, "name group model effort pool configured checks busy sessions team parent")
+                    self.assertKeys(agent, "name group model effort pool configured checks skills busy sessions team parent")
                     self.assertEqual(agent["team"], "main")
                     self.assertEqual(agent["parent"], "council" if agent["name"].startswith("councillor-") else "")
                     for session in agent["sessions"]:
@@ -106,6 +106,33 @@ class SnapshotDocumentTests(unittest.TestCase):
                     busy = snapshot_json.snapshot_document(snap, "demo")
                     self.assertEqual(busy["groups"][0]["agents"][0], root_name)
                     self.assertIn("orchestrator", busy["groups"][0]["agents"])
+
+    def test_learning_reports_notes_changes_and_what_is_still_pending(self):
+        import tempfile
+        from agentgraph import ledger
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            self.assertIsNone(snapshot_json.learning_document(root, root))  # no ledger at all
+            home = root / "memory"
+            home.mkdir()
+            def note(time, text, agent):
+                with (home / "feedback.jsonl").open("a") as stream:
+                    stream.write(json.dumps({"time": time, "text": text, "agent": agent, "task": "t"}) + "\n")
+            note(1.0, "Keep diffs small", "impl-openai")
+            note(2.0, "No green", "designer")
+            ledger.improved(home, 3.0, "prompts/impl.md", "Ask for small diffs")
+            note(5.0, "x" * 900, "impl-openai")
+            doc = snapshot_json.learning_document(root, root)
+            self.assertEqual((doc["total"], doc["pending"], doc["improvements"], doc["last_improvement"]), (3, 1, 1, 3.0))
+            self.assertEqual([item["time"] for item in doc["notes"]], [5.0, 2.0, 1.0])  # newest first
+            self.assertEqual((doc["notes"][1]["agent"], doc["notes"][1]["text"]), ("designer", "No green"))
+            self.assertEqual(len(doc["notes"][0]["text"]), 400)  # long notes are cut, never dropped
+            self.assertEqual(doc["changes"], [{"time": 3.0, "summary": "Ask for small diffs", "file": "prompts/impl.md"}])
+            self.assertIsInstance(doc["due"], bool)
+            # The active preset's own ledger wins when it exists.
+            (root / "memory-fast").mkdir()
+            (root / "oh-my-opencode-slim.json").write_text(json.dumps({"preset": "fast"}))
+            self.assertEqual(snapshot_json.learning_document(root, root)["total"], 0)
 
     def test_an_idle_root_outside_the_roster_is_still_the_hub(self):
         snap = demo_snapshot(1000)

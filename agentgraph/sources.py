@@ -108,6 +108,9 @@ def _load_roster(config_dir: Path) -> tuple[list[Agent], list[str], list[str]]:
                 parsed = _model_spec(spec)
                 if parsed:
                     agents.append(_agent(name, *parsed))
+                    listed = spec.get("skills") if isinstance(spec, dict) else None
+                    if isinstance(listed, list):
+                        agents[-1].skills = [str(skill)[:80] for skill in listed if isinstance(skill, str)][:50]
                 else:
                     warnings.append(f"roster: agent '{name}' has no usable model")
             council = config.get("council") or {}
