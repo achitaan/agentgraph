@@ -53,6 +53,7 @@ The web page is the clean view: one network of your agents that you can pan, zoo
 | `agentgraph improved --json-file PATH` | Mark that a prompt improvement was applied. |
 | `agentgraph serve [--port N] [--demo] [--open]` | Serve the graph view as a local web page. Listens on `127.0.0.1` only; `?task=NAME` picks a graph, `?select=n4` opens an item's details. |
 | `agentgraph snapshot [--demo]` | Print the data behind the view as one line of JSON (the format is in `WEB_API.md`). |
+| `agentgraph cost [--session ID] [--cap N]` | Where one chat's money went: warm and cold turns, why the cold ones happened, cost by context size, and what earlier compaction or a one-hour cache would have cost instead. |
 
 Keys in the live view: `1` agents, `2` tasks, `3` loops, `4` events, `5` issues, `0` dashboard, `j`/`k` or arrows to scroll, `?` help, `q` quit.
 

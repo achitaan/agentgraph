@@ -8,6 +8,7 @@
 #   agentgraph improved ...         mark that a prompt improvement was applied
 #   agentgraph serve [--port N]     the same view as a local web page (http://127.0.0.1:4747/)
 #   agentgraph snapshot             the data behind the view, as one line of JSON
+#   agentgraph cost [--session ID]  where one chat's money went, and what would have made it cheaper
 # -P: do not put the current directory on the import path, so a project that
 # has its own "agentgraph" package cannot shadow this tool.
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,6 +25,9 @@ case "$1" in
   serve)
     shift
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.server "$@" ;;
+  cost)
+    shift
+    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.cost "$@" ;;
   snapshot)
     shift
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.snapshot_json "$@" ;;
