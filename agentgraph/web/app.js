@@ -59,13 +59,36 @@
     const camera = { x: 0, y: 0, scale: 1, initialized: false, touched: false, width: 0, height: 0 };
     const pointers = new Map();
     let drag = null, pinch = null, suppressClick = false;
-    // Drawing loops: only when the host can write the structure. A click arms an agent and a second
-    // click (or one drag) asks for "the second checks the first"; a hold opens the details instead.
-    const setLoop = options.actions && typeof options.actions.setLoop === 'function' ? options.actions.setLoop : null;
-    if (setLoop) root.dataset.agLoops = 'draw';
-    const HOLD_MS = 350, STILL_PX = 6, UNDO_STEPS = 10;
-    let armed = '', press = null, hovered = '';
-    const pendingLoops = new Map(), freshLoops = new Set(), loopErrors = new Map(), loopHistory = [], drawnLoopViews = new Map(), timers = new Set();
+    // Drawing flows: only when the host can write the structure. A click starts a path at an agent, each
+    // further click adds a step (nothing is saved yet), and Enter, a second click on the newest agent or a
+    // double-click finishes it and asks the host to add the flow. Details open on a right-click (contextmenu),
+    // on `i`, the context-menu key or Shift+F10, and on a touch long press; a left click never opens them.
+    // A press that moves moves the agent, in every mode.
+    const flowAction = options.actions && typeof options.actions.flow === 'function' ? options.actions.flow : null;
+    const skillAction = options.actions && typeof options.actions.skills === 'function' ? options.actions.skills : null;
+    // Skill changes asked of the host: the one pending per agent ("add:NAME", "remove:NAME" or "all"), the host's
+    // answer until a snapshot shows it, and the lines said under the agent's skills after an answer.
+    const skillPending = new Map(), skillOverride = new Map(), skillNotes = new Map();
+    if (flowAction) root.dataset.agFlows = 'draw';
+    const MOVE_PX = 5, NUDGE_PX = 12, LONG_PRESS_MS = 500, DOUBLE_MS = 500, UNDO_STEPS = 10, FLOW_TEXT_CHARS = 2000;
+    // A touch press that may become a long press (details), and whether the browser's contextmenu event that a
+    // keyboard opening is followed by should be swallowed.
+    let hold = null, keyMenu = false;
+    // One meaning per gesture. `lastClick` is the newest clean click on an agent (a drag forgets it), so two of
+    // them on one lone agent within DOUBLE_MS are a double-click; `swallowClick` eats the browser's click after a
+    // drag ends, and `swallowDouble` the dblclick after a double-click that was already acted on.
+    let lastClick = null, swallowClick = false, swallowDouble = false;
+    // The drawn flow (or loop on itself) a left click picked: marked on the canvas, the target of Delete.
+    let pickedFlow = '';
+    let trail = [], trailPending = false, press = null, hovered = '', busyFlows = 0, loneCancel = '';
+    // Where the user put agents, per team and arrangement ("main:wide"): a body as { x, y } on the stage, a
+    // council seat as { dx, dy } from its lead. Kept for the session and, where the host has localStorage, across
+    // sessions under one key; an agent never moved keeps its automatic place. Nothing goes to the structure folder.
+    const POSITIONS_KEY = typeof options.positionsKey === 'string' && options.positionsKey ? options.positionsKey : 'agentgraph.positions.v1';
+    const moves = loadMoves();
+    // Presses since the last drag that moved something: a double-click counts only when its two clicks were clean.
+    let cleanPresses = Infinity;
+    const flowErrors = new Map(), flowHistory = [], routeViews = new Map(), freshRoutes = new Set(), timers = new Set();
     let layoutSignature = '', layoutFrame = null, resizeFrame = null, generation = 0, renderStamp = '';
     let arrangement = root.clientWidth > 0 && root.clientWidth <= 650 ? 'compact' : 'wide';
     let agentsByName = new Map(), stepsByAgent = new Map(), stepsById = new Map(), nodeOwners = new Map(), shownAgents = new Map();
@@ -119,10 +142,10 @@
     const viewport = el('div', 'ag-viewport');
     viewport.tabIndex = 0;
     viewport.setAttribute('role', 'group');
-    viewport.setAttribute('aria-keyshortcuts', 'F + - ArrowUp ArrowDown ArrowLeft ArrowRight Shift+Enter');
+    viewport.setAttribute('aria-keyshortcuts', 'F R + - ArrowUp ArrowDown ArrowLeft ArrowRight Shift+Enter');
     const drawing = svg('svg', { class: 'ag-drawing', width: '100%', height: '100%', 'aria-label': 'Agents' });
     const defs = svg('defs');
-    ['data', 'feedback', 'loop', 'work', 'work-stuck', 'work-closed', 'data-live', 'feedback-live', 'loop-live', 'work-live'].forEach(kind => {
+    ['data', 'feedback', 'loop', 'work', 'work-stuck', 'work-closed', 'data-live', 'feedback-live', 'loop-live', 'work-live', 'route'].forEach(kind => {
       const marker = svg('marker', { id: uid + '-' + kind, viewBox: '-7 -5 9 10', refX: 0, refY: 0, markerWidth: 9, markerHeight: 10, markerUnits: 'userSpaceOnUse', orient: 'auto' });
       marker.append(svg('polyline', { class: 'ag-arrow ag-arrow-' + kind, points: '-6,-3 0,0 -6,3' }));
       defs.append(marker);
@@ -133,9 +156,11 @@
     edgeLayer.append(spokeLayer, escalationLayer, flowLayer);
     const nodeLayer = svg('g', { class: 'ag-nodes' });
     const loopLayer = svg('g', { class: 'ag-loops' });
+    const routeLayer = svg('g', { class: 'ag-routes' });
+    const trailLayer = svg('g', { class: 'ag-trail', 'aria-hidden': 'true' });
     const wire = svg('line', { class: 'ag-wire', 'aria-hidden': 'true' });
     wire.style.display = 'none';
-    stage.append(edgeLayer, loopLayer, wire, nodeLayer); drawing.append(defs, stage);
+    stage.append(edgeLayer, loopLayer, routeLayer, trailLayer, wire, nodeLayer); drawing.append(defs, stage);
     const empty = el('div', 'ag-empty', 'Loading');
     viewport.append(drawing, empty);
     const panCue = el('button', 'ag-pan-cue');
@@ -168,7 +193,10 @@
       usageContext.dataset.level = String(info.wear.level || '');
       usageContext.replaceChildren(...parts);
     }
-    network.append(status, usage, viewport, controls);
+    // The pending path, for assistive technology only: nothing is written in the graph area.
+    const trailStatus = el('div', 'ag-sr-only');
+    trailStatus.setAttribute('role', 'status'); trailStatus.setAttribute('aria-live', 'polite');
+    network.append(status, usage, viewport, controls, trailStatus);
     const detail = el('aside', 'ag-detail');
     detail.hidden = true; detail.setAttribute('aria-label', 'Details');
     const detailHeader = el('div', 'ag-detail-header');
@@ -229,14 +257,19 @@
       stage.setAttribute('transform', 'translate(' + camera.x + ' ' + camera.y + ') scale(' + camera.scale + ')');
       updatePanCue();
     }
+    // What an agent takes up round its centre: its circle, its name and its busy count (top right).
+    function extentOf(p) {
+      return { left: Math.min(-p.r - 14, p.labelMin ?? -40), right: Math.max(p.r + 14, p.labelMax ?? 40), top: -p.r - (p.labelUp ? 26 : 16), bottom: p.r + (p.labelUp ? 16 : 28) };
+    }
     function graphBounds() {
       const points = visibleAgents.map(a => positions.get(a.name)).filter(Boolean);
       if (!points.length) return null;
+      const spans = points.map(p => ({ p, e: extentOf(p) }));
       return {
-        left: Math.min(...points.map(p => Math.min(p.x - p.r - 14, p.x + (p.labelMin ?? -40)))),
-        right: Math.max(...points.map(p => Math.max(p.x + p.r + 14, p.x + (p.labelMax ?? 40)))),
-        top: Math.min(...points.map(p => p.y - p.r - (p.labelUp ? 26 : 16))),
-        bottom: Math.max(...points.map(p => p.y + p.r + 50))
+        left: Math.min(...spans.map(({ p, e }) => p.x + e.left)),
+        right: Math.max(...spans.map(({ p, e }) => p.x + e.right)),
+        top: Math.min(...spans.map(({ p, e }) => p.y + e.top)),
+        bottom: Math.max(...spans.map(({ p, e }) => p.y + e.bottom))
       };
     }
     function updatePanCue() {
@@ -280,7 +313,12 @@
       const rect = viewport.getBoundingClientRect(), bounds = graphBounds();
       if (!rect.width || !rect.height || !bounds) return;
       if (arrangement === 'compact' && !userAction) {
-        camera.scale = 1; camera.x = rect.width / 2; camera.y = rect.height / 2;
+        // Every agent, its name and its count fit in the space left (the details sheet takes the lower part):
+        // full size when they fit, smaller when they do not.
+        const pad = 8, fit = Math.min((rect.width - pad * 2) / (bounds.right - bounds.left), (rect.height - pad * 2) / (bounds.bottom - bounds.top));
+        camera.scale = clamp(fit, .05, 1);
+        camera.x = rect.width / 2 - (bounds.left + bounds.right) / 2 * camera.scale;
+        camera.y = rect.height / 2 - (bounds.top + bounds.bottom) / 2 * camera.scale;
         clampPan();
       } else {
         const pad = arrangement === 'compact' ? 6 : 26;
@@ -392,10 +430,13 @@
       const isSeat = agent => agent.parent ? agent.parent !== hubName : agent.name.startsWith('councillor-');
       return a && b && !(a.group === 'hub' && isSeat(b)) && !(b.group === 'hub' && isSeat(a)) && (!isSeat(a) || a.parent === b.name) && (!isSeat(b) || b.parent === a.name);
     }
-    // An agent that can be either end of a drawn loop: shown, not the hub, not a council seat.
-    function loopEnd(name) {
+    function isHubAgent(name) { const agent = shownAgents.get(name); return !!agent && (agent.name === hubName || agent.group === 'hub'); }
+    function isSeatAgent(agent) { return agent.parent ? agent.parent !== hubName : agent.name.startsWith('councillor-'); }
+    // The agent a step of a flow stands for: a council seat stands for its council.
+    function standIn(name) {
       const agent = shownAgents.get(name);
-      return !!agent && agent.name !== hubName && agent.group !== 'hub' && !(agent.parent ? agent.parent !== hubName : agent.name.startsWith('councillor-'));
+      if (!agent) return '';
+      return isSeatAgent(agent) && agent.parent && shownAgents.has(agent.parent) ? agent.parent : name;
     }
     function later(fn, ms) {
       const timer = setTimeout(() => { timers.delete(timer); if (alive) fn(); }, ms);
@@ -406,13 +447,40 @@
       return flows().filter(f => f.from !== hubName && f.to !== hubName && allowedConnection(f.from, f.to) && !(['data', 'feedback'].includes(f.kind) && loopPairs.has(connectionKey(f.from, f.to))));
     }
     function displayName(agent) { return agent.parent ? agent.name.replace(/^councillor-/, '') : agent.name; }
+    function positionStore() { try { return typeof localStorage === 'undefined' ? null : localStorage; } catch (_) { return null; } }
+    function loadMoves() {
+      const kept = {};
+      try {
+        const raw = positionStore()?.getItem(POSITIONS_KEY), saved = raw ? JSON.parse(raw) : null;
+        Object.entries(saved && typeof saved.layouts === 'object' && saved.layouts ? saved.layouts : {}).forEach(([layout, agents]) => {
+          if (!agents || typeof agents !== 'object') return;
+          Object.entries(agents).forEach(([name, value]) => {
+            const body = value && Number.isFinite(value.x) && Number.isFinite(value.y), seat = value && Number.isFinite(value.dx) && Number.isFinite(value.dy);
+            if (body || seat) (kept[layout] ||= {})[name] = body ? { x: value.x, y: value.y } : { dx: value.dx, dy: value.dy };
+          });
+        });
+      } catch (_) { /* no storage, or nothing usable in it: the automatic layout */ }
+      return kept;
+    }
+    function saveMoves() {
+      try {
+        const store = positionStore();
+        if (!store) return;
+        if (Object.keys(moves).length) store.setItem(POSITIONS_KEY, JSON.stringify({ version: 1, layouts: moves }));
+        else store.removeItem(POSITIONS_KEY);
+      } catch (_) { /* storage full or refused: the positions still hold for this session */ }
+    }
+    function layoutKey() { return activeTeam + ':' + arrangement; }
+    function movedHere() { return moves[layoutKey()] || {}; }
+    function copyMoves(layout = layoutKey()) { return JSON.parse(JSON.stringify(moves[layout] || {})); }
     function stopLayout() {
       if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
       layoutFrame = null;
     }
     function cancelInteraction() {
       if (drag || pinch || pointers.size) suppressClick = true;
-      cancelPress(); if (!armed) wire.style.display = 'none';
+      if (press?.moved) { finishMove(press.before); swallowClick = true; lastClick = null; }
+      cancelPress(); clearHold(); if (!trail.length || trailPending) wire.style.display = 'none';
       drag = null; pinch = null;
       const captured = Array.from(pointers.keys()); pointers.clear();
       captured.forEach(id => { if (viewport.hasPointerCapture(id)) viewport.releasePointerCapture(id); });
@@ -459,8 +527,12 @@
       const rect = { width: root.clientWidth, height: Math.max(1, root.clientHeight - (notice.hidden ? 0 : notice.offsetHeight)) };
       if (rect.width <= 0 || viewport.clientWidth <= 0 || viewport.clientHeight <= 0) return;
       const compact = arrangement === 'compact';
+      // The canvas as it is with the details closed: a narrow oval grows into it, and opening the sheet does not re-lay
+      // out the agents (the camera fits them into what is left).
+      const sheet = compact && root.classList.contains('ag-details-open') ? parseFloat(getComputedStyle(root).getPropertyValue('--ag-sheet-height')) || 0 : 0;
+      const canvasHeight = Math.max(1, Math.round(viewport.clientHeight + sheet));
       const aspect = Math.round(clamp(rect.width / rect.height, 1, 1.3) * 20) / 20;
-      const signature = JSON.stringify([arrangement, compact ? [Math.round(rect.width), Math.round(rect.height)] : aspect, hubName, snapshot?.structure?.source === 'folder' ? (snapshot.groups || []).map(group => group.id) : null, agents.map(a => [a.name, a.group, a.parent]).sort()]);
+      const signature = JSON.stringify([arrangement, compact ? [Math.round(rect.width), canvasHeight] : aspect, hubName, snapshot?.structure?.source === 'folder' ? (snapshot.groups || []).map(group => group.id) : null, agents.map(a => [a.name, a.group, a.parent]).sort()]);
       if (signature === layoutSignature) return;
       layoutSignature = signature;
       stopLayout();
@@ -495,7 +567,7 @@
         ry = Math.max(least, rx / 1.3);
         if (perimeter(rx, ry) < needed) ry = grow(value => perimeter(rx, value) >= needed);
         // A tall panel is used, not left empty: the oval grows into spare height.
-        ry = Math.max(ry, Math.min(rx * 2.2, rect.height / 2 - Math.max(depth + 34, 96)));
+        ry = Math.max(ry, Math.min(rx * 2.2, canvasHeight / 2 - Math.max(depth + 34, 96)));
       } else {
         ry = perimeter(aspect * least, least) < needed ? grow(value => perimeter(aspect * value, value) >= needed) : least;
         rx = aspect * ry;
@@ -516,9 +588,11 @@
       });
       const hub = byAgent.get(hubName);
       if (hub) seeds.set(hub.name, { x: 0, y: 0, r: 38, reach: 38, group: hub.group, parent: '', dx: 0, dy: 0 });
+      const placedByUser = movedHere();
       const targets = Array.from(seeds, ([name, seed]) => {
-        const old = positions.get(name), pinned = !!old?.fixed && !seed.parent;
-        return { name, ...seed, ...(pinned ? { x: old.x, y: old.y } : {}), pinned, still: pinned || name === hubName };
+        const saved = placedByUser[name], pinned = !seed.parent && !!saved && Number.isFinite(saved.x);
+        const seat = !!seed.parent && !!saved && Number.isFinite(saved.dx) ? { dx: saved.dx, dy: saved.dy } : {};
+        return { name, ...seed, ...seat, ...(pinned ? { x: saved.x, y: saved.y } : {}), pinned, still: pinned || name === hubName };
       });
       const bodies = targets.filter(target => !target.parent), limit = body => Math.max(0, rect.width / 2 - body.reach - EDGE);
       for (let iteration = 0; iteration < 80; iteration++) {
@@ -585,26 +659,37 @@
       const node = nodes.get(name), p = positions.get(name);
       if (node && p) node.setAttribute('transform', 'translate(' + p.x + ' ' + p.y + ')');
     }
+    // Move one agent to (x, y) on the stage, as far as it goes without landing on another. A lead carries its
+    // seats; a seat moves on its own and keeps its new place beside its lead. The place is remembered.
     function moveNode(name, x, y) {
-      let point = positions.get(name);
+      const point = positions.get(name);
       if (!point) return;
-      if (point.parent && positions.has(point.parent)) {
-        const lead = positions.get(point.parent);
-        x = lead.x + x - point.x; y = lead.y + y - point.y; name = point.parent; point = lead;
-      }
-      if (arrangement === 'compact') {
-        const low = (point.r + EDGE - camera.x) / camera.scale, high = (viewport.clientWidth - point.r - EDGE - camera.x) / camera.scale;
-        if (high > low) x = clamp(x, low, high);
-      }
+      const lead = point.parent && positions.get(point.parent);
       let dx = x - point.x, dy = y - point.y;
       // A lead carries its seats, so the council stays a circle while it moves.
       const moving = new Set([name]);
-      positions.forEach((child, childName) => { if (child.parent === name) moving.add(childName); });
+      if (!lead) positions.forEach((child, childName) => { if (child.parent === name) moving.add(childName); });
+      // Nothing is moved out of the canvas: each agent, its name and its count stay inside, EDGE px in. One already
+      // outside (the space shrank) can still move, only not further out.
+      const width = viewport.clientWidth, height = viewport.clientHeight;
+      if (width > 0 && height > 0) {
+        let lowX = -Infinity, highX = Infinity, lowY = -Infinity, highY = Infinity;
+        moving.forEach(key => {
+          const member = positions.get(key), e = extentOf(member);
+          lowX = Math.max(lowX, (EDGE - camera.x) / camera.scale - e.left - member.x); highX = Math.min(highX, (width - EDGE - camera.x) / camera.scale - e.right - member.x);
+          lowY = Math.max(lowY, (EDGE - camera.y) / camera.scale - e.top - member.y); highY = Math.min(highY, (height - EDGE - camera.y) / camera.scale - e.bottom - member.y);
+        });
+        if (lowX <= highX) dx = clamp(dx, Math.min(0, lowX), Math.max(0, highX));
+        if (lowY <= highY) dy = clamp(dy, Math.min(0, lowY), Math.max(0, highY));
+      }
+      // Too close to another is refused, unless the move takes it further away (so a crowded agent can get out).
       const valid = (dx, dy) => {
         for (const key of moving) {
           const member = positions.get(key);
           for (const [otherName, other] of positions) {
-            if (!moving.has(otherName) && Math.hypot(member.x + dx - other.x, member.y + dy - other.y) < member.r + other.r + 14) return false;
+            if (moving.has(otherName)) continue;
+            const room = member.r + other.r + 14, after = Math.hypot(member.x + dx - other.x, member.y + dy - other.y);
+            if (after < room && after < Math.hypot(member.x - other.x, member.y - other.y) - .001) return false;
           }
         }
         return true;
@@ -622,13 +707,43 @@
         const member = positions.get(key);
         member.x += dx; member.y += dy; positionNode(key); measureLabels(nodes.get(key), member);
       });
-      point.fixed = true;
+      const here = moves[layoutKey()] ||= {};
+      if (lead) { point.dx = point.x - lead.x; point.dy = point.y - lead.y; here[name] = { dx: point.dx, dy: point.dy }; }
+      else { point.fixed = true; here[name] = { x: point.x, y: point.y }; }
       updateEdges();
+    }
+    // A move is over: keep it (storage and undo) when it changed anything; the camera stays where it is.
+    function finishMove(before, entry = {}) {
+      cleanPresses = 0;
+      const layout = layoutKey();
+      if (JSON.stringify(before) === JSON.stringify(moves[layout] || {})) return;
+      renderNodes(visibleAgents); updateEdges(); saveMoves();
+      const last = flowHistory.at(-1);
+      // Alt+arrow presses on one agent in a row are one move for undo.
+      if (entry.agent && last?.op === 'move' && last.agent === entry.agent && last.layout === layout && last.by === 'key') return;
+      remember({ op: 'move', layout, before, ...entry });
+    }
+    // Put the given positions back (undo), or none (every agent back in its automatic place).
+    function applyMoves(layout, positionsThen, record) {
+      const before = copyMoves(layout);
+      if (JSON.stringify(before) === JSON.stringify(positionsThen)) return false;
+      if (Object.keys(positionsThen).length) moves[layout] = JSON.parse(JSON.stringify(positionsThen)); else delete moves[layout];
+      saveMoves();
+      if (record) remember({ op: 'move', layout, before });
+      if (layout !== layoutKey()) { teamViews.delete(layout); return true; }
+      stopLayout(); layoutSignature = '';
+      positions.forEach(point => { point.fixed = false; });
+      addPositions(visibleAgents); renderNodes(visibleAgents); updateEdges();
+      if (trail.length && !trailPending) trailChanged();
+      return true;
+    }
+    function resetMoves() {
+      if (applyMoves(layoutKey(), {}, true)) fitView(false);
     }
     function measureLabels(node, point) {
       if (!node || !point) return false;
       let low = -point.r - 8, high = point.r + 8;
-      ['.ag-agent-name', '.ag-agent-work'].forEach(selector => {
+      ['.ag-agent-name'].forEach(selector => {
         const label = node.querySelector(selector);
         let measured = label.getBBox().width, shift = 0;
         if (arrangement === 'compact' && viewport.clientWidth > 0) {
@@ -665,12 +780,14 @@
           node.style.setProperty('--ag-order', String(nodes.size)); node.style.setProperty('--ag-phase', (-(nodes.size * 1.37) % 7).toFixed(2) + 's');
           node.append(svg('circle', { class: 'ag-ping' }), svg('circle', { class: 'ag-halo' }), svg('circle', { class: 'ag-hub-wake' }), svg('circle', { class: 'ag-hub-orbit' }), svg('circle', { class: 'ag-core' }), svg('circle', { class: 'ag-hub-progress', transform: 'rotate(-90)' }), svg('circle', { class: 'ag-spark' }));
           node.append(svg('text', { class: 'ag-agent-name', 'text-anchor': 'middle' }));
-          node.append(svg('text', { class: 'ag-agent-work', 'text-anchor': 'middle' }));
+          // The only text on an agent is its name, and a count of its sessions working now when there are two or more.
+          node.append(svg('text', { class: 'ag-busy-count', 'data-busy-count': agent.name, 'text-anchor': 'middle', 'dominant-baseline': 'central' }));
           node.append(svg('circle', { class: 'ag-learn-track' }), svg('g', { class: 'ag-learn-beads' }), svg('circle', { class: 'ag-learn-hit', 'data-learning': '', role: 'button', tabindex: 0, 'aria-label': 'Learning' }), svg('circle', { class: 'ag-alert', r: 4 }), svg('title'));
           nodes.set(agent.name, node); nodeLayer.append(node);
         }
         const active = busySteps(agent), isHub = agent.name === hubName;
-        const work = busy && active.length ? shorten(active[0].goal || active[0].id) + (active.length > 1 ? ' +' + (active.length - 1) : '') : '';
+        // The task is in the accessible name and the details only, never drawn on the canvas.
+        const work = busy && active.length ? text(active[0].goal || active[0].id) + (active.length > 1 ? ', and ' + (active.length - 1) + ' more' : '') : '';
         node.dataset.busy = String(busy); node.dataset.group = agent.group;
         node.dataset.openChat = String(!!sessionToOpen(agent));
         node.dataset.attention = String(alerts.has(agent.name));
@@ -702,14 +819,16 @@
         arc.dataset.shown = String(isHub && share > 0);
         p.labelUp = !!p.parent && p.dy < -1;
         node.querySelector('.ag-agent-name').setAttribute('y', p.labelUp ? -p.r - 8 : p.r + 20);
-        node.querySelector('.ag-agent-work').setAttribute('y', p.r + 35);
+        const badge = node.querySelector('.ag-busy-count'), corner = (p.r + 10) * Math.SQRT1_2;
+        badge.setAttribute('x', corner); badge.setAttribute('y', -corner);
+        badge.textContent = busy >= 2 ? '×' + busy : ''; badge.dataset.shown = String(busy >= 2);
         node.classList.toggle('ag-hub', isHub);
         node.classList.toggle('ag-council-lead', visibleAgents.some(a => a.parent === agent.name));
         node.querySelector('.ag-agent-name').textContent = displayName(agent);
-        node.querySelector('.ag-agent-work').textContent = work;
-        node.querySelector('title').textContent = loopErrors.get(agent.name) || agent.name;
-        node.dataset.armed = String(armed === agent.name);
-        if (setLoop && loopEnd(agent.name)) node.setAttribute('aria-keyshortcuts', 'Enter C Escape'); else node.removeAttribute('aria-keyshortcuts');
+        node.querySelector('title').textContent = flowErrors.get(agent.name) || agent.name;
+        node.dataset.armed = String(!trailPending && trail.at(-1) === agent.name);
+        node.dataset.trail = String(trail.includes(agent.name));
+        if (flowAction) node.setAttribute('aria-keyshortcuts', 'Enter Shift+Enter I Shift+F10 ContextMenu C L R Alt+ArrowUp Alt+ArrowDown Alt+ArrowLeft Alt+ArrowRight Backspace Escape'); else node.removeAttribute('aria-keyshortcuts');
         node.setAttribute('aria-label', agent.name + (busy ? ', working' + (work ? ', ' + work : '') : ', idle') + (alerts.has(agent.name) ? ', ' + alerts.get(agent.name) : ''));
         positionNode(agent.name);
         labelsChanged = measureLabels(node, p) || labelsChanged;
@@ -724,12 +843,8 @@
       // Work that passes through the orchestrator travels along its spoke.
       const viaHub = new Set(flows().filter(f => f.active && (f.from === hubName || f.to === hubName)).map(f => f.from === hubName ? f.to : f.from));
       const edges = visibleAgents.filter(a => a.name !== hubName && (a.parent || hubName)).map(a => ({ from: a.parent || hubName, to: a.name, kind: 'handoff', relation: a.parent ? 'membership' : 'supervision', active: (a.busy > 0 && !explained.has(a.name)) || (!a.parent && viaHub.has(a.name)) }));
-      edges.push(...snapshot.escalation.filter(e => allowedConnection(e.from, e.to) && (e.used || (selected?.type === 'agent' && (selected.key === e.from || selected.key === e.to)))).map(e => ({ ...e, kind: 'escalation', active: false })), ...workFlows);
-      // A checker is linked to every agent it can check; the link carries work only while it checks a looping agent.
-      const looping = new Set(canvasWorkLoops().map(loop => loop.agent));
-      visibleAgents.filter(agent => agent.checks && agent.name !== hubName).forEach(checker => visibleAgents.forEach(other => {
-        if (other.name !== checker.name && other.name !== hubName && !other.checks) edges.push({ from: checker.name, to: other.name, kind: 'check', active: checker.busy > 0 && looping.has(other.name) });
-      }));
+      // Settings alone draw nothing: an escalation route is drawn only once a task graph has used it.
+      edges.push(...snapshot.escalation.filter(e => allowedConnection(e.from, e.to) && e.used).map(e => ({ ...e, kind: 'escalation', active: false })), ...workFlows);
       const directions = new Set(workFlows.map(f => JSON.stringify([f.from, f.to])));
       const keys = new Set();
       edges.forEach(edge => {
@@ -743,7 +858,7 @@
           const flow = svg('line', { class: 'ag-flow', 'data-flow-kind': edge.kind });
           // Pulse overlays have no semantic edge hook; each flow is one edge.
           if (edge.kind === 'data' || edge.kind === 'feedback') line.setAttribute('marker-end', 'url(#' + uid + '-' + edge.kind + ')');
-          const layer = edge.kind === 'handoff' || edge.kind === 'check' ? spokeLayer : edge.kind === 'escalation' ? escalationLayer : flowLayer;
+          const layer = edge.kind === 'handoff' ? spokeLayer : edge.kind === 'escalation' ? escalationLayer : flowLayer;
           layer.append(line, flow); pair = { line, flow, edge }; lines.set(key, pair);
         }
         pair.edge = edge;
@@ -801,45 +916,120 @@
         } else if (view.count) { view.count.remove(); view.count = null; }
       });
       loopViews.forEach((view, id) => { if (!shown.has(id)) { view.group.remove(); loopViews.delete(id); } });
-      updateDrawnLoops();
+      updateRoutes();
       updateWorkLoops();
     }
-    // Loops drawn in the structure ("check checks work"), as the same slim leaf. A pair the graph
-    // already loops on is drawn by the graph's loop, which moves while work moves; a drawn loop at
-    // rest is still. A loop being asked for is dimmed until the host answers.
-    function drawnLoops() { return (snapshot?.structure?.loops || []).filter(loop => loop && loop.source === 'drawn' && typeof loop.work === 'string' && typeof loop.check === 'string'); }
-    function loopKey(work, check) { return JSON.stringify([work, check]); }
-    function hasDrawnLoop(work, check) { return drawnLoops().some(loop => loop.work === work && loop.check === check); }
-    function updateDrawnLoops() {
-      const graphPairs = new Set(canvasLoops().map(loop => loopKey(loop.worker, loop.evaluator)));
-      const wanted = new Map(drawnLoops().map(loop => [loopKey(loop.work, loop.check), { work: loop.work, check: loop.check, pending: false }]));
-      pendingLoops.forEach((on, key) => {
-        const [work, check] = JSON.parse(key);
-        if (on && !wanted.has(key)) wanted.set(key, { work, check, pending: true });
-        else if (wanted.has(key)) wanted.get(key).pending = true;
+    // Flows drawn in the structure: a forward step is a straight line with an arrowhead, a step back to an
+    // agent already on the path is a curved arc. Steps of different flows on one pair are offset so none
+    // hides another. A flow at rest is still; a new one draws in once. The pending path is drawn dimmed.
+    function routes() { return (snapshot?.structure?.flows || []).filter(flow => flow && typeof flow.id === 'string' && Array.isArray(flow.path) && flow.path.length >= 2 && flow.path.every(name => typeof name === 'string')); }
+    function routeById(id) { return routes().find(flow => flow.id === id) || null; }
+    // Step `index` (path[index] -> path[index + 1]) goes back to an agent already on the path; the hub ending a path adds no return.
+    function returnsAt(path, index) {
+      const to = path[index + 1];
+      return path.slice(0, index + 1).includes(to) && !(index + 1 === path.length - 1 && isHubAgent(to));
+    }
+    function pairKey(a, b) { return a < b ? a + '\n' + b : b + '\n' + a; }
+    function isSelfLoop(path) { return path.length === 2 && path[0] === path[1]; }
+    // An agent's loop on itself: a small drop on its outer side (away from the hub), never over its name below it.
+    function selfLoopPath(p, name) {
+      const hub = positions.get(hubName);
+      let ux = 0, uy = -1;
+      if (hub && name !== hubName) { const d = Math.hypot(p.x - hub.x, p.y - hub.y); if (d > 1) { ux = (p.x - hub.x) / d; uy = (p.y - hub.y) / d; } }
+      if (uy > -.35) { const n = Math.hypot(ux || 1, .35); ux = (ux < 0 ? -1 : 1) / n; uy = -.35 / n; }
+      const angle = Math.atan2(uy, ux), at = (a, r) => (p.x + r * Math.cos(a)) + ' ' + (p.y + r * Math.sin(a));
+      return 'M ' + at(angle - .5, p.r + 5) + ' C ' + at(angle - .85, p.r + 32) + ' ' + at(angle + .85, p.r + 32) + ' ' + at(angle + .5, p.r + 9);
+    }
+    // What else is drawn on each pair, as the band of sideways offsets it covers in the pair's own frame
+    // (the pair in name order): a straight line (a hub spoke, a work line, a used escalation)
+    // covers the middle, and a review loop from the task graph covers its two curved lanes.
+    function takenBands() {
+      const taken = new Map();
+      const cover = (key, lo, hi) => { const band = taken.get(key); taken.set(key, band ? { lo: Math.min(band.lo, lo), hi: Math.max(band.hi, hi) } : { lo, hi }); };
+      lines.forEach(pair => { if (pair.line.isConnected) cover(pairKey(pair.edge.from, pair.edge.to), -6, 6); });
+      loopViews.forEach(view => {
+        const { worker, evaluator } = view.loop, a = positions.get(worker), b = positions.get(evaluator), count = view.geometry?.count;
+        if (!a || !b || !count || !view.group.isConnected) return;
+        const distance = Math.hypot(b.x - a.x, b.y - a.y) || 1, nx = -(b.y - a.y) / distance, ny = (b.x - a.x) / distance;
+        const bow = ((count.x - (a.x + b.x) / 2) * nx + (count.y - (a.y + b.y) / 2) * ny) * (worker < evaluator ? 1 : -1);
+        const bulge = clamp(distance * .08, 8, 16);
+        cover(pairKey(worker, evaluator), bow - bulge - 3, bow + bulge + 3);
       });
-      const shown = new Set();
-      wanted.forEach((loop, key) => {
-        const a = positions.get(loop.work), b = positions.get(loop.check);
-        if (!a || !b || !loopEnd(loop.work) || !loopEnd(loop.check) || (graphPairs.has(key) && !loop.pending)) return;
-        shown.add(key);
-        let view = drawnLoopViews.get(key);
+      return taken;
+    }
+    // The sideways offset of the `index`-th of `count` flow steps on a pair, and the side a return bows to.
+    // Alone on a pair, steps are spread round the middle; next to anything else, they go beside it, on the
+    // side nearer the middle, so a flow is never drawn on top of a line or a loop.
+    function laneOf(band, index, count) {
+      if (!band) { const offset = (index - (count - 1) / 2) * 8; return { offset, side: offset < 0 ? -1 : 1 }; }
+      const side = band.hi + 6 <= -(band.lo - 6) ? 1 : -1;
+      return { offset: side > 0 ? band.hi + 6 + index * 8 : band.lo - 6 - index * 8, side };
+    }
+    function stepPath(a, b, from, to, back, lane) {
+      // One frame per pair, whichever way it is walked, so lanes on a pair never cross.
+      const p = from < to ? a : b, q = from < to ? b : a;
+      const distance = Math.hypot(q.x - p.x, q.y - p.y) || 1, nx = -(q.y - p.y) / distance, ny = (q.x - p.x) / distance;
+      const offset = lane.offset;
+      if (!back) {
+        const ux = (b.x - a.x) / distance, uy = (b.y - a.y) / distance;
+        return 'M ' + (a.x + ux * (a.r + 6) + nx * offset) + ' ' + (a.y + uy * (a.r + 6) + ny * offset) + ' L ' + (b.x - ux * (b.r + 9) + nx * offset) + ' ' + (b.y - uy * (b.r + 9) + ny * offset);
+      }
+      const side = lane.side, bow = 2 * (offset + side * clamp(distance * .14, 14, 30));
+      const cx = (a.x + b.x) / 2 + nx * bow, cy = (a.y + b.y) / 2 + ny * bow;
+      const out = Math.hypot(cx - a.x, cy - a.y) || 1, back2 = Math.hypot(cx - b.x, cy - b.y) || 1;
+      return 'M ' + (a.x + (cx - a.x) / out * (a.r + 6)) + ' ' + (a.y + (cy - a.y) / out * (a.r + 6)) + ' Q ' + cx + ' ' + cy + ' ' + (b.x + (cx - b.x) / back2 * (b.r + 9)) + ' ' + (b.y + (cy - b.y) / back2 * (b.r + 9));
+    }
+    function updateRoutes() {
+      const list = routes(), lanes = new Map(), shown = new Set(), taken = takenBands();
+      list.forEach(flow => flow.path.slice(1).forEach((to, i) => {
+        const key = pairKey(flow.path[i], to);
+        if (!lanes.has(key)) lanes.set(key, []);
+        lanes.get(key).push(flow.id + '#' + i);
+      }));
+      list.forEach(flow => {
+        const points = flow.path.map(name => positions.get(name));
+        if (points.some(p => !p)) return;
+        shown.add(flow.id);
+        let view = routeViews.get(flow.id);
         if (!view) {
-          const group = svg('g', { class: 'ag-drawn-loop', 'data-drawn-loop': loop.work + '~' + loop.check, 'aria-hidden': 'true' });
-          const halves = ['forward', 'return'].map(half => svg('path', { class: 'ag-loop-half', 'data-loop': 'drawn:' + loop.work + '~' + loop.check, 'data-loop-half': half, pathLength: 1, 'marker-end': 'url(#' + uid + '-loop)' }));
-          group.append(...halves); loopLayer.append(group);
-          view = { group, halves, loop }; drawnLoopViews.set(key, view);
+          const group = svg('g', { class: 'ag-route', 'data-route': flow.id, role: 'button', tabindex: 0 });
+          if (flowAction) group.setAttribute('aria-keyshortcuts', 'Enter I Shift+F10 ContextMenu Delete Backspace');
+          const title = svg('title'); group.append(title); routeLayer.append(group);
+          view = { group, title, steps: [], flow }; routeViews.set(flow.id, view);
         }
-        view.loop = loop;
-        const geometry = reviewGeometry(a, b);
-        view.halves[0].setAttribute('d', geometry.forward); view.halves[1].setAttribute('d', geometry.back);
-        view.group.dataset.pending = String(loop.pending);
-        if (!loop.pending && freshLoops.has(key)) {
-          freshLoops.delete(key); view.group.dataset.fresh = 'true';
+        view.flow = flow;
+        while (view.steps.length > flow.path.length - 1) { const step = view.steps.pop(); step.hit.remove(); step.line.remove(); }
+        while (view.steps.length < flow.path.length - 1) {
+          const hit = svg('path', { class: 'ag-route-hit' }), line = svg('path', { class: 'ag-route-step', pathLength: 1, 'marker-end': 'url(#' + uid + '-route)' });
+          view.group.insertBefore(hit, view.title); view.group.insertBefore(line, view.title); view.steps.push({ hit, line });
+        }
+        view.steps.forEach((step, i) => {
+          const key = pairKey(flow.path[i], flow.path[i + 1]), sharing = lanes.get(key), lane = laneOf(taken.get(key), sharing.indexOf(flow.id + '#' + i), sharing.length);
+          const self = isSelfLoop(flow.path), back = !self && returnsAt(flow.path, i);
+          const d = self ? selfLoopPath(points[0], flow.path[0]) : stepPath(points[i], points[i + 1], flow.path[i], flow.path[i + 1], back, lane);
+          step.line.setAttribute('d', d); step.hit.setAttribute('d', d);
+          step.line.dataset.step = self ? 'self' : back ? 'return' : 'forward'; step.line.dataset.index = String(i);
+        });
+        view.group.setAttribute('aria-label', 'Flow ' + flow.path.join(' → ')); view.title.textContent = flow.path.join(' → ');
+        if (freshRoutes.has(flow.id)) {
+          freshRoutes.delete(flow.id); view.group.dataset.fresh = 'true';
           later(() => { delete view.group.dataset.fresh; }, 400);
         }
       });
-      drawnLoopViews.forEach((view, key) => { if (!shown.has(key)) { view.group.remove(); drawnLoopViews.delete(key); } });
+      routeViews.forEach((view, id) => { if (!shown.has(id)) { view.group.remove(); routeViews.delete(id); } });
+      updateTrail();
+    }
+    function updateTrail() {
+      trailLayer.replaceChildren();
+      trailLayer.dataset.pending = String(trailPending);
+      trail.slice(1).forEach((to, i) => {
+        const a = positions.get(trail[i]), b = positions.get(to);
+        if (!a || !b) return;
+        if (trail[i] === to) { trailLayer.append(svg('path', { class: 'ag-trail-step', 'data-step': 'self', d: selfLoopPath(a, to), 'marker-end': 'url(#' + uid + '-route)' })); return; }
+        const back = returnsAt(trail, i);
+        const lane = laneOf(takenBands().get(pairKey(trail[i], to)), 0, 1);
+        trailLayer.append(svg('path', { class: 'ag-trail-step', 'data-step': back ? 'return' : 'forward', d: stepPath(a, b, trail[i], to, back, lane), 'marker-end': 'url(#' + uid + '-route)' }));
+      });
     }
     function updateWorkLoops() {
       const shown = new Set();
@@ -852,31 +1042,33 @@
           const group = svg('g', { class: 'ag-work-loop', 'data-work-loop-id': loop.agent, role: 'button', tabindex: 0 });
           const ring = svg('path', { class: 'ag-work-loop-edge', 'data-work-loop': loop.agent });
           const title = svg('title'); group.append(ring, title); loopLayer.append(group);
-          view = { group, ring, title, count: null, loop }; workLoopViews.set(loop.agent, view);
+          view = { group, ring, title, loop }; workLoopViews.set(loop.agent, view);
         }
         view.loop = loop;
         view.group.dataset.loopState = loop.state; view.group.dataset.active = String(!!loop.active);
         view.group.dataset.moving = String(!!loop.active && shownAgents.get(loop.agent)?.busy > 0);
         view.group.dataset.quiet = String(['closed', 'idle'].includes(loop.state) && !shownAgents.get(loop.agent)?.busy);
         view.ring.dataset.loopState = loop.state; view.ring.dataset.active = String(!!loop.active);
-        const radius = p.r + 9, open = loop.rounds >= 2 ? .46 : .17, start = -Math.PI / 4 + open, end = -Math.PI / 4 - open;
+        const radius = p.r + 9, open = (Number(shownAgents.get(loop.agent)?.busy) || 0) >= 2 ? .46 : .17, start = -Math.PI / 4 + open, end = -Math.PI / 4 - open;
         view.ring.setAttribute('d', 'M ' + (p.x + radius * Math.cos(start)) + ' ' + (p.y + radius * Math.sin(start)) + ' A ' + radius + ' ' + radius + ' 0 1 1 ' + (p.x + radius * Math.cos(end)) + ' ' + (p.y + radius * Math.sin(end)));
         view.ring.setAttribute('marker-end', 'url(#' + uid + (loop.state === 'stuck' ? '-work-stuck' : loop.state === 'closed' ? '-work-closed' : loop.state === 'working' && loop.active ? '-work-live' : '-work') + ')');
         view.group.setAttribute('aria-label', loop.agent + ', work loop, ' + loop.rounds + (loop.rounds === 1 ? ' round, ' : ' rounds, ') + named(WORK_LOOP_STATES, loop.state));
         view.title.textContent = loop.agent;
-        if (loop.rounds >= 2) {
-          if (!view.count) { view.count = svg('text', { class: 'ag-work-loop-count', 'data-work-loop-count': loop.agent, 'text-anchor': 'middle', 'dominant-baseline': 'central' }); view.group.append(view.count); }
-          view.count.textContent = '×' + loop.rounds;
-          view.count.setAttribute('x', p.x + (radius + 1) * Math.SQRT1_2); view.count.setAttribute('y', p.y - (radius + 1) * Math.SQRT1_2);
-        } else if (view.count) { view.count.remove(); view.count = null; }
       });
       workLoopViews.forEach((view, agent) => { if (!shown.has(agent)) { view.group.remove(); workLoopViews.delete(agent); } });
     }
     function highlight() {
-      // With loop drawing the pressed state is the armed one: the agent waiting for its checker.
-      nodes.forEach((node, key) => { const active = !!selected && ['agent', 'work-loop'].includes(selected.type) && selected.key === key; node.dataset.selected = String(active); node.setAttribute('aria-pressed', String(setLoop ? armed === key : active)); });
+      // With flow drawing the pressed state is the newest step of the pending path.
+      nodes.forEach((node, key) => { const active = !!selected && ['agent', 'work-loop'].includes(selected.type) && selected.key === key; node.dataset.selected = String(active); node.setAttribute('aria-pressed', String(flowAction ? !trailPending && trail.at(-1) === key : active)); });
       const selecting = !!selected && ['agent', 'work-loop'].includes(selected.type);
-      drawnLoopViews.forEach(view => { view.group.dataset.related = String(selecting && [view.loop.work, view.loop.check].includes(selected.key)); });
+      const chosenFlow = selected?.type === 'flow' ? selected.key : '';
+      if (pickedFlow && !routeById(pickedFlow)) pickedFlow = '';
+      routeLayer.dataset.selecting = String(!!selected && !['run', 'learning'].includes(selected.type));
+      routeViews.forEach((view, id) => {
+        const marked = chosenFlow === id || pickedFlow === id;
+        view.group.dataset.selected = String(marked); view.group.setAttribute('aria-pressed', String(marked));
+        view.group.dataset.related = String(chosenFlow ? chosenFlow === id : selecting && view.flow.path.includes(selected.key));
+      });
       edgeLayer.dataset.selecting = String(selecting);
       lines.forEach(pair => {
         const related = selecting && (pair.edge.from === selected.key || pair.edge.to === selected.key);
@@ -922,6 +1114,114 @@
       if (Array.isArray(value)) { const list = el('ul'); item.append(list); appendList(item, value, v => list.append(el('li', '', format(v)))); }
       else if (value !== undefined) { const p = el('p'); p.append(el(code ? 'code' : 'span', '', text(value) || '—')); item.append(p); }
       parent.append(item); return item;
+    }
+    function skillsOf(agent) { return skillOverride.get(agent.name) || agent.skills || []; }
+    // An agent's skills. Read-only without actions.skills (or for an agent whose skills cannot be set here: a council
+    // seat, a hub outside the roster, which then shows why); otherwise each skill row has a remove control, a closed
+    // fold offers the installed skills it lacks, and one control gives it every skill.
+    function skillSection(agent) {
+      const everything = (snapshot.skills || []).filter(skill => skill && typeof skill.name === 'string');
+      const about = new Map(everything.map(skill => [skill.name, skill.description]));
+      const editable = !!skillAction && agent.skills_editable === true, list = skillsOf(agent), busy = skillPending.get(agent.name) || '';
+      const control = (label, aria, request, key) => {
+        const button = el('button', 'ag-text-button ag-skill-control', label); button.type = 'button';
+        button.dataset.skillRequest = JSON.stringify(request); button.dataset.skillKey = key; button.setAttribute('aria-label', aria);
+        if (busy) button.disabled = true;
+        return button;
+      };
+      const row = (parent, name, on) => {
+        const item = el('div', 'ag-skill-row'); item.dataset.skill = text(name);
+        item.append(el('span', 'ag-skill-name', text(name)));
+        if (about.get(name)) item.append(el('span', 'ag-skill-about', text(about.get(name))));
+        item.title = text(about.get(name) || name);
+        if (editable && on !== undefined) {
+          const key = (on ? 'add:' : 'remove:') + name;
+          if (busy === key) { item.dataset.pending = 'true'; item.setAttribute('aria-busy', 'true'); }
+          item.classList.add('ag-skill-editable');
+          item.append(control(on ? 'add' : 'remove', (on ? 'Add ' : 'Remove ') + name + (on ? ' to ' : ' from ') + agent.name, { agent: agent.name, skill: name, on }, key));
+        }
+        parent.append(item);
+      };
+      const fold = (parent, id, title, names, on) => {
+        const item = el('details', 'ag-run-fold ag-skill-fold'); item.dataset.runFold = id; item.open = openFolds.has(id);
+        const summary = el('summary'); summary.append(el('span', '', title), el('span', 'ag-fold-count', String(names.length)));
+        item.append(summary);
+        const fill = () => {
+          if (item.querySelector('.ag-fold-body')) return;
+          const body = el('div', 'ag-fold-body');
+          appendList(body, names, name => row(body, name, on));
+          item.append(body);
+        };
+        lazySteps.set(item, fill); if (item.open || names.some(name => busy.endsWith(':' + name))) { item.open = true; fill(); }
+        parent.append(item);
+      };
+      let holder = null;
+      if (list.includes('*')) {
+        // "all" is every installed skill: say so, and let the reader open what that is.
+        holder = section(detailScroll, 'Skills', 'all' + (everything.length ? ' · ' + everything.length : ''));
+        if (everything.length) fold(holder, 'agent-skills', 'Installed skills', everything.map(skill => skill.name), editable ? false : undefined);
+      } else if (list.length || editable) {
+        holder = section(detailScroll, 'Skills · ' + list.length);
+        appendList(holder, list, name => row(holder, name, editable ? false : undefined));
+        if (editable) {
+          const missing = everything.map(skill => skill.name).filter(name => !list.includes(name));
+          if (missing.length) fold(holder, 'agent-skills-add', 'Add skills', missing, true);
+          const every = control('Give it every skill', 'Give ' + agent.name + ' every installed skill', { agent: agent.name, all: true }, 'all');
+          const line = el('div', 'ag-skill-all'); line.append(every);
+          if (busy === 'all') { line.dataset.pending = 'true'; line.setAttribute('aria-busy', 'true'); }
+          holder.append(line);
+        }
+      }
+      if (!skillAction) return;
+      if (!editable && agent.skills_reason) (holder || section(detailScroll, 'Skills')).append(el('p', 'ag-skill-reason', text(agent.skills_reason)));
+      const notes = skillNotes.get(agent.name);
+      if (notes?.length && holder) notes.forEach(note => { const line = el('p', 'ag-skill-note', note.text); line.dataset.kind = note.kind; holder.append(line); });
+    }
+    function redrawDetail() {
+      if (!selected || selected.type !== 'agent') return;
+      const key = document.activeElement?.closest?.('[data-skill-key]')?.dataset.skillKey;
+      detailSignature = ''; renderDetail();
+      if (key) Array.from(detailScroll.querySelectorAll('[data-skill-key]')).find(button => button.dataset.skillKey === key)?.focus({ preventScroll: true });
+    }
+    function skillKey(request) { return request.all ? 'all' : (request.on ? 'add:' : 'remove:') + request.skill; }
+    // Ask the host for one skill change. `record` false for an undo. One change per agent at a time.
+    function askSkill(request, record = true) {
+      const agent = agentsByName.get(request.agent);
+      if (!skillAction || !agent || skillPending.has(agent.name)) return Promise.reject(new Error('busy'));
+      const before = skillsOf(agent).slice();
+      skillPending.set(agent.name, skillKey(request)); skillNotes.delete(agent.name); redrawDetail();
+      let answer;
+      try { answer = Promise.resolve(skillAction(JSON.parse(JSON.stringify(request)))); } catch (error) { answer = Promise.reject(error); }
+      return answer.then(async result => {
+        const reply = result && typeof result === 'object' ? result : {};
+        if (!alive) return reply;
+        skillPending.delete(agent.name);
+        const after = Array.isArray(reply.skills) ? reply.skills.filter(name => typeof name === 'string') : null;
+        if (after) skillOverride.set(agent.name, after);
+        const notes = reply.changed === false ? [{ kind: 'done', text: 'No change needed.' }] : [{ kind: 'done', text: 'Applies after OpenCode restarts.' }];
+        (Array.isArray(reply.warnings) ? reply.warnings : []).forEach(warning => notes.push({ kind: 'warning', text: text(warning) }));
+        skillNotes.set(agent.name, notes);
+        if (record && reply.changed !== false) remember({ op: 'skill', agent: agent.name, request, before, after: after || before });
+        redrawDetail();
+        if (pending) await pending; // a snapshot asked for before the change may not show it
+        await refresh();
+        return reply;
+      }, error => {
+        if (alive) {
+          skillPending.delete(agent.name);
+          skillNotes.set(agent.name, [{ kind: 'error', text: message(error, 'The skills could not be changed') }]);
+          redrawDetail();
+        }
+        throw error;
+      });
+    }
+    // Undo one skill change: the opposite request, or (after "every skill") a remove for each skill it lacked before.
+    function undoSkill(last) {
+      const { agent, request, before } = last, installed = (snapshot.skills || []).map(skill => skill.name);
+      const requests = request.all ? (before.includes('*') ? [] : installed.filter(name => !before.includes(name)).map(skill => ({ agent, skill, on: false })))
+        : request.on ? [{ agent, skill: request.skill, on: false }]
+        : before.includes('*') ? [{ agent, all: true }] : [{ agent, skill: request.skill, on: true }];
+      requests.reduce((chain, next) => chain.then(() => askSkill(next, false)), Promise.resolve()).catch(() => { if (alive) flowHistory.push(last); });
     }
     function flowSection(agent, incoming, relevant) {
       const list = relevant.filter(f => (incoming ? f.to : f.from) === agent.name);
@@ -1136,6 +1436,9 @@
       // to detect refreshes. Only the bounded, visible detail content is built.
       const signature = renderRevision + ':' + selected.type + ':' + selected.key + ':' + highlightedStep;
       if (detailSignature === signature) return;
+      // An instruction being edited is never rebuilt under the user's hands; it is rebuilt once they leave it.
+      const editing = selected.type === 'flow' ? detailScroll.querySelector('[data-route-text]') : null;
+      if (editing && editing.dataset.routeText === selected.key && routeById(selected.key) && (document.activeElement === editing || editing.value !== editing.dataset.saved)) return;
       detailSignature = signature;
       const scroll = detailScroll.scrollTop;
       const focused = document.activeElement;
@@ -1158,6 +1461,23 @@
           if (answered.length) rows(section(detailScroll, 'Answered'), answered);
           if (learning.lessons?.length) section(detailScroll, 'Lessons', learning.lessons);
         } else detailScroll.append(el('p', 'ag-detail-intro', 'None'));
+      } else if (selected.type === 'flow') {
+        const flow = routeById(selected.key);
+        eyebrow.textContent = 'Flow';
+        detailScroll.append(el('h2', 'ag-detail-title ag-route-title', flow ? flow.path.join(' → ') : 'Unavailable'));
+        if (flow) {
+          const item = el('section', 'ag-detail-section ag-route-detail'), box = el('textarea', 'ag-route-text');
+          box.value = flow.text; box.dataset.routeText = flow.id; box.dataset.saved = flow.text;
+          box.rows = 6; box.spellcheck = false; box.setAttribute('aria-label', 'Instruction');
+          item.append(el('h3', '', 'Instruction'), box);
+          if (flowAction) {
+            const actions = el('div', 'ag-route-actions'), state = el('p', 'ag-route-state', 'Saved'), remove = el('button', 'ag-text-button ag-route-remove', 'Remove');
+            state.dataset.routeState = 'saved'; state.setAttribute('aria-live', 'polite');
+            remove.type = 'button'; remove.dataset.routeRemove = flow.id; remove.setAttribute('aria-label', 'Remove this flow');
+            actions.append(state, remove); item.append(actions);
+          } else box.readOnly = true;
+          detailScroll.append(item);
+        }
       } else if (selected.type === 'work-loop') {
         eyebrow.textContent = 'Loop';
         detailScroll.append(el('h2', 'ag-detail-title', workLoop ? workLoop.agent : 'Unavailable'));
@@ -1193,38 +1513,7 @@
         if (agent.pool) badges.append(el('span', 'ag-badge', 'Pool of ' + agent.pool));
         detailScroll.append(badges);
         stats(detailScroll, usageOf(agent.sessions));
-        if (agent.skills?.includes('*')) {
-          // "all" is every installed skill: say so, and let the reader open what that is.
-          const everything = snapshot.skills || [];
-          const all = section(detailScroll, 'Skills', 'all' + (everything.length ? ' · ' + everything.length : ''));
-          if (everything.length) {
-            const fold = el('details', 'ag-run-fold ag-skill-fold'); fold.dataset.runFold = 'agent-skills'; fold.open = openFolds.has('agent-skills');
-            const summary = el('summary'); summary.append(el('span', '', 'Installed skills'), el('span', 'ag-fold-count', String(everything.length)));
-            fold.append(summary);
-            const fill = () => {
-              if (fold.querySelector('.ag-fold-body')) return;
-              const body = el('div', 'ag-fold-body');
-              appendList(body, everything, skill => {
-                const row = el('div', 'ag-skill-row'); row.dataset.skill = text(skill.name);
-                row.append(el('span', 'ag-skill-name', text(skill.name)), el('span', 'ag-skill-about', text(skill.description)));
-                row.title = text(skill.description || skill.name); body.append(row);
-              });
-              fold.append(body);
-            };
-            lazySteps.set(fold, fill); if (fold.open) fill();
-            all.append(fold);
-          }
-        } else if (agent.skills?.length) {
-          // Each skill the agent may load, with what it is for.
-          const about = new Map((snapshot.skills || []).map(skill => [skill.name, skill.description]));
-          const list = section(detailScroll, 'Skills · ' + agent.skills.length);
-          appendList(list, agent.skills, name => {
-            const row = el('div', 'ag-skill-row'); row.dataset.skill = text(name);
-            row.append(el('span', 'ag-skill-name', text(name)));
-            if (about.get(name)) row.append(el('span', 'ag-skill-about', text(about.get(name))));
-            row.title = text(about.get(name) || name); list.append(row);
-          });
-        }
+        skillSection(agent);
         if (sessionToOpen(agent)) { const opener = el('button', 'ag-open-session', 'Open session'); opener.type = 'button'; opener.dataset.openSession = agent.name; detailScroll.append(opener); }
         const record = snapshot.learning?.agents && Object.hasOwn(snapshot.learning.agents, agent.name) ? snapshot.learning.agents[agent.name] : null;
         if (record) {
@@ -1285,9 +1574,10 @@
       [['x1', p.x], ['y1', p.y], ['x2', x], ['y2', y]].forEach(([key, value]) => wire.setAttribute(key, value));
       wire.style.display = '';
     }
-    // Only a valid end is highlighted under the pointer; the hub, a seat and the agent itself are not.
-    function aim(name, source) {
-      const next = name && source && name !== source && loopEnd(name) && loopEnd(source) ? name : '';
+    // Only a valid next step is highlighted under the pointer: any agent but the newest step (a seat stands for its council).
+    function aim(name) {
+      const step = name && trail.length && !trailPending ? standIn(name) : '';
+      const next = step && step !== trail.at(-1) ? step : '';
       if (next === hovered) return;
       const old = nodes.get(hovered);
       if (old) delete old.dataset.target;
@@ -1296,74 +1586,250 @@
     }
     function setTitle(name) {
       const title = nodes.get(name)?.querySelector('title');
-      if (title) title.textContent = loopErrors.get(name) || name;
+      if (title) title.textContent = flowErrors.get(name) || name;
     }
     function markArmed() {
-      nodes.forEach((node, key) => { node.dataset.armed = String(armed === key); });
+      nodes.forEach((node, key) => { node.dataset.armed = String(!trailPending && trail.at(-1) === key); node.dataset.trail = String(trail.includes(key)); });
       highlight();
     }
-    function arm(name) {
-      armed = name; loopErrors.delete(name); setTitle(name);
-      const p = positions.get(name);
-      if (p) showWire(name, p.x, p.y);
-      aim('', ''); markArmed();
+    function announce() {
+      trailStatus.textContent = !trail.length ? '' : trailPending ? 'Adding the flow ' + trail.join(' → ')
+        : trail.length > 1 && isHubAgent(trail.at(-1)) ? 'Flow so far: ' + trail.join(' → ') + '. ' + trail.at(-1) + ' ends it: Enter or a click on it adds the flow, Backspace removes the last step, Escape cancels.'
+        : 'Flow so far: ' + trail.join(' → ') + '. Click or press Enter on another agent to add a step; Enter on ' + trail.at(-1) + ' finishes, Backspace removes the last step, Escape cancels. With one agent, a double-click or l adds its loop on itself.';
+      if (trail.length) root.dataset.agTrail = trail.join(' '); else delete root.dataset.agTrail;
     }
-    function disarm() {
-      armed = ''; wire.style.display = 'none'; aim('', '');
-      markArmed();
+    function trailChanged() {
+      const last = trail.at(-1), p = last && positions.get(last);
+      if (p && !trailPending) showWire(last, p.x, p.y); else wire.style.display = 'none';
+      aim(''); updateTrail(); markArmed(); announce();
     }
-    function cancelPress() {
-      if (!press) return;
-      clearTimeout(press.timer); timers.delete(press.timer); press = null;
+    function startTrail(name) {
+      const step = standIn(name);
+      if (!step || trailPending) return;
+      loneCancel = '';
+      trail = [step]; flowErrors.delete(step); setTitle(step); trailChanged();
     }
-    function refuseLoop(work, error) {
-      const message = text(error && typeof error === 'object' && 'message' in error ? error.message : error).replace(/\s+/g, ' ').trim() || 'The loop could not be changed';
-      loopErrors.set(work, message); setTitle(work);
-      const node = nodes.get(work);
+    function dropTrail() { if (trailPending) return; trail = []; trailChanged(); }
+    function backStep() { if (trailPending) return; trail.pop(); trailChanged(); }
+    function addStep(name) {
+      const step = standIn(name);
+      if (!step || trailPending || !trail.length) return;
+      // A second click on a lone armed agent cancels it; a double-click there then makes its loop on itself.
+      if (step === trail.at(-1)) { loneCancel = trail.length === 1 ? step : ''; finishTrail(); return; }
+      // The hub can only end a path: once it is the newest step, only finishing it, Backspace or Escape is left.
+      if (trail.length > 1 && isHubAgent(trail.at(-1))) { refuseFlow(step, trail.at(-1) + ' ends this flow: press Enter or click it again to add the flow'); return; }
+      trail.push(step); trailChanged();
+    }
+    // A double-click (or `l`) on an agent with no path pending: its loop on itself, added once; if it has one,
+    // that flow is selected instead. It is never removed or doubled this way.
+    function loopOnItself(name) {
+      const step = standIn(name);
+      if (!flowAction || !step || trailPending) return;
+      loneCancel = '';
+      const own = routes().find(flow => isSelfLoop(flow.path) && flow.path[0] === step);
+      if (own) { if (trail.length) dropTrail(); select('flow', own.id, routeViews.get(own.id)?.group); return; }
+      addFlow([step, step]);
+    }
+    function cancelPress() { press = null; }
+    // Escape during a drag: the agent goes back to where it was, the canvas back to where it was, and nothing else.
+    function cancelDrag() {
+      if (press?.moved) {
+        const current = press; press = null;
+        applyMoves(layoutKey(), current.before, false);
+        if (arrangement === 'compact') { clampPan(); transform(); }
+      } else if (drag?.moved) {
+        camera.x = drag.x; camera.y = drag.y; clampPan(); transform(); drag = null;
+      } else return false;
+      viewport.dataset.dragging = 'false'; swallowClick = true; lastClick = null; cleanPresses = 0;
+      if (trail.length && !trailPending) trailChanged();
+      return true;
+    }
+    function clearHold() { if (hold?.timer) { clearTimeout(hold.timer); timers.delete(hold.timer); } hold = null; }
+    // What a right-click, a long press or `i` opens: a node (the hub's learning ring opens learning), a drawn flow,
+    // a review loop or a work loop. Anything else (empty canvas, the controls) is not a target.
+    function infoTarget(element) {
+      if (!element?.closest || !viewport.contains(element)) return null;
+      if (element.closest('[data-learning]')) return { type: 'learning', key: '', origin: element.closest('[data-learning]') };
+      const node = element.closest('[data-agent]');
+      if (node && nodeLayer.contains(node)) return { type: 'agent', key: node.dataset.agent, origin: node };
+      const route = element.closest('[data-route]');
+      if (route) return { type: 'flow', key: route.dataset.route, origin: route };
+      const work = element.closest('[data-work-loop-id]');
+      if (work) return { type: 'work-loop', key: work.dataset.workLoopId, origin: work };
+      const loop = element.closest('[data-loop-id]');
+      if (loop) return { type: 'loop', key: loop.dataset.loopId, origin: loop };
+      return null;
+    }
+    // Opening details touches nothing else: a pending path stays pending.
+    function openInfo(target) {
+      if (target.type === 'agent') activateAgent(target.key, target.origin);
+      else select(target.type, target.key, target.origin);
+    }
+    function pickFlow(id) { if (pickedFlow === id) return; pickedFlow = id; highlight(); }
+    // What Delete or Backspace is about: the focused node, flow or loop, else the picked flow, else the flow whose
+    // details are open.
+    function deleteTarget(element) {
+      const focused = infoTarget(element);
+      if (focused) return focused;
+      if (pickedFlow && routeById(pickedFlow)) return { type: 'flow', key: pickedFlow };
+      if (selected?.type === 'flow' && routeById(selected.key)) return { type: 'flow', key: selected.key };
+      return null;
+    }
+    // How each kind of target is deleted, or null when it cannot be. Only the user's own lines go today: a drawn
+    // flow or loop on itself, through actions.flow. The hub's and council's lines and everything drawn from a
+    // live task graph are not the user's data; a node (turning an agent off) is a later addition.
+    function deleter(target) {
+      switch (target?.type) {
+        case 'flow': return flowAction && routeById(target.key) ? () => removeFlow(target.key) : null;
+        case 'agent': return null;
+        default: return null; // a review or work loop, the learning ring
+      }
+    }
+    function infoKey(event) { return (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey) || (event.key.toLowerCase() === 'i' && !event.shiftKey)) && !event.ctrlKey && !event.metaKey && !event.altKey; }
+    function message(error, fallback) { return text(error && typeof error === 'object' && 'message' in error ? error.message : error).replace(/\s+/g, ' ').trim() || fallback; }
+    function refuseFlow(name, error) {
+      if (!name) return;
+      flowErrors.set(name, message(error, 'The flow could not be changed')); setTitle(name);
+      const node = nodes.get(name);
       if (node) { node.dataset.shake = 'true'; later(() => { delete node.dataset.shake; }, 400); }
     }
-    // Ask the host for "check checks work" (on) or its removal; the next snapshot shows the result.
-    function askLoop(work, check, on, remember) {
-      const key = loopKey(work, check);
-      if (pendingLoops.has(key)) return Promise.resolve(false);
-      pendingLoops.set(key, on); loopErrors.delete(work); setTitle(work); updateLoops(); highlight();
+    // Ask the host for a change; `before` runs on its answer, before the next snapshot is drawn.
+    function askFlow(request, before) {
+      busyFlows++;
       let answer;
-      try { answer = Promise.resolve(setLoop(work, check, on)); } catch (error) { answer = Promise.reject(error); }
-      return answer.then(async () => {
-        if (!alive) return false;
-        if (remember) { loopHistory.push({ work, check, on }); if (loopHistory.length > UNDO_STEPS) loopHistory.shift(); }
-        if (on) freshLoops.add(key);
+      try { answer = Promise.resolve(flowAction(request)); } catch (error) { answer = Promise.reject(error); }
+      return answer.then(async result => {
+        const reply = result && typeof result === 'object' ? result : {};
+        if (!alive) return reply;
+        if (before) before(reply);
         if (pending) await pending; // a snapshot asked for before the change may not show it
         await refresh();
-        pendingLoops.delete(key);
-        if (alive && snapshot) { updateLoops(); highlight(); }
-        return true;
+        return reply;
+      }).finally(() => { busyFlows--; });
+    }
+    function remember(entry) { flowHistory.push(entry); if (flowHistory.length > UNDO_STEPS) flowHistory.shift(); }
+    function finishTrail() {
+      if (trailPending) return; // the same path is never asked for twice
+      const path = trail.slice();
+      if (path.length < 2) { dropTrail(); return; }
+      addFlow(path);
+    }
+    function addFlow(path) {
+      if (trailPending) return;
+      trail = path.slice(); trailPending = true; trailChanged();
+      askFlow({ op: 'add', path }, reply => {
+        if (reply.flow?.id) freshRoutes.add(reply.flow.id);
+        trailPending = false; trail = []; trailChanged();
+      }).then(reply => {
+        if (!alive) return;
+        const flow = reply.flow;
+        if (flow?.id) {
+          remember({ op: 'add', id: flow.id, path: flow.path || path, text: flow.text });
+          if (routeById(flow.id)) {
+            // A flow just made opens its details with the instruction box focused and its made-up text selected:
+            // typing replaces it, and Escape or a click away keeps it.
+            select('flow', flow.id, routeViews.get(flow.id)?.group);
+            const box = [...detailScroll.querySelectorAll('[data-route-text]')].find(item => item.dataset.routeText === flow.id);
+            if (box && !box.readOnly) { box.focus({ preventScroll: true }); box.select(); }
+          }
+        }
       }, error => {
-        if (!alive) return false;
-        pendingLoops.delete(key); freshLoops.delete(key);
-        if (snapshot) { updateLoops(); highlight(); }
-        refuseLoop(work, error);
-        return false;
+        if (!alive) return;
+        trailPending = false; trail = []; trailChanged();
+        refuseFlow(path[0], error);
       });
     }
-    function completeLoop(work, check) {
-      disarm();
-      if (!work || !check || work === check || !loopEnd(work) || !loopEnd(check)) return;
-      askLoop(work, check, !hasDrawnLoop(work, check), true);
+    function setRouteState(kind, said) {
+      const state = detailScroll.querySelector('[data-route-state]');
+      if (!state) return;
+      state.dataset.routeState = kind;
+      state.textContent = said || { saved: 'Saved', unsaved: 'Not saved', saving: 'Saving' }[kind];
+      state.title = state.textContent;
     }
-    function undoLoop() {
-      const last = loopHistory.pop();
-      if (last) askLoop(last.work, last.check, !last.on, false).then(done => { if (!done && alive) loopHistory.push(last); });
+    // The instruction's limit counts characters (code points), as the command does, not UTF-16 units.
+    function overLimit(value) { const length = [...value].length; return length > FLOW_TEXT_CHARS ? 'Too long: ' + length + ' of ' + FLOW_TEXT_CHARS + ' characters' : ''; }
+    function saveRouteText(box) {
+      if (!flowAction || box.readOnly) return;
+      // A save asked for while one is out waits for its answer, then goes, so a newer edit is never dropped.
+      if (box.dataset.saving === 'true') { box.dataset.queued = 'true'; return; }
+      const id = box.dataset.routeText, before = box.dataset.saved, value = box.value;
+      if (value === before) return;
+      const long = overLimit(value);
+      if (long) { setRouteState('error', long); return; }
+      const next = () => {
+        if (box.dataset.queued !== 'true') return;
+        delete box.dataset.queued;
+        if (alive && box.isConnected && box.value !== box.dataset.saved) saveRouteText(box);
+      };
+      box.dataset.saving = 'true'; setRouteState('saving');
+      askFlow({ op: 'text', id, text: value }, reply => {
+        // A blank text comes back as the one made from the path.
+        box.dataset.saved = typeof reply.flow?.text === 'string' ? reply.flow.text : value;
+        if (box.value === value) box.value = box.dataset.saved;
+      }).then(() => {
+        box.dataset.saving = 'false';
+        remember({ op: 'text', id, before, after: box.dataset.saved });
+        setRouteState(box.value === box.dataset.saved ? 'saved' : 'unsaved');
+        next();
+      }, error => {
+        box.dataset.saving = 'false';
+        setRouteState('error', message(error, 'Not saved'));
+        next();
+      });
     }
-    // A click (or Enter) on an agent while loops can be drawn.
+    function removeFlow(id) {
+      const flow = routeById(id);
+      if (!flowAction || !flow) return;
+      // Undo puts back the newest instruction: one being saved as the remove goes, else the last one saved.
+      const box = [...detailScroll.querySelectorAll('[data-route-text]')].find(item => item.dataset.routeText === id);
+      const undoText = box && !box.readOnly ? (box.dataset.saving === 'true' && !overLimit(box.value) ? box.value : box.dataset.saved) : flow.text;
+      askFlow({ op: 'remove', id }).then(() => {
+        if (!alive) return;
+        remember({ op: 'remove', id, path: flow.path, text: undoText });
+        if (selected?.type === 'flow' && selected.key === id) closeDetails();
+      }, error => {
+        if (!alive) return;
+        // The flow stays; its details say why, as a line.
+        refuseFlow(flow.path[0], error);
+        if (routeById(id) && !(selected?.type === 'flow' && selected.key === id)) select('flow', id, routeViews.get(id)?.group);
+        setRouteState('error', message(error, 'Not removed'));
+      });
+    }
+    function undoFlow() {
+      const last = flowHistory.pop();
+      if (!last) return;
+      if (last.op === 'skill') { undoSkill(last); return; }
+      if (last.op === 'move') { applyMoves(last.layout, last.before, false); return; }
+      const request = last.op === 'add' ? { op: 'remove', id: last.id } : last.op === 'remove' ? { op: 'add', path: last.path, text: last.text } : { op: 'text', id: last.id, text: last.before };
+      askFlow(request, reply => {
+        // A flow put back gets a new file, so later steps that name it follow it there.
+        if (last.op === 'remove' && reply.flow?.id) flowHistory.forEach(entry => { if (entry.id === last.id) entry.id = reply.flow.id; });
+        if (last.op !== 'add' && selected?.type === 'flow' && selected.key === last.id && reply.flow?.id) selected.key = reply.flow.id;
+      }).then(() => {
+        if (alive && last.op === 'add' && selected?.type === 'flow' && selected.key === last.id) closeDetails();
+      }, error => {
+        if (!alive) return;
+        flowHistory.push(last);
+        refuseFlow((last.path || routeById(last.id)?.path || [])[0], error);
+      });
+    }
+    // A click (or Enter) on an agent while flows can be drawn: start a path, add a step, or finish on the newest.
     function pressAgent(name) {
-      if (armed) {
-        if (name === armed || !loopEnd(name)) disarm();
-        else completeLoop(armed, name);
-        return;
+      if (trailPending) return;
+      if (!trail.length) startTrail(name);
+      else addStep(name);
+    }
+    // A clean pointer click on an agent. Two on the same lone agent within DOUBLE_MS, with no path pending before
+    // the first, are a double-click: the second makes its loop on itself at once (never "cancel"), and the
+    // browser's dblclick that follows is swallowed. A slower second click cancels the lone agent as before.
+    function clickAgent(name) {
+      const step = standIn(name), now = performance.now();
+      if (step && !trailPending && trail.length === 1 && trail[0] === step && lastClick?.step === step && lastClick.lone && now - lastClick.at <= DOUBLE_MS) {
+        lastClick = null; swallowDouble = true; loopOnItself(step); return;
       }
-      if (loopEnd(name)) arm(name);
-      else activateAgent(name, nodes.get(name)); // the hub and council seats open their details
+      const lone = !trail.length;
+      pressAgent(name);
+      lastClick = step ? { step, at: now, lone: lone && trail.length === 1 && trail[0] === step } : null;
     }
     function focusNext(name, step) {
       const list = Array.from(nodes.values()).filter(node => node.isConnected), index = list.indexOf(nodes.get(name));
@@ -1386,14 +1852,40 @@
       if (foldLink) { const row = [...detailScroll.querySelectorAll('[data-run-fold]')].find(item => item.dataset.runFold === foldLink.dataset.runOpenFold); if (row) { row.open = true; lazySteps.get(row)?.(); row.scrollIntoView({ block: 'nearest' }); } return; }
       const opener = event.target.closest('[data-open-session]');
       if (opener) { openSession(opener.dataset.openSession); return; }
+      const skillButton = event.target.closest('[data-skill-request]');
+      if (skillButton) { if (!skillButton.disabled) askSkill(JSON.parse(skillButton.dataset.skillRequest)).catch(() => {}); return; }
+      const removeRoute = event.target.closest('[data-route-remove]');
+      if (removeRoute) { removeFlow(removeRoute.dataset.routeRemove); return; }
       const link = event.target.closest('[data-flow-peer]');
       if (link) { select('agent', link.dataset.flowPeer, nodes.get(link.dataset.flowPeer)); detailScroll.scrollTop = 0; }
     });
+    // The instruction is saved when focus leaves it or on Ctrl/Cmd+Enter; its state shows beside it.
+    listen(detailScroll, 'input', event => { const box = event.target.closest('[data-route-text]'); if (box && box.dataset.saving !== 'true') { const long = overLimit(box.value); if (long) setRouteState('error', long); else setRouteState(box.value === box.dataset.saved ? 'saved' : 'unsaved'); } });
+    listen(detailScroll, 'focusout', event => { const box = event.target.closest('[data-route-text]'); if (box) saveRouteText(box); });
+    listen(detailScroll, 'keydown', event => {
+      const box = event.target.closest('[data-route-text]');
+      if (box && event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); saveRouteText(box); }
+    });
     listen(root, 'keydown', event => {
-      if (setLoop && event.key === 'Escape' && (armed || press)) { event.preventDefault(); cancelPress(); disarm(); return; }
-      if (setLoop && (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'z') {
-        if (loopHistory.length) { event.preventDefault(); undoLoop(); }
+      if (event.key === 'Escape' && (press?.moved || drag?.moved)) { event.preventDefault(); cancelDrag(); return; }
+      const typing = !!event.target.closest('textarea, input, select');
+      if (!typing && !event.defaultPrevented && (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'z') {
+        if (flowHistory.length) { event.preventDefault(); undoFlow(); }
         return;
+      }
+      if ((flowAction || skillAction) && !typing && !event.defaultPrevented) {
+        const plain = !event.ctrlKey && !event.metaKey && !event.altKey;
+        // Delete and Backspace edit text in a field (excluded above) and do nothing on the details panel's controls.
+        const inPanel = !!event.target.closest('.ag-detail');
+        if (event.key === 'Escape' && pickedFlow && !trail.length && !press && !inPanel) { pickFlow(''); }
+        if (event.key === 'Escape' && (trail.length || press)) { event.preventDefault(); if (press?.moved) finishMove(press.before); cancelPress(); dropTrail(); return; }
+        if (event.key === 'Backspace' && plain && trail.length && !inPanel) { event.preventDefault(); backStep(); return; }
+        if (event.key === 'Enter' && plain && trail.length && !event.target.closest('.ag-detail, button, [data-agent]')) { event.preventDefault(); finishTrail(); return; }
+        if ((event.key === 'Delete' || event.key === 'Backspace') && plain && !trail.length && !inPanel) {
+          const remove = deleter(deleteTarget(event.target));
+          if (remove) { event.preventDefault(); remove(); }
+          return;
+        }
       }
       if (event.key === 'Escape' && selected) { event.preventDefault(); closeDetails(); }
     });
@@ -1424,19 +1916,31 @@
       const inspect = event.target.closest('[data-agent-inspect]');
       if (inspect) { select('agent', inspect.dataset.agentInspect, nodes.get(inspect.dataset.agentInspect)); return; }
       const node = event.target.closest('[data-agent]');
-      if (node && !suppressClick) { if (setLoop) pressAgent(node.dataset.agent); else activateAgent(node.dataset.agent, node, event.shiftKey); }
+      // A left click builds (with actions.flow); it never opens details, which a right-click does.
+      if (node && !suppressClick && flowAction) pressAgent(node.dataset.agent);
     });
-    // Moving between agents with the keyboard while one is armed draws the line to the focused one.
-    listen(nodeLayer, 'focusin', event => {
-      const node = event.target.closest('[data-agent]'), p = node && positions.get(node.dataset.agent);
-      if (!setLoop || !armed || !p) return;
-      showWire(armed, p.x, p.y); aim(node.dataset.agent, armed);
-    });
-    listen(loopLayer, 'click', event => {
-      const work = event.target.closest('[data-work-loop-id]');
-      if (work && !suppressClick) { select('work-loop', work.dataset.workLoopId, work); return; }
-      const loop = event.target.closest('[data-loop-id]');
-      if (loop && !suppressClick) select('loop', loop.dataset.loopId, loop);
+    // Moving between agents with the keyboard while a path is pending draws the line to the focused one.
+    function aimAtFocus() {
+      const node = document.activeElement?.closest?.('[data-agent]'), p = node && nodeLayer.contains(node) && positions.get(node.dataset.agent);
+      if (!flowAction || !trail.length || trailPending || !p) return;
+      showWire(trail.at(-1), p.x, p.y); aim(node.dataset.agent);
+    }
+    listen(nodeLayer, 'focusin', aimAtFocus);
+    // A right-click (two-finger click, Ctrl+click on a Mac) on a node, a flow or a loop opens its details and
+    // replaces the browser's menu there only. It is never a click: the press it began is forgotten, so it does
+    // not arm, connect, finish or cancel a path, start a drag or count towards a double-click.
+    listen(root, 'contextmenu', event => {
+      if (keyMenu) { keyMenu = false; event.preventDefault(); return; }
+      // During a drag a right-click is ignored: the drag goes on and no menu opens.
+      if (press?.moved || drag?.moved) { event.preventDefault(); return; }
+      const target = infoTarget(event.target);
+      if (!target) return;
+      event.preventDefault();
+      if (hold && !hold.fired) { clearTimeout(hold.timer); timers.delete(hold.timer); hold.timer = null; hold.fired = true; openInfo(target); return; }
+      if (hold?.fired) return;
+      if (press && !press.moved) press = null;
+      if (drag && !drag.moved) drag = null;
+      openInfo(target);
     });
     listen(viewport, 'keydown', event => {
       const ring = event.target.closest('[data-learning]');
@@ -1447,23 +1951,42 @@
       if (work && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); select('work-loop', work.dataset.workLoopId, work); return; }
       const loop = event.target.closest('[data-loop-id]');
       if (loop && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); select('loop', loop.dataset.loopId, loop); return; }
+      const route = event.target.closest('[data-route]');
+      if (route && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); select('flow', route.dataset.route, route); return; }
+      // `i`, the context-menu key and Shift+F10 open the focused node's, flow's or loop's details; nothing else changes.
+      if (infoKey(event)) {
+        const target = infoTarget(event.target);
+        if (target) {
+          event.preventDefault();
+          if (event.key !== 'i' && event.key !== 'I') { keyMenu = true; later(() => { keyMenu = false; }, 600); }
+          openInfo(target); return;
+        }
+      }
       const node = event.target.closest('[data-agent]');
-      if (node && setLoop && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      // Shift+Enter opens an agent's details whatever is pending; `r` puts every agent back in its automatic place.
+      if (node && event.key === 'Enter' && event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) { event.preventDefault(); activateAgent(node.dataset.agent, node); return; }
+      if ((node || event.target === viewport) && event.key.toLowerCase() === 'r' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) { event.preventDefault(); resetMoves(); return; }
+      if (node && flowAction && !event.ctrlKey && !event.metaKey && !event.altKey) {
         const key = node.dataset.agent;
-        if ((event.key === 'Enter' || event.key === ' ') && armed) { event.preventDefault(); pressAgent(key); return; }
-        if (event.key.toLowerCase() === 'c' && !event.shiftKey) { event.preventDefault(); if (armed === key) disarm(); else if (loopEnd(key)) arm(key); return; }
-        if (!event.shiftKey && event.key.startsWith('Arrow')) { event.preventDefault(); focusNext(key, event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1); return; }
+        if ((event.key === 'Enter' || event.key === ' ') && trail.length) { event.preventDefault(); pressAgent(key); return; }
+        if (event.key.toLowerCase() === 'c' && !event.shiftKey) { event.preventDefault(); if (trail.length === 1 && trail[0] === standIn(key)) dropTrail(); else startTrail(key); return; }
+        // `l`: the keyboard's double-click, the agent's loop on itself (only with no path of two or more pending).
+        if (event.key.toLowerCase() === 'l' && !event.shiftKey) { event.preventDefault(); if (trail.length <= 1 && !trailPending) loopOnItself(key); return; }
+        if (!event.shiftKey && event.key.startsWith('Arrow')) { event.preventDefault(); focusNext(key, event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1); aimAtFocus(); return; }
       }
       if (node && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); activateAgent(node.dataset.agent, node, event.shiftKey); return; }
-      if (node && event.shiftKey && event.key.startsWith('Arrow')) {
-        const p = positions.get(node.dataset.agent);
+      // Alt+arrow (or Shift+arrow) moves the focused agent; the presses in a row on one agent undo as one move.
+      if (node && (event.altKey || event.shiftKey) && !event.ctrlKey && !event.metaKey && event.key.startsWith('Arrow')) {
+        const key = node.dataset.agent, p = positions.get(key);
+        if (!p) return;
         stopLayout(); let x = p.x, y = p.y;
-        if (event.key === 'ArrowLeft') x -= 12;
-        else if (event.key === 'ArrowRight') x += 12;
-        else if (event.key === 'ArrowUp') y -= 12;
-        else if (event.key === 'ArrowDown') y += 12;
+        if (event.key === 'ArrowLeft') x -= NUDGE_PX;
+        else if (event.key === 'ArrowRight') x += NUDGE_PX;
+        else if (event.key === 'ArrowUp') y -= NUDGE_PX;
+        else if (event.key === 'ArrowDown') y += NUDGE_PX;
         else return;
-        event.preventDefault(); camera.touched = true; moveNode(node.dataset.agent, x, y);
+        event.preventDefault(); camera.touched = true;
+        const before = copyMoves(); moveNode(key, x, y); finishMove(before, { agent: key, by: 'key' });
         if (arrangement === 'compact') { clampPan(); transform(); } else fitView(false);
         return;
       }
@@ -1479,39 +2002,47 @@
       event.preventDefault(); camera.touched = true; clampPan(); transform();
     });
     listen(viewport, 'pointerdown', event => {
+      keyMenu = false;
       if (event.button !== 0 && event.pointerType !== 'touch') return;
+      // While an agent is pressed or dragged, a second pointer is ignored.
+      if (press && press.id !== event.pointerId) return;
+      swallowClick = false; swallowDouble = false;
       if (event.target.closest('[data-learning]')) return;
       pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      clearHold();
+      // Touch: a press held still opens the details of what it is on; one that moves first is a drag or a pan.
+      const touched = event.pointerType === 'touch' && pointers.size === 1 && infoTarget(event.target);
+      if (touched) {
+        const id = event.pointerId;
+        hold = { id, x: event.clientX, y: event.clientY, fired: false, timer: null };
+        hold.timer = later(() => { if (hold?.id === id && !hold.fired) { hold.timer = null; hold.fired = true; openInfo(touched); } }, LONG_PRESS_MS);
+      }
       if (pointers.size === 2) {
         const [a, b] = Array.from(pointers.values()), rect = viewport.getBoundingClientRect();
         pinch = { distance: Math.hypot(a.x - b.x, a.y - b.y), scale: camera.scale, x: ((a.x + b.x) / 2 - rect.left - camera.x) / camera.scale, y: ((a.y + b.y) / 2 - rect.top - camera.y) / camera.scale };
         drag = null; suppressClick = true;
-        cancelPress();
-      } else if (pointers.size === 1 && setLoop && event.target.closest('[data-agent]')) {
-        // On an agent a press is a click (arm or connect), a hold (details) or a drag (connect), never a move.
-        // The hub and council seats cannot be connected, so a drag that starts on them pans, as before.
-        const node = event.target.closest('[data-agent]'), key = node.dataset.agent, id = event.pointerId;
+        if (press?.moved) finishMove(press.before);
+        cancelPress(); clearHold();
+      } else if (pointers.size === 1 && event.target.closest('[data-agent]')) {
+        // On an agent a press is a click, whatever its length; once it moves past MOVE_PX it moves the agent
+        // instead, and then it never arms, selects, starts or finishes a path.
+        const node = event.target.closest('[data-agent]'), key = node.dataset.agent, p = positions.get(key);
         cancelPress(); drag = null; suppressClick = false;
-        press = { id, key, startX: event.clientX, startY: event.clientY, cameraX: camera.x, cameraY: camera.y, moved: false, held: false, timer: null };
-        press.timer = later(() => {
-          if (!press || press.id !== id || press.moved) return;
-          press.held = true; disarm(); activateAgent(key, node);
-        }, HOLD_MS);
+        press = { id: event.pointerId, key, startX: event.clientX, startY: event.clientY, x: p ? p.x : 0, y: p ? p.y : 0, moved: false, before: null };
         node.focus({ preventScroll: true });
       } else if (pointers.size === 1) {
-        const node = event.target.closest('[data-agent]'), p = node && positions.get(node.dataset.agent), loop = event.target.closest('[data-loop-id], [data-work-loop-id]');
-        if (p) stopLayout();
-        drag = { id: event.pointerId, key: p ? node.dataset.agent : null, loopKey: loop?.dataset.workLoopId || loop?.dataset.loopId, loopType: loop?.hasAttribute('data-work-loop-id') ? 'work-loop' : 'loop', startX: event.clientX, startY: event.clientY, x: p ? p.x : camera.x, y: p ? p.y : camera.y, moved: false };
+        const loop = event.target.closest('[data-loop-id], [data-work-loop-id], [data-route]');
+        drag = { id: event.pointerId, route: loop?.dataset.route || '', startX: event.clientX, startY: event.clientY, x: camera.x, y: camera.y, moved: false };
         suppressClick = false;
-        if (node) node.focus({ preventScroll: true });
-        else if (loop) loop.focus({ preventScroll: true });
+        if (loop) loop.focus({ preventScroll: true });
       }
       viewport.setPointerCapture(event.pointerId);
     });
     listen(viewport, 'pointermove', event => {
-      if (setLoop && armed && !press) { const point = stagePoint(event.clientX, event.clientY); showWire(armed, point.x, point.y); aim(agentAt(event.clientX, event.clientY), armed); }
+      if (flowAction && trail.length && !trailPending && !press) { const point = stagePoint(event.clientX, event.clientY); showWire(trail.at(-1), point.x, point.y); aim(agentAt(event.clientX, event.clientY)); }
       if (!pointers.has(event.pointerId)) return;
       pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (hold?.id === event.pointerId && !hold.fired && Math.hypot(event.clientX - hold.x, event.clientY - hold.y) > MOVE_PX) clearHold();
       if (pinch && pointers.size >= 2) {
         const [a, b] = Array.from(pointers.values()), rect = viewport.getBoundingClientRect();
         camera.scale = clamp(pinch.scale * Math.hypot(a.x - b.x, a.y - b.y) / Math.max(1, pinch.distance), .2, 3);
@@ -1520,59 +2051,85 @@
         camera.touched = true; transform(); return;
       }
       if (press && press.id === event.pointerId) {
-        if (!press.moved && Math.hypot(event.clientX - press.startX, event.clientY - press.startY) <= STILL_PX) return;
-        if (!press.moved) { press.moved = true; clearTimeout(press.timer); timers.delete(press.timer); }
-        if (press.held) return;
-        suppressClick = true;
-        if (!loopEnd(press.key)) {
-          drag = { id: press.id, key: null, startX: press.startX, startY: press.startY, x: press.cameraX, y: press.cameraY, moved: false };
-          press = null; disarm();
-        } else {
-          if (armed && armed !== press.key) disarm();
-          const point = stagePoint(event.clientX, event.clientY);
-          showWire(press.key, point.x, point.y); aim(agentAt(event.clientX, event.clientY), press.key);
-          return;
-        }
+        const dx = event.clientX - press.startX, dy = event.clientY - press.startY;
+        if (!press.moved && Math.hypot(dx, dy) <= MOVE_PX) return;
+        if (!positions.has(press.key)) return;
+        if (!press.moved) { press.moved = true; press.before = copyMoves(); stopLayout(); suppressClick = true; camera.touched = true; viewport.dataset.dragging = 'true'; }
+        moveNode(press.key, press.x + dx / camera.scale, press.y + dy / camera.scale);
+        // A pending path stays as it was: its line waits at the newest step instead of following the pointer.
+        const last = flowAction && trail.length && !trailPending && positions.get(trail.at(-1));
+        if (last) { showWire(trail.at(-1), last.x, last.y); aim(''); }
+        return;
       }
       if (!drag || drag.id !== event.pointerId) return;
       const dx = event.clientX - drag.startX, dy = event.clientY - drag.startY;
       if (!drag.moved && Math.hypot(dx, dy) < 4) return;
       drag.moved = true; camera.touched = true; suppressClick = true; viewport.dataset.dragging = 'true';
-      if (drag.key) { if (positions.has(drag.key)) moveNode(drag.key, drag.x + dx / camera.scale, drag.y + dy / camera.scale); }
-      else { camera.x = drag.x + dx; camera.y = drag.y + dy; clampPan(); transform(); }
+      camera.x = drag.x + dx; camera.y = drag.y + dy; clampPan(); transform();
     });
     function pointerUp(event) {
       if (!pointers.has(event.pointerId)) return;
+      // A long press already opened details: its release is not a click.
+      const held = hold?.id === event.pointerId && hold.fired;
+      clearHold();
       if (press && press.id === event.pointerId) {
         const current = press; cancelPress();
-        if (event.type === 'pointerup' && !pinch && !current.held) {
-          if (!current.moved) pressAgent(current.key);
-          else {
-            const to = agentAt(event.clientX, event.clientY);
-            if (to && to !== current.key && loopEnd(current.key) && loopEnd(to)) completeLoop(current.key, to);
-            else disarm();
-          }
-        } else if (current.moved) disarm();
+        if (current.moved) {
+          // Dropped where it is: the camera does not move, so the agent stays under the pointer. The browser's
+          // click (and dblclick) after it is swallowed, and the double-click timer starts again.
+          swallowClick = true; lastClick = null;
+          finishMove(current.before);
+          if (arrangement === 'compact') { clampPan(); transform(); }
+          if (trail.length && !trailPending) trailChanged();
+        } else if (event.type === 'pointerup' && !pinch && !held) {
+          cleanPresses++;
+          // A click builds: on a canvas that draws flows it starts a path or adds a step. It never opens details.
+          pickFlow('');
+          if (flowAction) clickAgent(current.key);
+        }
         suppressClick = true;
       }
-      // A click on empty canvas (or on a loop) while an agent is armed cancels it.
-      if (event.type === 'pointerup' && armed && drag && !drag.moved && !drag.key && !pinch) disarm();
-      if (event.type === 'pointerup' && drag && !drag.moved && drag.key && !pinch) { activateAgent(drag.key, nodes.get(drag.key), event.shiftKey); suppressClick = true; }
-      if (event.type === 'pointerup' && drag?.loopKey && !drag.moved && !pinch) { select(drag.loopType, drag.loopKey, (drag.loopType === 'work-loop' ? workLoopViews : loopViews).get(drag.loopKey)?.group); suppressClick = true; }
-      if (drag?.key && drag.moved) { if (arrangement === 'compact') { clampPan(); transform(); } else fitView(false); }
+      if (drag?.moved) { cleanPresses = 0; swallowClick = true; lastClick = null; } else if (event.type === 'pointerup' && drag && !pinch && !held) cleanPresses++;
+      // A click on empty canvas (or on a line) while a path is pending drops the whole path. Otherwise a click
+      // on a drawn flow picks it (Delete removes it), and anywhere else lets it go.
+      if (event.type === 'pointerup' && drag && !drag.moved && !pinch && !held) {
+        if (trail.length) dropTrail();
+        else pickFlow(drag.route && routeById(drag.route) ? drag.route : '');
+      }
+      if (drag && !drag.moved) suppressClick = true;
       pointers.delete(event.pointerId); pinch = null; drag = null; viewport.dataset.dragging = 'false';
       if (viewport.hasPointerCapture(event.pointerId)) viewport.releasePointerCapture(event.pointerId);
     }
     ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(name => listen(viewport, name, pointerUp));
+    // The click a browser fires after a drag (or an Escape-cancelled drag) ends is not a click.
+    listen(viewport, 'click', event => { if (swallowClick) { swallowClick = false; event.stopPropagation(); event.preventDefault(); } }, true);
+    // A double-click is two clicks first: on an agent with no path the second click has already made its loop on
+    // itself (see clickAgent); this only catches a double-click slower than DOUBLE_MS (a long system setting),
+    // where the second click cancelled. With a path pending the two clicks have already finished it there.
+    // A double-click on empty canvas puts every agent back in its automatic place. One whose clicks were part of a
+    // drag does nothing.
+    listen(viewport, 'dblclick', event => {
+      if (swallowDouble) { swallowDouble = false; event.preventDefault(); loneCancel = ''; return; }
+      if (cleanPresses < 2) { loneCancel = ''; return; }
+      const name = event.target.closest?.('[data-agent]')?.dataset.agent || agentAt(event.clientX, event.clientY);
+      if (!name && !event.target.closest?.('[data-route], [data-loop-id], [data-work-loop-id], [data-learning], button')) { event.preventDefault(); resetMoves(); return; }
+      if (!flowAction || trailPending) return;
+      const step = name && standIn(name);
+      if (!step) return;
+      if ((!trail.length && loneCancel === step) || (trail.length === 1 && trail[0] === step)) { event.preventDefault(); loopOnItself(step); }
+      loneCancel = '';
+    });
 
     function render(data) {
       const previousTeam = activeTeam;
       snapshot = { ...data, agents: prepareRoster(data) };
-      const stamp = JSON.stringify([data.agents, data.graph, data.warnings, data.totals, data.escalation, data.root?.wear, data.structure]);
+      const stamp = JSON.stringify([data.agents, data.graph, data.warnings, data.totals, data.escalation, data.root?.wear, data.structure, data.skill_warnings, (data.skills || []).length]);
       if (stamp !== renderStamp) { renderStamp = stamp; renderRevision++; }
+      // The host's answer stands for an agent's skills only until a snapshot shows the same list.
+      skillOverride.forEach((list, name) => { const agent = (data.agents || []).find(item => item?.name === name); if (!agent || JSON.stringify(agent.skills) === JSON.stringify(list)) skillOverride.delete(name); });
       indexSteps();
       if (activeTeam !== previousTeam) { rememberTeam(previousTeam); restoreTeam(activeTeam); }
-      if (armed && !loopEnd(armed)) disarm();
+      if (trail.some(name => !shownAgents.has(name))) dropTrail();
       const graph = data.graph;
       runDetails.dataset.notices = String(data.warnings.length + (graph ? graph.problems.length : 0) > 0 || !!data.learning?.due);
       renderActivity();
@@ -1591,7 +2148,10 @@
         if (agent) select('agent', agent.name, nodes.get(agent.name), step?.id);
         else if (step) select('run', '', runDetails, step.id);
       }
-      renderDetail(); highlight();
+      // A flow removed elsewhere closes its details; one this view is changing waits for the answer.
+      if (selected?.type === 'flow' && !routeById(selected.key) && !busyFlows) closeDetails();
+      else renderDetail();
+      highlight();
     }
     function scheduleResize() {
       if (!alive || resizeFrame !== null) return;
@@ -1652,14 +2212,14 @@
       pointers.forEach((_, id) => { if (viewport.hasPointerCapture(id)) viewport.releasePointerCapture(id); });
       pointers.clear(); drag = null; pinch = null; suppressClick = false;
       viewport.dataset.dragging = 'false';
-      cancelPress(); armed = ''; hovered = ''; wire.style.display = 'none';
-      pendingLoops.clear(); freshLoops.clear(); loopErrors.clear(); loopHistory.length = 0; drawnLoopViews.clear();
+      cancelPress(); trail = []; trailPending = false; hovered = ''; wire.style.display = 'none';
+      freshRoutes.clear(); flowErrors.clear(); flowHistory.length = 0; routeViews.clear(); trailStatus.textContent = ''; delete root.dataset.agTrail;
       selected = null; selectedOrigin = null; initialSelection = ''; highlightedStep = ''; detailSignature = '';
       teamChoice = null; activeTeam = 'main'; teamChoices = []; layoutSignature = ''; renderStamp = '';
       arrangement = root.clientWidth > 0 && root.clientWidth <= 650 ? 'compact' : 'wide';
       visibleAgents = []; hubName = ''; openSteps.clear(); openFolds.clear(); teamViews.clear(); positions.clear(); nodes.clear(); lines.clear(); loopViews.clear(); workLoopViews.clear();
       agentsByName.clear(); stepsByAgent.clear(); stepsById.clear(); nodeOwners.clear(); shownAgents.clear();
-      nodeLayer.replaceChildren(); spokeLayer.replaceChildren(); escalationLayer.replaceChildren(); flowLayer.replaceChildren(); loopLayer.replaceChildren();
+      nodeLayer.replaceChildren(); spokeLayer.replaceChildren(); escalationLayer.replaceChildren(); flowLayer.replaceChildren(); loopLayer.replaceChildren(); routeLayer.replaceChildren(); trailLayer.replaceChildren();
       detailScroll.replaceChildren(); detail.hidden = true; root.classList.remove('ag-details-open');
       root.style.removeProperty('--ag-sheet-height');
       delete root.dataset.team; root.dataset.state = 'loading';
@@ -1676,7 +2236,7 @@
       if (!alive) return;
       alive = false; generation++; stopLayout(); if (resizeFrame !== null) cancelAnimationFrame(resizeFrame); clearInterval(timer); timers.forEach(clearTimeout); timers.clear(); resize.disconnect(); schemeObserver.disconnect(); cleanups.forEach(fn => fn());
       pointers.forEach((_, id) => { if (viewport.hasPointerCapture(id)) viewport.releasePointerCapture(id); });
-      pointers.clear(); teamViews.clear(); root.replaceChildren(); root.classList.remove('agentgraph', 'ag-compact', 'ag-canvas-compact', 'ag-details-open'); root.style.removeProperty('--ag-sheet-height'); root.style.removeProperty('--ag-header-height'); delete root.dataset.state; delete root.dataset.team; delete root.dataset.agScheme; delete root.dataset.agSchemeSource; delete root.dataset.agMotion; delete root.dataset.agLoops;
+      pointers.clear(); teamViews.clear(); root.replaceChildren(); root.classList.remove('agentgraph', 'ag-compact', 'ag-canvas-compact', 'ag-details-open'); root.style.removeProperty('--ag-sheet-height'); root.style.removeProperty('--ag-header-height'); delete root.dataset.state; delete root.dataset.team; delete root.dataset.agScheme; delete root.dataset.agSchemeSource; delete root.dataset.agMotion; delete root.dataset.agFlows; delete root.dataset.agTrail;
     } };
   }
   window.AgentGraph = { mount };

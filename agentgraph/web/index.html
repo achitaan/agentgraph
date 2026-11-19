@@ -21,16 +21,19 @@
         if (params.has(key)) request.set(key, params.get(key));
       }
       const query = request.size ? '?' + request.toString() : '';
-      // Drawing a loop between two agents writes the structure folder; the demo writes nothing.
-      const setLoop = async (work, check, on) => {
-        const response = await fetch('/api/structure/loop', { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ work, check, on }) });
+      // Drawing a flow through agents writes the structure folder, and a skill change the plugin's preset file;
+      // the demo writes nothing.
+      const post = (path, failed) => async request => {
+        const response = await fetch(path, { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request) });
         let data = null;
         try { data = await response.json(); } catch (_) { /* the status says it */ }
-        if (!response.ok || !data || data.error) throw new Error(data?.error || 'The loop could not be changed (' + response.status + ')');
-        return data.loops;
+        if (!response.ok || !data || data.error) throw new Error(data?.error || failed + ' (' + response.status + ')');
+        return data;
       };
+      const flow = post('/api/structure/flow', 'The flow could not be changed');
+      const skills = post('/api/skills', 'The skills could not be changed');
       window.AgentGraph.mount(root, {
-        actions: params.has('demo') ? undefined : { setLoop },
+        actions: params.has('demo') ? undefined : { flow, skills },
         fetchSnapshot: async () => {
           const response = await fetch('/api/snapshot' + query, { cache: 'no-store' });
           const body = await response.text();

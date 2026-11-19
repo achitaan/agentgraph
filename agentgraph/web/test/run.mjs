@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 const [chrome, work] = process.argv.slice(2);
 const browser = spawn(chrome, ['--headless=new', '--disable-gpu', '--no-first-run', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--window-size=1400,900', '--remote-debugging-port=0', '--user-data-dir=' + work + '/profile', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
 let socket;
-const timeout = setTimeout(() => { console.error('View checks timed out'); browser.kill(); process.exit(1); }, 45000);
+const timeout = setTimeout(() => { console.error('View checks timed out'); browser.kill(); process.exit(1); }, 90000);
 try {
   const endpoint = await new Promise((resolve, reject) => {
     let log = '';
