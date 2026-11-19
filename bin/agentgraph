@@ -1,0 +1,32 @@
+#!/bin/sh
+# agentgraph launcher. Run it from a project directory.
+#   agentgraph                      live view of the agent graph and the current task graph
+#   agentgraph check                validate the task-graph files
+#   agentgraph record               save finished graphs to the run ledger
+#   agentgraph feedback --stdin     save a correction from the user, read from stdin (--agent NAME, --task NAME)
+#   agentgraph signals [--json]     what the ledger says should improve
+#   agentgraph improved ...         mark that a prompt improvement was applied
+#   agentgraph serve [--port N]     the same view as a local web page (http://127.0.0.1:4747/)
+#   agentgraph snapshot             the data behind the view, as one line of JSON
+# -P: do not put the current directory on the import path, so a project that
+# has its own "agentgraph" package cannot shadow this tool.
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+# "--home DIR <ledger command>" is also accepted.
+if [ "$1" = "--home" ] && [ $# -ge 3 ]; then
+  PYTHONPATH="$HERE" exec python3 -P -m agentgraph.ledger "$@"
+fi
+case "$1" in
+  check)
+    shift
+    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.check "$@" ;;
+  record|feedback|signals|improved)
+    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.ledger "$@" ;;
+  serve)
+    shift
+    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.server "$@" ;;
+  snapshot)
+    shift
+    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.snapshot_json "$@" ;;
+  *)
+    PYTHONPATH="$HERE" exec python3 -P -m agentgraph "$@" ;;
+esac
