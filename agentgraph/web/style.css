@@ -422,3 +422,16 @@
 .agentgraph .ag-detail-section .ag-note { margin: 0 0 6px; padding-left: 8px; border-left: 2px solid var(--ag-work); font-size: 10.5px; line-height: 1.5; white-space: normal; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .agentgraph .ag-detail-section .ag-learning-line { margin-bottom: 8px; color: var(--ag-muted); }
 .agentgraph .ag-detail-section .ag-learning-line[data-due="true"] { color: var(--ag-work); }
+
+/* The outer loop round the centre: what the user has said, and what a prompt change has answered. */
+.agentgraph .ag-learn-track, .agentgraph .ag-learn-hit, .agentgraph .ag-learn-beads { display: none; }
+.agentgraph .ag-agent:not([data-outer="off"]) .ag-learn-track, .agentgraph .ag-agent:not([data-outer="off"]) .ag-learn-hit, .agentgraph .ag-agent:not([data-outer="off"]) .ag-learn-beads { display: initial; }
+.agentgraph .ag-learn-track { fill: none; stroke: var(--ag-supervision); stroke-width: 1; pointer-events: none; }
+.agentgraph .ag-agent[data-outer="due"] .ag-learn-track { stroke: var(--ag-work); opacity: .55; }
+.agentgraph .ag-learn-hit { fill: none; stroke: transparent; stroke-width: 14; pointer-events: stroke; cursor: pointer; outline: none; }
+.agentgraph .ag-learn-hit:hover, .agentgraph .ag-learn-hit:focus-visible { stroke: var(--ag-activity-glow); }
+.agentgraph .ag-learn-bead { fill: var(--ag-bg); stroke: var(--ag-idle); stroke-width: 1; pointer-events: none; }
+.agentgraph .ag-learn-bead[data-fresh="true"] { fill: var(--ag-work); stroke: var(--ag-work); }
+.agentgraph .ag-note-row { margin: 0 0 8px; }
+.agentgraph .ag-detail-section .ag-note-row .ag-note { margin-bottom: 2px; }
+.agentgraph .ag-note-meta { display: block; padding-left: 10px; font-size: 9.5px; color: var(--ag-muted); }

@@ -523,6 +523,7 @@
       if (!sessionID) return;
       try { Promise.resolve(options.onOpenSession({ agent: name, sessionID })).catch(() => {}); } catch (_) { /* the details stay open either way */ }
     }
+    function learningLine(learning) { return [learning.total + (learning.total === 1 ? ' note' : ' notes'), learning.pending ? learning.pending + ' new' : '', learning.due ? 'change due' : '', learning.improvements ? learning.improvements + ' applied' : ''].filter(Boolean).join(' · '); }
     function cells(parent, pairs) {
       const grid = el('div', 'ag-stats');
       pairs.forEach(([label, value]) => { const cell = el('div', 'ag-stat'); cell.append(el('span', 'ag-stat-label', label), el('span', 'ag-stat-value', value)); grid.append(cell); });
@@ -614,7 +615,7 @@
           node.append(svg('circle', { class: 'ag-ping' }), svg('circle', { class: 'ag-halo' }), svg('circle', { class: 'ag-hub-wake' }), svg('circle', { class: 'ag-hub-orbit' }), svg('circle', { class: 'ag-core' }), svg('circle', { class: 'ag-hub-progress', transform: 'rotate(-90)' }), svg('circle', { class: 'ag-spark' }));
           node.append(svg('text', { class: 'ag-agent-name', 'text-anchor': 'middle' }));
           node.append(svg('text', { class: 'ag-agent-work', 'text-anchor': 'middle' }));
-          node.append(svg('circle', { class: 'ag-alert', r: 4 }), svg('title'));
+          node.append(svg('circle', { class: 'ag-learn-track' }), svg('g', { class: 'ag-learn-beads' }), svg('circle', { class: 'ag-learn-hit', 'data-learning': '', role: 'button', tabindex: 0, 'aria-label': 'Learning' }), svg('circle', { class: 'ag-alert', r: 4 }), svg('title'));
           nodes.set(agent.name, node); nodeLayer.append(node);
         }
         const active = busySteps(agent), isHub = agent.name === hubName;
@@ -622,6 +623,18 @@
         node.dataset.busy = String(busy); node.dataset.group = agent.group;
         node.dataset.openChat = String(!!sessionToOpen(agent));
         node.dataset.attention = String(alerts.has(agent.name));
+        // The outer loop sits round the centre: one bead for each thing the user said, filled until a prompt change answers it.
+        const learn = isHub ? snapshot.learning : null, reach = p.r + 27, from = 158, sweep = 224, round = 2 * Math.PI * reach;
+        node.dataset.outer = learn ? learn.due ? 'due' : 'on' : 'off';
+        [node.querySelector('.ag-learn-track'), node.querySelector('.ag-learn-hit')].forEach(ring => { ring.setAttribute('r', reach); ring.setAttribute('stroke-dasharray', (round * sweep / 360) + ' ' + round); ring.setAttribute('transform', 'rotate(' + from + ')'); });
+        const beads = node.querySelector('.ag-learn-beads'), count = learn ? Math.min(40, Number(learn.total) || 0) : 0, fresh = learn ? Math.min(count, Number(learn.pending) || 0) : 0;
+        if (beads.dataset.stamp !== count + ':' + fresh + ':' + reach) {
+          beads.dataset.stamp = count + ':' + fresh + ':' + reach;
+          beads.replaceChildren(...Array.from({ length: count }, (_, i) => {
+            const angle = (from + (count === 1 ? sweep / 2 : i * sweep / (count - 1))) * Math.PI / 180;
+            return svg('circle', { class: 'ag-learn-bead', 'data-fresh': String(i < fresh), cx: reach * Math.cos(angle), cy: reach * Math.sin(angle), r: 2.2 });
+          }));
+        }
         const mark = node.querySelector('.ag-alert'); mark.setAttribute('cx', -p.r * .72); mark.setAttribute('cy', -p.r * .72);
         node.dataset.parent = agent.parent; node.dataset.team = agent.team;
         node.querySelector('.ag-core').setAttribute('r', p.r);
@@ -776,7 +789,7 @@
         const related = selecting && (pair.edge.from === selected.key || pair.edge.to === selected.key);
         pair.line.dataset.related = String(!!related); pair.flow.dataset.related = String(!!related);
       });
-      loopLayer.dataset.selecting = String(!!selected && selected.type !== 'run');
+      loopLayer.dataset.selecting = String(!!selected && !['run', 'learning'].includes(selected.type));
       loopViews.forEach((view, id) => {
         const related = selected?.type === 'loop' ? selected.key === id : selecting && [view.loop.worker, view.loop.evaluator].includes(selected.key);
         view.group.dataset.related = String(!!related);
@@ -912,7 +925,7 @@
       const learning = snapshot.learning;
       if (learning) {
         const lesson = runSection('Learning', 'learning');
-        const line = el('p', 'ag-learning-line', [learning.total + (learning.total === 1 ? ' note' : ' notes'), learning.pending ? learning.pending + ' new' : '', learning.due ? 'change due' : '', learning.improvements ? learning.improvements + ' applied' : ''].filter(Boolean).join(' · '));
+        const line = el('p', 'ag-learning-line', learningLine(learning));
         line.dataset.due = String(!!learning.due); lesson.append(line);
         notes(lesson, (learning.notes || []).slice(0, 3));
       }
@@ -1003,7 +1016,24 @@
       const focused = document.activeElement;
       const focusedStep = detailScroll.contains(focused) ? focused.closest('[data-step]')?.dataset.step : null;
       detailScroll.replaceChildren();
-      if (selected.type === 'work-loop') {
+      if (selected.type === 'learning') {
+        const learning = snapshot.learning;
+        eyebrow.textContent = 'Loop';
+        detailScroll.append(el('h2', 'ag-detail-title', 'Learning'));
+        if (learning) {
+          const line = el('p', 'ag-detail-intro ag-learning-line', learningLine(learning)); line.dataset.due = String(!!learning.due); detailScroll.append(line);
+          cells(detailScroll, [['Notes', text(learning.total)], ['New', text(learning.pending)], ['Applied', text(learning.improvements)], ['Runs', text(learning.runs)]]);
+          const rate = side => learning.trend?.[side]?.first_pass_rate == null ? '—' : Math.round(learning.trend[side].first_pass_rate * 100) + '%';
+          const rounds = side => learning.trend?.[side]?.mean_attempts == null ? '—' : Number(learning.trend[side].mean_attempts).toFixed(1);
+          if (learning.trend) cells(section(detailScroll, 'Since the last change'), [['First pass', rate('before') + ' → ' + rate('after')], ['Rounds', rounds('before') + ' → ' + rounds('after')]]);
+          const said = learning.notes || [], waiting = said.slice(0, Number(learning.pending) || 0), answered = said.slice(waiting.length);
+          const rows = (parent, list) => appendList(parent, list, note => { const row = el('div', 'ag-note-row'); row.append(el('p', 'ag-note', text(note.text)), el('span', 'ag-note-meta', [note.agent, ago(note.time)].filter(Boolean).join(' · '))); row.title = text(note.text); parent.append(row); });
+          if (waiting.length) rows(section(detailScroll, 'New'), waiting);
+          if (learning.changes?.length) { const applied = section(detailScroll, 'Applied'); appendList(applied, learning.changes, change => { const row = el('div', 'ag-history-row'); row.append(el('span', 'ag-history-when', ago(change.time)), el('span', 'ag-history-what', text(change.summary)), el('span', 'ag-history-note', text(change.file))); applied.append(row); }); }
+          if (answered.length) rows(section(detailScroll, 'Answered'), answered);
+          if (learning.lessons?.length) section(detailScroll, 'Lessons', learning.lessons);
+        } else detailScroll.append(el('p', 'ag-detail-intro', 'None'));
+      } else if (selected.type === 'work-loop') {
         eyebrow.textContent = 'Loop';
         detailScroll.append(el('h2', 'ag-detail-title', workLoop ? workLoop.agent : 'Unavailable'));
         if (workLoop) {
@@ -1036,6 +1066,7 @@
         if (agent.pool) badges.append(el('span', 'ag-badge', 'Pool of ' + agent.pool));
         detailScroll.append(badges);
         stats(detailScroll, usageOf(agent.sessions));
+        if (agent.skills?.length) section(detailScroll, 'Skills', agent.skills.includes('*') ? 'all' : agent.skills.slice(0, LIST_LIMIT).join(' · '));
         if (sessionToOpen(agent)) { const opener = el('button', 'ag-open-session', 'Open session'); opener.type = 'button'; opener.dataset.openSession = agent.name; detailScroll.append(opener); }
         const record = snapshot.learning?.agents && Object.hasOwn(snapshot.learning.agents, agent.name) ? snapshot.learning.agents[agent.name] : null;
         if (record) {
@@ -1117,6 +1148,8 @@
       zoomAt(camera.scale * Math.exp(-clamp(event.deltaY, -160, 160) * .007), event.clientX - rect.left, event.clientY - rect.top);
     }, { passive: false });
     listen(nodeLayer, 'click', event => {
+      const ring = event.target.closest('[data-learning]');
+      if (ring) { select('learning', '', ring); return; }
       const inspect = event.target.closest('[data-agent-inspect]');
       if (inspect) { select('agent', inspect.dataset.agentInspect, nodes.get(inspect.dataset.agentInspect)); return; }
       const node = event.target.closest('[data-agent]');
@@ -1129,6 +1162,8 @@
       if (loop && !suppressClick) select('loop', loop.dataset.loopId, loop);
     });
     listen(viewport, 'keydown', event => {
+      const ring = event.target.closest('[data-learning]');
+      if (ring && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); select('learning', '', ring); return; }
       const inspect = event.target.closest('[data-agent-inspect]');
       if (inspect && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); select('agent', inspect.dataset.agentInspect, nodes.get(inspect.dataset.agentInspect)); return; }
       const work = event.target.closest('[data-work-loop-id]');
@@ -1162,7 +1197,7 @@
     });
     listen(viewport, 'pointerdown', event => {
       if (event.button !== 0 && event.pointerType !== 'touch') return;
-      if (event.target.closest('[data-agent-inspect]')) return;
+      if (event.target.closest('[data-learning]')) return;
       pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
       if (pointers.size === 2) {
         const [a, b] = Array.from(pointers.values()), rect = viewport.getBoundingClientRect();

@@ -1091,10 +1091,41 @@
       });
     });
     await test('the information panel and the readouts use the monospace face', async () => {
-      await using(fixture(), root => {
+      const skilled = fixture(); skilled.agents.find(a => a.name === 'impl-openai').skills = ['engineering-delivery', 'code-assurance'];
+      await using(skilled, root => {
         open(root, 'impl-openai');
+        const skills = [...root.querySelectorAll('.ag-detail-section')].find(item => item.querySelector('h3').textContent === 'Skills');
+        assert(skills && skills.querySelector('p').textContent === 'engineering-delivery · code-assurance', 'an agent does not list its skills');
         for (const selector of ['.ag-detail-title', '.ag-detail-section p', '.ag-usage', '.ag-activity']) assert(/monospace/.test(getComputedStyle(root.querySelector(selector)).fontFamily), selector + ' is not monospace');
         assert(!/monospace/.test(getComputedStyle(root.querySelector('.ag-agent-name')).fontFamily), 'agent names changed face');
+      });
+    });
+    await test('the outer loop round the centre shows every note and opens the learning panel', async () => {
+      const data = fixture();
+      data.learning = { total: 5, pending: 2, due: true, runs: 3, improvements: 1, last_improvement: 10, lessons: ['Review early'], trend: { before: { runs: 2, first_pass_rate: 0.25, mean_attempts: 2.5 }, after: { runs: 1, first_pass_rate: 0.5, mean_attempts: 1.5 } }, changes: [{ time: Date.now() / 1000 - 7200, summary: 'Ask for small diffs', file: 'impl.md' }],
+        notes: [{ time: 5, agent: 'designer', text: 'Wider <i>please</i>' }, { time: 4, agent: 'impl-openai', text: 'Run the tests' }, { time: 3, agent: '', text: 'Old one' }, { time: 2, agent: '', text: 'Older' }, { time: 1, agent: '', text: 'Oldest' }] };
+      await using(data, async (root, app) => {
+        const hub = root.querySelector('[data-agent="orchestrator"]'), beads = [...hub.querySelectorAll('.ag-learn-bead')];
+        assert(hub.dataset.outer === 'due' && beads.length === 5 && beads.filter(bead => bead.dataset.fresh === 'true').length === 2, 'beads do not show five notes, two unanswered');
+        const core = hub.querySelector('.ag-core').getBoundingClientRect(), label = hub.querySelector('.ag-agent-name').getBoundingClientRect(), cx = core.x + core.width / 2, cy = core.y + core.height / 2;
+        beads.forEach(bead => { const b = bead.getBoundingClientRect(), x = b.x + b.width / 2, y = b.y + b.height / 2; assert(Math.abs(Math.hypot(x - cx, y - cy) - (core.width / 2 + 27 * root.querySelector('.ag-drawing > g').getCTM().a)) < 1.5, 'a bead is off the outer loop'); assert(!(x > label.left && x < label.right && y > label.top && y < label.bottom), 'a bead sits on the name'); });
+        assert(root.querySelector('[data-agent="impl-openai"]').dataset.outer === 'off' && getComputedStyle(root.querySelector('[data-agent="impl-openai"] .ag-learn-track')).display === 'none', 'another agent carries the outer loop');
+        assert(getComputedStyle(hub.querySelector('.ag-learn-track')).animationName === 'none', 'the outer loop moves');
+        hub.querySelector('[data-learning]').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        const detail = root.querySelector('.ag-detail'), heading = name => [...detail.querySelectorAll('.ag-detail-section')].find(item => item.querySelector('h3')?.textContent === name);
+        assert(!detail.hidden && detail.querySelector('.ag-detail-title').textContent === 'Learning', 'the outer loop does not open the learning panel');
+        assert(detail.querySelector('.ag-learning-line').textContent === '5 notes · 2 new · change due · 1 applied', 'learning status is wrong');
+        assert(heading('Since the last change').textContent.includes('25% → 50%') && heading('Since the last change').textContent.includes('2.5 → 1.5'), 'before and after are missing');
+        assert([...heading('New').querySelectorAll('.ag-note')].map(n => n.textContent).join('|') === 'Wider <i>please</i>|Run the tests' && !detail.querySelector('i'), 'unanswered notes are wrong or parsed as markup');
+        assert(heading('New').querySelector('.ag-note-meta').textContent.startsWith('designer · '), 'a note does not say which agent it is about');
+        assert(heading('Answered').querySelectorAll('.ag-note').length === 3 && heading('Applied').textContent === 'Applied2hAsk for small diffsimpl.md', 'answered notes or applied changes are wrong');
+        root.querySelector('.ag-close').click();
+        hub.dispatchEvent(new MouseEvent('click', { bubbles: true })); assert(detail.querySelector('.ag-detail-title').textContent === 'orchestrator', 'the centre itself no longer opens its details');
+        root.querySelector('.ag-close').click(); data.learning.pending = 0; data.learning.due = false; await app.refresh();
+        assert(hub.dataset.outer === 'on' && !hub.querySelector('.ag-learn-bead[data-fresh="true"]'), 'answered notes still look unanswered');
+        delete data.learning; await app.refresh();
+        assert(hub.dataset.outer === 'off' && !hub.querySelector('.ag-learn-bead'), 'the outer loop stays without a ledger');
+        assertFits(root);
       });
     });
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
