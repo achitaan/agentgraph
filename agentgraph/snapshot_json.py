@@ -144,13 +144,111 @@ def _active_graph(graphs: list[TaskGraph], sessions: list[Session], task: str | 
     return (graphs[0] if graphs else None), []
 
 
+STRUCTURE_DIR = ORCHESTRATION_GRAPH_DIR.parent.parent / "structure"
+
+
+def load_structure(directory: Path | None = None) -> dict | None:
+    """Read the agent structure from a folder: one sub-folder per group, in name
+    order (a leading number and dash set the order and are dropped), one `.md`
+    file per agent. A file may start with `key: value` lines: `pool` (a number),
+    `escalates_to` (an agent), `checks: all`, `seats` (a name prefix whose agents
+    sit round this one). None when the folder does not exist or holds no group."""
+    root = Path(directory) if directory is not None else STRUCTURE_DIR
+    try:
+        folders = sorted(path for path in root.iterdir() if path.is_dir() and not path.name.startswith("."))[:50]
+    except OSError:
+        return None
+    shape: dict = {"groups": [], "titles": {}, "group_of": {}, "pool": {}, "escalation": [], "checkers": set(), "seats": {}}
+    for folder in folders:
+        group = re.sub(r"^\d+[-_]", "", folder.name)
+        if not group or group in shape["titles"]:
+            continue
+        shape["groups"].append(group)
+        shape["titles"][group] = contract.GROUP_TITLES.get(group, group.replace("-", " ").capitalize())
+        try:
+            files = sorted(path for path in folder.iterdir() if path.suffix == ".md" and path.is_file())[:100]
+        except OSError:
+            continue
+        for path in files:
+            name = path.stem
+            if name in shape["group_of"]:
+                continue
+            shape["group_of"][name] = group
+            try:
+                with path.open("rb") as stream:
+                    head = stream.read(2048).decode("utf-8", "replace")
+            except OSError:
+                continue
+            seen = False
+            for line in head.splitlines()[:12]:
+                key, sep, value = line.partition(":")
+                key, value = key.strip().lower(), value.strip().strip("`'\"")
+                if line.strip() in ("", "---"):
+                    if seen:
+                        break  # a blank line closes the settings
+                    continue
+                if not sep or not value or key not in ("pool", "escalates_to", "checks", "seats"):
+                    break  # the settings end at the first line of prose
+                seen = True
+                if key == "pool" and value.isdigit():
+                    shape["pool"][name] = int(value)
+                elif key == "escalates_to":
+                    shape["escalation"].append((name, value))
+                elif key == "checks" and value.lower() == "all":
+                    shape["checkers"].add(name)
+                elif key == "seats":
+                    shape["seats"][name] = value
+    return shape if shape["groups"] else None
+
+
+class _Shape:
+    """Where each agent sits: from a structure folder when there is one, else the built-in table."""
+
+    def __init__(self, structure: dict | None):
+        self.structure = structure
+        self.groups = list(structure["groups"]) if structure else list(contract.GROUPS)
+        if "hub" not in self.groups:
+            self.groups.insert(0, "hub")
+
+    def title(self, group: str) -> str:
+        return (self.structure["titles"] if self.structure else contract.GROUP_TITLES).get(group) or contract.GROUP_TITLES.get(group, group)
+
+    def group_of(self, name: str) -> str:
+        if not self.structure:
+            return contract.group_of(name)
+        if name in self.structure["group_of"]:
+            return self.structure["group_of"][name]
+        for lead, prefix in self.structure["seats"].items():
+            if name.startswith(prefix):
+                return self.structure["group_of"][lead]
+        fallback = contract.group_of(name)
+        return fallback if fallback in self.groups and fallback != "hub" else next((g for g in self.groups if g != "hub"), "hub")
+
+    def pool(self, name: str, default):
+        return self.structure["pool"].get(name) if self.structure else default
+
+    def parent_of(self, name: str, names) -> str:
+        if not self.structure:
+            return contract.parent_of(name, names)
+        return next((lead for lead, prefix in self.structure["seats"].items()
+                     if name.startswith(prefix) and name != lead and lead in names), "")
+
+    def checks(self, name: str) -> bool:
+        return name in (self.structure["checkers"] if self.structure else contract.CHECKERS)
+
+    @property
+    def escalation(self):
+        return self.structure["escalation"] if self.structure else contract.ESCALATION
+
+
 def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, *,
-                      session: str | None = None) -> dict:
+                      session: str | None = None, structure: dict | None = None) -> dict:
     """Project a snapshot onto the web contract without modifying the input.
 
     `session` is the session id the caller asked to watch (it may be a
     sub-agent's); it picks that session's graph when no `task` is given.
     """
+    shape = _Shape(structure)
     graphs = sorted(snapshot.graphs, key=lambda graph: _time_key(graph.updated), reverse=True)
     root = snapshot.root
     sessions = ([root] if root is not None else []) + snapshot.sessions
@@ -182,24 +280,24 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
         root_name = None
     if root_name is not None:
         names.setdefault(root_name)
-        for name in [n for n in names if n != root_name and contract.group_of(n) == "hub"
+        for name in [n for n in names if n != root_name and shape.group_of(n) == "hub"
                      and not any(item.busy for item in by_agent.get(n, []))]:
             del names[name]
 
-    grouped = {group: [] for group in contract.GROUPS}
+    grouped = {group: [] for group in shape.groups}
     for name in names:
         related = by_agent.get(name, [])
         configured = name in roster
         agent = roster.get(name)
         if agent is None:
             model, effort = (related[0].model, related[0].effort) if related else ("", "")
-            agent = Agent(name, model or "", effort or "", contract.group_of(name), contract.POOL.get(name))
-        group = "hub" if name == root_name else contract.group_of(name or "")
+            agent = Agent(name, model or "", effort or "", shape.group_of(name), contract.POOL.get(name))
+        group = "hub" if name == root_name else shape.group_of(name or "")
         grouped[group].append({
             "name": name, "group": group, "model": agent.model, "effort": agent.effort,
-            "pool": agent.pool, "configured": configured, "checks": name in contract.CHECKERS,
+            "pool": shape.pool(name, agent.pool), "configured": configured, "checks": shape.checks(name),
             "skills": list(agent.skills),
-            "team": contract.team_of(name or ""), "parent": contract.parent_of(name or "", names),
+            "team": contract.team_of(name or ""), "parent": shape.parent_of(name or "", names),
             "busy": sum(bool(session.busy) for session in related),
             "sessions": [_session_document(session) for session in related],
         })
@@ -217,12 +315,13 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
                    "tokens_out": sum(s.tokens_out for s in sessions)},
         "root": {**_session_document(root), "agent": root.agent, "directory": root.directory}
         if root is not None else None,
-        "groups": [{"id": group, "title": contract.GROUP_TITLES[group],
+        "structure": {"source": "folder" if structure else "builtin"},
+        "groups": [{"id": group, "title": shape.title(group),
                     "agents": [agent["name"] for agent in agents]}
                    for group, agents in grouped.items()],
         "agents": [agent for agents in grouped.values() for agent in agents],
         "escalation": [{"from": a, "to": b, "used": (a, b) in handoffs}
-                       for a, b in contract.ESCALATION if a in names and b in names],
+                       for a, b in shape.escalation if a in names and b in names],
         "graph": graph_doc,
         "graphs": [{"task": graph.task, "status": graph.status, "updated": graph.updated}
                    for graph in graphs],
@@ -306,7 +405,8 @@ def skills_document(config_dir: Path | None = None) -> list[dict]:
 
 def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, session: str | None = None) -> dict:
     """The snapshot document plus `learning` for a live source."""
-    document = snapshot_document(snapshot, source, task, session=session)
+    document = snapshot_document(snapshot, source, task, session=session,
+                                 structure=load_structure() if source == "live" else None)
     if source == "live":
         document["learning"] = _json_safe(learning_document())
         document["skills"] = skills_document()

@@ -21,7 +21,7 @@ class SnapshotDocumentTests(unittest.TestCase):
         for snapshot, source in ((demo_snapshot(1000), "demo"), (Snapshot(1000), "live")):
             with self.subTest(source=source):
                 doc = snapshot_json.snapshot_document(snapshot, source)
-                self.assertKeys(doc, "version generated source warnings team totals root groups agents escalation graph graphs")
+                self.assertKeys(doc, "version generated source warnings team totals root structure groups agents escalation graph graphs")
                 self.assertEqual(doc["team"], "main")
                 self.assertEqual((doc["version"], doc["generated"], doc["source"], doc["warnings"]),
                                  (1, 1000, source, []))
@@ -106,6 +106,58 @@ class SnapshotDocumentTests(unittest.TestCase):
                     busy = snapshot_json.snapshot_document(snap, "demo")
                     self.assertEqual(busy["groups"][0]["agents"][0], root_name)
                     self.assertIn("orchestrator", busy["groups"][0]["agents"])
+
+    def test_the_graph_follows_the_structure_folder(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            self.assertIsNone(snapshot_json.load_structure(root / "missing"))
+            self.assertIsNone(snapshot_json.load_structure(root))  # no group folders
+            def agent_file(rel, text=""):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text)
+            agent_file("00-hub/orchestrator.md")
+            agent_file("10-council/council.md", "seats: councillor-\n\nprose with a colon: ignored\npool: 9\n")
+            agent_file("20-build/impl-openai.md", "pool: 3\nescalates_to: impl-claude\n")
+            agent_file("20-build/impl-claude.md", "escalates_to: `oracle`\n")
+            agent_file("30-check/reviewer.md", "checks: all\n")
+            agent_file("30-check/notes.txt", "not an agent")
+            agent_file("README.md", "not a group")
+            (root / ".hidden").mkdir()
+            shape = snapshot_json.load_structure(root)
+            self.assertEqual(shape["groups"], ["hub", "council", "build", "check"])
+            self.assertEqual(shape["titles"]["check"], "Check")
+            self.assertEqual(shape["pool"], {"impl-openai": 3})  # a setting after prose does not count
+            self.assertEqual(shape["escalation"], [("impl-claude", "oracle"), ("impl-openai", "impl-claude")])
+            self.assertEqual((shape["checkers"], shape["seats"]), ({"reviewer"}, {"council": "councillor-"}))
+
+            def document():
+                return snapshot_json.snapshot_document(demo_snapshot(1000), "demo", structure=snapshot_json.load_structure(root))
+            doc = document()
+            agents = {agent["name"]: agent for agent in doc["agents"]}
+            self.assertEqual(doc["structure"], {"source": "folder"})
+            self.assertEqual([group["id"] for group in doc["groups"]], ["hub", "council", "build", "check"])
+            self.assertEqual((agents["reviewer"]["group"], agents["reviewer"]["checks"]), ("check", True))
+            self.assertEqual((agents["impl-openai"]["pool"], agents["impl-claude"]["pool"]), (3, None))
+            self.assertEqual(agents["councillor-fable"]["parent"], "council")
+            self.assertEqual(agents["councillor-fable"]["group"], "council")
+            # An agent with no file keeps its built-in group when that group exists, else the first group.
+            self.assertEqual(agents["designer"]["group"], "build")
+            self.assertEqual(agents["explorer"]["group"], "council")
+            self.assertEqual([(route["from"], route["to"]) for route in doc["escalation"]],
+                             [("impl-claude", "oracle"), ("impl-openai", "impl-claude")])
+            # Change the structure and the graph changes with it: move an agent, add a group.
+            (root / "20-build/impl-claude.md").rename(root / "30-check/impl-claude.md")
+            agent_file("40-scouts/explorer.md")
+            doc = document()
+            agents = {agent["name"]: agent for agent in doc["agents"]}
+            self.assertEqual((agents["impl-claude"]["group"], agents["explorer"]["group"]), ("check", "scouts"))
+            self.assertEqual([group["id"] for group in doc["groups"]], ["hub", "council", "build", "check", "scouts"])
+            self.assertEqual(doc["groups"][-1], {"id": "scouts", "title": "Scouts", "agents": ["explorer"]})
+        # Without a structure the built-in table is used, unchanged.
+        plain = snapshot_json.snapshot_document(demo_snapshot(1000), "demo")
+        self.assertEqual(plain["structure"], {"source": "builtin"})
+        self.assertEqual([group["id"] for group in plain["groups"]], ["hub", "understand", "decide", "council", "build", "verify"])
 
     def test_skills_are_listed_with_their_descriptions(self):
         import tempfile
