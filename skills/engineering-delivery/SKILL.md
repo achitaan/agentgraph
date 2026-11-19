@@ -15,7 +15,7 @@ then inspect the working-tree state, existing mechanisms and affected consumers.
 Understand where the change belongs and which boundaries it must preserve.
 Read only what the task needs; reconcile documentation with current code instead
 of assuming either is complete. Define the requested result and the evidence
-that will show it works. Reuse decisions already made; clarify only a consequential unknown.
+that will show it works. Reuse decisions already made; for a consequential unknown, state your assumption and proceed, or report it as BLOCKED or under `Discovered` for the orchestrator; do not wait.
 An explicit design interview belongs to the existing Grill-Me/Grilling workflow.
 
 - **Small, known change:** edit, run the relevant check, inspect the diff, finish.
@@ -44,8 +44,7 @@ respond to new evidence. Repeated identical failures call for diagnosis, not
 another blind retry. Run the agreed check and read its real output: a reported
 pass (a worker's or a verifier's) is a claim until the evidence is read, and a
 check is never weakened to get a pass. Once acceptance and required checks pass,
-review the final diff and complete any independent review required by the
-selected workflow. Then stop unless new evidence reveals remaining work.
+review the final diff as your own self-check; independent checking is done by the verifier and the reviewer, which the orchestrator dispatches, so name that need in your report. Then stop unless new evidence reveals remaining work.
 
 Trace cross-module changes with the available code map or source search. A graph
 is a navigation aid; inspect current definitions and callers before editing.

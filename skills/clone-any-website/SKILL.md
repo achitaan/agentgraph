@@ -7,7 +7,7 @@ description: Inspect and reconstruct an authorized website as maintainable local
 
 Use the observable site as a specification. Reimplement its behavior in the
 project's existing stack or the smallest suitable new stack. Reuse Playwright
-CLI, the available browser tools, and SkillUI's existing extraction output.
+CLI, the available browser tools, and any existing extraction output (for example from a skill-extraction tool, if one is available).
 Do not install another browser MCP, cloner, or orchestration framework.
 
 ## Scope and permissions

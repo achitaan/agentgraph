@@ -19,7 +19,7 @@ First, fetch `https://supabase.com/changelog.md` (a lightweight summary index â€
 After implementing any fix, run a test query to confirm the change works. A fix without verification is incomplete.
 
 **3. Recover from errors, don't loop.**
-If an approach fails after 2-3 attempts, stop and reconsider. Try a different method, check documentation, inspect the error more carefully, and review relevant logs when available. Supabase issues are not always solved by retrying the same command, and the answer is not always in the logs, but logs are often worth checking before proceeding.
+When the same failure repeats, stop repeating it and find the cause before the next try. Try a different method, check documentation, inspect the error more carefully, and review relevant logs when available. Supabase issues are not always solved by retrying the same command, and the answer is not always in the logs, but logs are often worth checking before proceeding.
 
 **4. Exposing tables to the Data API:** Depending on the user's [Data API settings](https://supabase.com/dashboard/project/<ref>/integrations/data_api/settings), newly created tables may not be automatically exposed via the Data (REST) API. If this is the case, `anon` and `authenticated` roles will need to be explicitly granted access.
 
@@ -40,7 +40,7 @@ When working on any Supabase task that touches auth, RLS, views, storage, or use
 
 - **API key and client exposure**
   - **Never expose the `service_role` or secret key in public clients.** Prefer publishable keys for frontend code. Legacy `anon` keys are only for compatibility. In Next.js, any `NEXT_PUBLIC_` env var is sent to the browser.
-  - **Use scoped personal access tokens for the Management API, CLI, and MCP server.** A classic personal access token carries the user's full account access, on every organization and project. For scripts, CI, and agents, have the user create a scoped token limited to the organizations, projects, and permissions the task needs. The [personal access tokens guide](https://supabase.com/docs/guides/platform/personal-access-tokens.md) lists the permission each Management API endpoint and MCP tool requires. Look permissions up there rather than guessing.
+  - **Use scoped personal access tokens for the Management API, CLI, and MCP server.** A classic personal access token carries the user's full account access, on every organization and project. For scripts, CI, and agents, use a scoped token limited to the organizations, projects, and permissions the task needs; creating one is for the person who owns the account, so if none is provided, report that as BLOCKED. The [personal access tokens guide](https://supabase.com/docs/guides/platform/personal-access-tokens.md) lists the permission each Management API endpoint and MCP tool requires. Look permissions up there rather than guessing.
 
 - **RLS, views, and privileged database code**
   - **Views bypass RLS by default.** In Postgres 15 and above, use `CREATE VIEW ... WITH (security_invoker = true)`. In older versions of Postgres, protect your views by revoking access from the `anon` and `authenticated` roles, or by putting them in an unexposed schema.
@@ -71,7 +71,7 @@ When working on any Supabase task that touches auth, RLS, views, storage, or use
   - **Storage upsert requires INSERT + SELECT + UPDATE.** Granting only INSERT allows new uploads but file replacement (upsert) silently fails. You need all three.
 
 - **Dependency and supply-chain security**
-  - **Always pin package versions and commit lockfiles** when installing Supabase packages (`supabase-js`, `@supabase/ssr`, `supabase-py`, etc.). See the [npm security guide](https://supabase.com/docs/guides/security/npm-security.md) for the full checklist.
+  - **Always pin package versions and keep the lockfile updated** (committing it only when the brief allows; otherwise leave that to the orchestrator) when installing Supabase packages (`supabase-js`, `@supabase/ssr`, `supabase-py`, etc.). See the [npm security guide](https://supabase.com/docs/guides/security/npm-security.md) for the full checklist.
 
 For any security concern not covered above, fetch the Supabase product security index: `https://supabase.com/docs/guides/security/product-security.md`
 
@@ -108,7 +108,7 @@ For setup instructions, server URL, and configuration, see the [MCP setup guide]
    Verify the project root has a valid `.mcp.json` with the correct server URL. If missing, create one pointing to `https://mcp.supabase.com/mcp`.
 
 3. **Authenticate the MCP server:**
-   If the server is reachable and `.mcp.json` is correct but tools aren't visible, the user needs to authenticate. The Supabase MCP server uses OAuth 2.1 â€” tell the user to trigger the auth flow in their agent, complete it in the browser, and reload the session.
+   If the server is reachable and `.mcp.json` is correct but tools aren't visible, authentication is missing. The Supabase MCP server uses OAuth 2.1, and the browser flow needs a person: report this as BLOCKED or under `Discovered` for the orchestrator, naming the auth flow that must be completed and the session reload that follows. Do not wait for it.
    In CI or other environments where the browser flow can't run, pass a scoped personal access token in the `Authorization: Bearer` header instead.
 
 4. **Check scoped token permissions:**

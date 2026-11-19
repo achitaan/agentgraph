@@ -30,10 +30,10 @@ Example reads:
 - *"Reading this as: solo designer portfolio for hiring managers, with an editorial / kinetic-type language, leaning toward native CSS + scroll-driven animation + custom typography."*
 - *"Reading this as: redesign of a public-sector service site, with a trust-first language, leaning toward GOV.UK Frontend or USWDS."*
 
-### 0.C If the brief is ambiguous, ask one question, do not guess
-Ask exactly **one** clarifying question - never a multi-question dump - and only when the design read genuinely diverges. Example: *"Should this feel closer to Linear-clean or Awwwards-experimental?"*
+### 0.C If the brief is ambiguous, state your assumption and proceed
+When the design read genuinely diverges, pick the most likely reading, state it as an explicit assumption, and proceed - do not guess silently and do not wait for an answer. Report the open question for the orchestrator (as BLOCKED if the work cannot go on, otherwise under `Discovered`). Example: *"Assuming Linear-clean rather than Awwwards-experimental; flagging for confirmation."*
 
-If you can confidently infer from context, **do not ask**. Just declare the design read and proceed.
+If you can confidently infer from context, just declare the design read and proceed.
 
 ### 0.D Anti-Default Discipline
 Do not default to: AI-purple gradients, centered hero over dark mesh, three equal feature cards, generic glassmorphism on everything, infinite-loop micro-animations everywhere, Inter + slate-900. These are the LLM defaults. Reach past them deliberately based on the design read.
@@ -154,7 +154,7 @@ Discouraged by default in code, markup, and visible text. Replace symbols with i
 * **Grid over Flex-Math:** NEVER use complex flexbox percentage math (`w-[calc(33%-1rem)]`). ALWAYS use CSS Grid (`grid grid-cols-1 md:grid-cols-3 gap-6`).
 
 ### 3.F Dependency Verification (mandatory)
-Before importing ANY 3rd-party library, check `package.json`. If the package is missing, output the install command first. **Never** assume a library exists.
+Before importing ANY 3rd-party library, check `package.json`. If the package is missing, name the install command in your report first and run it only when the brief allows installs (installs belong to the orchestrator otherwise). **Never** assume a library exists.
 
 ---
 
@@ -269,7 +269,7 @@ Landing pages and portfolios are **visual products**. Text-only pages with fake-
    * `https://picsum.photos/seed/{descriptive-seed}/{w}/{h}` for placeholder photography (seed should describe the section, e.g. `marrow-cookware-kitchen`)
    * Actual stock or brand URLs when the brief provides them
    * Open-license sources (Unsplash via direct URL, Pexels) if explicitly allowed
-3. **Last resort: tell the user.** If neither is possible, do NOT fill the page with hand-rolled SVG illustrations or div-based "fake screenshots." Instead, leave clearly-labeled placeholder slots (`<!-- TODO: hero product photo, 1600x1200 -->`) and at the end of the response say: *"This page needs real images at: \[list of placements\]. Please generate or provide them."*
+3. **Last resort: report it.** If neither is possible, do NOT fill the page with hand-rolled SVG illustrations or div-based "fake screenshots." Instead, leave clearly-labeled placeholder slots (`<!-- TODO: hero product photo, 1600x1200 -->`) and at the end of the response add a note in the report for the orchestrator: *"This page needs real images at: \[list of placements\]."*
 
 **Even minimalist sites need real images.** A pure-text page is not minimalism. It is incomplete work. Even an editorial Linear-style site needs at least 2-3 real images (hero, one product/lifestyle shot, one supporting image). Generate B&W minimalist photography if the brief is restrained; do not skip images entirely because the dial is low.
 
@@ -789,7 +789,7 @@ This skill handles **greenfield builds AND redesigns**. Misclassifying the mode 
 * **Redesign - Preserve** - modernise without breaking the brand. Audit first, extract brand tokens, evolve gradually.
 * **Redesign - Overhaul** - new visual language on top of existing content. Treat as greenfield for visuals; preserve content and IA.
 
-If ambiguous, ask **once**: *"Should this redesign preserve the existing brand, or are we starting visually from scratch?"*
+If ambiguous, state your assumption (for example, *"Assuming this redesign preserves the existing brand rather than starting visually from scratch"*), proceed, and report the open question to the orchestrator.
 
 ### 11.B Audit Before Touching
 Document the current state before proposing changes:
@@ -823,7 +823,7 @@ Apply in order - stop when the brief is satisfied:
 * Brand itself is changing → **greenfield**.
 
 ### 11.F What Never Changes Silently
-Never modify without explicit user approval:
+Never modify unless the brief says so (a worker cannot get approval; report the proposed change to the orchestrator instead):
 * URL structure / route slugs.
 * Primary nav labels.
 * Form field names or order (breaks analytics + autofill).
@@ -909,7 +909,7 @@ If the brief is one of the above, **say so explicitly**, point to the right tool
 
 ## 14. FINAL PRE-FLIGHT CHECK
 
-Run this matrix before outputting code. This is the last filter.
+Run this matrix before outputting code. This is your own self-check; independent checking is done by the verifier and the reviewer, which the orchestrator dispatches. Name any need for it in your report.
 
 **THIS IS NOT OPTIONAL. Run every box. If any box fails, the output is not done.**
 

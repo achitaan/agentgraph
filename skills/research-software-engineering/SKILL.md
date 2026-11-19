@@ -13,7 +13,7 @@ metadata:
 ## How this skill is organised (progressive disclosure)
 
 This skill follows the **three-level progressive disclosure** pattern
-also used by `agent-resource-discipline` and codified by Anthropic's
+also used by other agent skills and codified by Anthropic's
 `skill-creator`:
 
 - **Level 1 (always in context once loaded)**: this `SKILL.md`,
@@ -25,7 +25,7 @@ also used by `agent-resource-discipline` and codified by Anthropic's
 - **Level 3 (planned future work)**: numerical-correctness
   enforcement hooks (golden-output-diff guard, lockfile-drift guard,
   experiment-id guard, commit-pin guard) -- specification deferred,
-  same rationale as `agent-resource-discipline`'s planned hooks.
+  same rationale as other planned agent-skill hooks.
 
 Always load this SKILL.md when the trigger fires. Load specific
 references only when the current sub-task requires them.
@@ -49,8 +49,9 @@ Load this skill at the start of any session that will involve any of:
 - extracting a reusable library out of experiment scripts.
 
 If the session is a paper-writing session that does NOT touch code,
-load `research-paper-writing` instead. If the session is mixed (paper +
-code), load both.
+this skill does not apply; if a paper-writing skill is available, use
+it instead. If the session is mixed (paper + code), use both when
+available.
 
 ## Core principle: numerical correctness is not optional
 
@@ -131,10 +132,12 @@ apply unconditionally are:
   or dummy functions that appear to meet acceptance criteria but do
   not reflect true functionality. Any test asserting numerical
   equality must cite the source of the expected value.
-- **R8 (commit before major changes; revert beats debug-in-polluted-context)**:
-  always commit working code before agentic changes; if an attempt
-  goes off the rails, `git reset --hard` is cheaper than trying to
-  steer a confused context back to correctness.
+- **R8 (start major changes from a clean, known-good state; returning to it beats debug-in-polluted-context)**:
+  start agentic changes from a clean, known-good state (committing it
+  only when the brief allows; committing and resetting history belong
+  to the orchestrator unless the brief says otherwise); if an attempt
+  goes off the rails, returning to that known-good state is cheaper
+  than trying to steer a confused context back to correctness.
 - **R9 ("AI wrote it" is never an accountability defence)**: the
   human is responsible for every line that ships. Be sceptical of
   the AI's claims of success; verify behaviourally, not by inspection.
@@ -189,7 +192,8 @@ applied across all references are:
 1. **Correctness before style.** Numerical correctness wins when in
    conflict with anything else.
 2. **Tests cite their expected-value source.** Always.
-3. **Commit before agentic changes.** Bridgeford R8.
+3. **Start agentic changes from a clean, known-good state.** Bridgeford R8;
+   commit only when the brief allows.
 4. **Lightest tool that does the job.** A small PDE-paper repo
    usually needs only Git + Zenodo + `experiments/<run-id>/` + a
    lockfile. Don't oversell DVC / wandb / mlflow until the project
@@ -206,28 +210,20 @@ applied across all references are:
    citation, prior implementation, empirical sweep).
 7. **Long open-development history.** Avoid the JOSS desk-rejection
    anti-pattern of "all commits in the last two weeks before
-   submission". Open the repo from project start; commit early and
-   often; aim for 6+ months of public history before any planned
+   submission". Open the repo from project start; keep history
+   granular (commits are made when the brief allows, otherwise by the
+   orchestrator); aim for 6+ months of public history before any planned
    release.
 
 ## Adjacent skills (compose freely)
 
 This skill composes with:
 
-- `agent-resource-discipline` -- always load when the session is
-  heavy (PDF / multi-file / web fetch / cross-session). Software
-  sessions almost always qualify.
-- `human-facing-doc-authoring` -- load when authoring or revising
-  the project's `README.md`, `PLAN.md`, `notes/impl_*.md`, or any
-  human-facing doc.
-- `literature-survey` -- load when papers cited as algorithm
-  sources need bib + survey-note workflow (the `_collection_log.md`
-  pattern transfers cleanly to "papers we cited in code comments").
-- `research-paper-writing` -- load when the code supports a paper
-  and the paper draft is also being touched.
-
-The four skills are designed to compose; loading 2-3 simultaneously
-is normal for software sessions.
+- If a skill for resource discipline (heavy PDF / multi-file / web fetch
+  sessions), human-facing docs (`README.md`, `PLAN.md`,
+  `notes/impl_*.md`), literature surveys (papers cited as algorithm
+  sources) or paper writing is available, it composes with this one. If
+  it is not, report the need instead of improvising a replacement.
 
 ## Adjacent prior art + lineage
 
@@ -257,12 +253,9 @@ When the user invokes this skill, the agent should:
    throughout.
 4. For any numerical assertion produced by the agent, ensure the
    "tests cite their expected-value source" rule is followed.
-5. Surface contradictions explicitly (per `agent-resource-discipline`'s
-   surfacing rule); never silently fix.
-6. Append an entry to `notes/agent_feedback.md` if any of the
-   trigger conditions in
-   `agent-resource-discipline/references/persistent-memory.md` fired
-   during the session.
+5. Surface contradictions explicitly; never silently fix.
+6. Record in the report any session-level lesson that should persist,
+   for the orchestrator to keep.
 
 ---
 

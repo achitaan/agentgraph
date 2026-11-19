@@ -4,26 +4,26 @@ Every skill in the toolkit, what was done with it for OpenCode, and which agents
 
 | Skill | Verdict | Agents | Why |
 |---|---|---|---|
-| `code-assurance` | keep | `impl-openai`, `impl-claude`, `impl-hard`, `verifier`, `reviewer` | Host-neutral craft for finding and testing failures; the core skill of everything that writes or checks code. |
+| `code-assurance` | reworded | `impl-openai`, `impl-claude`, `impl-hard`, `verifier`, `reviewer` | Host-neutral craft for finding and testing failures; the core skill of everything that writes or checks code. |
 | `engineering-delivery` | reworded | `impl-openai`, `impl-claude`, `impl-hard` | Delivery habits for implementers; its checking advice now matches the loop rules (a reported pass is a claim). |
 | `project-contracts` | keep | `oracle`, `oracle-lite`, `impl-claude`, `impl-hard`, `reviewer` | Acceptance checks and interfaces: for whoever designs across module boundaries and whoever judges it. |
 | `codebase-map` | keep | `explorer`, `impl-claude` | Source-backed maps: for discovery and for cross-module changes. |
-| `delivery-operations` | keep | `impl-claude`, `impl-hard` | CI, releases and rollbacks belong to the implementers that take big or hard changes. |
+| `delivery-operations` | reworded | `impl-claude`, `impl-hard` | CI, releases and rollbacks belong to the implementers that take big or hard changes. |
 | `performance-speedup` | reworded | `oracle`, `oracle-lite`, `impl-hard` | Its delegation section named an agent that does not exist here; it now points at `explorer` and `oracle-lite`. |
-| `research-software-engineering` | keep | `researcher`, `impl-hard`, `reviewer` | Numerical correctness: for hard implementation, research, and review of numerical code. |
-| `ml-experiment-standards` | keep | `researcher`, `impl-hard`, `reviewer` | Leakage, splits and honest reporting: for whoever builds, studies or reviews a model. |
+| `research-software-engineering` | reworded | `researcher`, `impl-hard`, `reviewer` | Numerical correctness: for hard implementation, research, and review of numerical code. |
+| `ml-experiment-standards` | reworded | `researcher`, `impl-hard`, `reviewer` | Leakage, splits and honest reporting: for whoever builds, studies or reviews a model. |
 | `math-research` | reworded | `researcher`, `oracle` | Proof work for the advisers; model names became roles. Its runner scripts start the Codex CLI and are used only where that exists. |
-| `sympy` | keep | `oracle`, `impl-hard` | Exact mathematics for the adviser and the hard implementer, who can run it. |
-| `experimental-design` | keep | `researcher`, `oracle` | Designing a study before data: research and advice. |
+| `sympy` | reworded | `oracle`, `impl-hard` | Exact mathematics for the adviser and the hard implementer, who can run it. |
+| `experimental-design` | reworded | `researcher`, `oracle` | Designing a study before data: research and advice. |
 | `exa-research` | reworded | `researcher` | Public source discovery for the researcher. |
 | `research-summarizer` | reworded | `researcher` | Summaries of supplied sources for the researcher. |
 | `context7-mcp` | keep | `explorer` | Library docs; only `explorer` has that tool. |
-| `design-taste-frontend` | keep | `designer` | Original visual direction: designer. |
+| `design-taste-frontend` | reworded | `designer` | Original visual direction: designer. |
 | `ui-ux-pro-max` | keep | `designer` | App interfaces and design-system reference data: designer. |
 | `impeccable` | reworded | `designer` | Audit and polish of an existing interface: designer. |
-| `clone-any-website` | keep | `designer` | Measured reconstruction of a site: designer. |
-| `playwright-cli` | keep | `designer`, `verifier` | Browser evidence: the designer builds with it and the verifier checks interface items with it. |
-| `supabase` | keep | `impl-claude` | Stack-specific: the implementer that takes multi-file product work. |
+| `clone-any-website` | reworded | `designer` | Measured reconstruction of a site: designer. |
+| `playwright-cli` | reworded | `designer`, `verifier` | Browser evidence: the designer builds with it and the verifier checks interface items with it. |
+| `supabase` | reworded | `impl-claude` | Stack-specific: the implementer that takes multi-file product work. |
 | `supabase-postgres-best-practices` | keep | `impl-openai`, `impl-claude`, `reviewer` | Schema, RLS and query rules: implementers that touch a database, and the reviewer for security. |
 | `writing-clearly-and-concisely` | reworded | `designer` | Prose people read: the orchestrator (reports) and the designer (interface text). |
 | `humanizer` | keep | orchestrator only | Editing prose for the user: orchestrator only. |
@@ -40,4 +40,6 @@ Every skill in the toolkit, what was done with it for OpenCode, and which agents
 
 Verdicts: **keep** is unchanged from the Codex toolkit; **reworded** had host, model or delegation wording replaced (every replacement is in [OPENCODE-CHANGES.md](OPENCODE-CHANGES.md)); **rewritten** was substantially changed for this setup.
 
-Counts: 19 kept, 11 reworded, 3 rewritten, 33 in all. `shopify-ruby` is kept out of the toolkit as a separate, employer-specific skill.
+Counts: 9 kept, 21 reworded, 3 rewritten, 33 in all. `shopify-ruby` is kept out of the toolkit as a separate, employer-specific skill.
+
+A second pass removed from 13 worker-loaded skills the instructions a worker here cannot follow (asking the user, committing or resetting history, global installs, attempt caps, a self-review as the final check, pointers to skills that are not installed). The same limits are stated once in every worker's prompt ("Skills serve the brief"), so a skill added later is covered too.

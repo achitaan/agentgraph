@@ -13,7 +13,7 @@ Read the definitions, domains, assumptions, quantifiers, and conclusion. For a c
 
 A changed assumption or weaker conclusion is theorem repair. State the original claim's status and the exact change. A counterexample to a proposed lemma or faulty encoding does not refute the original theorem.
 
-Use `math-proof-writing` when the route stays fixed. When the user wants a new structural proof of an already established result, stay here.
+When the route stays fixed and only exposition remains, use a proof-writing skill if one is available; otherwise report that need. When the user wants a new structural proof of an already established result, stay here.
 
 ## Find a mechanism that closes the argument
 
@@ -43,7 +43,7 @@ Develop one coherent route through the whole claim. On a failed step, identify t
 | Local question | Useful return |
 | --- | --- |
 | Is this algebraic, sign, or finite claim correct? | `math-tools` or an available exact tool: inputs, assumptions, replayable result, and implication for the proof. See [tool-assisted checks](references/tool-assisted-proof-patterns.md) |
-| Can this stable lemma be formally checked? | `lean-theorem-formalizer`: checked target, axioms, replay, and the remaining parent implication. See [Lean bridge](references/lean-formalization-bridge.md) |
+| Can this stable lemma be formally checked? | A Lean formalization tool or skill, if available (otherwise report the need): checked target, axioms, replay, and the remaining parent implication. See [Lean bridge](references/lean-formalization-bridge.md) |
 | Does this fixed algorithm admit a performance certificate? | `peppy`, only after the [PEP eligibility gate](references/peppy-proof-bridge.md) |
 | Is a genuinely idea-level kernel still missing after local methods? | A bounded [expert consultation](references/expert-consultation.md), if available and authorized; independently check its suggestion |
 
@@ -55,7 +55,7 @@ Preserve valid work when a route fails. Retry only with an ingredient that addre
 
 Review the entire candidate against the original target, including boundaries, exceptional parameters, cited premises, and final assembly. Use a fresh-context referee for a hard or suspect argument: the orchestrator dispatches `reviewer` (or `oracle` for hard mathematics) and treats its verdict as a claim to check; a worker does not start agents, so it reports the need under `Discovered` in its loop report and identifies its own check as self-review. The [referee contract](references/prover-verifier-loop.md) separates criticism from coauthoring.
 
-Repair a local error once while the mechanism survives. A failed repair or broken mechanism calls for a new route; repeated failure at the same kernel calls for a new ingredient or an explicit unresolved result. For a correct but unsimplified proof, preserve correctness and report that the simplification goal is still unmet.
+Repair a local error while the mechanism survives; when the mechanism breaks, change route. Repeated failure at the same kernel calls for a new ingredient or an explicit unresolved result, not another identical repair. For a correct but unsimplified proof, preserve correctness and report that the simplification goal is still unmet.
 
 Use the [verification gate](references/verification-gate.md) to determine what the evidence supports. In particular:
 
@@ -67,13 +67,13 @@ Lead the answer with the mathematical result and its mechanism. Give a complete 
 
 ## Execution and durable state
 
-Solve short problems directly. For a hard self-contained task that benefits from separate generation and review, the optional bounded runner (it launches the separate Codex CLI, so use it only where that CLI is installed; otherwise the orchestrator dispatches generation and review as loop items) is:
+Solve short problems directly. For a hard self-contained task that benefits from separate generation and review, the optional bounded runner is below. It launches the separate Codex CLI, which is a second agent, so running it is the orchestrator's decision: a worker never launches it itself, uses `--prepare-only` to inspect the packet, and reports the need for a full run under `Discovered` (the orchestrator dispatches generation and review as loop items):
 
 ```bash
 python3 "$HOME/.config/opencode/skills/math-research/scripts/proof_loop.py" \
-  path/to/project --claim "EXACT CLAIM" --max-iterations 3 --reasoning-effort high
+  path/to/project --claim "EXACT CLAIM" --reasoning-effort high
 ```
 
-It enforces one repair per route and explicit iteration/time budgets. `--prepare-only` inspects the packet without a model call. Follow [runtime recovery](references/runtime-recovery.md) for references, search, hard exploration, theorem revisions, and interrupted runs. Use `start_proof.py` for a project spanning sessions or dependent lemmas; on resume read the compact runtime brief before old logs.
+It enforces one local repair per route and explicit iteration/time budgets, which are the script's own defaults; change them with `--max-iterations` or `--max-wall-seconds` only when the brief gives limits, and when the same failure repeats, find the cause before the next run. `--prepare-only` inspects the packet without a model call and is the only form a worker runs. Follow [runtime recovery](references/runtime-recovery.md) for references, search, hard exploration, theorem revisions, and interrupted runs. Use `start_proof.py` for a project spanning sessions or dependent lemmas; on resume read the compact runtime brief before old logs.
 
 Load references to answer the current mathematical question. The [research map](references/research-backed-proof-loop.md), [source update](references/ai-math-workflows-2026.md), and [evaluation protocol](references/evaluation.md) are for skill maintenance, not ordinary proof context.

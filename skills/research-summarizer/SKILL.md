@@ -23,7 +23,7 @@ Not a generic "summarize this" — a repeatable framework that extracts what mat
 
 This skill summarizes **documents the user already has** (papers, articles, reports pasted or attached). It performs no web search and needs no MCP server. It is NOT:
 
-- `research/litreview` — academic literature *discovery* and review-guide generation (finds papers via Consensus/academic APIs)
+- academic literature *discovery* and review-guide generation (finding papers via academic APIs) — report that need if it arises
 - `research/dossier` — entity due-diligence built from live web research
 - `research/notebooklm` — drives Google's NotebookLM product UI
 - `research/research` — the router for open-ended "research [topic]" requests that require searching
@@ -242,7 +242,7 @@ Flag these without being asked:
 - **Source has no date** → Note it. Undated sources lose credibility points.
 - **Source contradicts other sources** → Highlight the contradiction explicitly. Don't paper over disagreements.
 - **Source is behind a paywall** → Note limited access. Suggest alternatives if known.
-- **User provides only one source for a compare** → Ask for at least one more. Comparison needs 2+.
+- **User provides only one source for a compare** → State the limit (comparison needs 2+ sources), summarize the one source, and report the missing second source to the orchestrator.
 - **Citations are incomplete** → Flag missing fields (year, author, title). Don't invent metadata.
 - **Source is 5+ years old in a fast-moving field** → Warn about potential obsolescence.
 
@@ -250,21 +250,7 @@ Flag these without being asked:
 
 ## Installation
 
-### One-liner (any tool)
-```bash
-git clone https://github.com/alirezarezvani/claude-skills.git
-cp -r claude-skills/product-team/research-summarizer ~/.claude/skills/
-```
-
-### Multi-tool install (run from the claude-skills repo root)
-```bash
-./scripts/convert.sh --skill research-summarizer --tool codex|gemini|cursor|windsurf|openclaw
-```
-
-### OpenClaw
-```bash
-clawhub install cs-research-summarizer
-```
+This skill is already installed where you read it. Do not install it or other tools; if a missing tool or skill is needed, report the need to the orchestrator.
 
 ---
 

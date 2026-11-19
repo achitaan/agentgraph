@@ -195,7 +195,7 @@ playwright-cli video-stop
 playwright-cli video-show-actions --duration=600 --position=top-right --highlight-style="outline: 2px solid #333"
 playwright-cli video-hide-actions
 
-# launch the dashboard for UI review / design feedback — user annotates the page, you receive the annotated screenshot, snapshot, and notes
+# only when a person is at the browser: launch the dashboard for UI review / design feedback — user annotates the page, you receive the annotated screenshot, snapshot, and notes
 playwright-cli show --annotate
 
 # generate a Playwright locator for an element from its ref or selector
@@ -397,7 +397,7 @@ playwright-cli kill-all
 
 ## Installation
 
-Package installation and custom `npm` scripts may require separate approval.
+Package installation and custom `npm` scripts need the brief to allow them; otherwise report the need instead of running them.
 
 If global `playwright-cli` command is not available, try a local version via `npx playwright cli`:
 
@@ -405,10 +405,10 @@ If global `playwright-cli` command is not available, try a local version via `np
 npx --no-install playwright --version
 ```
 
-When local version is available, use `npx playwright cli` in all commands. Otherwise, install `playwright-cli` as a global command:
+When local version is available, use `npx playwright cli` in all commands. Otherwise, `playwright-cli` has to be installed as a global command from the official package (`@playwright/cli`); global installs belong to the orchestrator unless the brief says otherwise, so report the need instead of installing. To check the local version, run:
 
 ```bash
-npm install -g @playwright/cli@latest
+npx playwright --version
 ```
 
 ## Example: Form submission
@@ -457,20 +457,25 @@ playwright-cli close
 
 ## Example: Interactive session
 
-Ask the user for UI review or design feedback. The user draws boxes on the live page and types comments; you receive the annotated screenshot, the snapshot of the marked region, and the user's notes. Use this whenever the user asks for "UI review", "design feedback", or to "ask the user what they think / want / mean":
+For UI review or design feedback, do not wait for a person: save an annotated screenshot of the page for the orchestrator and report what needs a human opinion. (Interactive annotation, where a person draws boxes on the live page and types comments, only works when a person is at the browser, so use it only when the brief says one is.) Use this whenever the brief asks for "UI review" or "design feedback":
 
 ```bash
 playwright-cli open https://example.com
+playwright-cli screenshot --filename=review.png
+# only when a person is at the browser:
 playwright-cli show --annotate
 ```
 
 ## Attaching screenshots and videos to pull requests
 
-`gh` 2.99+ uploads local images and videos with the repeatable `--attach` flag on `gh pr create`, `gh pr comment` and `gh issue comment`. Attach a screenshot or a short video when it saves the reviewer a checkout: a UI fix, a before/after pair, a new user-facing flow, or the failure state in a bug report.
+`gh` 2.99+ uploads local images and videos with the repeatable `--attach` flag on `gh pr create`, the PR comment command and `gh issue comment`. Attach a screenshot or a short video when it saves the reviewer a checkout: a UI fix, a before/after pair, a new user-facing flow, or the failure state in a bug report.
+
+Posting to pull requests and issues belongs to the orchestrator unless the brief says otherwise. Save the evidence and hand it over with its path; when the brief does allow posting, the form is:
 
 ```bash
 playwright-cli screenshot --filename=settings-after.png
-gh pr comment 123 --body "Settings page after the fix." --attach ./settings-after.png
+# only when the brief allows opening or posting to the PR:
+gh pr create --title "Fix settings page" --body "Settings page after the fix." --attach ./settings-after.png
 ```
 
 See [references/pr-attachments.md](references/pr-attachments.md) for alt text, inline references, size limits and attaching test artifacts from CI.

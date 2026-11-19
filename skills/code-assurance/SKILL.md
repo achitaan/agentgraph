@@ -24,8 +24,8 @@ outside the edited lines. Do not reduce a failing quality bar to get a pass.
 
 Choose review depth by consequence, not line count. A small change to auth,
 money movement, concurrency, data deletion, or a public contract can deserve
-independent review. Request it through the active orchestration policy when
-authorized and useful; do not ask for cross-model review after every cycle.
+independent review. Treat your own review as a self-check; independent checking is done by the verifier and the reviewer, which the orchestrator dispatches. Name the need in your report
+when it is useful; do not ask for cross-model review after every cycle.
 
 Stop when the requested assessment or fix and its required verification are
 complete. Report important before/after effects, evidence, and unresolved limits.

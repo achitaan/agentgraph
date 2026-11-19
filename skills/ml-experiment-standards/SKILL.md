@@ -108,7 +108,7 @@ if __name__ == "__main__":
 - **Capacity order**: small model + simple baseline first (logistic
   regression, RF); a deep model that can't beat the baseline is a data
   problem, not an architecture problem.
-- EO-specific chipping/inference details → `geo-deep-learning`.
+- EO-specific chipping/inference details → a geospatial deep-learning skill, if one is available; otherwise report the need.
 
 ## 6. System context (MLOps)
 

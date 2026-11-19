@@ -32,7 +32,7 @@ request for one.
 
 Track local verification, CI, review/merge, deployment, and production observation
 as separate facts with timestamps and links. Continue authorized delivery work;
-ask only for authority or information still missing at the consequential step.
+where authority or information is still missing at the consequential step, state your assumption and proceed if safe; otherwise report it as BLOCKED or under `Discovered` for the orchestrator, and do not wait.
 
 ## Observability
 
