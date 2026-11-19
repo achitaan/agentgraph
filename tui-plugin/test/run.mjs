@@ -217,6 +217,99 @@ test("spend line: dollars, tokens, units muted, context only when known", () => 
   ]);
 });
 
+// root.wear (WEB_API.md): the context bar on the spend line
+const W = (extra = {}) => Object.assign({
+  context: 124000, window: 1000000, window_known: true, compact_at: 250000, summaries: 0, turns: 10,
+  turns_since_summary: 10, history: [124000], per_turn: { start: null, recent: null }, level: "long",
+}, extra);
+const wearDoc = (wear, root = {}) => D([A("orchestrator", "hub")], null, "orchestrator", {
+  totals: T(6.57, 12000, 70900), root: Object.assign({ agent: "orchestrator", context: 124000, wear }, root),
+});
+const wearLines = (wear, width = 37, root) => text(wearDoc(wear, root), width);
+const barSpans = (wear, width = 37) => R.render(wearDoc(wear), { width })[1].filter((s) => /^[━─]+$/.test(s.text));
+
+test("wear: an 8-cell bar to compact_at, then the number, in place of ctx", () => {
+  // 124k of 250k: 49.6% -> 4 of 8 cells
+  assert.equal(wearLines(W())[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k");
+  assert.deepEqual(barSpans(W()).map((s) => [s.text, s.tone]), [["━━━━", "muted"], ["────", "muted"]]);
+  // compact_at null: the full bar is the window. 600k of 1M = 60% -> 5 cells
+  assert.equal(wearLines(W({ context: 600000, compact_at: null }))[1], "$6.57  12.0k↑ 70.9k↓  ━━━━━─── 600k");
+  // wear.context wins over root.context; a tiny context still shows one cell; never full below 100%
+  assert.equal(wearLines(W({ context: 1000 }))[1], "$6.57  12.0k↑ 70.9k↓  ━─────── 1.0k");
+  assert.equal(wearLines(W({ context: 249000 }))[1], "$6.57  12.0k↑ 70.9k↓  ━━━━━━━─ 249k");
+  assert.equal(wearLines(W({ context: 300000 }))[1], "$6.57  12.0k↑ 70.9k↓  ━━━━━━━━ 300k");
+  // spans: the number as before (value plain, unit muted)
+  const spans = R.render(wearDoc(W()), { width: 37 })[1];
+  assert.deepEqual(spans.slice(-3).map((s) => [s.text, s.tone]), [[" ", "plain"], ["124", "plain"], ["k", "muted"]]);
+});
+
+test("wear: bar tone muted below 60%, accent from 60%, danger from 85%, never another tone", () => {
+  const fill = (context, extra = {}) => barSpans(W(Object.assign({ context }, extra)))[0].tone;
+  assert.equal(fill(149999), "muted"); // 59.99%
+  assert.equal(fill(150000), "accent"); // 60%
+  assert.equal(fill(212499), "accent"); // 84.99%
+  assert.equal(fill(212500), "danger"); // 85%
+  assert.equal(fill(400000), "danger");
+  assert.equal(fill(850000, { compact_at: null }), "danger");
+  assert.equal(R.wearTone(0.59), "muted");
+  assert.equal(R.wearTone(0.6), "accent");
+  assert.equal(R.wearTone(0.85), "danger");
+  for (const share of [0, 0.3, 0.6, 0.7, 0.85, 1, 2]) assert.ok(["muted", "accent", "danger"].includes(R.wearTone(share)));
+  // the empty part is always muted
+  assert.equal(barSpans(W({ context: 212500 }))[1].tone, "muted");
+});
+
+test("wear: one dot per summary, at most five, then the count", () => {
+  assert.equal(wearLines(W({ summaries: 2 }), 60)[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k ••2");
+  assert.equal(wearLines(W({ summaries: 5 }), 60)[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k •••••5");
+  assert.equal(wearLines(W({ summaries: 7 }), 60)[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k •••••7");
+  assert.equal(wearLines(W({ summaries: 12 }), 60)[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k •••••12");
+  // no summary: no dots and no count
+  assert.equal(wearLines(W({ summaries: 0 }), 60)[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k");
+  const dots = R.render(wearDoc(W({ summaries: 2 })), { width: 60 })[1].pop();
+  assert.deepEqual([dots.text, dots.tone], ["••2", "muted"]);
+});
+
+test("wear: worn adds one muted line 'summarized N times' under the spend line", () => {
+  const lines = wearLines(W({ summaries: 4, level: "worn" }), 60);
+  assert.equal(lines[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k ••••4");
+  assert.equal(lines[2], "summarized 4 times");
+  const spans = R.render(wearDoc(W({ summaries: 4, level: "worn" })), { width: 60 })[2];
+  assert.deepEqual(spans.map((s) => s.tone), ["muted"]);
+  // fresh and long: no such line
+  assert.equal(wearLines(W({ summaries: 1, level: "long" }), 60).length, 2);
+  assert.equal(wearLines(W({ summaries: 0, level: "fresh" }), 60).length, 2);
+  // it fits narrow widths too
+  assert.ok(wearLines(W({ summaries: 4, level: "worn" }), 12).every((l) => R.displayWidth(l) <= 12));
+});
+
+test("wear: null or absent wear draws the spend line exactly as before", () => {
+  const before = "$6.57  12.0k↑ 70.9k↓  ctx 124k";
+  assert.equal(text(wearDoc(null))[1], before);
+  const absent = wearDoc(undefined);
+  delete absent.root.wear;
+  assert.equal(text(absent)[1], before);
+  assert.deepEqual(R.render(wearDoc(null))[1], R.render(absent)[1]);
+  // wear without a usable window or compact_at: the number only
+  assert.equal(wearLines(W({ window: null, compact_at: null }))[1], "$6.57  12.0k↑ 70.9k↓  124k");
+  // wear and root without any context: no context part
+  assert.equal(wearLines(W({ context: null }), 37, { context: null })[1], "$6.57  12.0k↑ 70.9k↓");
+});
+
+test("wear: too narrow drops the dots first, then the bar, keeping the number", () => {
+  const w = W({ summaries: 7 });
+  assert.equal(wearLines(w, 42)[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k •••••7");
+  assert.equal(wearLines(w, 41)[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k");
+  assert.equal(wearLines(w, 35)[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k");
+  assert.equal(wearLines(w, 34)[1], "$6.57  12.0k↑ 70.9k↓  124k");
+  assert.equal(wearLines(w, 26)[1], "$6.57  12.0k↑ 70.9k↓  124k");
+  // below that, the old rules: the context part goes, then single spaces
+  assert.equal(wearLines(w, 25)[1], "$6.57  12.0k↑ 70.9k↓");
+  for (let width = 8; width <= 70; width += 1) {
+    for (const line of wearLines(W({ summaries: 9, level: "worn" }), width)) assert.ok(R.displayWidth(line) <= width, `${width}: ${line}`);
+  }
+});
+
 test("formatTokens and formatDollars at the boundaries", () => {
   const cases = [
     [0, "0"], [7, "7"], [999, "999"], [1000, "1.0k"], [1049, "1.0k"], [1050, "1.1k"], [9999, "10.0k"], [12400, "12.4k"],
@@ -721,7 +814,13 @@ const STUBS = {
   "@opentui/solid": [
     "const s = globalThis.__agentgraphStub;",
     "export function createElement(tag) { return { tag, props: {}, children: [] }; }",
-    "export function setProp(node, key, value) { node.props[key] = value; }",
+    // Like the real host (OpenCode 2.2.5 and 2.3.2): `fg`/`bg` take a string or OpenTUI's own RGBA (it has a
+    // Float32Array `buffer`); any other object throws inside OpenTUI. `failProp` makes one property always throw.
+    "export function setProp(node, key, value) {",
+    "  if (s.failProp === key) throw new Error('stub: ' + key + ' refused');",
+    "  if ((key === 'fg' || key === 'bg') && typeof value !== 'string' && !(value && value.buffer && value.buffer.length >= 3)) throw new TypeError(\"undefined is not an object (evaluating 'e.length')\");",
+    "  node.props[key] = value;",
+    "}",
     "export function insert(node, child) {",
     "  if (typeof child === 'function') { s.track(() => { const v = child(); node.children = Array.isArray(v) ? v : [v]; }); }",
     "  else node.children.push(child);",
@@ -1311,6 +1410,142 @@ test("panel: cleanup removes the slots, the command layer and the timers", async
   const calls = fs.readFileSync(pluginLog, "utf8").trim().split("\n").length;
   await sleep(1300);
   assert.equal(fs.readFileSync(pluginLog, "utf8").trim().split("\n").length, calls, "fetched after cleanup");
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// The theme the real host passes (captured from OpenCode 2.3.2 in a terminal): colours are OpenTUI RGBA objects
+// (a Float32Array `buffer`, r/g/b getters 0-1), text is `text.base` / `text.muted`, warnings and errors are
+// `text.feedback.<kind>.base`, and there is no top-level warning, accent or error. The plugin used to hand the
+// whole `text` object to `fg`: the host threw inside OpenTUI, the error line threw again, and the view was empty.
+
+class HostRGBA {
+  constructor(r, g, b, a = 1) {
+    this.buffer = new Float32Array([r, g, b, a]);
+  }
+  get r() { return this.buffer[0]; }
+  get g() { return this.buffer[1]; }
+  get b() { return this.buffer[2]; }
+  get a() { return this.buffer[3]; }
+}
+const rgb = (r, g, b) => new HostRGBA(r / 255, g / 255, b / 255);
+const hostTheme = () => ({
+  hue: { accent: { 100: rgb(179, 143, 244), 200: rgb(157, 124, 216) }, green: { 200: rgb(127, 216, 143) } },
+  text: {
+    base: rgb(238, 238, 238),
+    muted: rgb(128, 128, 128),
+    faint: rgb(128, 128, 128),
+    feedback: {
+      error: { base: rgb(224, 108, 117), muted: rgb(140, 57, 65) },
+      warning: { base: rgb(245, 167, 66), muted: rgb(150, 99, 65) },
+      success: { base: rgb(127, 216, 143), muted: rgb(61, 127, 75) },
+      info: { base: rgb(92, 156, 245), muted: rgb(44, 91, 155) },
+    },
+  },
+  background: { base: rgb(10, 10, 10) },
+});
+const allFg = (node, out = []) => {
+  if (node && typeof node === "object") {
+    if ("fg" in node.props) out.push(node.props.fg);
+    for (const child of node.children) allFg(child, out);
+  }
+  return out;
+};
+
+test("host theme: text.base, text.muted, text.feedback and RGBA colours map to the four tones", () => {
+  const tones = P.themeTones(hostTheme());
+  assert.equal(P.colorProp(tones.plain.fg), "#eeeeee");
+  assert.equal(P.colorProp(tones.muted.fg), "#808080");
+  assert.equal(P.colorProp(tones.accent.fg), "#f5a742", "the warning colour is nearer terracotta than the purple accent");
+  assert.equal(tones.accent.bold, false);
+  assert.equal(P.colorProp(tones.danger.fg), "#e06c75");
+  // a green warning and accent: plain text in bold, never green
+  const greenTheme = hostTheme();
+  greenTheme.text.feedback.warning.base = rgb(80, 200, 100);
+  greenTheme.hue.accent = { 200: rgb(60, 180, 90) };
+  const g = P.themeTones(greenTheme);
+  assert.deepEqual([P.colorProp(g.accent.fg), g.accent.bold], ["#eeeeee", true]);
+  // colorProp: always #rrggbb (from #rgb, #rrggbb, #rrggbbaa or any { r, g, b }), everything else undefined
+  assert.equal(P.colorProp("#123456"), "#123456");
+  assert.equal(P.colorProp(" #ABCDEF "), "#abcdef");
+  assert.equal(P.colorProp("#abc"), "#aabbcc");
+  assert.equal(P.colorProp("#11223344"), "#112233", "alpha dropped");
+  assert.equal(P.colorProp({ r: 0.8, g: 0.45, b: 0.25 }), "#cc7340");
+  assert.equal(P.colorProp({ r: 204, g: 115, b: 64 }), "#cc7340");
+  assert.equal(P.colorProp({ base: rgb(1, 2, 3) }), undefined);
+  assert.equal(P.colorProp(undefined), undefined);
+  assert.equal(P.colorProp(""), undefined);
+});
+
+test("colorProp: anything but a hex colour or an { r, g, b } gives the host's default colour, never a raw string", async () => {
+  for (const bad of ["not a colour", "red", "transparent", "rgb(1, 2, 3)", "123456", "#12345", "#1234567", "#ggg", "#", "", null, 12, {}, { base: "#ffffff" }]) {
+    assert.equal(P.colorProp(bad), undefined, JSON.stringify(bad));
+  }
+  // a theme of named colours: the view still draws, every fg is left to the host
+  const { ctx, state } = makeHost();
+  ctx.theme = { text: { default: "white", muted: "grey" }, warning: "orange", error: "red" };
+  const stop = tui.setup(ctx);
+  try {
+    const view = state.claims[0].render({ sessionID: "ses_named" });
+    await waitFor(() => screen(view).includes("○ w-ses_named"), 5000, "snapshot with named colours");
+    assert.match(screen(view)[0], /^◉ orchestrator/);
+    assert.deepEqual(allFg(view), [], "no fg is set at all");
+  } finally {
+    stop();
+  }
+});
+
+test("host theme: the sidebar and the panel draw the view with the real host's theme (was empty)", async () => {
+  const { ctx, state, panelClaim } = makePanelHost();
+  ctx.theme = hostTheme();
+  const stop = tui.setup(ctx);
+  try {
+    const side = state.claims[0].render({ sessionID: "ses_theme" });
+    const view = panelClaim().render(makePanel({ sessionID: "ses_theme" }));
+    for (const v of [side, view]) {
+      await waitFor(() => screen(v).includes("○ w-ses_theme"), 5000, "snapshot with the host theme");
+      assert.match(screen(v)[0], /^◉ orchestrator/);
+      const fgs = allFg(v);
+      assert.ok(fgs.length > 0);
+      assert.ok(fgs.every((fg) => typeof fg === "string" && /^#[0-9a-f]{6}$/.test(fg)), "every fg is a hex string: " + fgs.join(","));
+      assert.equal(v.children[0].children[0].props.fg, "#f5a742", "the busy hub mark uses the accent");
+      assert.ok(!fgs.some((fg) => P.isGreen(fg)), "no green");
+    }
+  } finally {
+    stop();
+  }
+});
+
+test("panel: never empty for its own name: loading, error, no session and a drawing failure each draw a line", async () => {
+  const { ctx, panelClaim } = makePanelHost();
+  ctx.theme = hostTheme();
+  const stop = tui.setup(ctx);
+  const nonEmpty = (v) => screen(v).filter((l) => l.trim() !== "");
+  try {
+    // loading: drawn at once, before the first snapshot
+    const loading = panelClaim().render(makePanel({ sessionID: "ses_slow" }));
+    assert.deepEqual(screen(loading), ["Loading"]);
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    // error document
+    const error = panelClaim().render(makePanel({ sessionID: "ses_err" }));
+    await waitFor(() => screen(error)[0] === "no db", 5000, "error line");
+    assert.deepEqual(screen(error), ["no db"]);
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    // no session: neither the panel nor the router has one
+    const none = panelClaim().render(makePanel({ sessionID: undefined }));
+    assert.deepEqual(screen(none), ["No session"]);
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    // drawing fails (the host refuses every colour): one plain line with the reason, no colour
+    globalThis.__agentgraphStub.failProp = "fg";
+    const broken = panelClaim().render(makePanel({ sessionID: "ses_broken" }));
+    assert.equal(nonEmpty(broken).length, 1, "one line: " + JSON.stringify(screen(broken)));
+    assert.match(screen(broken)[0], /fg refused/);
+    assert.equal(broken.children[0].props.fg, undefined);
+    assert.ok(R.displayWidth(screen(broken)[0]) <= 80);
+  } finally {
+    globalThis.__agentgraphStub.failProp = undefined;
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    stop();
+  }
 });
 
 // ---------------------------------------------------------------------------------------------------------------

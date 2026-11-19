@@ -351,7 +351,9 @@ function runBlock(doc, hub, width, frame) {
     const cost = finiteNumber(totals.cost);
     const tin = finiteNumber(totals.tokens_in);
     const tout = finiteNumber(totals.tokens_out);
-    const ctx = isObject(doc.root) ? finiteNumber(doc.root.context) : null;
+    const root = isObject(doc.root) ? doc.root : null;
+    const wear = root && isObject(root.wear) ? root.wear : null;
+    const ctx = (wear ? finiteNumber(wear.context) : null) ?? (root ? finiteNumber(root.context) : null);
     const parts = [];
     if (cost !== null) parts.push([sp(formatDollars(cost), "plain")]);
     const tokens = [];
@@ -360,18 +362,75 @@ function runBlock(doc, hub, width, frame) {
     const tokenSpans = [];
     tokens.forEach((t, i) => tokenSpans.push(...(i ? [sp(" ", "plain")] : []), ...t));
     if (tokenSpans.length) parts.push(tokenSpans);
-    if (ctx !== null) parts.push([sp("ctx ", "muted"), ...numberSpans(formatTokens(ctx))]);
     const join = (items, sep) => {
       const out = [];
       items.forEach((p, i) => out.push(...(i ? [sp(sep, "plain")] : []), ...p));
       return out;
     };
-    let spend = join(parts, "  ");
-    if (lineWidth(spend) > width && ctx !== null) spend = join(parts.slice(0, -1), "  ");
-    if (lineWidth(spend) > width) spend = join(parts.slice(0, -1).length ? parts.slice(0, -1) : parts, " ");
+    // The context part, widest first: with `wear`, bar + number + summary dots, then without the dots, then the
+    // number alone; without `wear`, "ctx 124k" as before.
+    const ctxParts = ctx === null ? [] : wear ? wearParts(wear, ctx) : [[sp("ctx ", "muted"), ...numberSpans(formatTokens(ctx))]];
+    let spend = null;
+    for (const part of ctxParts) {
+      const candidate = join([...parts, part], "  ");
+      if (lineWidth(candidate) <= width) {
+        spend = candidate;
+        break;
+      }
+    }
+    if (!spend) {
+      const all = ctxParts.length ? [...parts, ctxParts[ctxParts.length - 1]] : parts;
+      spend = join(all, "  ");
+      if (lineWidth(spend) > width && ctx !== null) spend = join(all.slice(0, -1), "  ");
+      if (lineWidth(spend) > width) spend = join(all.slice(0, -1).length ? all.slice(0, -1) : all, " ");
+    }
     if (spend.length) lines.push(spend);
+    if (wear && wear.level === "worn") {
+      const n = Math.max(0, Math.floor(Number(wear.summaries) || 0));
+      lines.push([sp(truncate(`summarized ${n} times`, width), "muted")]);
+    }
   }
   return lines;
+}
+
+export const WEAR_BAR_CELLS = 8;
+export const SUMMARY_DOT = "•";
+const SUMMARY_DOTS_MAX = 5;
+
+// Share of the context window used: context / compact_at (or / window when compact_at is null); null if unknown.
+export function wearShare(wear, ctx) {
+  const compactAt = finiteNumber(wear.compact_at);
+  const windowSize = finiteNumber(wear.window);
+  const limit = compactAt !== null && compactAt > 0 ? compactAt : windowSize !== null && windowSize > 0 ? windowSize : null;
+  return limit === null ? null : Math.max(0, ctx) / limit;
+}
+
+// Tone of the context bar's fill: muted below 60%, accent from 60%, danger from 85%. Never green.
+export function wearTone(share) {
+  return share >= 0.85 ? "danger" : share >= 0.6 ? "accent" : "muted";
+}
+
+function wearParts(wear, ctx) {
+  const number = numberSpans(formatTokens(ctx));
+  const share = wearShare(wear, ctx);
+  const variants = [];
+  if (share !== null) {
+    let filled = Math.round(WEAR_BAR_CELLS * share);
+    if (ctx > 0) filled = Math.max(1, filled);
+    if (share < 1) filled = Math.min(filled, WEAR_BAR_CELLS - 1);
+    filled = Math.max(0, Math.min(WEAR_BAR_CELLS, filled));
+    const bar = [];
+    if (filled > 0) bar.push(sp(BAR_FULL.repeat(filled), wearTone(share)));
+    if (WEAR_BAR_CELLS - filled > 0) bar.push(sp(BAR_EMPTY.repeat(WEAR_BAR_CELLS - filled), "muted"));
+    const withBar = [...bar, sp(" ", "plain"), ...number];
+    const summaries = Math.max(0, Math.floor(Number(wear.summaries) || 0));
+    if (summaries > 0) {
+      variants.push([...withBar, sp(" ", "plain"), sp(SUMMARY_DOT.repeat(Math.min(SUMMARY_DOTS_MAX, summaries)) + summaries, "muted")]);
+    }
+    variants.push(withBar);
+  }
+  variants.push(number);
+  return variants;
 }
 
 // Block 2: what needs the user, most urgent first, one line per agent.

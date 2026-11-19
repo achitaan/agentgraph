@@ -10,7 +10,7 @@
  * width) and the command "agentgraph.graph" (slash /graph, alias /agents) that opens and closes it. Every host
  * function is feature-detected; a host without them gets the sidebar only.
  */
-import { render, isAnimated } from "./render.js";
+import { render, isAnimated, truncate as truncateText } from "./render.js";
 import { createSnapshotRunner, errorDocument, errorMessage, oneLine } from "./runner.js";
 
 export const PLUGIN_ID = "agentgraph-tui";
@@ -53,10 +53,25 @@ export function resolveOptions(raw, { os, path }) {
 // ---------------------------------------------------------------------------------------------------------------
 // Theme -> colours for the four tones. Never green for "accent".
 
+// A colour token: a colour, or a token object holding one (`default`, or `base` as OpenCode 2.3 themes have, or the
+// 200 step of a hue scale).
 function pick(value) {
   if (value === undefined || value === null) return undefined;
-  if (isPlainObject(value) && !("r" in value) && "default" in value) return pick(value.default);
+  if (isPlainObject(value) && !("r" in value)) {
+    if ("default" in value) return pick(value.default);
+    if ("base" in value) return pick(value.base);
+    if ("200" in value) return pick(value[200]);
+  }
   return value;
+}
+
+function dig(value, ...keys) {
+  let v = value;
+  for (const key of keys) {
+    if (!v || typeof v !== "object") return undefined;
+    v = v[key];
+  }
+  return v;
 }
 
 export function toRgb(color) {
@@ -76,6 +91,18 @@ export function toRgb(color) {
     }
   }
   return null;
+}
+
+// The value handed to the host's `fg`: always "#rrggbb", from a "#rgb", "#rrggbb" or "#rrggbbaa" string (alpha
+// dropped) or any { r, g, b } colour (OpenTUI RGBA, 0-1 or 0-255); anything else undefined (the host's default text
+// colour). The host's `fg` setter accepts only strings and its own RGBA class; any other object throws inside
+// OpenTUI, and a named or functional colour string would be up to the host to understand.
+export function colorProp(value) {
+  let rgb = null;
+  if (typeof value === "string") rgb = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(value.trim()) ? toRgb(value) : null;
+  else if (value && typeof value === "object") rgb = toRgb(value);
+  if (!rgb) return undefined;
+  return "#" + rgb.map((c) => Math.max(0, Math.min(255, Math.round(c))).toString(16).padStart(2, "0")).join("");
 }
 
 function hsl([r, g, b]) {
@@ -110,15 +137,19 @@ function hueDistance(color) {
 }
 
 // -> { plain, muted, accent, danger }: each { fg, bold }
+// Two theme shapes: OpenCode 2.3 (`text.base`, `text.muted`, `text.feedback.{warning,error}.base`, `hue.accent`)
+// and the older flat one (`text.default`, `text.muted`/`subdued`, `warning`, `accent`, `error`).
 export function themeTones(theme) {
   const t = theme && typeof theme === "object" ? theme : {};
   const text = t.text;
   const plain = pick(text) ?? pick(t.foreground);
   const muted = (text && (pick(text.muted) ?? pick(text.subdued))) ?? pick(t.textMuted) ?? plain;
-  const candidates = [pick(t.warning), pick(t.accent)].filter((c) => c !== undefined && !isGreen(c));
+  const warning = pick(t.warning) ?? pick(dig(text, "feedback", "warning"));
+  const accentColor = pick(t.accent) ?? pick(dig(t, "hue", "accent"));
+  const candidates = [warning, accentColor].filter((c) => c !== undefined && !isGreen(c));
   candidates.sort((a, b) => hueDistance(a) - hueDistance(b));
   const accent = candidates.length ? { fg: candidates[0], bold: false } : { fg: plain, bold: true };
-  const errorColor = pick(t.error) ?? pick(t.danger) ?? pick(t.critical);
+  const errorColor = pick(t.error) ?? pick(t.danger) ?? pick(t.critical) ?? pick(dig(text, "feedback", "error"));
   const danger = errorColor !== undefined && !isGreen(errorColor) ? { fg: errorColor, bold: false } : { fg: accent.fg, bold: true };
   return { plain: { fg: plain, bold: false }, muted: { fg: muted, bold: false }, accent, danger };
 }
@@ -164,15 +195,32 @@ export function createPlugin(host) {
   }
 
   function lineNode(line, tones) {
-    if (!line.length) return element("text", { wrapMode: "none", fg: tones.muted.fg }, [" "]);
+    if (!line.length) return element("text", { wrapMode: "none", fg: colorProp(tones.muted.fg) }, [" "]);
     return element(
       "box",
       { flexDirection: "row", width: "100%", flexShrink: 0 },
       line.map((span) => {
         const tone = tones[span.tone] || tones.plain;
-        return element("text", { fg: tone.fg, attributes: tone.bold ? BOLD : undefined, wrapMode: "none", flexShrink: 0 }, [span.text]);
+        return element("text", { fg: colorProp(tone.fg), attributes: tone.bold ? BOLD : undefined, wrapMode: "none", flexShrink: 0 }, [span.text]);
       }),
     );
+  }
+
+  // Last resort when drawing failed: one line of text with no colour or other property that could fail again.
+  function plainLine(message, width) {
+    return element("text", { wrapMode: "none" }, [truncateText(oneLine(message) || "agent graph: unknown error", width)]);
+  }
+
+  // Optional debug log of swallowed errors: AGENTGRAPH_TUI_DEBUG=<file> in the TUI's environment.
+  function report(where, error) {
+    try {
+      const file = host.env && host.env.AGENTGRAPH_TUI_DEBUG;
+      if (file && host.fs && typeof host.fs.appendFileSync === "function") {
+        host.fs.appendFileSync(file, `${new Date().toISOString()} ${where}: ${(error && error.stack) || errorMessage(error)}\n`);
+      }
+    } catch (_) {
+      /* ignore */
+    }
   }
 
   function setup(ctx, secondOptions) {
@@ -308,10 +356,18 @@ export function createPlugin(host) {
         else lines = render(snap.doc, { width, frame: watcher.frame() });
         return lines.map((line) => lineNode(line, tones));
       } catch (error) {
+        // Never an empty view: draw the error as one line, and if even that fails, as plain uncoloured text.
+        report("view", error);
         try {
           return [lineNode(render(errorDocument(errorMessage(error)), { width })[0], tones)];
-        } catch (_) {
-          return [];
+        } catch (again) {
+          report("error line", again);
+          try {
+            return [plainLine(errorMessage(error), width)];
+          } catch (last) {
+            report("plain line", last);
+            return [];
+          }
         }
       }
     }
@@ -323,8 +379,9 @@ export function createPlugin(host) {
           host.insert(root, () => makeView(watcher, resolve, props));
           return root;
         } catch (error) {
+          report("render", error);
           try {
-            return element("text", { wrapMode: "none" }, [oneLine(errorMessage(error)).slice(0, WIDTH)]);
+            return plainLine(errorMessage(error), WIDTH);
           } catch (_) {
             return null;
           }
