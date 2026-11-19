@@ -21,6 +21,6 @@ recognizes running calls with unknown final usage.
 Nine recovered modules retain ownership checks, no-follow I/O, private locking,
 expiring one-use previews, state checks, receipts and bounded executable probes.
 The specialist pack, plugin registration and fixed model roster are excluded.
-See [module parity](upstream-parity.md) for replacements and remaining exclusions.
+The module-parity table for the Codex controller is not part of the OpenCode version.
 Source ownership and test evidence do not establish live permissions, account
 compatibility, or lower token costs.

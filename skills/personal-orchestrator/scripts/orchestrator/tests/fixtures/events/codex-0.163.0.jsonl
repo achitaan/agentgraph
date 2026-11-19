@@ -1,4 +1,0 @@
-{"type":"thread.started","thread_id":"fixture-codex-0163"}
-{"type":"turn.started"}
-{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Fixture check completed."}}
-{"type":"turn.completed","usage":{"input_tokens":120,"cached_input_tokens":100,"cache_write_input_tokens":8,"output_tokens":15,"reasoning_output_tokens":7}}

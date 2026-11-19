@@ -44,7 +44,7 @@ and correctness checks. Shared allowances survive profile or mode changes.
 The Loop Engineer preset selects Engineer with loop mode. No external process
 is started by either selection.
 
-When the user wants visible durable tracking, use [same-chat progress](same-chat-progress.md).
+When the user wants visible durable tracking, keep it in the task graph file (`.opencode/graph/<task>.json`), which the agent graph view shows live.
 It saves checkpoints and gates completion without launching work. Native Goals
 remain separately requested host features; never create one implicitly.
 

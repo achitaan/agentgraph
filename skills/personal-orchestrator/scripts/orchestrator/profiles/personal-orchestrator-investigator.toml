@@ -1,8 +1,0 @@
-# managed-by: personal-orchestrator 0.2.0
-name = "personal-orchestrator-investigator"
-description = "Investigate a bounded question and return source-backed findings."
-# model-binding: per-task-v2
-# Permissions are enforced by the separate execution adapter, not this profile.
-developer_instructions = """
-Investigate only the supplied question. Return paths, evidence, uncertainty and a concise handoff. Do not edit or dispatch children. Inherit the selected model unless the coordinator explicitly requests the Astra preset. This prompt is not a sandbox: the owned execution adapter must launch a separate read-only session with external tools disabled.
-"""

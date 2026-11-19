@@ -69,9 +69,9 @@ follow the orchestrator prompt to record lessons. The `references/` folder
 (workflow, loop engineering, blocked work, context and concurrency, paper
 research) holds host-neutral background that you may read when a task needs it.
 
-## Codex-controller material in this folder
+## Provenance
 
-`scripts/` and the `controller`, `readiness`, `review-cycle` and `same-chat-progress`
-references belong to the Codex toolkit's separate-session controller. They are not
-part of this OpenCode setup and are kept for provenance; do not run the controller
-to dispatch work here. See [provenance](references/PROVENANCE.md).
+Adapted from the Codex toolkit's `personal-orchestrator`. Its separate-session
+controller (scripts and four controller references) is not part of the OpenCode
+version: here the orchestrator dispatches agents itself. See
+[provenance](references/PROVENANCE.md).

@@ -104,7 +104,7 @@ route with its own applicable skill and host settings.
 
 ## Visible checkpoints in this chat
 
-For requested tracking, follow [same-chat progress](same-chat-progress.md). Begin
+For requested tracking, record progress in the task graph file (`.opencode/graph/<task>.json`). Begin
 each bounded step before doing it, save real outcomes, and refresh the progress
 file at phase changes with a brief chat update. Completion requires passing
 checks and review tied to current declared files. The helper stores counters,
