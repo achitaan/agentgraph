@@ -761,6 +761,226 @@ class Ledger(unittest.TestCase):
         self.assertIn("a turn over 2 turns in 1 chats", text)
         self.assertNotIn("Chat cost", self.cli("signals", "--no-cost")[1])
 
+    def test_selected_feedback_ids_preserve_legacy_lines_and_keep_first_reason(self):
+        self.home.mkdir()
+        feedback = self.home / "feedback.jsonl"
+        legacy = b'{"time": 1, "text": "Duplicate"}\n'
+        original = legacy + b'not JSON\n' + legacy
+        feedback.write_bytes(original)
+        first, second = [item["id"] for item in self.report("--feedback-ids")["feedback"]]
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.cli("feedback", "Later", now=10)[0], 0)
+        later = feedback.read_bytes()
+        self.assertTrue(later.startswith(original))
+
+        marks = self.project / "marks.json"
+        marks.write_text(json.dumps({first: "one task", "unknown": "covered"}))
+        code, _, errors = self.cli("improved", "--handled-file", str(marks))
+        self.assertEqual(code, 2)
+        self.assertIn("unknown feedback id", errors)
+        self.assertEqual(self.report()["pending"]["feedback"], 3)
+        self.assertFalse((self.home / "feedback-handled.jsonl").exists())
+
+        marks.write_text(json.dumps({first: "covered: rule already exists"}))
+        self.assertEqual(self.cli("improved", "--handled-file", str(marks), now=20)[0], 0)
+        self.assertEqual(self.report()["pending"]["feedback"], 2)
+        self.assertNotIn("id", self.report()["feedback"][0])
+        self.assertEqual(self.report("--feedback-ids")["feedback"][0]["id"], second)
+        self.assertEqual(self.report("--all", "--feedback-ids")["feedback"][0]["id"], first)
+        self.assertIsNone(self.report()["last_improvement"])
+        stored = (self.home / "feedback-handled.jsonl").read_bytes()
+        marks.write_text(json.dumps({first: "rejected"}))
+        self.assertEqual(self.cli("improved", "--handled-file", str(marks), now=30)[0], 0)
+        self.assertEqual(self.records("feedback-handled.jsonl"), [
+            {"time": 20, "handled": {first: "covered: rule already exists"}},
+        ])
+        self.assertEqual((self.home / "feedback-handled.jsonl").read_bytes(), stored)
+        self.assertEqual(feedback.read_bytes(), later)
+
+    def test_feedback_marks_combine_with_watermarks_and_batch_records_do_not_advance_them(self):
+        self.assertEqual(self.cli("feedback", "before", now=2)[0], 0)
+        self.assertEqual(self.cli("feedback", "at boundary", now=3)[0], 0)
+        self.assertEqual(self.cli("feedback", "mark this", now=4)[0], 0)
+        self.assertEqual(self.cli("feedback", "leave pending", now=5)[0], 0)
+        common = ["--file", "prompt.md", "--summary", "Applied"]
+        self.assertEqual(self.cli("improved", *common, "--seen-until", "3", now=6)[0], 0)
+        self.assertEqual(self.report()["watermark"], 3)
+        marked = self.report("--feedback-ids")["feedback"][0]["id"]
+        marks = self.project / "marks.json"
+        marks.write_text(json.dumps({marked: "applied"}))
+        self.assertEqual(self.cli("improved", "--handled-file", str(marks), now=8)[0], 0)
+        self.assertEqual(self.cli("improved", *common, "--keep-watermark", now=9)[0], 0)
+        report = self.report()
+        self.assertEqual(report["last_improvement"]["time"], 9)
+        self.assertEqual(report["watermark"], 3)
+        self.assertEqual(report["pending"]["feedback"], 1)
+        self.assertEqual([note["text"] for note in report["feedback"]], ["leave pending"])
+        self.assertIn("1 pending feedback items", self.record()[1].splitlines()[-1])
+        self.assertEqual(self.cli("improved", *common, "--seen-until", "5", now=10)[0], 0)
+        self.assertEqual(self.report()["watermark"], 5)
+        self.assertEqual(self.report()["pending"]["feedback"], 0)
+
+    def test_first_batch_improvement_keeps_a_missing_watermark(self):
+        self.assertEqual(self.cli("feedback", "still pending", now=2)[0], 0)
+        self.assertEqual(self.cli("improved", "--file", "prompt.md", "--summary", "Applied",
+                                  "--keep-watermark", now=3)[0], 0)
+        report = self.report()
+        self.assertIsNone(report["watermark"])
+        self.assertEqual(report["pending"]["feedback"], 1)
+
+    def test_unknown_feedback_id_leaves_missing_and_legacy_homes_untouched(self):
+        marks = self.project / "marks.json"
+        marks.write_text('{"unknown":"covered"}')
+        for legacy in (False, True):
+            with self.subTest(legacy_home=legacy):
+                self.home = self.project / f"ledger-{legacy}"
+                original = b'{"time": 1, "text": "legacy"}\n'
+                if legacy:
+                    self.home.mkdir()
+                    (self.home / "feedback.jsonl").write_bytes(original)
+                code, _, errors = self.cli("improved", "--handled-file", str(marks))
+                self.assertEqual(code, 2)
+                self.assertIn("unknown feedback id", errors)
+                if legacy:
+                    self.assertEqual({p.name for p in self.home.iterdir()}, {"feedback.jsonl"})
+                    self.assertEqual((self.home / "feedback.jsonl").read_bytes(), original)
+                else:
+                    self.assertFalse(self.home.exists())
+
+    def test_signals_no_cost_does_not_read_config_or_write_settings(self):
+        config = self.project / "scratch-config.json"
+        config.write_text('{"compaction": {"buffer": 12345}}')
+        log = self.project / "scratch-settings.jsonl"
+        options = ("--config", str(config), "--settings-log", str(log))
+        with patch.object(ledger.cost, "read_settings", wraps=ledger.cost.read_settings) as read_settings:
+            self.assertNotIn("cost", self.report("--no-cost", *options))
+            read_settings.assert_not_called()
+            self.assertFalse(log.exists())
+            self.assertIn("cost", self.report(*options))
+            read_settings.assert_called_once_with(config)
+            self.assertTrue(log.is_file())
+
+    def message_db(self, messages):
+        with contextlib.closing(sqlite3.connect(self.db)) as db, db:
+            db.executescript("""
+                CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, title TEXT, directory TEXT);
+                CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT,
+                                              time_created INTEGER, data TEXT);
+                INSERT INTO session_v2 VALUES ('root', NULL, 'Root title', '/root'),
+                    ('child', 'root', 'Child', '/root'), ('untitled', NULL, NULL, '/project');
+            """)
+            db.executemany("INSERT INTO session_message VALUES (?,?,?,?,?)",
+                           [(i, s, kind, ms, json.dumps(data)) for i, s, kind, ms, data in messages])
+
+    def test_messages_filter_types_roots_expansion_duplicates_and_handled(self):
+        fixtures = [
+            ("typed", "root", "user", 50, {"text": "typed"}),
+            ("child", "child", "user", 51, {"text": "child text"}),
+            ("tool", "root", "assistant", 52, {"text": "tool result"}),
+            ("synthetic", "root", "synthetic", 53, {"text": "synthetic text"}),
+            ("system", "root", "system", 54, {"text": "system text"}),
+            ("summary", "root", "compaction", 55, {"text": "summary text"}),
+            ("expanded", "root", "user", 56, {"text": "expanded prompt",
+                                             "metadata": {"displayText": "/sample argument"}}),
+            ("duplicate", "root", "user", 57, {"text": "saved note"}),
+            ("display", "untitled", "user", 58, {"text": "text plus appended context",
+                                                "metadata": {"displayText": "display only"}}),
+            ("blank", "root", "user", 59, {"text": " \t"}),
+        ]
+        self.message_db(fixtures)
+        self.assertEqual(self.cli("feedback", "saved note")[0], 0)
+        # Historical notes still deduplicate identical chat text below the single-proposal watermark.
+        self.assertEqual(self.cli("improved", "--file", "p", "--summary", "s", now=110)[0], 0)
+        opts = ("--messages", "--db", str(self.db), "--no-cost")
+        expected = [
+            {"id": "msg:display", "time": 58, "session": "/project", "text": "display only"},
+            {"id": "msg:typed", "time": 50, "session": "Root title", "text": "typed"},
+        ]
+        self.assertEqual(self.report(*opts)["messages"], expected)
+        self.assertEqual(self.report(*opts)["messages"], expected)
+        marks = self.project / "marks.json"
+        marks.write_text(json.dumps({"msg:typed": "not a note"}))
+        self.assertEqual(self.cli("improved", "--handled-file", str(marks), "--db", str(self.db))[0], 0)
+        self.assertEqual(self.report(*opts)["messages"], expected[:1])
+        self.assertEqual(self.report(*opts)["watermark"], 110)
+        # Do not accept a non-user or nonexistent ID, or write a partial mark.
+        marks.write_text(json.dumps({"msg:display": "covered", "msg:tool": "covered", "msg:missing": "covered"}))
+        code, _, errors = self.cli("improved", "--handled-file", str(marks), "--db", str(self.db))
+        self.assertEqual(code, 2)
+        self.assertIn("unknown feedback id", errors)
+        self.assertEqual(self.report(*opts)["messages"], expected[:1])
+
+    def test_messages_respect_caps_and_count_every_eligible_omission(self):
+        self.message_db([(str(i), "root", "user", i, {"text": "x" * 620 if i >= 160 else f"short {i}"})
+                         for i in range(211)])
+        opts = ("--messages", "--db", str(self.db), "--no-cost")
+        report = self.report(*opts)
+        self.assertEqual(len(report["messages"]), 50)
+        self.assertEqual(report["messages"][0]["id"], "msg:210")
+        self.assertTrue(all(len(m["text"]) == 600 for m in report["messages"]))
+        self.assertEqual(sum(map(lambda m: len(m["text"]), report["messages"])), 30000)
+        self.assertEqual(report["messages_left_out"], 161)
+        marks = self.project / "marks.json"
+        marks.write_text(json.dumps({"handled": {m["id"]: "not a note" for m in report["messages"]},
+                                     "messages_through": report["messages_through"], "keep_backlog": True}))
+        self.assertEqual(self.cli("improved", "--handled-file", str(marks), "--db", str(self.db))[0], 0)
+        self.assertEqual(self.records("feedback-handled.jsonl")[-1]["messages_through"], 100000)
+        self.assertEqual(self.report(*opts)["messages"][0]["id"], "msg:160")
+        self.db.unlink()
+        self.message_db([(f"short-{i}", "root", "user", i, {"text": f"short {i}"}) for i in range(200)])
+        report = self.report(*opts)
+        self.assertEqual(len(report["messages"]), 150)
+        self.assertEqual(report["messages_left_out"], 50)
+
+    def test_messages_checkpoint_separate_from_watermark_and_keeps_deferred(self):
+        self.message_db([("old", "root", "user", 1000, {"text": "old"}),
+                         ("defer", "root", "user", 2000, {"text": "deferred"}),
+                         ("new", "root", "user", 3001, {"text": "new"})])
+        opts = ("--messages", "--db", str(self.db), "--no-cost")
+        report = self.report(*opts, now=3)
+        self.assertEqual(report["messages_through"], 3000)
+        self.assertEqual([m["id"] for m in report["messages"]], ["msg:defer", "msg:old"])
+        marks = self.project / "marks.json"
+        marks.write_text(json.dumps({"handled": {}, "messages_through": report["messages_through"],
+                                     "keep_messages": ["msg:defer"]}))
+        self.assertEqual(self.cli("improved", "--handled-file", str(marks), "--db", str(self.db), now=4)[0], 0)
+        report = self.report(*opts, now=4)
+        self.assertEqual([m["id"] for m in report["messages"]], ["msg:new", "msg:defer"])
+        self.assertIsNone(report["watermark"])
+        self.assertIsNone(report["last_improvement"])
+
+    def test_messages_missing_unknown_or_locked_database_warns_once(self):
+        opts = ("signals", "--json", "--messages", "--db", str(self.db), "--no-cost")
+
+        def check():
+            code, output, errors = self.cli(*opts)
+            self.assertEqual(code, 0, errors)
+            self.assertEqual(len(errors.splitlines()), 1)
+            self.assertIn("warning", errors)
+            report = json.loads(output)
+            self.assertEqual(report["messages"], [])
+            self.assertIsNone(report["messages_through"])
+
+        check()
+        self.assertFalse(self.db.exists())
+        with contextlib.closing(sqlite3.connect(self.db)) as db:
+            db.execute("CREATE TABLE unrelated (id TEXT)")
+        check()
+        self.db.unlink()
+        self.message_db([])
+        with contextlib.closing(sqlite3.connect(self.db)) as db:
+            db.execute("BEGIN EXCLUSIVE")
+            check()
+
+    def test_messages_skip_null_and_empty_ids_with_one_counted_warning(self):
+        self.message_db([(None, "root", "user", 1, {"text": "missing ID"}),
+                         ("", "root", "user", 2, {"text": "empty ID"}),
+                         ("valid", "root", "user", 3, {"text": "valid ID"})])
+        code, output, errors = self.cli("signals", "--json", "--messages", "--no-cost", "--db", str(self.db))
+        self.assertEqual(code, 0, errors)
+        self.assertEqual(errors.splitlines(), ["ledger warning: skipped 2 user message rows with invalid IDs"])
+        self.assertEqual([m["id"] for m in json.loads(output)["messages"]], ["msg:valid"])
+
 
 if __name__ == "__main__":
     unittest.main()

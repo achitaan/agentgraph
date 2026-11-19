@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -26,8 +27,17 @@ DUE_FEEDBACK = 2
 
 _RUNS = "runs.jsonl"
 _FEEDBACK = "feedback.jsonl"
+_FEEDBACK_HANDLED = "feedback-handled.jsonl"
 _IMPROVEMENTS = "improvements.jsonl"
 _Row = tuple[bytes, dict | None]
+_MESSAGE_COUNT = 150
+_MESSAGE_LENGTH = 600
+_MESSAGE_BUDGET = 30_000
+_MESSAGE_ROWS = """
+    SELECT m.id, m.time_created, s.title, s.directory, m.data
+    FROM session_message AS m JOIN session_v2 AS s ON s.id = m.session_id
+    WHERE s.parent_id IS NULL AND m.type = 'user'
+"""
 
 
 def _number(value) -> bool:
@@ -104,6 +114,13 @@ def _valid_improvement_fields(item: dict) -> bool:
     )
 
 
+def _valid_handled(handled) -> bool:
+    return isinstance(handled, dict) and bool(handled) and all(
+        isinstance(note_id, str) and note_id and isinstance(reason, str) and reason.strip()
+        for note_id, reason in handled.items()
+    )
+
+
 def _finite_float(text: str) -> float:
     value = float(text)
     if not math.isfinite(value):
@@ -131,11 +148,47 @@ def _records(rows: list[_Row]) -> list[dict]:
     return [item for _, item in rows if item is not None]
 
 
+def _feedback_notes(home: Path) -> list[dict]:
+    counts: Counter[str] = Counter()
+    notes = []
+    for line, note in _read(home / _FEEDBACK, _valid_feedback):
+        if note is None:
+            continue
+        # Derive stable IDs without rewriting old lines; distinguish identical notes.
+        digest = hashlib.sha256(line.removesuffix(b"\n")).hexdigest()
+        counts[digest] += 1
+        notes.append({**note, "id": f"{digest}-{counts[digest]}"})
+    return sorted(notes, key=lambda item: item["time"])
+
+
+def _valid_message_checkpoint(item: dict) -> bool:
+    through = item.get("messages_through")
+    keep = item.get("keep_messages", [])
+    return (type(through) is int and 0 <= through < 2**63 and type(item.get("keep_backlog", False)) is bool
+            and _strings(keep)
+            and len(keep) <= _MESSAGE_COUNT and all(i.startswith("msg:") and len(i) > 4 for i in keep))
+
+
+def _handled_state(home: Path) -> tuple[set[str], int, list[str], dict]:
+    rows = _read(home / _FEEDBACK_HANDLED,
+                 lambda row: _valid_handled(row.get("handled")) or _valid_message_checkpoint(row))
+    handled: set[str] = set()
+    through, keep, latest = -1, [], {}
+    for item in _records(rows):
+        # Checkpoint-only rows have an empty handled map.
+        if _valid_handled(item.get("handled")):
+            handled.update(item["handled"])
+        if _valid_message_checkpoint(item) and item["messages_through"] >= latest.get("messages_through", -1):
+            latest = {k: item[k] for k in ("messages_through", "keep_messages", "keep_backlog") if k in item}
+            if not item.get("keep_backlog"):
+                through, keep = item["messages_through"], item.get("keep_messages", [])
+    return handled, through, keep, latest
+
+
 def _history(home: Path) -> tuple[list[_Row], list[dict], list[dict]]:
     runs = _read(home / _RUNS, _valid_run)
-    responses = sorted(_records(_read(home / _FEEDBACK, _valid_feedback)), key=lambda item: item["time"])
     improvements = sorted(_records(_read(home / _IMPROVEMENTS, _valid_improvement)), key=lambda item: item["time"])
-    return runs, responses, improvements
+    return runs, _feedback_notes(home), improvements
 
 
 @contextmanager
@@ -189,7 +242,12 @@ def _replace(path: Path, rows: list[_Row]) -> None:
 
 
 def _append(path: Path, now: float | None, fields: dict) -> dict:
-    with _lock(path.parent, writing=True), path.open("a+b") as stream:
+    with _lock(path.parent, writing=True):
+        return _append_locked(path, now, fields)
+
+
+def _append_locked(path: Path, now: float | None, fields: dict) -> dict:
+    with path.open("a+b") as stream:
         # A previous incomplete append must not swallow the new record.
         separator = b""
         if stream.seek(0, os.SEEK_END):
@@ -387,12 +445,12 @@ def record(
             selected.append(graph)
 
         rows, responses, improvements = _history(home)
+        handled, _, _, _ = _handled_state(home)
         costs = _session_costs(db_path, selected)
         when = _now(now)
         outcome = "abandoned" if abandoned else "passed"
         rows, saved, refused = _upsert(rows, [_summary(graph, when, costs, outcome) for graph in selected], notes)
-        latest = improvements[-1] if improvements else None
-        runs, responses = _pending(_records(rows), responses, _watermark(latest))
+        runs, responses = _pending(_records(rows), responses, _watermark(improvements), handled)
         due = _due_fields(runs, responses)
         if saved:
             _replace(home / _RUNS, rows)
@@ -411,13 +469,119 @@ def feedback(
 def improved(
     home: Path, now: float | None, file: str | Path | list[str], summary: str, *,
     signals: list[str] | None = None, metric: str | None = None, seen_until: float | None = None,
+    keep_watermark: bool = False,
 ) -> dict:
     """Record an applied improvement without opening or modifying its file."""
     fields = {"file": str(file) if isinstance(file, Path) else file,
               "summary": summary, "signals": signals or [], "metric": metric}
     if seen_until is not None:
         fields["seen_until"] = seen_until
+    if keep_watermark:
+        fields["keep_watermark"] = True
     return _append(home / _IMPROVEMENTS, now, fields)
+
+
+def _open_message_db(path: Path) -> sqlite3.Connection:
+    return sqlite3.connect(path.expanduser().resolve().as_uri() + "?mode=ro", uri=True, timeout=0.25)
+
+
+def _valid_message_id(value) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _user_message(row) -> tuple[str, int, str, str] | None:
+    message_id, created, title, directory, raw = row
+    if not _valid_message_id(message_id):
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("text"), str):
+        return None
+    display = data.get("metadata")
+    display = display.get("displayText") if isinstance(display, dict) else None
+    text = display if isinstance(display, str) else data["text"]
+    # Display text, when present, is the pre-expansion input. Skip visible slash invocations.
+    if not text.strip() or text.lstrip().startswith("/"):
+        return None
+    return "msg:" + message_id, created, (title or directory or "")[:120], text
+
+
+def _message_report(db_path: Path, generated: float, since: int, keep: list[str],
+                    notes: list[dict], handled: set[str]) -> dict:
+    messages: list[dict] = []
+    saved = {note["text"] for note in notes}
+    through = int(generated * 1000)
+    left_out = chars = invalid_ids = 0
+    try:
+        with closing(_open_message_db(db_path)) as db:
+            rows = db.execute(_MESSAGE_ROWS + """
+                AND m.time_created <= ?
+                AND (m.time_created > ? OR m.id IN (SELECT value FROM json_each(?)))
+                ORDER BY m.time_created DESC, m.id DESC
+            """, (through, since, json.dumps([i[4:] for i in keep])))
+            for row in rows:
+                if not _valid_message_id(row[0]):
+                    invalid_ids += 1
+                    continue
+                if "msg:" + row[0] in handled or not (message := _user_message(row)):
+                    continue
+                note_id, created, session, text = message
+                if text in saved:
+                    continue
+                text = text[:_MESSAGE_LENGTH]
+                if left_out or len(messages) >= _MESSAGE_COUNT or chars + len(text) > _MESSAGE_BUDGET:
+                    left_out += 1
+                    continue
+                messages.append(dict(id=note_id, time=created, session=session, text=text))
+                chars += len(text)
+    except (OSError, sqlite3.Error):
+        print("ledger warning: cannot read user messages (database unavailable or unrecognized schema)", file=sys.stderr)
+        return {"messages": [], "messages_left_out": 0, "messages_through": None}
+    if invalid_ids:
+        print(f"ledger warning: skipped {invalid_ids} user message rows with invalid IDs", file=sys.stderr)
+    return {"messages": messages, "messages_left_out": left_out, "messages_through": through}
+
+
+def _mark_feedback(home: Path, now: float | None, payload: dict, db_path: Path) -> None:
+    checkpoint = {}
+    handled = payload
+    if isinstance(payload, dict) and "messages_through" in payload:
+        handled = payload.get("handled")
+        if (payload.keys() - {"handled", "messages_through", "keep_messages", "keep_backlog"}
+                or not _valid_message_checkpoint(payload)
+                or payload["messages_through"] > int(_now(now) * 1000)):
+            raise ValueError("invalid messages checkpoint")
+        checkpoint = {"messages_through": payload["messages_through"],
+                      "keep_messages": payload.get("keep_messages", [])}
+        if payload.get("keep_backlog"):
+            checkpoint["keep_backlog"] = True  # Record the read time without consuming the capped backlog.
+    if not (_valid_handled(handled) or (checkpoint and handled == {})):
+        raise ValueError("expected a JSON object mapping feedback IDs to reasons, or a message checkpoint")
+    # Feedback is append-only. Validate without creating a home or lock on failure.
+    with _lock(home, writing=False):
+        known = {note["id"] for note in _feedback_notes(home)}
+        already, _, _, _ = _handled_state(home)
+    requested = handled.keys() | set(checkpoint.get("keep_messages", []))
+    message_ids = {i[4:] for i in requested - already if i.startswith("msg:")}
+    if message_ids:
+        with closing(_open_message_db(db_path)) as db:
+            for row in db.execute(_MESSAGE_ROWS + " AND m.id IN (SELECT value FROM json_each(?))",
+                                  (json.dumps(sorted(message_ids)),)):
+                if message := _user_message(row):
+                    known.add(message[0])
+    unknown = requested - known - already
+    if unknown:
+        raise ValueError(f"unknown feedback id: {min(unknown)!r}")
+    with _lock(home, writing=True):
+        already, _, _, latest = _handled_state(home)
+        new = {note_id: reason for note_id, reason in handled.items() if note_id not in already}
+        through = checkpoint.get("messages_through")
+        if through is None or through < latest.get("messages_through", -1) or checkpoint == latest:
+            checkpoint = {}
+        if new or checkpoint:
+            _append_locked(home / _FEEDBACK_HANDLED, now, {"handled": new, **checkpoint})
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:
@@ -500,15 +664,18 @@ def _metrics(runs: list[dict]) -> dict:
     }
 
 
-def _watermark(latest: dict | None) -> float | None:
-    return latest.get("seen_until", latest["time"]) if latest is not None else None
+def _watermark(improvements: list[dict]) -> float | None:
+    for item in reversed(improvements):
+        if item.get("keep_watermark") is not True:
+            return item.get("seen_until", item["time"])
+    return None
 
 
-def _pending(runs: list[dict], responses: list[dict], watermark: float | None) -> tuple[list[dict], list[dict]]:
-    if watermark is None:
-        return runs, responses
-    return ([run for run in runs if run["recorded"] > watermark],
-            [item for item in responses if item["time"] > watermark])
+def _pending(runs: list[dict], responses: list[dict], watermark: float | None,
+             handled: set[str]) -> tuple[list[dict], list[dict]]:
+    return (runs if watermark is None else [run for run in runs if run["recorded"] > watermark],
+            [item for item in responses
+             if (watermark is None or item["time"] > watermark) and item["id"] not in handled])
 
 
 def _due_fields(runs: list[dict], responses: list[dict]) -> dict:
@@ -517,17 +684,18 @@ def _due_fields(runs: list[dict], responses: list[dict]) -> dict:
 
 
 def signals(home: Path, now: float | None, *, all_items: bool = False, cost_db: Path | None = None,
-            settings_log: Path | None = None) -> dict:
+            settings_log: Path | None = None, feedback_ids: bool = False, message_db: Path | None = None) -> dict:
     """Read the ledger and aggregate pending or historical signals."""
     generated = _now(now)
     with _lock(home, writing=False) as locked:
         rows, responses, improvements = _history(home)
+        handled, messages_since, keep, _ = _handled_state(home)
         if locked:
             generated = _now(now)
     runs = _records(rows)
     latest = improvements[-1] if improvements else None
-    watermark = _watermark(latest)
-    pending_runs, pending_feedback = _pending(runs, responses, watermark)
+    watermark = _watermark(improvements)
+    pending_runs, pending_feedback = _pending(runs, responses, watermark, handled)
     trend = None
     if latest is not None:
         cutoff = latest["time"]
@@ -537,10 +705,11 @@ def signals(home: Path, now: float | None, *, all_items: bool = False, cost_db: 
     nodes = [node for run in scope for node in run["nodes"]]
     verdicts = Counter(node["verdict"] for node in nodes if node["type"] == "gate")
     outcomes = Counter(map(_outcome, scope))
+    notes = responses if all_items else pending_feedback
     report = {
         "generated": generated, "last_improvement": latest, "watermark": watermark,
         **_due_fields(pending_runs, pending_feedback),
-        "feedback": responses if all_items else pending_feedback,
+        "feedback": notes if feedback_ids else [{k: v for k, v in note.items() if k != "id"} for note in notes],
         "lessons": [{"task": run["task"], "text": text} for run in scope for text in run["lessons"]],
         "discovered": [{"task": run["task"], "note": note} for run in scope for note in run["discovered"]],
         "agents": _agent_stats(nodes), "gates": {verdict: verdicts[verdict] for verdict in VERDICTS},
@@ -548,6 +717,8 @@ def signals(home: Path, now: float | None, *, all_items: bool = False, cost_db: 
         "escalations": _escalations(scope),
         "amendments": sum(run["amendments"] for run in scope), "trend": trend, "improvements": improvements,
     }
+    if message_db is not None:
+        report.update(_message_report(message_db, generated, messages_since, keep, responses, handled))
     if cost_db is not None:
         try:
             log = cost.SETTINGS_LOG if settings_log is None else settings_log
@@ -673,16 +844,23 @@ def main(argv: list[str] | None = None) -> int:
     feedback_parser.add_argument("--text-file", type=Path, help=f"read feedback from a UTF-8 text file; {ending_help}")
     feedback_parser.add_argument("--agent")
     feedback_parser.add_argument("--task")
-    improved_parser = commands.add_parser("improved", help="record an applied improvement")
+    improved_parser = commands.add_parser("improved", help="record an applied improvement or handle feedback")
     improved_parser.add_argument("--json-file", type=Path, help="read all improvement metadata from a JSON file")
     improved_parser.add_argument("--file")
     improved_parser.add_argument("--summary")
     improved_parser.add_argument("--signal", action="append")
     improved_parser.add_argument("--metric")
     improved_parser.add_argument("--seen-until", type=_finite_float, help="generated time of the signals report used")
+    batch = improved_parser.add_mutually_exclusive_group()
+    batch.add_argument("--keep-watermark", action="store_true", help="record a batch edit without consuming pending signals")
+    batch.add_argument("--handled-file", type=Path, help="mark feedback using a JSON object mapping IDs to reasons")
+    improved_parser.add_argument("--db", type=Path, help="OpenCode database for validating message IDs")
     signals_parser = commands.add_parser("signals", help="report improvement signals")
     signals_parser.add_argument("--json", action="store_true")
     signals_parser.add_argument("--all", action="store_true")
+    signals_parser.add_argument("--feedback-ids", action="store_true", help="include note IDs in the JSON feedback items")
+    signals_parser.add_argument("--messages", action="store_true", help="include recent root-chat user messages")
+    signals_parser.add_argument("--db", type=Path, help="OpenCode database for reading messages")
     signals_parser.add_argument("--no-cost", action="store_true", help="leave out the chat cost trend")
     signals_parser.add_argument("--cost-db", type=Path, help="OpenCode session database for the chat cost trend")
     signals_parser.add_argument("--settings-log", type=Path, help="log of the cost settings over time")
@@ -719,20 +897,35 @@ def main(argv: list[str] | None = None) -> int:
                 print("feedback text must not be empty", file=sys.stderr)
                 return 2
         elif args.command == "improved":
-            improved(home, None, **_improvement_fields(args))
+            if args.handled_file is not None:
+                if any(value is not None for value in
+                       (args.json_file, args.file, args.summary, args.signal, args.metric, args.seen_until)):
+                    raise ValueError("--handled-file cannot be combined with improvement metadata options")
+                _mark_feedback(home, None, json.loads(args.handled_file.read_text(encoding="utf-8")),
+                               args.db or sources.DB_PATH)
+            else:
+                fields = _improvement_fields(args)
+                if args.keep_watermark and "seen_until" in fields:
+                    raise ValueError("--keep-watermark cannot be combined with seen_until")
+                improved(home, None, keep_watermark=args.keep_watermark, **fields)
         else:
             log = args.settings_log or cost.SETTINGS_LOG
-            try:
-                cost.note_current_settings(log, args.config or cost.CONFIG_PATH)
-            except Exception:
-                pass
+            if not args.no_cost:
+                try:
+                    cost.note_current_settings(log, args.config or cost.CONFIG_PATH)
+                except Exception:
+                    pass
             report = signals(home, None, all_items=args.all, settings_log=log,
-                             cost_db=None if args.no_cost else args.cost_db or sources.DB_PATH)
+                             cost_db=None if args.no_cost else args.cost_db or sources.DB_PATH,
+                             feedback_ids=args.feedback_ids,
+                             message_db=(args.db or sources.DB_PATH) if args.messages else None)
             if args.json:
                 print(json.dumps(report, allow_nan=False))
             else:
                 _print_report(report)
-    except (OSError, ValueError, RecursionError) as exc:
+                if args.messages:
+                    print(json.dumps({k: v for k, v in report.items() if k.startswith("messages")}))
+    except (OSError, sqlite3.Error, ValueError, RecursionError) as exc:
         print(f"ledger: {exc}", file=sys.stderr)
         return 2
     return 0
