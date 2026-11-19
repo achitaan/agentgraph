@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote
 
 from .demo import demo_snapshot
-from .snapshot_json import snapshot_document
+from .snapshot_json import learning_document, snapshot_document
 from .sources import ORCHESTRATION_GRAPH_DIR, build_snapshot
 
 _HOST = "127.0.0.1"
@@ -99,9 +99,11 @@ def make_server(
                 else:
                     snapshot = build_snapshot(graph_dir=graph_dir, root_id=session, cwd=cwd,
                                               session_graph_dir=None if graph_dir else ORCHESTRATION_GRAPH_DIR)
-                body = json.dumps(snapshot_document(snapshot, "demo" if use_demo else "live", task,
-                                                    session=None if use_demo else session),
-                                  allow_nan=False).encode("utf-8")
+                document = snapshot_document(snapshot, "demo" if use_demo else "live", task,
+                                             session=None if use_demo else session)
+                if not use_demo:
+                    document["learning"] = learning_document()
+                body = json.dumps(document, allow_nan=False).encode("utf-8")
             except Exception as exc:
                 body = json.dumps({"version": 1, "error": str(exc)}).encode("utf-8")
                 self._reply(500, "application/json", body)

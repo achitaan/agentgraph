@@ -451,8 +451,11 @@ _COLUMNS = (
 )
 
 
+_CACHE_COLUMNS = ("tokens_cache_read", "tokens_cache_write")
+
+
 def _session(row: tuple) -> Session:
-    (sid, parent, agent, model, title, directory, cost, tin, tout, created, updated, busy, idle) = row
+    (sid, parent, agent, model, title, directory, cost, tin, tout, created, updated, busy, idle, *cached) = row
     model_name, effort = "", ""
     if model:
         try:
@@ -473,7 +476,8 @@ def _session(row: tuple) -> Session:
         created=_num(created) / 1000.0,
         updated=_num(updated) / 1000.0,
         cost=_num(cost),
-        tokens_in=int(_num(tin)),
+        # Everything sent to the model: fresh input plus what was read from or written to the cache.
+        tokens_in=int(_num(tin) + sum(_num(value) for value in cached)),
         tokens_out=int(_num(tout)),
         directory=_str(directory),
     )
@@ -485,20 +489,46 @@ def _connect(db_path) -> sqlite3.Connection:
     return sqlite3.connect(uri, uri=True, timeout=1.0)
 
 
-def _read_sessions(db_path: Path) -> list[Session]:
+def _read_sessions(db_path: Path, pick=None) -> list[Session]:
+    """`pick` chooses, from all sessions, the ones whose context is worth reading."""
     conn = _connect(db_path)
     try:
-        rows = conn.execute(f"SELECT {_COLUMNS} FROM session_v2").fetchall()
+        present = {row[1] for row in conn.execute("PRAGMA table_info(session_v2)")}
+        extra = "".join(f", {name}" for name in _CACHE_COLUMNS if name in present)
+        rows = conn.execute(f"SELECT {_COLUMNS}{extra} FROM session_v2").fetchall()
+        sessions = [_session(r) for r in rows]
+        if pick is not None:
+            _fill_context(conn, pick(sessions))
     finally:
         conn.close()
-    return [_session(r) for r in rows]
+    return sessions
 
 
-def _read_checked(db_path: Path) -> tuple[list[Session] | None, list[str]]:
+_CONTEXT_QUERY = (
+    "SELECT json_extract(data, '$.tokens.input'), json_extract(data, '$.tokens.cache.read'), "
+    "json_extract(data, '$.tokens.cache.write') FROM session_message "
+    "WHERE session_id = ? AND type = 'assistant' AND json_extract(data, '$.tokens.input') IS NOT NULL "
+    "ORDER BY seq DESC LIMIT 1"
+)
+
+
+def _fill_context(conn: sqlite3.Connection, sessions: list[Session]) -> None:
+    """Set each session's `context`: the prompt size of its last model call.
+    Left as None when the database does not record it."""
+    try:
+        for session in sessions:
+            row = conn.execute(_CONTEXT_QUERY, (session.id,)).fetchone()
+            if row is not None:
+                session.context = int(sum(_num(value) for value in row))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _read_checked(db_path: Path, pick=None) -> tuple[list[Session] | None, list[str]]:
     try:
         if not Path(db_path).exists():
             return None, [f"sessions: database not found: {db_path}"]
-        return _read_sessions(Path(db_path)), []
+        return _read_sessions(Path(db_path), pick), []
     except Exception as exc:  # noqa: BLE001
         return None, [f"sessions: cannot read database: {exc}"]
 
@@ -626,17 +656,24 @@ def build_snapshot(
             candidates.append(str(gd.parent.parent))
     candidates.append(str(cwd))
 
-    sessions_all, w3 = _read_checked(db_path)
-    root, sessions = None, []
-    if sessions_all is not None:
+    picked: dict = {"root": None, "sessions": [], "warnings": []}
+
+    def pick(everyone: list[Session]) -> list[Session]:
         chosen = root_id
         if not chosen and graphs and graphs[0].session:
-            if any(s.id == graphs[0].session for s in sessions_all):
+            if any(s.id == graphs[0].session for s in everyone):
                 chosen = graphs[0].session
             else:
-                w3.append(f"sessions: graph session {graphs[0].session} not found in the database")
-        root, sessions, w4 = _select(sessions_all, chosen, candidates)
-        w3 += w4
+                picked["warnings"].append(f"sessions: graph session {graphs[0].session} not found in the database")
+        found_root, found, more = _select(everyone, chosen, candidates)
+        picked.update(root=found_root, sessions=found)
+        picked["warnings"] += more
+        return ([found_root] if found_root is not None else []) + found
+
+    sessions_all, w3 = _read_checked(db_path, pick)
+    root, sessions = picked["root"], picked["sessions"]
+    w3 += picked["warnings"]
+    if sessions_all is not None:
         if root_id and session_graph_dir is not None:
             parents = {s.id: s.parent_id for s in sessions_all}
             owners: set[str] = set()

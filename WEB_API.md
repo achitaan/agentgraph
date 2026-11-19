@@ -64,6 +64,9 @@ Rules:
 - `source` is `"live"` or `"demo"`.
 - `agents` lists every agent in the active configured roster, plus an agent outside it only while one of its sessions is busy and its name is not in the config's `disabled_agents`, so live work is never invisible (`"configured": false`, model and effort taken from its newest session, or `""`; its group is looked up as below, so an unknown name is `build`). An agent that appears only in finished sessions or only in graph nodes is not listed. `totals` still count every session. Order: by group in the order of `groups`, then roster order.
 - `nodes[].busy` is true only when the node's status is `running` and its `session` is busy now. A session is often reused for several nodes (rework runs on the same session), so a busy session alone does not make a finished node busy.
+- `learning` (live sources only; may be `null`) is what the ledger has stored for the active preset: `total` and `pending` counts of the user's notes, `due` (a prompt change is due), `runs`, `improvements`, `last_improvement`, the newest `notes` (`time`, `agent`, `task`, `text` in the user's own words), `lessons`, and per agent `agents[name]` = `steps`, `first_pass_rate`, `mean_attempts` over recorded runs.
+- A session's `tokens_in` is everything sent to the model (fresh input plus tokens read from or written to the cache), `tokens_out` what it produced, and `context` the prompt size of its last model call, or `null` when the database does not record it. `totals` sums `cost`, `tokens_in` and `tokens_out` over every session.
+- `agents[].checks` is true for an agent that checks every other agent's work (`verifier`); an interface links it to all of them.
 - `agents[].busy` is the number of that agent's sessions that are busy now. `agents[].sessions` is newest first and includes the root session under the orchestrator.
 - `groups` always has the six groups in this order: `hub`, `understand`, `decide`, `council`, `build`, `verify`. `agents` in each is the names in display order (may be empty). Group of an agent: `orchestrator` is `hub`; `explorer` and `researcher` are `understand`; `oracle` and `oracle-lite` are `decide`; `council` and every `councillor-*` are `council`; `impl-openai`, `impl-claude`, `impl-hard` and `designer` are `build`; `verifier` and `reviewer` are `verify`; unknown agents are `build`.
 - `agents[].team` and the top-level `team` are always `"main"`: there is one team. The fields stay so the shape of the document does not change.
@@ -112,8 +115,9 @@ Rules:
 // options.fetchSnapshot: async () => snapshot document (already parsed). Required.
 // options.intervalMs: how often to refresh. Default 1500 (the desktop panel passes 4000).
 // options.onOpenSession: optional ({ agent, sessionID }) => true when the host opened that session.
-//   Called when the user activates an agent that is working, with its newest busy session (for the
-//   hub, the root session). Any other answer, a throw or a rejection opens the view's own details.
+//   Called only from the "Open session" button in an agent's details, with its newest busy session
+//   (for the hub, its newest working subagent). Clicking an agent always opens its details; the
+//   graph never gives way to another view on its own.
 // options.motion: "full" (default) or "none" for a still picture (tests, screenshots). The system's
 //   reduced-motion setting is always honoured.
 // options.scheme: "auto" (default; follows a data-color-scheme on an ancestor or the document element,

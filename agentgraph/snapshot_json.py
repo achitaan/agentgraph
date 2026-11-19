@@ -13,7 +13,7 @@ from pathlib import Path
 from . import contract
 from .contract import Agent, Session, Snapshot, TaskGraph
 from .demo import demo_snapshot
-from .sources import ORCHESTRATION_GRAPH_DIR, build_snapshot, top_level_session
+from .sources import CONFIG_DIR, ORCHESTRATION_GRAPH_DIR, build_snapshot, top_level_session
 
 
 def _json_safe(value):
@@ -36,7 +36,7 @@ def _session_document(session: Session) -> dict:
         "id": session.id, "title": session.title, "model": session.model,
         "effort": session.effort, "busy": session.busy, "created": session.created,
         "updated": session.updated, "cost": session.cost, "tokens_in": session.tokens_in,
-        "tokens_out": session.tokens_out,
+        "tokens_out": session.tokens_out, "context": session.context,
     }
 
 
@@ -196,7 +196,7 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
         group = "hub" if name == root_name else contract.group_of(name or "")
         grouped[group].append({
             "name": name, "group": group, "model": agent.model, "effort": agent.effort,
-            "pool": agent.pool, "configured": configured,
+            "pool": agent.pool, "configured": configured, "checks": name in contract.CHECKERS,
             "team": contract.team_of(name or ""), "parent": contract.parent_of(name or "", names),
             "busy": sum(bool(session.busy) for session in related),
             "sessions": [_session_document(session) for session in related],
@@ -227,6 +227,50 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
     })
 
 
+def learning_document(home_root: Path | None = None, config_dir: Path | None = None) -> dict | None:
+    """What the ledger has stored for the active preset: the user's notes in
+    their own words, whether a prompt change is due, and each agent's record
+    over recorded runs. None when there is no ledger to read."""
+    try:
+        from . import ledger
+        root = Path(home_root) if home_root is not None else ORCHESTRATION_GRAPH_DIR.parent.parent
+        preset = ""
+        try:
+            config = json.loads((Path(config_dir or CONFIG_DIR) / "oh-my-opencode-slim.json").read_text())
+            preset = str(config.get("preset") or "")
+        except Exception:  # noqa: BLE001
+            pass
+        home = root / f"memory-{preset}"
+        if not preset or "/" in preset or not home.is_dir():
+            home = root / "memory"
+        if not home.is_dir():
+            return None
+        report = ledger.signals(home, None, all_items=True)
+        notes = sorted(report["feedback"], key=lambda item: item.get("time", 0), reverse=True)
+        last = report.get("last_improvement")
+        return {
+            "total": len(notes), "pending": report["pending"]["feedback"], "due": bool(report["due"]),
+            "runs": sum(report["outcomes"].values()), "improvements": len(report.get("improvements", [])),
+            "last_improvement": last.get("time") if isinstance(last, dict) else None,
+            "notes": [{"time": item.get("time"), "agent": str(item.get("agent") or ""), "task": str(item.get("task") or ""),
+                       "text": str(item.get("text") or "")[:400]} for item in notes[:50]],
+            "lessons": [str(item["text"])[:400] for item in report["lessons"][:20]],
+            "agents": {name: {"steps": stats["nodes"], "first_pass_rate": stats["first_pass_rate"],
+                              "mean_attempts": stats["mean_attempts"]}
+                       for name, stats in list(report["agents"].items())[:100]},
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, session: str | None = None) -> dict:
+    """The snapshot document plus `learning` for a live source."""
+    document = snapshot_document(snapshot, source, task, session=session)
+    if source == "live":
+        document["learning"] = _json_safe(learning_document())
+    return document
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentgraph snapshot", description=__doc__)
     parser.add_argument("--demo", action="store_true", help="use sample data")
@@ -240,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             snapshot = build_snapshot(graph_dir=args.dir, root_id=args.session,
                                       session_graph_dir=None if args.dir else ORCHESTRATION_GRAPH_DIR)
-        line = json.dumps(snapshot_document(snapshot, "demo" if args.demo else "live", args.task,
+        line = json.dumps(live_document(snapshot, "demo" if args.demo else "live", args.task,
                                             session=None if args.demo else args.session),
                           allow_nan=False)
     except Exception as exc:

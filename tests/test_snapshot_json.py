@@ -16,7 +16,7 @@ class SnapshotDocumentTests(unittest.TestCase):
         self.assertEqual(set(document), set(keys.split()))
 
     def test_document_shape_for_demo_and_empty(self):
-        session_keys = "id title model effort busy created updated cost tokens_in tokens_out"
+        session_keys = "id title model effort busy created updated cost tokens_in tokens_out context"
         group_ids = ["hub", "understand", "decide", "council", "build", "verify"]
         for snapshot, source in ((demo_snapshot(1000), "demo"), (Snapshot(1000), "live")):
             with self.subTest(source=source):
@@ -42,7 +42,7 @@ class SnapshotDocumentTests(unittest.TestCase):
                 self.assertKeys(doc["root"], session_keys + " agent directory")
                 self.assertEqual(len(doc["agents"]), 14)
                 for agent in doc["agents"]:
-                    self.assertKeys(agent, "name group model effort pool configured busy sessions team parent")
+                    self.assertKeys(agent, "name group model effort pool configured checks busy sessions team parent")
                     self.assertEqual(agent["team"], "main")
                     self.assertEqual(agent["parent"], "council" if agent["name"].startswith("councillor-") else "")
                     for session in agent["sessions"]:
