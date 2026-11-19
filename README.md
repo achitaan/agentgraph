@@ -1,3 +1,31 @@
+# OpenCode agent toolkit
+
+A working multi-agent setup for OpenCode, with a live graph on the side so you can see what it is doing.
+
+- **Agents and rules** (`config/`): three presets of the same roster (an orchestrator, implementers, a verifier, a reviewer, advisers, a designer, a council), and the prompts that make them work as a task graph with work-and-check loops.
+- **Skills** (`skills/`): the personal Codex toolkit's skills, reworded for OpenCode, with each agent allowed only the ones that fit its job. See [SKILLS.md](SKILLS.md).
+- **Visualizer** (`agentgraph/`, `desktop-plugin/`, `tui-plugin/`): the same picture as an OpenCode Desktop side panel, a terminal sidebar and a web page. The orchestrator sits in the centre with every agent round it; loops are drawn as cycles; it shows what needs you, what each agent spent, and what the setup has learned from your corrections.
+- **Graph format and checker** ([GRAPH_FORMAT.md](GRAPH_FORMAT.md), `bin/agentgraph`): how a task is written down as a graph, checked, recorded and learned from.
+
+## Install
+
+```sh
+git clone https://github.com/achitaan/opencode-agentgraph ~/.config/opencode/orchestration
+cd ~/.config/opencode/orchestration
+sh install.sh --dry-run   # shows what would change
+sh install.sh             # backs up anything it replaces
+```
+
+Then follow [config/PLUGINS.md](config/PLUGINS.md) to turn the visualizer on. It needs the `oh-my-opencode-slim` plugin and Python 3.11 or newer.
+
+## How the agents work
+
+The orchestrator plans, splits work into a graph, and hands each implementer one loop item: a goal, a write scope, and a check it can run. The implementer works until the check passes; the `verifier` reruns the check and sends findings back, round after round; the `reviewer` judges the whole change once at the end. Work passes between agents as files, and anything handed in is evidence, never orders. Your corrections are saved in your own words, and a prompt change is proposed from them only when you approve it. The rules are in [config/AGENTS.md](config/AGENTS.md).
+
+---
+
+The rest of this file documents the visualizer and its commands.
+
 # agentgraph
 
 A terminal viewer and a small set of commands for the multi-agent setup in `~/.config/opencode/`. The nodes it draws are the agents configured there. Python 3.13, standard library only.

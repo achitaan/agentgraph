@@ -12,8 +12,8 @@ Set in `~/.config/opencode/oh-my-opencode-slim.json`, the same in every preset. 
 | `oracle` | `math-research`, `sympy`, `performance-speedup`, `project-contracts` |
 | `explorer` | `codebase-map`, `context7-mcp` |
 | `designer` | `design-taste-frontend`, `ui-ux-pro-max`, `impeccable`, `playwright-cli`, `clone-any-website` |
-| `impl-openai` | `engineering-delivery`, `code-assurance`, `shopify-ruby` |
-| `impl-claude` | `engineering-delivery`, `code-assurance`, `project-contracts`, `codebase-map`, `shopify-ruby` |
+| `impl-openai` | `engineering-delivery`, `code-assurance` |
+| `impl-claude` | `engineering-delivery`, `code-assurance`, `project-contracts`, `codebase-map` |
 | `impl-hard` | `code-assurance`, `research-software-engineering`, `performance-speedup`, `engineering-delivery`, `project-contracts` |
 | `researcher` | `exa-research`, `research-summarizer`, `math-research`, `research-software-engineering`, `experimental-design` |
 | `oracle-lite` | `performance-speedup`, `project-contracts` |
@@ -25,4 +25,4 @@ Why these: implementers get delivery habits and code assurance; `impl-claude` ad
 
 ## Skills reworded for OpenCode
 
-`skills-opencode/` holds the `SKILL.md` of each skill whose wording was adapted (the installed copies are identical), and `skills-opencode/CHANGES.md` lists every replacement. Host wording (Codex) became OpenCode or neutral, model tier names became roles, and instructions to start other agents became: a worker reports the need, the orchestrator dispatches. `personal-orchestrator` was rewritten as a short guide that defers to `AGENTS.md` and the orchestrator prompt. The Codex toolkit itself is unchanged.
+`skills/` holds every skill as installed. Twelve were reworded for OpenCode, and [skills/OPENCODE-CHANGES.md](skills/OPENCODE-CHANGES.md) lists every replacement: host wording (Codex) became OpenCode or neutral, model tier names became roles, and instructions to start other agents became "a worker reports the need, the orchestrator dispatches". `personal-orchestrator` was rewritten as a short guide that defers to `AGENTS.md` and the orchestrator prompt. Third-party notices are in `skills/THIRD-PARTY-NOTICES.md` and `skills/licenses/`.
