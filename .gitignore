@@ -7,3 +7,4 @@ __pycache__/
 memory*/
 proposals*/
 out/
+cost-settings.jsonl

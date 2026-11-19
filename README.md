@@ -54,6 +54,7 @@ The web page is the clean view: one network of your agents that you can pan, zoo
 | `agentgraph serve [--port N] [--demo] [--open]` | Serve the graph view as a local web page. Listens on `127.0.0.1` only; `?task=NAME` picks a graph, `?select=n4` opens an item's details. |
 | `agentgraph snapshot [--demo]` | Print the data behind the view as one line of JSON (the format is in `WEB_API.md`). |
 | `agentgraph cost [--session ID] [--cap N]` | Where one chat's money went: warm and cold turns, why the cold ones happened, cost by context size, and what earlier compaction or a one-hour cache would have cost instead. |
+| `agentgraph cost --trend [--days N] [--json]` | What chats cost per turn over time, split by the cost settings in force (compaction buffer, cache lifetime), so a settings change can be judged. Each run notes the current settings in `cost-settings.jsonl`; `signals` shows the last two periods (`--no-cost` skips them). |
 
 Keys in the live view: `1` agents, `2` tasks, `3` loops, `4` events, `5` issues, `0` dashboard, `j`/`k` or arrows to scroll, `?` help, `q` quit.
 

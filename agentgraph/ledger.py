@@ -18,7 +18,7 @@ from dataclasses import dataclass, replace
 from itertools import groupby
 from pathlib import Path
 
-from . import check, sources
+from . import check, cost, sources
 from .contract import VERDICTS, TaskGraph, objective_coverage
 
 DUE_RUNS = 5
@@ -516,7 +516,8 @@ def _due_fields(runs: list[dict], responses: list[dict]) -> dict:
             "due": len(runs) >= DUE_RUNS or len(responses) >= DUE_FEEDBACK}
 
 
-def signals(home: Path, now: float | None, *, all_items: bool = False) -> dict:
+def signals(home: Path, now: float | None, *, all_items: bool = False, cost_db: Path | None = None,
+            settings_log: Path | None = None) -> dict:
     """Read the ledger and aggregate pending or historical signals."""
     generated = _now(now)
     with _lock(home, writing=False) as locked:
@@ -536,7 +537,7 @@ def signals(home: Path, now: float | None, *, all_items: bool = False) -> dict:
     nodes = [node for run in scope for node in run["nodes"]]
     verdicts = Counter(node["verdict"] for node in nodes if node["type"] == "gate")
     outcomes = Counter(map(_outcome, scope))
-    return {
+    report = {
         "generated": generated, "last_improvement": latest, "watermark": watermark,
         **_due_fields(pending_runs, pending_feedback),
         "feedback": responses if all_items else pending_feedback,
@@ -547,6 +548,13 @@ def signals(home: Path, now: float | None, *, all_items: bool = False) -> dict:
         "escalations": _escalations(scope),
         "amendments": sum(run["amendments"] for run in scope), "trend": trend, "improvements": improvements,
     }
+    if cost_db is not None:
+        try:
+            log = cost.SETTINGS_LOG if settings_log is None else settings_log
+            report["cost"] = {"periods": cost.trend(cost_db, cost.load_history(log), now=generated)}
+        except Exception:
+            report["cost"] = None
+    return report
 
 
 def _print_due(report: dict) -> None:
@@ -555,8 +563,24 @@ def _print_due(report: dict) -> None:
     print(f"{label} {pending['runs']} pending runs, {pending['feedback']} pending feedback items")
 
 
+def _print_cost(report: dict) -> None:
+    if "cost" not in report:
+        return
+    if report["cost"] is None:
+        print("Chat cost: unavailable")
+        return
+    periods = report["cost"]["periods"]
+    print("Chat cost per turn by settings (billed estimate, root chats of the last 30 days):" if periods else "Chat cost: no chats in the window")
+    for period in periods[-2:]:
+        started = "earlier" if period["since"] is None else time.strftime("%Y-%m-%d", time.localtime(period["since"]))
+        print(f"  {started}: {cost.describe_settings(period['settings'])}: ${period['per_turn']:.3f} a turn over "
+              f"{period['turns']} turns in {period['chats']} chats, cold share {period['cold_share']:.0%}, "
+              f"pauses ${period['pauses']['cost']:.2f}")
+
+
 def _print_report(report: dict) -> None:
     _print_due(report)
+    _print_cost(report)
     for title, field in (("Feedback", "feedback"), ("Lessons", "lessons"), ("Discovered", "discovered")):
         if report[field]:
             print(f"{title}:")
@@ -659,6 +683,10 @@ def main(argv: list[str] | None = None) -> int:
     signals_parser = commands.add_parser("signals", help="report improvement signals")
     signals_parser.add_argument("--json", action="store_true")
     signals_parser.add_argument("--all", action="store_true")
+    signals_parser.add_argument("--no-cost", action="store_true", help="leave out the chat cost trend")
+    signals_parser.add_argument("--cost-db", type=Path, help="OpenCode session database for the chat cost trend")
+    signals_parser.add_argument("--settings-log", type=Path, help="log of the cost settings over time")
+    signals_parser.add_argument("--config", type=Path, help="OpenCode config file")
     for command_parser in (record_parser, feedback_parser, improved_parser, signals_parser):
         command_parser.add_argument("--home", type=Path, default=argparse.SUPPRESS, help="ledger directory")
 
@@ -693,7 +721,13 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "improved":
             improved(home, None, **_improvement_fields(args))
         else:
-            report = signals(home, None, all_items=args.all)
+            log = args.settings_log or cost.SETTINGS_LOG
+            try:
+                cost.note_current_settings(log, args.config or cost.CONFIG_PATH)
+            except Exception:
+                pass
+            report = signals(home, None, all_items=args.all, settings_log=log,
+                             cost_db=None if args.no_cost else args.cost_db or sources.DB_PATH)
             if args.json:
                 print(json.dumps(report, allow_nan=False))
             else:

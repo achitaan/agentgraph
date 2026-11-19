@@ -1,4 +1,7 @@
+import contextlib
+import io
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -74,13 +77,160 @@ class CostTests(unittest.TestCase):
             db.close()
             session, turns, workers = cost.load_turns(db_path=path)
             self.assertEqual((session, workers), ("ses_root", {"sessions": 1, "cost": 2.5}))
-            self.assertEqual(turns[0], {"cost": 0.5, "input": 10, "read": 100, "write": 200, "output": 25, "gap": 0.0, "between": ["user"]})
+            self.assertEqual(turns[0], {"cost": 0.5, "input": 10, "read": 100, "write": 200, "output": 25, "gap": 0.0, "between": ["user"], "time": 60.0, "model": ""})
+            self.assertEqual((turns[1]["time"], turns[2]["time"], turns[2]["model"]), (660.0, 670.0, ""))
             self.assertEqual((turns[1]["gap"], turns[1]["between"], turns[1]["write"]), (10.0, ["system", "user"], 70_000))
             self.assertEqual(len(turns), 3)
             text = cost.report(session, cost.analyse(turns), workers)
             self.assertIn("ses_root: $2.00 over 3 turns", text)
             self.assertIn("pause over 5 minutes", text)
             self.assertEqual(cost.load_turns("ses_old", path)[1], [])
+
+
+HOUR = 3600
+NOW = 1_000_000.0
+
+
+def make_db(path, chats, messages):
+    """chats: (id, parent, cost, updated_seconds); messages: (session, seq, time_seconds, model, write, read)."""
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE session_v2 (id TEXT, parent_id TEXT, cost REAL, time_updated INTEGER)")
+    db.execute("CREATE TABLE session_message (session_id TEXT, type TEXT, seq INTEGER, data TEXT)")
+    db.executemany("INSERT INTO session_v2 VALUES (?, ?, ?, ?)", [(i, p, c, int(u * 1000)) for i, p, c, u in chats])
+    for session, seq, when, model, write, read in messages:
+        data = {"time": {"created": int(when * 1000)}, "cost": (read * 0.1 + write * 1.25 + 1000 * 5) * 5e-6,
+                "tokens": {"input": 0, "output": 1000, "cache": {"read": read, "write": write}}}
+        if model:
+            data["model"] = {"id": model}
+        db.execute("INSERT INTO session_message VALUES (?, 'assistant', ?, ?)", (session, seq, json.dumps(data)))
+    db.commit()
+    db.close()
+
+
+class SettingsTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.folder = Path(temporary.name)
+
+    def test_settings_are_read_from_the_config(self):
+        path = self.folder / "opencode.json"
+        path.write_text(json.dumps({"compaction": {"buffer": 750000}, "providers": {"anthropic": {
+            "settings": {"cache": {"ttl": "5m"}},
+            "models": {"fable": {"settings": {"cache": {"ttl": "1h"}}}, "plain": {}}}}}))
+        self.assertEqual(cost.read_settings(path), {"compaction_buffer": 750000, "cache_ttl": {"*": "5m", "fable": "1h"}})
+        path.write_text("{}")
+        self.assertEqual(cost.read_settings(path), {"compaction_buffer": None, "cache_ttl": {}})
+
+    def test_a_missing_or_invalid_config_gives_the_defaults(self):
+        empty = {"compaction_buffer": None, "cache_ttl": {}}
+        self.assertEqual(cost.read_settings(self.folder / "missing.json"), empty)
+        for text in ("{not json", "[1, 2]", '{"compaction": 5, "providers": {"anthropic": {"models": 3}}}'):
+            (self.folder / "bad.json").write_text(text)
+            self.assertEqual(cost.read_settings(self.folder / "bad.json"), empty)
+
+    def test_the_log_gets_a_line_only_when_the_settings_change(self):
+        log = self.folder / "sub" / "log.jsonl"
+        one, two = {"compaction_buffer": None, "cache_ttl": {}}, {"compaction_buffer": 5, "cache_ttl": {"*": "1h"}}
+        self.assertEqual(cost.load_history(log), [])
+        self.assertTrue(cost.note_settings(log, one, 10))
+        self.assertFalse(cost.note_settings(log, one, 20))
+        with log.open("a") as handle:
+            handle.write("garbage\n{\"time\": \"x\", \"settings\": {}}\n[]\n")
+        self.assertFalse(cost.note_settings(log, one, 25))   # bad lines do not count as the last line
+        self.assertTrue(cost.note_settings(log, two, 30))
+        self.assertFalse(cost.note_settings(log, two, 40))
+        self.assertTrue(cost.note_settings(log, one, 50))
+        self.assertEqual(cost.load_history(log), [{"time": 10, "settings": one}, {"time": 30, "settings": two}, {"time": 50, "settings": one}])
+
+    def test_current_settings_are_noted_with_the_config_time(self):
+        config, log = self.folder / "opencode.json", self.folder / "log.jsonl"
+        config.write_text(json.dumps({"compaction": {"buffer": 7}}))
+        self.assertTrue(cost.note_current_settings(log, config))
+        self.assertFalse(cost.note_current_settings(log, config))
+        self.assertEqual(cost.load_history(log)[0]["time"], config.stat().st_mtime)
+
+
+class TrendTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.folder = Path(temporary.name)
+        self.db = self.folder / "opencode.db"
+        base = NOW - 10 * 24 * HOUR
+        # one chat with six turns an hour apart (all cold: 60k written, nothing read), two models alternating
+        messages = [("ses_a", n, base + n * HOUR, "fable" if n % 2 else "plain", 60_000, 0) for n in range(6)]
+        messages += [("ses_b", n, base + (n + 7) * HOUR, "plain", 1_000, 100_000) for n in range(2)]
+        messages += [("ses_old", 0, base, "plain", 60_000, 0), ("ses_cheap", 0, base, "plain", 60_000, 0),
+                     ("ses_child", 0, base, "plain", 60_000, 0)]
+        make_db(self.db, [("ses_a", None, 5.0, NOW - HOUR), ("ses_b", None, 2.0, NOW - HOUR),
+                          ("ses_old", None, 9.0, NOW - 40 * 24 * HOUR), ("ses_cheap", None, 0.5, NOW - HOUR),
+                          ("ses_child", "ses_a", 9.0, NOW - HOUR)], messages)
+        self.base = base
+
+    def test_a_chat_is_split_between_periods_and_a_period_reports_its_numbers(self):
+        split = self.base + 2.5 * HOUR   # turns 0-2 before it, turns 3-5 of ses_a and all of ses_b after
+        history = [{"time": split, "settings": {"compaction_buffer": 1, "cache_ttl": {}}}]
+        periods = cost.trend(self.db, history, now=NOW)
+        self.assertEqual([p["since"] for p in periods], [None, split])
+        before, after = periods
+        self.assertEqual((before["chats"], before["turns"]), (1, 3))
+        self.assertEqual((after["chats"], after["turns"]), (2, 5))
+        self.assertEqual(before["settings"], {"compaction_buffer": None, "cache_ttl": {}})
+        self.assertEqual(after["settings"], history[0]["settings"])
+        cold_cost = (60_000 * 1.25 + 5000) * 5e-6
+        self.assertAlmostEqual(before["cost"], 3 * cold_cost)
+        self.assertAlmostEqual(before["billed"], before["cost"])
+        self.assertAlmostEqual(before["per_turn"], cold_cost)
+        # the first turn has no earlier turn so no pause; the two after it follow a 60 minute gap
+        self.assertEqual(before["pauses"]["turns"], 2)
+        self.assertAlmostEqual(before["pauses"]["cost"], 2 * cold_cost)
+        self.assertAlmostEqual(before["cold_share"], 1.0)
+        self.assertEqual(before["context"], 60_000)
+        warm_cost = (1_000 * 1.25 + 100_000 * 0.1 + 5000) * 5e-6
+        self.assertAlmostEqual(after["cost"], 3 * cold_cost + 2 * warm_cost)
+        self.assertAlmostEqual(after["cold_share"], 3 * cold_cost / (3 * cold_cost + 2 * warm_cost))
+        self.assertEqual(after["context"], 60_000)
+
+    def test_the_window_and_the_minimum_cost_filter_chats(self):
+        self.assertEqual(sum(p["chats"] for p in cost.trend(self.db, [], now=NOW)), 2)
+        self.assertEqual(sum(p["chats"] for p in cost.trend(self.db, [], now=NOW, days=60)), 3)
+        self.assertEqual(sum(p["chats"] for p in cost.trend(self.db, [], now=NOW, min_cost=0.1)), 3)
+        self.assertEqual(cost.trend(self.db, [], now=NOW, days=0), [])
+
+    def test_the_one_hour_price_applies_only_to_the_listed_model(self):
+        listed = [{"time": 0, "settings": {"compaction_buffer": None, "cache_ttl": {"fable": "1h"}}}]
+        (period,) = cost.trend(self.db, listed, now=NOW)
+        weight = lambda model: 60_000 * (2.0 if model == "fable" else 1.25) + 5000
+        fable_cost = (60_000 * 1.25 + 5000) * 5e-6
+        self.assertAlmostEqual(period["cost"], 6 * fable_cost + 2 * (1_000 * 1.25 + 10_000 + 5000) * 5e-6)
+        expected = 3 * fable_cost * weight("fable") / weight("plain") + 3 * fable_cost \
+            + 2 * (1_000 * 1.25 + 10_000 + 5000) * 5e-6
+        self.assertAlmostEqual(period["billed"], expected)
+        self.assertGreater(period["billed"], period["cost"])
+        star = [{"time": 0, "settings": {"compaction_buffer": None, "cache_ttl": {"*": "1h"}}}]
+        self.assertGreater(cost.trend(self.db, star, now=NOW)[0]["billed"], period["billed"])
+
+    def test_the_command_prints_the_periods_and_notes_the_settings(self):
+        config, log = self.folder / "opencode.json", self.folder / "log.jsonl"
+        config.write_text(json.dumps({"compaction": {"buffer": 750000},
+                                      "providers": {"anthropic": {"models": {"fable": {"settings": {"cache": {"ttl": "1h"}}}}}}}))
+        # the config's time is in the past of every turn, so one period with the current settings
+        os.utime(config, (self.base - HOUR, self.base - HOUR))
+        args = ["--trend", "--db", str(self.db), "--settings-log", str(log), "--config", str(config), "--days", "100000"]
+        for _ in range(2):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(cost.main(args), 0)
+        self.assertEqual(len(log.read_text().splitlines()), 1)
+        self.assertIn("one-hour cache for fable", out.getvalue())
+        self.assertIn("compaction buffer 750 000", out.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cost.main([*args, "--json"])
+        (period,) = json.loads(out.getvalue())
+        self.assertEqual(period["settings"]["cache_ttl"], {"fable": "1h"})
+        self.assertEqual(period["turns"], 9)   # the old chat is inside this window
 
 
 if __name__ == "__main__":

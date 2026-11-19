@@ -49,6 +49,9 @@ class Ledger(unittest.TestCase):
         output, errors = io.StringIO(), io.StringIO()
         argv = list(args) if env_home else ["--home", str(self.home), *args]
         with (patch("agentgraph.ledger.time.time", return_value=now),
+              patch.object(ledger.cost, "SETTINGS_LOG", self.project / "cost-settings.jsonl"),
+              patch.object(ledger.cost, "CONFIG_PATH", self.project / "opencode.json"),
+              patch.object(ledger.sources, "DB_PATH", self.project / "no-such.db"),
               contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors)):
             status = ledger.main(argv)
         return status, output.getvalue(), errors.getvalue()
@@ -737,6 +740,26 @@ class Ledger(unittest.TestCase):
         self.assertEqual(code, 0, errors)
         self.assertEqual([item["text"] for item in json.loads(output)["feedback"]], ["env"])
         self.assertEqual([item["text"] for item in self.report()["feedback"]], ["flag", "after"])
+
+
+    def test_signals_include_the_chat_cost_trend_only_when_given_a_database(self):
+        from tests.test_cost import make_db
+        chats = self.project / "chats.db"
+        make_db(chats, [("ses_a", None, 5.0, 99.0)], [("ses_a", n, 90.0 + n, "m", 60_000, 0) for n in range(2)])
+        log = self.project / "cost-settings.jsonl"
+        self.assertIsNone(self.report()["cost"])   # the command's default is the (here patched, missing) real database
+        with_db = self.report("--cost-db", str(chats))
+        (period,) = with_db["cost"]["periods"]
+        self.assertEqual((period["turns"], period["chats"], period["since"]), (2, 1, None))
+        self.assertTrue(log.exists())      # the command noted the settings
+        self.assertEqual(len(log.read_text().splitlines()), 1)
+        self.assertEqual(self.report("--cost-db", str(chats), "--no-cost").get("cost", "absent"), "absent")
+        self.assertIsNone(self.report("--cost-db", str(self.project / "missing.db"))["cost"])
+        self.assertIsNone(ledger.signals(self.home, 100.0, cost_db=self.project / "missing.db")["cost"])
+        self.assertNotIn("cost", ledger.signals(self.home, 100.0))
+        text = self.cli("signals", "--cost-db", str(chats))[1]
+        self.assertIn("a turn over 2 turns in 1 chats", text)
+        self.assertNotIn("Chat cost", self.cli("signals", "--no-cost")[1])
 
 
 if __name__ == "__main__":
