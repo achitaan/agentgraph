@@ -43,3 +43,15 @@ Verdicts: **keep** is unchanged from the Codex toolkit; **reworded** had host, m
 Counts: 9 kept, 21 reworded, 3 rewritten, 33 in all. `shopify-ruby` is kept out of the toolkit as a separate, employer-specific skill.
 
 A second pass removed from 13 worker-loaded skills the instructions a worker here cannot follow (asking the user, committing or resetting history, global installs, attempt caps, a self-review as the final check, pointers to skills that are not installed). The same limits are stated once in every worker's prompt ("Skills serve the brief"), so a skill added later is covered too.
+
+## Left for a later pass
+
+Found by the audit or the verifier and not changed, because the rule in every worker prompt already covers them or the decision is the user's:
+
+- `math-research`: its description still points at `math-proof-writing`, which is not installed. Changing a description changes when the skill is chosen.
+- `math-research`: `scripts/proof_loop.py` defaults to three iterations and launches the Codex CLI. The skill now says only the orchestrator decides to run it.
+- `supabase`, `exa-research`, `context7-mcp`, `experimental-design`, `sympy`, `design-taste-frontend`: lines that fetch web pages or documentation. A worker without that tool reports the need.
+- `ui-ux-pro-max`: three lines ask the user or call its checklist a final review. It lives outside the OpenCode skills folder, so `sync.sh` does not carry it.
+- `playwright-cli`: "record user actions" could be read as needing a person.
+- `sympy`, `experimental-design`, `playwright-cli`: an `allowed-tools` frontmatter field from another host. It appears to be ignored here; that was not tested.
+
