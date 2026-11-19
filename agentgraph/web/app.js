@@ -21,8 +21,10 @@
   }
   function text(value) { return value == null ? '' : typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value); }
   function cost(value) { return '$' + (Number(value) || 0).toFixed(2); }
+  function amount(value) { const n = Number(value) || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(n >= 1e5 ? 0 : 1) + 'k' : String(Math.round(n)); }
   function named(labels, value) { return Object.hasOwn(labels, value) ? labels[value] : text(value); }
   function state(value) { return named(STATES, value); }
+  function ago(time) { const s = Math.max(0, Date.now() / 1000 - (Number(time) || 0)); return s < 90 ? 'now' : s < 5400 ? Math.round(s / 60) + 'm' : s < 129600 ? Math.round(s / 3600) + 'h' : Math.round(s / 86400) + 'd'; }
   function clamp(value, min, max) { return Math.min(max, Math.max(min, value)); }
   function shorten(value) {
     const words = text(value).trim().split(/\s+/);
@@ -121,7 +123,15 @@
       button.type = 'button'; button.setAttribute('aria-label', label); button.title = label;
     });
     controls.append(fit, runDetails);
-    network.append(activity, viewport, controls);
+    const status = el('div', 'ag-status');
+    const attention = el('button', 'ag-attention');
+    attention.type = 'button'; attention.hidden = true; attention.setAttribute('aria-label', 'Needs attention');
+    status.append(activity, attention);
+    const usage = el('button', 'ag-usage');
+    usage.type = 'button'; usage.hidden = true; usage.setAttribute('aria-label', 'Usage');
+    const usageCost = el('span', 'ag-usage-cost'), usageTokens = el('span', 'ag-usage-tokens'), usageContext = el('span', 'ag-usage-context');
+    usage.append(usageCost, usageTokens, usageContext);
+    network.append(status, usage, viewport, controls);
     const detail = el('aside', 'ag-detail');
     detail.hidden = true; detail.setAttribute('aria-label', 'Details');
     const detailHeader = el('div', 'ag-detail-header');
@@ -137,6 +147,39 @@
       activity.hidden = !working;
       activity.textContent = working ? working + ' working' : '';
       activity.dataset.active = String(working > 0);
+      const alerts = snapshot ? attentionAgents().size : 0;
+      attention.hidden = !alerts; attention.textContent = alerts ? '! ' + alerts : '';
+      usage.hidden = !snapshot;
+      if (!snapshot) return;
+      usageCost.textContent = cost(snapshot.totals?.cost);
+      usageTokens.textContent = amount(snapshot.totals?.tokens_in) + '↑ ' + amount(snapshot.totals?.tokens_out) + '↓';
+      usageContext.hidden = !snapshot.root?.context;
+      usageContext.textContent = snapshot.root?.context ? 'ctx ' + amount(snapshot.root.context) : '';
+    }
+    // Agents the user should look at: a step that failed, is blocked or stalled,
+    // a work loop that is stuck, or work a reviewer sent back.
+    function attentionAgents() {
+      const found = new Map();
+      (snapshot?.graph?.nodes || []).forEach(node => {
+        if (!['failed', 'blocked'].includes(node.status) && !node.stalled) return;
+        const owner = nodeOwners.get(node.id);
+        if (owner && shownAgents.has(owner) && !found.has(owner)) found.set(owner, node.stalled ? 'Stuck' : state(node.status));
+      });
+      canvasWorkLoops().forEach(loop => { if (loop.state === 'stuck' && !found.has(loop.agent)) found.set(loop.agent, 'Stuck'); });
+      canvasLoops().forEach(loop => { if (loop.state === 'sent_back' && !found.has(loop.worker)) found.set(loop.worker, 'Sent back'); });
+      return found;
+    }
+    function usageOf(sessions) {
+      const known = sessions.filter(session => session.context), current = known.find(session => session.busy) || known[0];
+      return { cost: sessions.reduce((sum, s) => sum + (Number(s.cost) || 0), 0), sent: sessions.reduce((sum, s) => sum + (Number(s.tokens_in) || 0), 0), received: sessions.reduce((sum, s) => sum + (Number(s.tokens_out) || 0), 0), context: current?.context || 0 };
+    }
+    function stats(parent, used) {
+      const grid = el('div', 'ag-stats');
+      [['Spent', cost(used.cost)], ['In', amount(used.sent)], ['Out', amount(used.received)], ['Context', used.context ? amount(used.context) : '']].forEach(([label, value]) => {
+        if (!value) return;
+        const cell = el('div', 'ag-stat'); cell.append(el('span', 'ag-stat-label', label), el('span', 'ag-stat-value', value)); grid.append(cell);
+      });
+      parent.append(grid);
     }
     function showEmpty() {
       empty.hidden = visibleAgents.length > 0;
@@ -473,16 +516,19 @@
       const newest = pool.filter(session => session.busy && session.id !== snapshot?.root?.id).reduce((latest, session) => !latest || Number(session.updated || session.created || 0) > Number(latest.updated || latest.created || 0) ? session : latest, null);
       return newest?.id || (own && snapshot?.root?.id) || '';
     }
-    function activateAgent(name, origin, inspect) {
-      const agent = agentsByName.get(name), sessionID = !inspect && sessionToOpen(agent);
-      if (!sessionID) { select('agent', name, origin); return; }
-      // The host answers true when it opened the session; anything else,
-      // including a failure, falls back to the details.
-      const requested = generation;
-      const details = () => { if (alive && generation === requested) select('agent', name, origin); };
-      try { Promise.resolve(options.onOpenSession({ agent: name, sessionID })).then(handled => { if (handled !== true) details(); }, details); }
-      catch (_) { details(); }
+    function activateAgent(name, origin) { select('agent', name, origin); }
+    // Opening a session is the user's explicit choice, made from the details. The graph stays where it is.
+    function openSession(name) {
+      const sessionID = sessionToOpen(agentsByName.get(name));
+      if (!sessionID) return;
+      try { Promise.resolve(options.onOpenSession({ agent: name, sessionID })).catch(() => {}); } catch (_) { /* the details stay open either way */ }
     }
+    function cells(parent, pairs) {
+      const grid = el('div', 'ag-stats');
+      pairs.forEach(([label, value]) => { const cell = el('div', 'ag-stat'); cell.append(el('span', 'ag-stat-label', label), el('span', 'ag-stat-value', value)); grid.append(cell); });
+      parent.append(grid);
+    }
+    function notes(parent, list) { list.forEach(note => { const row = el('p', 'ag-note', text(note.text)); row.title = text(note.text); parent.append(row); }); }
     function positionNode(name) {
       const node = nodes.get(name), p = positions.get(name);
       if (node && p) node.setAttribute('transform', 'translate(' + p.x + ' ' + p.y + ')');
@@ -556,6 +602,7 @@
       const names = new Set(agents.map(a => a.name));
       nodes.forEach((node, name) => { if (!names.has(name)) { node.remove(); nodes.delete(name); } });
       positions.forEach((_, name) => { if (!names.has(name)) positions.delete(name); });
+      const alerts = attentionAgents();
       const done = snapshot?.graph?.progress, share = done && done.total ? clamp(done.passed / done.total, 0, 1) : 0;
       agents.forEach(agent => {
         const p = positions.get(agent.name), busy = Number(agent.busy) || 0;
@@ -567,15 +614,15 @@
           node.append(svg('circle', { class: 'ag-ping' }), svg('circle', { class: 'ag-halo' }), svg('circle', { class: 'ag-hub-wake' }), svg('circle', { class: 'ag-hub-orbit' }), svg('circle', { class: 'ag-core' }), svg('circle', { class: 'ag-hub-progress', transform: 'rotate(-90)' }), svg('circle', { class: 'ag-spark' }));
           node.append(svg('text', { class: 'ag-agent-name', 'text-anchor': 'middle' }));
           node.append(svg('text', { class: 'ag-agent-work', 'text-anchor': 'middle' }));
-          const inspect = svg('g', { class: 'ag-agent-inspect', 'data-agent-inspect': agent.name, role: 'button', tabindex: 0, 'aria-label': 'Details for ' + agent.name });
-          inspect.append(svg('circle', { class: 'ag-inspect-disc', r: 8.5 }), svg('text', { class: 'ag-inspect-symbol', 'text-anchor': 'middle', y: 3.5 }, 'i'));
-          node.append(inspect, svg('title'));
+          node.append(svg('circle', { class: 'ag-alert', r: 4 }), svg('title'));
           nodes.set(agent.name, node); nodeLayer.append(node);
         }
         const active = busySteps(agent), isHub = agent.name === hubName;
         const work = busy && active.length ? shorten(active[0].goal || active[0].id) + (active.length > 1 ? ' +' + (active.length - 1) : '') : '';
         node.dataset.busy = String(busy); node.dataset.group = agent.group;
         node.dataset.openChat = String(!!sessionToOpen(agent));
+        node.dataset.attention = String(alerts.has(agent.name));
+        const mark = node.querySelector('.ag-alert'); mark.setAttribute('cx', -p.r * .72); mark.setAttribute('cy', -p.r * .72);
         node.dataset.parent = agent.parent; node.dataset.team = agent.team;
         node.querySelector('.ag-core').setAttribute('r', p.r);
         node.querySelector('.ag-halo').setAttribute('r', p.r + 8);
@@ -592,13 +639,12 @@
         p.labelUp = !!p.parent && p.dy < -1;
         node.querySelector('.ag-agent-name').setAttribute('y', p.labelUp ? -p.r - 8 : p.r + 20);
         node.querySelector('.ag-agent-work').setAttribute('y', p.r + 35);
-        node.querySelector('.ag-agent-inspect').setAttribute('transform', 'translate(' + (p.r * .78) + ' ' + (-p.r * .78) + ')');
         node.classList.toggle('ag-hub', isHub);
         node.classList.toggle('ag-council-lead', visibleAgents.some(a => a.parent === agent.name));
         node.querySelector('.ag-agent-name').textContent = displayName(agent);
         node.querySelector('.ag-agent-work').textContent = work;
         node.querySelector('title').textContent = agent.name;
-        node.setAttribute('aria-label', agent.name + (busy ? ', working' + (work ? ', ' + work : '') : ', idle'));
+        node.setAttribute('aria-label', agent.name + (busy ? ', working' + (work ? ', ' + work : '') : ', idle') + (alerts.has(agent.name) ? ', ' + alerts.get(agent.name) : ''));
         positionNode(agent.name);
         labelsChanged = measureLabels(node, p) || labelsChanged;
       });
@@ -613,6 +659,11 @@
       const viaHub = new Set(flows().filter(f => f.active && (f.from === hubName || f.to === hubName)).map(f => f.from === hubName ? f.to : f.from));
       const edges = visibleAgents.filter(a => a.name !== hubName && (a.parent || hubName)).map(a => ({ from: a.parent || hubName, to: a.name, kind: 'handoff', relation: a.parent ? 'membership' : 'supervision', active: (a.busy > 0 && !explained.has(a.name)) || (!a.parent && viaHub.has(a.name)) }));
       edges.push(...snapshot.escalation.filter(e => allowedConnection(e.from, e.to) && (e.used || (selected?.type === 'agent' && (selected.key === e.from || selected.key === e.to)))).map(e => ({ ...e, kind: 'escalation', active: false })), ...workFlows);
+      // A checker is linked to every agent it can check; the link carries work only while it checks a looping agent.
+      const looping = new Set(canvasWorkLoops().map(loop => loop.agent));
+      visibleAgents.filter(agent => agent.checks && agent.name !== hubName).forEach(checker => visibleAgents.forEach(other => {
+        if (other.name !== checker.name && other.name !== hubName && !other.checks) edges.push({ from: checker.name, to: other.name, kind: 'check', active: checker.busy > 0 && looping.has(other.name) });
+      }));
       const directions = new Set(workFlows.map(f => JSON.stringify([f.from, f.to])));
       const keys = new Set();
       edges.forEach(edge => {
@@ -626,7 +677,7 @@
           const flow = svg('line', { class: 'ag-flow', 'data-flow-kind': edge.kind });
           // Pulse overlays have no semantic edge hook; each flow is one edge.
           if (edge.kind === 'data' || edge.kind === 'feedback') line.setAttribute('marker-end', 'url(#' + uid + '-' + edge.kind + ')');
-          const layer = edge.kind === 'handoff' ? spokeLayer : edge.kind === 'escalation' ? escalationLayer : flowLayer;
+          const layer = edge.kind === 'handoff' || edge.kind === 'check' ? spokeLayer : edge.kind === 'escalation' ? escalationLayer : flowLayer;
           layer.append(line, flow); pair = { line, flow, edge }; lines.set(key, pair);
         }
         pair.edge = edge;
@@ -641,7 +692,9 @@
         const coordinates = { x1: a.x + ux * (a.r + 5) - uy * shift, y1: a.y + uy * (a.r + 5) + ux * shift, x2: b.x - ux * (b.r + 6) - uy * shift, y2: b.y - uy * (b.r + 6) + ux * shift };
         [pair.line, pair.flow].forEach(line => Object.entries(coordinates).forEach(([key, value]) => line.setAttribute(key, value)));
         pair.line.dataset.active = String(!!edge.active);
-        pair.flow.style.display = edge.active && edge.kind !== 'escalation' ? '' : 'none';
+        // A line moves only while work is travelling along it to an agent that is working.
+        const moving = edge.active && edge.kind !== 'escalation' && (edge.kind !== 'feedback' || shownAgents.get(edge.to)?.busy > 0);
+        pair.flow.style.display = moving ? '' : 'none';
       });
       lines.forEach((pair, key) => { if (!keys.has(key)) { pair.line.remove(); pair.flow.remove(); lines.delete(key); } });
       updateLoops();
@@ -663,6 +716,7 @@
         }
         view.loop = loop;
         view.group.dataset.state = loop.state; view.group.dataset.active = String(!!loop.active);
+        view.group.dataset.moving = String(!!loop.active && [loop.worker, loop.evaluator].some(name => shownAgents.get(name)?.busy > 0));
         view.group.setAttribute('aria-label', loop.worker + ' and ' + loop.evaluator + ', review loop, ' + loop.rounds + (loop.rounds === 1 ? ' round, ' : ' rounds, ') + named(LOOP_STATES, loop.state));
         view.title.textContent = loop.worker + ' ↔ ' + loop.evaluator;
         const geometry = reviewGeometry(a, b);
@@ -698,6 +752,7 @@
         }
         view.loop = loop;
         view.group.dataset.loopState = loop.state; view.group.dataset.active = String(!!loop.active);
+        view.group.dataset.moving = String(!!loop.active && shownAgents.get(loop.agent)?.busy > 0);
         view.group.dataset.quiet = String(['closed', 'idle'].includes(loop.state) && !shownAgents.get(loop.agent)?.busy);
         view.ring.dataset.loopState = loop.state; view.ring.dataset.active = String(!!loop.active);
         const radius = p.r + 9, open = loop.rounds >= 2 ? .46 : .17, start = -Math.PI / 4 + open, end = -Math.PI / 4 - open;
@@ -853,6 +908,14 @@
         teamChoices.slice(0, LIST_LIMIT).forEach(option => { const item = el('option', '', option.label); item.value = option.team; choice.append(item); });
         choice.value = activeTeam; field.append(el('span', '', 'Team'), choice); detailScroll.append(field);
       }
+      stats(detailScroll, { cost: snapshot.totals?.cost, sent: snapshot.totals?.tokens_in, received: snapshot.totals?.tokens_out, context: snapshot.root?.context || 0 });
+      const learning = snapshot.learning;
+      if (learning) {
+        const lesson = runSection('Learning', 'learning');
+        const line = el('p', 'ag-learning-line', [learning.total + (learning.total === 1 ? ' note' : ' notes'), learning.pending ? learning.pending + ' new' : '', learning.due ? 'change due' : '', learning.improvements ? learning.improvements + ' applied' : ''].filter(Boolean).join(' · '));
+        line.dataset.due = String(!!learning.due); lesson.append(line);
+        notes(lesson, (learning.notes || []).slice(0, 3));
+      }
       if (graph) {
         const progressLine = el('div', 'ag-run-progress');
         progressLine.append(el('strong', 'ag-run-number', graph.progress.passed + ' / ' + graph.progress.total), el('span', '', 'steps passed'), el('span', 'ag-run-state', graph.status === 'passed' ? 'Complete' : state(graph.status)));
@@ -875,6 +938,16 @@
         canvasWorkLoops().filter(loop => loop.state === 'stuck' && !loop.nodes.some(id => troubleIDs.has(id))).forEach(loop => issues.push({ title: loop.agent, detail: 'Work loop', meta: 'Stuck · ' + loop.rounds, work: loop.agent }));
         if (!issues.length) attention.append(el('p', 'ag-run-empty', 'None'));
         appendList(attention, issues, item => runRow(attention, item));
+
+        const spend = runSection('Spend', 'spend');
+        const spenders = visibleAgents.map(agent => ({ name: agent.name, used: usageOf(agent.sessions) })).filter(item => item.used.cost > 0).sort((a, b) => b.used.cost - a.used.cost);
+        const most = spenders[0]?.used.cost || 1;
+        if (!spenders.length) spend.append(el('p', 'ag-run-empty', 'None'));
+        appendList(spend, spenders, item => {
+          const row = el('button', 'ag-spend-row'); row.type = 'button'; row.dataset.flowPeer = item.name;
+          const bar = el('span', 'ag-spend-bar'), fill = el('i'); fill.style.width = Math.max(2, item.used.cost / most * 100) + '%'; bar.append(fill);
+          row.append(el('span', 'ag-spend-name', item.name), bar, el('span', 'ag-spend-cost', cost(item.used.cost))); spend.append(row);
+        });
 
         const circuits = runSection('Loops', 'loops');
         const loopItems = [...canvasWorkLoops().map(loop => ({ title: loop.agent, detail: 'Work · ' + named(WORK_LOOP_STATES, loop.state), meta: loop.rounds + (loop.rounds === 1 ? ' round' : ' rounds'), work: loop.agent, active: loop.active })), ...canvasLoops().map(loop => ({ title: loop.worker + ' ↔ ' + loop.evaluator, detail: 'Review · ' + named(LOOP_STATES, loop.state), meta: loop.rounds + (loop.rounds === 1 ? ' round' : ' rounds'), review: loop.id, active: loop.active }))].sort((a, b) => Number(b.active) - Number(a.active));
@@ -962,6 +1035,13 @@
         if (agent.effort) badges.append(el('span', 'ag-badge', agent.effort + ' effort'));
         if (agent.pool) badges.append(el('span', 'ag-badge', 'Pool of ' + agent.pool));
         detailScroll.append(badges);
+        stats(detailScroll, usageOf(agent.sessions));
+        if (sessionToOpen(agent)) { const opener = el('button', 'ag-open-session', 'Open session'); opener.type = 'button'; opener.dataset.openSession = agent.name; detailScroll.append(opener); }
+        const record = snapshot.learning?.agents && Object.hasOwn(snapshot.learning.agents, agent.name) ? snapshot.learning.agents[agent.name] : null;
+        if (record) {
+          const past = section(detailScroll, 'Track record');
+          cells(past, [['Steps', text(record.steps)], ['First pass', record.first_pass_rate == null ? '—' : Math.round(record.first_pass_rate * 100) + '%'], ['Rounds', record.mean_attempts == null ? '—' : Number(record.mean_attempts).toFixed(1)]]);
+        }
         const children = snapshot.agents.filter(a => a.parent === agent.name);
         if (children.length || agent.parent) {
           const family = section(detailScroll, agent.parent ? 'Council lead' : 'Council seats');
@@ -973,12 +1053,19 @@
         const work = section(detailScroll, 'Steps in this run' + (steps.length ? ' · ' + steps.length : ''));
         if (!steps.length) work.append(el('p', '', 'None'));
         appendList(work, steps, step => stepRow(work, step));
+        const own = new Set(steps.map(step => step.id)), happened = (graph?.events || []).filter(event => own.has(event.node)).slice(-12).reverse();
+        if (happened.length) {
+          const history = section(detailScroll, 'History');
+          happened.forEach(event => { const row = el('div', 'ag-history-row'); row.append(el('span', 'ag-history-when', ago(event.time)), el('span', 'ag-history-what', event.node + ' ' + event.event), el('span', 'ag-history-note', text(event.note))); row.title = text(event.note); history.append(row); });
+        }
+        const said = (snapshot.learning?.notes || []).filter(note => note.agent === agent.name).slice(0, 5);
+        if (said.length) notes(section(detailScroll, 'From you'), said);
         const sessions = section(detailScroll, 'Sessions · ' + agent.sessions.length);
         if (!agent.sessions.length) sessions.append(el('p', '', 'None'));
         appendList(sessions, agent.sessions, session => {
           const row = el('div', 'ag-session');
           row.append(el('div', 'ag-session-title', (session.busy ? '● Active · ' : '') + session.title));
-          row.append(el('div', 'ag-session-meta', [session.model, session.effort ? session.effort + ' effort' : '', cost(session.cost)].filter(Boolean).join(' · ')));
+          row.append(el('div', 'ag-session-meta', [session.model, session.effort ? session.effort + ' effort' : '', cost(session.cost), amount(session.tokens_in) + '↑ ' + amount(session.tokens_out) + '↓', session.context ? 'ctx ' + amount(session.context) : ''].filter(Boolean).join(' · ')));
           row.append(el('div', 'ag-session-meta', session.id)); sessions.append(row);
         });
       } else {
@@ -990,6 +1077,8 @@
 
     listen(close, 'click', closeDetails);
     listen(runDetails, 'click', () => select('run', '', runDetails));
+    listen(usage, 'click', () => select('run', '', usage));
+    listen(attention, 'click', () => { select('run', '', attention); detailScroll.querySelector('[data-run-section="attention"]')?.scrollIntoView({ block: 'start' }); });
     listen(detailScroll, 'change', event => { if (event.target.matches('[data-run-team]')) switchTeam(event.target.value); });
     listen(detailScroll, 'click', event => {
       const stepLink = event.target.closest('[data-run-step]');
@@ -1000,6 +1089,8 @@
       if (workLink) { select('work-loop', workLink.dataset.runWork, workLoopViews.get(workLink.dataset.runWork)?.group); return; }
       const foldLink = event.target.closest('[data-run-open-fold]');
       if (foldLink) { const row = [...detailScroll.querySelectorAll('[data-run-fold]')].find(item => item.dataset.runFold === foldLink.dataset.runOpenFold); if (row) { row.open = true; lazySteps.get(row)?.(); row.scrollIntoView({ block: 'nearest' }); } return; }
+      const opener = event.target.closest('[data-open-session]');
+      if (opener) { openSession(opener.dataset.openSession); return; }
       const link = event.target.closest('[data-flow-peer]');
       if (link) { select('agent', link.dataset.flowPeer, nodes.get(link.dataset.flowPeer)); detailScroll.scrollTop = 0; }
     });
@@ -1122,7 +1213,7 @@
       indexSteps();
       if (activeTeam !== previousTeam) { rememberTeam(previousTeam); restoreTeam(activeTeam); }
       const graph = data.graph;
-      runDetails.dataset.notices = String(data.warnings.length + (graph ? graph.problems.length : 0) > 0);
+      runDetails.dataset.notices = String(data.warnings.length + (graph ? graph.problems.length : 0) > 0 || !!data.learning?.due);
       renderActivity();
       const previousLayout = layoutSignature;
       if (root.clientWidth > 0 && viewport.clientWidth > 0) {
@@ -1210,7 +1301,7 @@
       root.style.removeProperty('--ag-sheet-height');
       delete root.dataset.team; root.dataset.state = 'loading';
       notice.hidden = true; notice.textContent = ''; notice.title = '';
-      activity.hidden = true; activity.textContent = ''; delete runDetails.dataset.notices;
+      activity.hidden = true; activity.textContent = ''; attention.hidden = true; usage.hidden = true; delete runDetails.dataset.notices;
       showEmpty();
       Object.assign(camera, { x: 0, y: 0, scale: 1, initialized: false, touched: false, width: 0, height: 0 }); transform();
       return refresh();

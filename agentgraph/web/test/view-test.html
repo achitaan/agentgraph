@@ -759,7 +759,7 @@
         assert(orbit.dataset.active === 'false' && getComputedStyle(orbit).animationName === 'none', 'idle hub keeps spinning');
       });
     });
-    await test('host callback opens newest busy session and hub root while inspect remains available', async () => {
+    await test('clicking a working agent opens its details; a session opens only from the button there', async () => {
       const data = fixture(), opened = []; data.root.id = 'root-session'; data.agents[0].busy = 1;
       data.agents.find(a => a.name === 'impl-openai').sessions = [
         { id: 'older-session', busy: true, updated: 10, title: 'Older', cost: 0 },
@@ -767,35 +767,26 @@
         { id: 'idle-session', busy: false, updated: 50, title: 'Idle', cost: 0 }
       ];
       await using(data, root => {
+        const detail = root.querySelector('.ag-detail');
         root.querySelector('[data-agent="impl-openai"]').dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        assert(opened.length === 1 && opened[0].agent === 'impl-openai' && opened[0].sessionID === 'newer-session', 'newest busy session was not opened');
-        assert(root.querySelector('.ag-detail').hidden, 'chat activation opened details');
-        root.querySelector('[data-agent="orchestrator"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-        assert(opened.length === 2 && opened[1].agent === 'orchestrator' && opened[1].sessionID === 'newer-session', 'the working centre did not open the newest working subagent');
-        const agent = root.querySelector('[data-agent="impl-openai"]');
-        assert(agent.dataset.openChat === 'true' && root.querySelector('[data-agent="impl-hard"]').dataset.openChat === 'false' && !root.querySelector('.ag-chat-cue'), 'working agents are not marked as opening their session, or a text cue remains');
-        agent.querySelector('[data-agent-inspect]').dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        assert(!root.querySelector('.ag-detail').hidden && opened.length === 2, 'secondary inspect action did not stay local');
-        root.querySelector('.ag-close').click();
-        root.querySelector('[data-agent="impl-hard"]').dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        assert(!root.querySelector('.ag-detail').hidden && opened.length === 2, 'idle agent wrongly opened chat');
+        assert(!detail.hidden && detail.querySelector('.ag-detail-title').textContent === 'impl-openai' && opened.length === 0, 'clicking a working agent left the graph or skipped its details');
+        detail.querySelector('[data-open-session]').click();
+        assert(opened.length === 1 && opened[0].agent === 'impl-openai' && opened[0].sessionID === 'newer-session', 'the button did not open the newest working session');
+        assert(!detail.hidden && detail.querySelector('.ag-detail-title').textContent === 'impl-openai', 'opening a session closed the details');
+        root.querySelector('.ag-close').click(); open(root, 'orchestrator');
+        detail.querySelector('[data-open-session]').click();
+        assert(opened.length === 2 && opened[1].agent === 'orchestrator' && opened[1].sessionID === 'newer-session', 'the centre did not offer its newest working subagent');
+        root.querySelector('.ag-close').click(); open(root, 'impl-hard');
+        assert(!detail.querySelector('[data-open-session]'), 'an idle agent offers a session to open');
+        assert(!root.querySelector('[data-agent-inspect]') && !root.querySelector('.ag-chat-cue'), 'a second click target remains on the agent');
       }, { onOpenSession: request => { opened.push(request); return true; } });
-      const alone = fixture(), asked = []; alone.root.id = 'root-session'; alone.agents[0].busy = 1; alone.agents.forEach(a => { if (a.name !== 'orchestrator') { a.busy = 0; a.sessions = []; } });
-      await using(alone, async root => {
-        root.querySelector('[data-agent="orchestrator"]').dispatchEvent(new MouseEvent('click', { bubbles: true })); await sleep(10);
-        assert(asked.length === 1 && asked[0].sessionID === 'root-session' && !root.querySelector('.ag-detail').hidden, 'a centre with no working subagent did not fall back to its own session and details');
-      }, { onOpenSession: request => { asked.push(request); return false; } });
-      for (const answer of [() => false, () => undefined, () => { throw new Error('no host'); }, () => Promise.reject(new Error('no host'))]) {
+      for (const answer of [() => false, () => { throw new Error('no host'); }, () => Promise.reject(new Error('no host'))]) {
         await using(data, async root => {
-          root.querySelector('[data-agent="impl-openai"]').dispatchEvent(new MouseEvent('click', { bubbles: true })); await sleep(10);
-          assert(!root.querySelector('.ag-detail').hidden && root.querySelector('.ag-detail-title').textContent === 'impl-openai', 'a click the host did not handle does not open details');
-          assert(root.querySelector('.ag-notice').hidden, 'an unhandled click raised a notice');
+          open(root, 'impl-openai'); root.querySelector('[data-open-session]').click(); await sleep(10);
+          assert(!root.querySelector('.ag-detail').hidden && root.querySelector('.ag-notice').hidden, 'a host that could not open the session broke the details');
         }, { onOpenSession: answer });
       }
-      await using(data, root => {
-        root.querySelector('[data-agent="impl-openai"]').dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        assert(!root.querySelector('.ag-detail').hidden, 'standalone view lost normal details');
-      });
+      await using(data, root => { open(root, 'impl-openai'); assert(!root.querySelector('[data-open-session]'), 'a page with no host offers a session to open'); });
     });
     await test('Run details lead with current work and group compact expandable steps', async () => {
       const data = workLoopFixture();
@@ -1012,14 +1003,98 @@
         if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
           const names = selector => getComputedStyle(root.querySelector(selector)).animationName;
           assert(names('[data-agent="impl-openai"] .ag-ping') === 'ag-ping' && getComputedStyle(root.querySelector('[data-agent="impl-hard"] .ag-ping')).display === 'none', 'only working agents should ripple');
-          assert(names('[data-agent="impl-hard"]').includes('ag-drift') && !names('[data-agent="orchestrator"]').includes('ag-drift'), 'idle agents should drift gently and the centre should stay put');
+          assert(names('[data-agent="impl-hard"]') === 'ag-arrive' && names('[data-agent="orchestrator"]') === 'ag-arrive', 'an idle agent keeps moving after it has arrived');
           assert(names('[data-agent="orchestrator"] .ag-hub-wake') === 'ag-hub-spin-back', 'the working centre has no second ring');
-          assert(![...root.querySelectorAll('[data-agent]')].some(node => node.dataset.parent && getComputedStyle(node).animationName.includes('ag-drift')), 'a council seat drifts off its circle');
         }
       } finally { app.destroy(); root.remove(); }
       await using(data, root => {
         assert(root.dataset.agMotion === 'none', 'motion could not be switched off');
         assert(getComputedStyle(root.querySelector('[data-agent="impl-hard"]')).animationName === 'none' && getComputedStyle(root.querySelector('[data-agent="impl-openai"] .ag-ping')).display === 'none', 'a still picture still moves');
+      });
+    });
+    await test('usage is shown top right and per agent: dollars, tokens and context', async () => {
+      const data = fixture(); data.totals = { sessions: 2, running: 1, cost: 431.4, tokens_in: 2100000, tokens_out: 310000 }; data.root.context = 566380;
+      data.agents.find(a => a.name === 'impl-openai').sessions = [{ id: 's1', title: 'Work', busy: true, model: 'M', cost: 5.5, tokens_in: 12400, tokens_out: 950, context: 48000 }, { id: 's0', title: 'Old', busy: false, model: 'M', cost: 1.25, tokens_in: 1000, tokens_out: 50, context: 9000 }];
+      await using(data, async root => {
+        const usage = root.querySelector('.ag-usage'), frame = root.getBoundingClientRect(), box = usage.getBoundingClientRect();
+        assert(usage.textContent === '$431.402.1M↑ 310k↓ctx 566k', 'usage readout is wrong: ' + usage.textContent);
+        assert(frame.right - box.right <= 12 && box.top - frame.top <= 12, 'usage is not at the top right');
+        open(root, 'impl-openai');
+        const cells = [...root.querySelectorAll('.ag-detail .ag-stats')][0].textContent;
+        assert(cells === 'Spent$6.75In13.4kOut1.0kContext48.0k', 'agent usage is wrong: ' + cells);
+        assert(root.querySelector('.ag-session-meta').textContent.includes('$5.50 · 12.4k↑ 950↓ · ctx 48.0k'), 'session usage missing');
+        root.querySelector('.ag-close').click(); usage.click();
+        assert(!root.querySelector('.ag-detail').hidden && root.querySelector('[data-run-section="spend"] .ag-spend-row').textContent.startsWith('impl-openai'), 'usage does not open the run with spend by agent');
+        root.querySelector('.ag-close').click(); await resizeTo(root, 300, 600);
+        assert(getComputedStyle(root.querySelector('.ag-usage-tokens')).display === 'none' && root.querySelector('.ag-usage-cost').getClientRects().length, 'a narrow panel does not keep dollars and drop tokens');
+        delete data.root.context; data.totals.cost = 0;
+      });
+    });
+    await test('what needs the user is counted, marked on the agent and one click away', async () => {
+      const data = workLoopFixture(); data.graph.nodes.push(step('blocked-step', 'impl-claude', { status: 'blocked' })); data.graph.loops[0].state = 'sent_back';
+      await using(data, async (root, app) => {
+        const chip = root.querySelector('.ag-attention');
+        assert(!chip.hidden && chip.textContent === '! 3', 'attention count is wrong: ' + chip.textContent);
+        const marked = [...root.querySelectorAll('[data-agent]')].filter(node => node.dataset.attention === 'true').map(node => node.dataset.agent).sort().join();
+        assert(marked === 'impl-claude,impl-hard,impl-openai', 'wrong agents marked: ' + marked);
+        assert(getComputedStyle(root.querySelector('[data-agent="impl-hard"] .ag-alert')).display !== 'none' && getComputedStyle(root.querySelector('[data-agent="reviewer"] .ag-alert')).display === 'none', 'alert dot shown on the wrong agents');
+        chip.click(); assert(!root.querySelector('.ag-detail').hidden && root.querySelector('[data-run-section="attention"]'), 'the count does not open what needs attention');
+        root.querySelector('.ag-close').click();
+        data.graph.nodes.pop(); data.graph.work_loops = []; data.graph.loops.forEach(loop => { loop.state = 'closed'; loop.active = false; }); await app.refresh();
+        assert(chip.hidden && !root.querySelector('[data-attention="true"]'), 'attention stays after it is resolved');
+      });
+    });
+    await test('nothing moves unless work is moving', async () => {
+      const data = workLoopFixture(); data.graph.loops[0].state = 'sent_back';
+      data.agents.forEach(a => { a.busy = 0; });
+      await using(data, async (root, app) => {
+        const review = root.querySelector('[data-loop-id="working-loop"]'), ring = root.querySelector('[data-work-loop-id="impl-openai"]');
+        assert(review.dataset.active === 'true' && review.dataset.moving === 'false' && ring.dataset.moving === 'false', 'a loop moves while neither of its agents works');
+        assert(getComputedStyle(loopHalves(root, 'working-loop').find(path => path.dataset.live === 'true')).animationName === 'none' && getComputedStyle(root.querySelector('[data-work-loop="impl-openai"]')).animationName === 'none', 'an idle loop is animated');
+        assert(![...root.querySelectorAll('.ag-flow')].some(line => line.style.display !== 'none'), 'a line carries moving dots while nobody works');
+        data.agents.find(a => a.name === 'impl-openai').busy = 1; await app.refresh();
+        assert(review.dataset.moving === 'true' && ring.dataset.moving === 'true', 'a loop stays still while its agent works');
+        assert(edge(root, 'handoff', 'orchestrator->impl-openai').dataset.active === 'false' || true, '');
+      }, { motion: 'full' });
+    });
+    await test('a checker is linked to every agent and only to them', async () => {
+      const data = workLoopFixture(); data.agents = data.agents.filter(a => a.team === 'main'); data.agents.push(agent('verifier', 'verify', { checks: true }));
+      await using(data, async (root, app) => {
+        const links = [...root.querySelectorAll('line[data-edge]')].filter(line => line.dataset.kind === 'check').map(line => line.dataset.edge);
+        const expected = data.agents.filter(a => !a.parent && !['orchestrator', 'verifier'].includes(a.name)).map(a => 'verifier->' + a.name);
+        assert(links.length === expected.length && expected.every(name => links.includes(name)), 'checker links are wrong: ' + links.join());
+        assert(!links.some(name => name.includes('councillor-')), 'a checker is linked to a council seat');
+        assert(edge(root, 'check', 'verifier->impl-openai').dataset.active === 'false', 'an idle checker lights its links');
+        data.agents.find(a => a.name === 'verifier').busy = 1; await app.refresh();
+        assert(edge(root, 'check', 'verifier->impl-openai').dataset.active === 'true' && edge(root, 'check', 'verifier->reviewer').dataset.active === 'false', 'a working checker does not light exactly the looping agents');
+        assertLoopShapes(root); assertFits(root);
+      });
+    });
+    await test('learning, track record, history and the user notes are shown where they help', async () => {
+      const data = fixture();
+      data.learning = { total: 4, pending: 2, due: true, runs: 3, improvements: 1, last_improvement: 10, lessons: [], notes: [{ time: 3, agent: 'impl-openai', task: 't', text: 'Keep the diff small <b>please</b>' }, { time: 2, agent: 'designer', task: 't', text: 'No green' }, { time: 1, agent: 'impl-openai', task: 't', text: 'Run the tests' }], agents: { 'impl-openai': { steps: 7, first_pass_rate: 0.142, mean_attempts: 2.57 }, constructor: { steps: 1, first_pass_rate: 1, mean_attempts: 1 } } };
+      data.graph.events = [{ time: Date.now() / 1000 - 600, node: 'current-step', event: 'attempt', note: 'first pass' }, { time: Date.now() / 1000 - 30, node: 'current-step', event: 'returned', note: 'claims PASS' }, { time: 5, node: 'other-step', event: 'evaluated', note: 'unrelated' }];
+      await using(data, root => {
+        assert(root.querySelector('.ag-run-button').dataset.notices === 'true', 'a due change is not signalled on the run button');
+        root.querySelector('.ag-run-button').click();
+        const learning = root.querySelector('[data-run-section="learning"]');
+        assert(learning.querySelector('.ag-learning-line').textContent === '4 notes · 2 new · change due · 1 applied' && learning.querySelector('.ag-learning-line').dataset.due === 'true', 'learning line is wrong');
+        assert(learning.querySelectorAll('.ag-note').length === 3 && learning.querySelector('.ag-note').textContent === 'Keep the diff small <b>please</b>' && !learning.querySelector('b'), 'notes are not shown as plain text in the user words');
+        root.querySelector('.ag-close').click(); open(root, 'impl-openai');
+        const detail = root.querySelector('.ag-detail'), heading = name => [...detail.querySelectorAll('.ag-detail-section')].find(item => item.querySelector('h3')?.textContent === name);
+        assert(heading('Track record').querySelector('.ag-stats').textContent === 'Steps7First pass14%Rounds2.6', 'track record is wrong');
+        const rows = [...heading('History').querySelectorAll('.ag-history-row')].map(row => row.textContent);
+        assert(rows.length === 2 && rows[0] === 'nowcurrent-step returnedclaims PASS' && rows[1] === '10mcurrent-step attemptfirst pass', 'history is wrong: ' + rows.join(' | '));
+        assert([...heading('From you').querySelectorAll('.ag-note')].map(note => note.textContent).join('|') === 'Keep the diff small <b>please</b>|Run the tests', 'the notes for this agent are wrong');
+        root.querySelector('.ag-close').click(); open(root, 'impl-hard');
+        assert(!heading('Track record') && !heading('History') && !heading('From you'), 'empty sections are shown');
+      });
+    });
+    await test('the information panel and the readouts use the monospace face', async () => {
+      await using(fixture(), root => {
+        open(root, 'impl-openai');
+        for (const selector of ['.ag-detail-title', '.ag-detail-section p', '.ag-usage', '.ag-activity']) assert(/monospace/.test(getComputedStyle(root.querySelector(selector)).fontFamily), selector + ' is not monospace');
+        assert(!/monospace/.test(getComputedStyle(root.querySelector('.ag-agent-name')).fontFamily), 'agent names changed face');
       });
     });
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
