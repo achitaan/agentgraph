@@ -8,3 +8,6 @@ memory*/
 proposals*/
 out/
 cost-settings.jsonl
+
+# Flows drawn in the agent graph: each user's own standing instructions.
+structure/flows/

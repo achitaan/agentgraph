@@ -145,7 +145,7 @@ def _active_graph(graphs: list[TaskGraph], sessions: list[Session], task: str | 
 
 
 STRUCTURE_DIR = ORCHESTRATION_GRAPH_DIR.parent.parent / "structure"
-SETTING_KEYS = ("pool", "escalates_to", "checks", "seats", "checked_by")
+SETTING_KEYS = ("pool", "escalates_to", "seats")
 HEAD_BYTES = 4096  # only the start of an agent's file is read for its settings and description
 SETTING_LINES = 12
 
@@ -155,7 +155,7 @@ def read_settings(data: bytes) -> tuple[list[tuple[str, str]], list[str], int]:
     the first HEAD_BYTES bytes, split with `str.splitlines`, at most
     SETTING_LINES lines; blank or `---` lines before the first setting are
     skipped, a blank line after one closes them, and the first line that is not
-    `key: value` with a known key starts the description. A `checked_by` line
+    `key: value` with a known key starts the description. A settings-like line
     after the description is therefore description text, not a setting.
     Returns the (key, value) pairs in order, the lines read, and the index of
     the description's first line."""
@@ -177,71 +177,151 @@ def read_settings(data: bytes) -> tuple[list[tuple[str, str]], list[str], int]:
     return settings, lines, prose_from
 
 
-def checked_by_names(settings: list[tuple[str, str]]) -> list[str]:
-    """Every name on the `checked_by` lines among these settings, in order, once each."""
-    names: list[str] = []
-    for key, value in settings:
-        if key == "checked_by":
-            names.extend(name for name in setting_names(value) if name not in names)
-    return names
+FLOWS_FOLDER = "flows"  # inside the structure folder: one file per flow, never a group of agents
+FLOW_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
+FLOW_TEXT_LIMIT = 2000
+FLOW_FILES_LIMIT = 200
 
 
-def setting_names(value: str) -> list[str]:
-    """The agent names in a `checked_by` value: comma-separated, quotes and backticks dropped."""
-    names: list[str] = []
-    for part in value.split(","):
-        name = part.strip().strip("`'\"").strip()
-        if name and name not in names:
-            names.append(name)
-    return names
+def seat_lead(shape: dict, name: str) -> str:
+    """The council lead a seat stands for, or "" when `name` is not a seat."""
+    return next((lead for lead, prefix in shape["seats"].items() if name != lead and name.startswith(prefix)), "")
 
 
-def _drawn_loops(shape: dict) -> None:
-    """Turn the raw `checked_by` settings into `loops` (work, check) pairs and
-    `warnings`: an unknown name, the agent itself, the hub or a council seat at
-    either end is ignored with a warning, never an error."""
-    known = shape["group_of"]
+def is_self_loop(path: list[str]) -> bool:
+    """`A -> A`: an agent checking its own work, the whole path."""
+    return len(path) == 2 and path[0] == path[1]
 
-    def problem(name: str) -> str:
-        if any(name.startswith(prefix) and name != lead for lead, prefix in shape["seats"].items()):
-            return "is a council seat"
-        if name not in known:
-            return "is not an agent in the structure folder"
-        if known[name] == "hub":
-            return "is the hub"
-        return ""
 
-    loops: set[tuple[str, str]] = set()
-    for work, checkers in shape["checked_by"].items():
-        reason = problem(work)
-        if reason:
-            shape["warnings"].append(f"structure: checked_by in {work} ignored: {work} {reason}")
+def hub_names(shape: dict | None) -> frozenset[str]:
+    return frozenset(name for name, group in shape["group_of"].items() if group == "hub") if shape else frozenset()
+
+
+def flow_steps(path: list[str], hubs) -> tuple[list[str], int]:
+    """The working part of a flow's path (the hub dropped from either end) and
+    the index in it of the first return (a step to an agent already on the
+    path), or -1 when there is none."""
+    working = list(path)
+    if working and working[0] in hubs:
+        working = working[1:]
+    if working and working[-1] in hubs:
+        working = working[:-1]
+    first_return = next((index for index in range(1, len(working)) if working[index] in working[:index]), -1)
+    return working, first_return
+
+
+def flow_refusal(shape: dict, path: list[str]) -> str:
+    """Why `path` (names already standing for themselves: a seat replaced by its
+    council) cannot be a flow, or "". The rules `agentgraph check` enforces
+    must be satisfiable for every path accepted here."""
+    if len(path) < 2:
+        return "a flow needs at least two agents"
+    for name in path:
+        if name not in shape["group_of"]:
+            return f"unknown agent {name}: there is no {name}.md in the structure folder"
+    if is_self_loop(path):
+        return ""  # any agent, the hub included, may loop on itself (one such flow each: see add_flow)
+    hubs = hub_names(shape)
+    for index in range(1, len(path)):
+        if path[index] == path[index - 1]:
+            return f"{path[index]} follows itself: a step must go to another agent"
+    for index, name in enumerate(path[1:-1], start=1):
+        if name in hubs:
+            return (f"the hub {name} can only start or end a flow: it already hands out and receives every piece "
+                    "of work, so it adds no step in the middle")
+    working, _ = flow_steps(path, hubs)
+    # A return needs the chain's current node to be a gate (a check). Right after the work returned to the
+    # first agent, the current node is that agent's own work, which is never a gate: no task graph could follow.
+    for index in range(2, len(working)):
+        if working[index] in working[:index] and working[index - 1] == working[0]:
+            return (f"{working[index]} cannot get the work back straight after it returned to {working[0]}: "
+                    f"{working[0]}'s own work is not a check; send it forward to another agent first")
+    return ""
+
+
+def read_flow(data: bytes) -> tuple[list[str], str] | None:
+    """A flow file: `path: A -> B -> C` (settings lines at the top), a blank
+    line, then the instruction, verbatim (one final newline dropped). None when
+    the file has no path line, is not UTF-8 or is too large."""
+    if len(data) > 4 * FLOW_TEXT_LIMIT + 4096:
+        return None
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    head, sep, body = text.partition("\n\n")
+    path: list[str] = []
+    for line in head.split("\n"):
+        key, colon, value = line.partition(":")
+        if colon and key.strip().lower() == "path":
+            path = [name.strip() for name in value.split("->")]
+    if not path or not all(path):
+        return None
+    return path, body[:-1] if body.endswith("\n") else body
+
+
+def load_flows(root: Path, shape: dict) -> None:
+    """Read `flows/` into shape["flows"] ({"id", "path", "text"}, in id order);
+    a file that cannot be read or whose path is no longer valid is skipped
+    with a warning, and so is a second loop of one agent on itself. Adding
+    stops at FLOW_FILES_LIMIT files; files beyond it (put there by hand) are
+    named in a warning, never dropped silently."""
+    shape["flows"] = []
+    folder = root / FLOWS_FOLDER
+    if folder.is_symlink() or not folder.is_dir():
+        return
+    try:
+        files = sorted((path for path in folder.iterdir() if path.suffix == ".md" and FLOW_ID.fullmatch(path.stem)),
+                       key=lambda path: path.stem)  # id order: `a-2` after `a`
+    except OSError:
+        return
+    if len(files) > FLOW_FILES_LIMIT:
+        shape["warnings"].append(f"structure: {len(files)} flow files, more than the {FLOW_FILES_LIMIT} read; "
+                                 f"ignored: {', '.join(path.stem for path in files[FLOW_FILES_LIMIT:][:5])}"
+                                 + (" and more" if len(files) > FLOW_FILES_LIMIT + 5 else ""))
+    looped: dict[str, str] = {}
+    for path in files[:FLOW_FILES_LIMIT]:
+        if path.is_symlink() or not path.is_file():
             continue
-        for check in checkers:
-            reason = "is the agent itself" if check == work else problem(check)
-            if reason:
-                shape["warnings"].append(f"structure: {work} checked_by {check} ignored: {check} {reason}")
-            else:
-                loops.add((work, check))
-    shape["loops"] = sorted(loops)
+        try:
+            flow = read_flow(path.read_bytes())
+        except OSError:
+            continue
+        if flow is None:
+            shape["warnings"].append(f"structure: flow {path.stem} ignored: it has no readable path line")
+            continue
+        names, text = flow
+        names = [seat_lead(shape, name) or name for name in names]  # a seat stands for its council
+        reason = flow_refusal(shape, names)
+        if reason:
+            shape["warnings"].append(f"structure: flow {path.stem} ignored: {reason}")
+            continue
+        if is_self_loop(names):
+            if names[0] in looped:
+                shape["warnings"].append(f"structure: flow {path.stem} ignored: {names[0]} already loops on itself "
+                                         f"in flow {looped[names[0]]}")
+                continue
+            looped[names[0]] = path.stem
+        shape["flows"].append({"id": path.stem, "path": names, "text": text})
 
 
 def load_structure(directory: Path | None = None) -> dict | None:
     """Read the agent structure from a folder: one sub-folder per group, in name
     order (a leading number and dash set the order and are dropped), one `.md`
     file per agent. A file may start with `key: value` lines: `pool` (a number),
-    `escalates_to` (an agent), `checks: all`, `seats` (a name prefix whose agents
-    sit round this one), `checked_by` (agents that check this one's work, round
-    after round: the drawn loops, kept as `loops` pairs of (work, check)). The
-    text after the settings is the agent's description, kept as `about`. None
-    when the folder does not exist or holds no group."""
+    `escalates_to` (an agent), `seats` (a name prefix whose agents
+    sit round this one). The text after the settings is the agent's
+    description, kept as `about`. The `flows` folder holds the drawn flows
+    (see `load_flows`), never agents. None when the folder does not exist or
+    holds no group."""
     root = Path(directory) if directory is not None else STRUCTURE_DIR
     try:
-        folders = sorted(path for path in root.iterdir() if path.is_dir() and not path.name.startswith("."))[:50]
+        folders = sorted(path for path in root.iterdir()
+                         if path.is_dir() and not path.name.startswith(".") and path.name != FLOWS_FOLDER)[:50]
     except OSError:
         return None
-    shape: dict = {"groups": [], "titles": {}, "group_of": {}, "pool": {}, "escalation": [], "checkers": set(), "seats": {}, "about": {},
-                   "files": {}, "checked_by": {}, "loops": [], "warnings": []}
+    shape: dict = {"groups": [], "titles": {}, "group_of": {}, "pool": {}, "escalation": [], "seats": {}, "about": {},
+                   "files": {}, "flows": [], "warnings": []}
     for folder in folders:
         group = re.sub(r"^\d+[-_]", "", folder.name)
         if not group or group in shape["titles"]:
@@ -268,18 +348,14 @@ def load_structure(directory: Path | None = None) -> dict | None:
                     shape["pool"][name] = int(value)
                 elif key == "escalates_to":
                     shape["escalation"].append((name, value))
-                elif key == "checks" and value.lower() == "all":
-                    shape["checkers"].add(name)
                 elif key == "seats":
                     shape["seats"][name] = value
-            if any(key == "checked_by" for key, _ in settings):
-                shape["checked_by"][name] = checked_by_names(settings)
             about = " ".join(" ".join(lines[prose_from:]).split())
             if about:
                 shape["about"][name] = about[:600]
     if not shape["groups"]:
         return None
-    _drawn_loops(shape)
+    load_flows(root, shape)
     return shape
 
 
@@ -318,25 +394,13 @@ class _Shape:
     def about(self, name: str) -> str:
         return self.structure["about"].get(name, "") if self.structure else ""
 
-    def checks(self, name: str) -> bool:
-        return name in (self.structure["checkers"] if self.structure else contract.CHECKERS)
-
     @property
     def warnings(self) -> list[str]:
         return list(self.structure.get("warnings", [])) if self.structure else []
 
-    def loops(self, listed: list[dict], hub: str | None) -> list[dict]:
-        """Every loop: the drawn ones (`checked_by`, all of them, listed or not),
-        then a checker's (`checks: all`) over every other listed agent that is
-        not the hub, a council seat or another checker."""
-        drawn = [{"work": work, "check": check, "source": "drawn"}
-                 for work, check in (self.structure.get("loops", []) if self.structure else [])]
-        workers = [agent["name"] for agent in listed
-                   if agent["group"] != "hub" and agent["name"] != hub and not agent["parent"] and not agent["checks"]]
-        default = [{"work": work, "check": checker["name"], "source": "default"}
-                   for checker in listed if checker["checks"] and checker["group"] != "hub" and checker["name"] != hub
-                   for work in workers if work != checker["name"]]
-        return drawn + sorted(default, key=lambda loop: (loop["work"], loop["check"]))
+    def flows(self) -> list[dict]:
+        """The drawn flows: {"id", "path", "text", "source": "drawn"}."""
+        return [{**flow, "source": "drawn"} for flow in (self.structure.get("flows", []) if self.structure else [])]
 
     @property
     def escalation(self):
@@ -399,7 +463,7 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
         # by the plugin, so it may load every skill; any other agent keeps its roster list.
         grouped[group].append({
             "name": name, "group": group, "model": agent.model, "effort": agent.effort,
-            "pool": shape.pool(name, agent.pool), "configured": configured, "checks": shape.checks(name),
+            "pool": shape.pool(name, agent.pool), "configured": configured,
             "skills": ["*"] if name == root_name and not configured else list(agent.skills), "about": shape.about(name),
             "team": contract.team_of(name or ""), "parent": shape.parent_of(name or "", names),
             "busy": sum(bool(session.busy) for session in related),
@@ -421,7 +485,7 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
         "root": {**_session_document(root), "agent": root.agent, "directory": root.directory,
                  "wear": root.wear}
         if root is not None else None,
-        "structure": {"source": "folder" if structure else "builtin", "loops": shape.loops(listed, root_name)},
+        "structure": {"source": "folder" if structure else "builtin", "flows": shape.flows()},
         "groups": [{"id": group, "title": shape.title(group),
                     "agents": [agent["name"] for agent in agents]}
                    for group, agents in grouped.items()],
@@ -514,8 +578,10 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
     document = snapshot_document(snapshot, source, task, session=session,
                                  structure=load_structure() if source == "live" else None)
     if source == "live":
+        from . import skillset  # skillset imports this module
         document["learning"] = _json_safe(learning_document())
         document["skills"] = skills_document()
+        skillset.annotate(document)
     return document
 
 

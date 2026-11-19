@@ -68,9 +68,6 @@ AGENT_GROUPS = {
 # Standing pool sizes (from the routing prompt, not the config file).
 POOL = {"impl-openai": 3, "impl-claude": 2}
 
-# Agents that check every other agent's work; a view links them to all of them.
-CHECKERS = frozenset({"verifier"})
-
 # Escalation routes the orchestrator takes when a node fails the same way twice.
 # A route is shown only when both of its agents are present.
 ESCALATION = (

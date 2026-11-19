@@ -17,8 +17,7 @@ from .contract import (
     NODE_TYPES, VERDICTS, TaskGraph, objective_coverage, shape_advice, validate,
 )
 from .sources import find_graph_dir, graph_files, graph_from_raw, read_graph_text
-from .snapshot_json import load_structure
-from .structure import drawn_loops
+from .snapshot_json import flow_steps, hub_names, is_self_loop, load_structure
 
 
 _NODE_STRINGS = ("id", "type", "agent", "goal", "done_when", "status")
@@ -207,32 +206,93 @@ def read_graph(path: Path) -> tuple[TaskGraph | None, list[str]]:
     return _graph_and_issues(raw, path)
 
 
-def loop_problems(graph: TaskGraph, loops) -> list[str]:
-    """Drawn loops (`checked_by` in the structure folder) that the graph does not
-    honour: every `implement` or `design` node that has not passed, whose agent
-    has drawn checkers, needs a `gate` node run by each checker whose
-    `feedback_to` names it. `loops` holds (work, check) pairs."""
-    checkers: dict[str, list[str]] = {}
-    for work, check in loops:
-        checkers.setdefault(work, [])
-        if check not in checkers[work]:
-            checkers[work].append(check)
-    if not checkers:
+FLOW_START_TYPES = ("implement", "design", "research", "decision")
+_CHAIN_BUDGET = 20000  # search steps per starting node; a graph needing more is reported, never passed silently
+
+
+def flow_problems(graph: TaskGraph, flows, hubs=frozenset()) -> list[str]:
+    """Drawn flows (the `flows` folder of the structure) that the graph does not
+    follow. A flow applies to work that starts at its first agent (the second
+    when the hub is first): every node of that agent of a FLOW_START_TYPES type
+    that has not passed needs the rest of the path as a chain. A step forward to
+    a new agent Y needs a node run by Y that follows the chain's current node
+    (lists it in depends_on, or is a gate whose feedback_to names it); a return
+    to an earlier agent needs the current node to be a gate whose feedback_to
+    names that agent's node on the chain, and the chain continues from there.
+    The hub as the last step adds nothing. One problem per starting node
+    without a complete chain, naming the first missing step."""
+    # A loop of one agent on itself adds no rule: a task graph cannot show it. It is printed with the others.
+    flows = [flow for flow in flows if not is_self_loop(flow["path"]) and len(flow_steps(flow["path"], hubs)[0]) >= 2]
+    if not flows:
         return []
-    gates = {(node.agent, target) for node in graph.nodes if node.type == "gate" for target in node.feedback_to}
-    return [f"{node.id} ({node.agent}) has no check by {check}: the structure says {check} checks {node.agent}"
-            for node in graph.nodes
-            if node.type in ("implement", "design") and node.status != "passed"
-            for check in checkers.get(node.agent, [])
-            if (check, node.id) not in gates]
+    by_id = {node.id: node for node in graph.nodes}
+    followers: dict[str, list] = {}
+    for node in graph.nodes:
+        targets = list(node.depends_on) + (list(node.feedback_to) if node.type == "gate" else [])
+        for target in dict.fromkeys(targets):
+            followers.setdefault(target, []).append(node)
+    problems: list[str] = []
+    for flow in flows:
+        working, _ = flow_steps(flow["path"], hubs)
+        label = " → ".join(flow["path"])
+        for start in graph.nodes:
+            if start.agent != working[0] or start.type not in FLOW_START_TYPES or start.status == "passed":
+                continue
+            budget = [_CHAIN_BUDGET]
+            best: list = [0, None]  # furthest step reached, and the chain there
+
+            def walk(step: int, current: str, chain: dict[str, str]) -> bool:
+                if step == len(working):
+                    return True
+                if step > best[0]:
+                    best[:] = [step, (current, dict(chain))]
+                budget[0] -= 1
+                if budget[0] < 0:
+                    return False
+                agent = working[step]
+                if agent in chain:  # a return
+                    node = by_id[current]
+                    return node.type == "gate" and chain[agent] in node.feedback_to and walk(step + 1, chain[agent], chain)
+                for follower in followers.get(current, []):
+                    if follower.agent == agent and follower.id not in chain.values():
+                        if walk(step + 1, follower.id, {**chain, agent: follower.id}):
+                            return True
+                return False
+
+            best[:] = [1, (start.id, {working[0]: start.id})]
+            if walk(1, start.id, {working[0]: start.id}):
+                continue
+            step, (current, chain) = best
+            if budget[0] < 0:
+                problems.append(f"{start.id} ({start.agent}): its chain is too tangled to check: flow {label}")
+                continue
+            agent = working[step]
+            where = "" if current == start.id else f" after {by_id[current].agent} ({current})"
+            if agent in chain:
+                problems.append(f"{start.id} ({start.agent}) is not sent back to {agent}{where}: {current} must be a gate "
+                                f"whose feedback_to names {chain[agent]}: flow {label}")
+            else:
+                problems.append(f"{start.id} ({start.agent}) is not followed by {agent}{where}: flow {label}")
+    return problems
 
 
-def _graph_and_issues(raw: dict, path: Path, loops=()) -> tuple[TaskGraph, list[str]]:
+def print_flows(flows) -> None:
+    """The user's standing instructions, after the result; never part of it."""
+    if not flows:
+        return
+    _print("flows: the user's standing instructions for shaping task graphs (agentgraph structure flows):")
+    for flow in flows:
+        _print(f"  {' → '.join(flow['path'])}  [{flow['id']}]")
+        for line in flow["text"].splitlines() or [""]:
+            _print(f"      {line}" if line.strip() else "")
+
+
+def _graph_and_issues(raw: dict, path: Path, flows=(), hubs=frozenset()) -> tuple[TaskGraph, list[str]]:
     issues = _raw_issues(raw)
     graph = graph_from_raw(raw, path)
     if issues:
         return graph, issues
-    issues = validate(graph) + loop_problems(graph, loops)
+    issues = validate(graph) + flow_problems(graph, flows, hubs)
     for node in graph.nodes:
         if node.type not in NODE_TYPES:
             issues.append(f"{node.id} has unknown type {node.type!r}")
@@ -254,14 +314,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dir", type=Path, help="directory of graph JSON files (default: nearest .opencode/graph)")
     parser.add_argument("--task", metavar="NAME", help="check only the graph with this declared task name")
     parser.add_argument("--structure", type=Path, metavar="DIR",
-                        help="structure folder whose drawn loops the graphs must honour (default: the orchestration's own)")
+                        help="structure folder whose drawn flows the graphs must follow (default: the orchestration's own)")
     args = parser.parse_args(argv)
-    # A missing default folder means no drawn loops; a folder named on the command line must exist,
-    # so a mistyped path cannot turn the loop checks off without a word.
-    if args.structure is not None and load_structure(args.structure) is None:
+    # A missing default folder means no drawn flows; a folder named on the command line must exist,
+    # so a mistyped path cannot turn the flow checks off without a word.
+    shape = load_structure(args.structure)
+    if args.structure is not None and shape is None:
         _print(f"structure folder {args.structure} does not exist or holds no group folder")
         return 2
-    loops = [(loop["work"], loop["check"]) for loop in drawn_loops(args.structure)]
+    flows = shape["flows"] if shape else []
+    hubs = hub_names(shape)
 
     discovery_warnings: list[str] = []
     try:
@@ -292,7 +354,7 @@ def main(argv: list[str] | None = None) -> int:
         if raw is not None:
             if args.task is not None and raw.get("task") != args.task:
                 continue  # Another task's graph: never validated, so it cannot slow this check.
-            graph, issues = _graph_and_issues(raw, path, loops)
+            graph, issues = _graph_and_issues(raw, path, flows, hubs)
         if graph is None:
             # A non-object is readable JSON with a schema problem; preserve
             # the CLI's distinction between it and a read or decode failure.
@@ -332,6 +394,7 @@ def main(argv: list[str] | None = None) -> int:
                 _print(f"advice: {advice}")
         failed = failed or bool(issues)
 
+    print_flows(flows)
     if (warnings or listing_warnings or discovery_warnings) and args.task is None:
         return 2
     return 1 if failed else 0

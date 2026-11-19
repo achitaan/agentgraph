@@ -43,7 +43,7 @@ class SnapshotDocumentTests(unittest.TestCase):
                 self.assertIsNone(doc["root"]["wear"])
                 self.assertEqual(len(doc["agents"]), 14)
                 for agent in doc["agents"]:
-                    self.assertKeys(agent, "name group model effort pool configured checks skills about busy sessions team parent")
+                    self.assertKeys(agent, "name group model effort pool configured skills about busy sessions team parent")
                     self.assertEqual(agent["team"], "main")
                     self.assertEqual(agent["parent"], "council" if agent["name"].startswith("councillor-") else "")
                     for session in agent["sessions"]:
@@ -121,6 +121,7 @@ class SnapshotDocumentTests(unittest.TestCase):
             agent_file("10-council/council.md", "seats: councillor-\n\nprose with a colon: ignored\npool: 9\n")
             agent_file("20-build/impl-openai.md", "pool: 3\nescalates_to: impl-claude\n")
             agent_file("20-build/impl-claude.md", "escalates_to: `oracle`\n")
+            # `checks: all` is no longer a setting: the line is the start of the description.
             agent_file("30-check/reviewer.md", "checks: all\n")
             agent_file("30-check/notes.txt", "not an agent")
             agent_file("README.md", "not a group")
@@ -130,16 +131,19 @@ class SnapshotDocumentTests(unittest.TestCase):
             self.assertEqual(shape["titles"]["check"], "Check")
             self.assertEqual(shape["pool"], {"impl-openai": 3})  # a setting after prose does not count
             self.assertEqual(shape["escalation"], [("impl-claude", "oracle"), ("impl-openai", "impl-claude")])
-            self.assertEqual((shape["checkers"], shape["seats"]), ({"reviewer"}, {"council": "councillor-"}))
+            self.assertEqual(shape["seats"], {"council": "councillor-"})
+            self.assertNotIn("checkers", shape)
+            self.assertEqual(shape["about"]["reviewer"], "checks: all")
 
             def document():
                 return snapshot_json.snapshot_document(demo_snapshot(1000), "demo", structure=snapshot_json.load_structure(root))
             doc = document()
             agents = {agent["name"]: agent for agent in doc["agents"]}
-            # The structure also carries its loops (drawn and `checks: all`); tests/test_structure.py covers them.
-            self.assertEqual((doc["structure"]["source"], sorted(doc["structure"])), ("folder", ["loops", "source"]))
+            # The structure carries its drawn flows only (no default loops); tests/test_structure.py covers them.
+            self.assertEqual((doc["structure"]["source"], sorted(doc["structure"])), ("folder", ["flows", "source"]))
             self.assertEqual([group["id"] for group in doc["groups"]], ["hub", "council", "build", "check"])
-            self.assertEqual((agents["reviewer"]["group"], agents["reviewer"]["checks"]), ("check", True))
+            self.assertEqual(agents["reviewer"]["group"], "check")
+            self.assertNotIn("checks", agents["reviewer"])
             self.assertEqual((agents["impl-openai"]["pool"], agents["impl-claude"]["pool"]), (3, None))
             self.assertEqual(agents["councillor-fable"]["parent"], "council")
             self.assertEqual(agents["councillor-fable"]["group"], "council")
@@ -158,7 +162,7 @@ class SnapshotDocumentTests(unittest.TestCase):
             self.assertEqual(doc["groups"][-1], {"id": "scouts", "title": "Scouts", "agents": ["explorer"]})
         # Without a structure the built-in table is used, unchanged.
         plain = snapshot_json.snapshot_document(demo_snapshot(1000), "demo")
-        self.assertEqual((plain["structure"]["source"], sorted(plain["structure"])), ("builtin", ["loops", "source"]))
+        self.assertEqual((plain["structure"]["source"], sorted(plain["structure"])), ("builtin", ["flows", "source"]))
         self.assertEqual([group["id"] for group in plain["groups"]], ["hub", "understand", "decide", "council", "build", "verify"])
 
     def test_an_agent_carries_the_description_from_its_structure_file(self):

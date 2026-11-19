@@ -7,12 +7,29 @@ This folder is the shape of the agent team, and the graph is drawn from it.
 - A file may begin with settings, one per line, before its description:
   - `pool: 3`: how many of this agent stand ready;
   - `escalates_to: impl-claude`: where its work goes when it fails twice;
-  - `checks: all`: it checks every other agent's work, so the graph links it to all of them;
-  - `seats: councillor-`: agents whose names start with this sit in a circle round it;
-  - `checked_by: reviewer, verifier`: a drawn loop. Each agent named checks this one's work, round after round, until it passes. `agentgraph check` then wants, for every unfinished `implement` or `design` step this agent runs, a `gate` step run by each checker whose `feedback_to` names it. Draw or remove one by clicking one agent and then another in the graph view, or with `agentgraph structure link impl-openai reviewer` / `unlink`; `agentgraph structure loops` lists them. A name that is unknown, the agent itself, the hub or a council seat is ignored with a warning. Only the settings at the top count: a `checked_by` line after the description is part of the description, not a loop. In the snapshot the loops are `structure.loops`: `{"work": "impl-openai", "check": "reviewer", "source": "drawn"}`, followed by the `checks: all` pairs with `"source": "default"`.
+  - `seats: councillor-`: agents whose names start with this sit in a circle round it.
 
-Settings are read from the first 4096 bytes and at most the first 12 lines; blank lines before them are skipped, a blank line after them closes them, and the first other line starts the description. `agentgraph structure link|unlink` (and drawing in the view) leaves a file untouched and says why when it cannot edit it safely: a symlink, text that is not UTF-8, a line break other than `\n` or `\r\n` (such as a lone `\r`), or settings the graph would read differently after the edit.
+Settings are read from the first 4096 bytes and at most the first 12 lines; blank lines before them are skipped, a blank line after them closes them, and the first other line starts the description.
 
 The text after the settings is the agent's description: two or three plain sentences on what it does, when the orchestrator uses it and what it hands back, under 320 characters, with no model names (models come from the preset). It is carried in the snapshot as `agents[].about` and shown first in the agent's details in the graph view. `tests/test_structure_descriptions.py` checks it.
 
+Settings are data: they show in the agent's details and never draw a line by themselves. A fresh download has agents and no connections; at rest the graph draws only the hub's lines to the agents and the council's to its seats. Every other line comes from a flow the user drew, or from a running task graph.
+
 Which agents exist, and their models and skills, still come from the active preset in `oh-my-opencode-slim.json`: an agent with a file here and no entry there is not drawn. Without this folder the graph uses its built-in table.
+
+## Flows
+
+The `flows/` folder (never a group, and ignored by git through the repository's `.gitignore`: flows are each user's own) holds the flows drawn in the graph view: paths through several agents, each agent's output being the next one's input, with a short instruction for the orchestrator. One file per flow, `<id>.md`, where the id (lowercase letters, digits and `-`) is made from the path, such as `flows/impl-openai-verifier-impl-openai.md`:
+
+```
+path: impl-openai -> verifier -> impl-openai
+
+verifier checks impl-openai's work. If it does not pass, send verifier's findings back to impl-openai and repeat until it passes.
+```
+
+- The path has two to 20 agents, each the name of an agent file here; a council seat stands for its council. A step to an agent already on the path sends the work back to it, and the path may go on after that. Refused: an unknown agent, the same agent twice in a row, the hub anywhere but first or last, and a return straight after the work came back to the first agent (its own work is not a check).
+- `A -> A` alone is a loop of an agent on itself, allowed for any agent, the hub included: "A checks its own work against the task's evaluation and repeats until it passes." An agent has one at most; a second is refused. `agentgraph check` adds no rule for it but prints it with the others.
+- At most 200 flow files are read. Adding a flow when 200 are there is refused before anything is written; files beyond 200 put there by hand are named in a warning.
+- The instruction is the text after the blank line, kept exactly as written: at most 2000 characters, no control characters other than newline and tab. It is only ever read as text, never as settings. Left empty or only whitespace, on adding or on editing, it is made from the path again: that is how an edit goes back to the generated text.
+- Draw one in the graph view (click an agent, click the next ones, then press Enter or click the last one again; the details then let you edit the instruction; later, right-click a flow to open them again, or click it and press Delete to remove it, with Ctrl/Cmd+Z to bring it back), or use `agentgraph structure flow add impl-openai verifier impl-openai [--text-file F|-]`. `flow text ID --text-file F|-` changes the instruction, `flow remove ID` removes the flow, and `agentgraph structure flows` lists them. These commands write only in `flows/`: a new file never replaces another, the folder goes when its last flow does, and no agent's file is touched. A file that cannot be read as a flow, or a symlink, is skipped with a warning.
+- `agentgraph check` enforces each flow on the task graphs (see `GRAPH_FORMAT.md`) and prints the instructions after its result. In the snapshot they are `structure.flows`: `{"id": ..., "path": [...], "text": ..., "source": "drawn"}`. There are no default loops.
