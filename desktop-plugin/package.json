@@ -1,0 +1,7 @@
+{
+  "name": "agentgraph-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenCode Desktop side panel showing the live agent graph (GUI part only; loaded as a local directory).",
+  "license": "UNLICENSED"
+}
