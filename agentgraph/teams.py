@@ -388,13 +388,15 @@ def add(lead, members, text: str | None = None, structure_dir: Path | None = Non
         shape = _agents(root)
         loaded, _ = _load(root, shape)
         lead, members, notes = _refusal(shape, lead, members, loaded)
-        if len(loaded) >= TEAM_FILES_LIMIT:
-            raise TeamError(f"the structure folder already holds {len(loaded)} teams, the most it reads is "
-                            f"{TEAM_FILES_LIMIT}; remove one first. Nothing was written")
         if text is None or not text.strip():
             text = team_text(lead, members, _hub(shape))
         teams_fd = _open_teams(root_fd, True)
         try:
+            # Count the files, not the teams read: a file that cannot be read still counts toward the limit.
+            held = len(_files(teams_fd))
+            if held >= TEAM_FILES_LIMIT:
+                raise TeamError(f"the structure folder already holds {held} team files, the most it reads is "
+                                f"{TEAM_FILES_LIMIT}; remove one first. Nothing was written")
             team_id = _new_id(lead, {name[:-3] for name in os.listdir(teams_fd) if name.endswith(".md")})
             _write(teams_fd, team_id + ".md", team_file(lead, members, text), new=True)
         finally:
@@ -491,63 +493,61 @@ def problems(teams, graph, seats: dict | None = None) -> list[str]:
     which none or one member has a node adds no rule. Node statuses do not matter. `graph` is a task graph or
     its JSON as a dict; `seats` ({council lead: seat prefix}) makes a seat's node count for its council.
     Odd input adds no message and never raises."""
-    try:
-        raw_nodes = _get(graph, "nodes")
-        if not isinstance(raw_nodes, (list, tuple)) or not isinstance(teams, (list, tuple)):
-            return []
-        prefixes = {lead: prefix for lead, prefix in (seats or {}).items()
-                    if isinstance(lead, str) and isinstance(prefix, str) and prefix}
-        nodes: list[tuple[str, str, list[str]]] = []
-        for raw in raw_nodes:
-            node_id, agent = _get(raw, "id"), _get(raw, "agent")
-            if not isinstance(node_id, str) or not isinstance(agent, str):
-                continue
-            agent = next((lead for lead, prefix in prefixes.items() if agent != lead and agent.startswith(prefix)), agent)
-            nodes.append((node_id, agent, _names(_get(raw, "depends_on"))))
-        depends: dict[str, set[str]] = {}
-        for node_id, _, after in nodes:
-            depends.setdefault(node_id, set()).update(after)
-
-        def ancestors(start: str) -> set[str]:
-            seen: set[str] = set()
-            stack = list(depends.get(start, ()))
-            while stack:
-                current = stack.pop()
-                if current not in seen:
-                    seen.add(current)
-                    stack.extend(depends.get(current, ()))
-            return seen
-
-        found: list[str] = []
-        for team in teams:
-            lead, members = _get(team, "lead"), _names(_get(team, "members"))
-            if not isinstance(lead, str) or not members:
-                continue
-            team_id = _get(team, "id")
-            label = team_id if isinstance(team_id, str) and team_id else lead
-            member_nodes = [node_id for node_id, agent, _ in nodes if agent in members]
-            member_nodes = list(dict.fromkeys(member_nodes))
-            if len(member_nodes) < 2:
-                continue
-            best: list[str] | None = None
-            for node_id in dict.fromkeys(node_id for node_id, agent, _ in nodes if agent == lead):
-                above = ancestors(node_id)
-                missing = [mine for mine in member_nodes if mine not in above]
-                if best is None or len(missing) < len(best):
-                    best = missing
-            missing = member_nodes if best is None else best
-            if not missing:
-                continue
-            who = {node_id: agent for node_id, agent, _ in nodes}
-            shown = ", ".join(f"{node_id} ({who[node_id]})" for node_id in missing[:8]) \
-                + (f" and {len(missing) - 8} more" if len(missing) > 8 else "")
-            how = ("no node of " + lead + " follows them" if best is None
-                   else f"no single node of {lead} depends on all of them")
-            found.append(f"team {label}: the work of {shown} is not reported to {lead}, the team's lead: {how}; "
-                         f"a node run by {lead} must depend on each of them")
-        return found
-    except Exception:  # odd input is the caller's problem, never a crash in the validator
+    raw_nodes = _get(graph, "nodes")
+    if not isinstance(raw_nodes, (list, tuple)) or not isinstance(teams, (list, tuple)):
         return []
+    seats = seats if isinstance(seats, dict) else {}
+    prefixes = {lead: prefix for lead, prefix in seats.items()
+                if isinstance(lead, str) and isinstance(prefix, str) and prefix}
+    nodes: list[tuple[str, str, list[str]]] = []
+    for raw in raw_nodes:
+        node_id, agent = _get(raw, "id"), _get(raw, "agent")
+        if not isinstance(node_id, str) or not isinstance(agent, str):
+            continue
+        agent = next((lead for lead, prefix in prefixes.items() if agent != lead and agent.startswith(prefix)), agent)
+        nodes.append((node_id, agent, _names(_get(raw, "depends_on"))))
+    depends: dict[str, set[str]] = {}
+    for node_id, _, after in nodes:
+        depends.setdefault(node_id, set()).update(after)
+
+    def ancestors(start: str) -> set[str]:
+        seen: set[str] = set()
+        stack = list(depends.get(start, ()))
+        while stack:
+            current = stack.pop()
+            if current not in seen:
+                seen.add(current)
+                stack.extend(depends.get(current, ()))
+        return seen
+
+    found: list[str] = []
+    for team in teams:
+        lead, members = _get(team, "lead"), _names(_get(team, "members"))
+        if not isinstance(lead, str) or not members:
+            continue
+        team_id = _get(team, "id")
+        label = team_id if isinstance(team_id, str) and team_id else lead
+        member_nodes = [node_id for node_id, agent, _ in nodes if agent in members]
+        member_nodes = list(dict.fromkeys(member_nodes))
+        if len(member_nodes) < 2:
+            continue
+        best: list[str] | None = None
+        for node_id in dict.fromkeys(node_id for node_id, agent, _ in nodes if agent == lead):
+            above = ancestors(node_id)
+            missing = [mine for mine in member_nodes if mine not in above]
+            if best is None or len(missing) < len(best):
+                best = missing
+        missing = member_nodes if best is None else best
+        if not missing:
+            continue
+        who = {node_id: agent for node_id, agent, _ in nodes}
+        shown = ", ".join(f"{node_id} ({who[node_id]})" for node_id in missing[:8]) \
+            + (f" and {len(missing) - 8} more" if len(missing) > 8 else "")
+        how = ("no node of " + lead + " follows them" if best is None
+               else f"no single node of {lead} depends on all of them")
+        found.append(f"team {label}: the work of {shown} is not reported to {lead}, the team's lead: {how}; "
+                     f"a node run by {lead} must depend on each of them")
+    return found
 
 
 # --- command ------------------------------------------------------------------------------------

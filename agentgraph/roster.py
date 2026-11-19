@@ -28,6 +28,12 @@ PROTECTED = ("orchestrator", "council", "councillor")
 # Keys the plugin reads at the preset level; a custom agent with one of these names would be
 # mistaken for them. "constructor" and "prototype" are JavaScript object traps.
 RESERVED = ("extends", "agents", "marketplace", "constructor", "prototype")
+# Names that are not the plugin's to hand out. `user` is the human (sources.py never lists it as an
+# agent). build, plan, general (and explore, an alias above) are OpenCode's own agents (the `agent`
+# map of @opencode-ai/sdk's Config type); compaction, summary and title are its hidden system
+# agents (plugin dist/index.js line 41082, SYSTEM_AGENTS).
+HOST_AGENTS = ("user", "build", "plan", "general", "compaction", "summary", "title")
+AGENTS_DIR = sources.CONFIG_DIR / "agents"
 SEAT_PREFIX = "councillor-"
 
 NAME = re.compile(r"[a-z][a-z0-9_-]{0,63}")
@@ -98,7 +104,18 @@ def _names(values, kind):
     return result
 
 
-def _check_new_name(obj, name, selected):
+def _agent_files(agents_dir):
+    """The stems of the *.md files in OpenCode's agents folder (read only; none when it is missing)."""
+    try:
+        with os.scandir(agents_dir) as entries:
+            return {Path(entry.name).stem for entry in entries if entry.name.endswith(".md")}
+    except FileNotFoundError:
+        return set()
+    except OSError as exc:
+        raise RosterError(f"cannot read the agents folder: {exc}") from exc
+
+
+def _check_new_name(obj, name, selected, agents_dir=AGENTS_DIR):
     if not isinstance(name, str) or not NAME.fullmatch(name):
         raise RosterError("invalid agent name: use a lowercase letter, then lowercase letters, digits, '_' or '-' (64 at most)")
     if name in BUILTIN or name in ALIASES:
@@ -107,6 +124,10 @@ def _check_new_name(obj, name, selected):
         raise RosterError(f"names starting with {SEAT_PREFIX!r} belong to council seats")
     if name in RESERVED:
         raise RosterError(f"{name!r} is a key the plugin reads in presets; choose another name")
+    if name in HOST_AGENTS:
+        raise RosterError(f"{name!r} is reserved for the user or one of OpenCode's own agents")
+    if name in _agent_files(agents_dir):
+        raise RosterError(f"{name!r} is already an agent file in the agents folder")
     taken = [preset for preset in selected if name in obj["presets"][preset]]
     if taken:
         raise RosterError(f"agent {name!r} already exists in preset {', '.join(taken)}")
@@ -251,7 +272,8 @@ def _map_apply(text, old, new, hint=None):
         if name in before:
             continue
         index = len(rows) if hint is None else min(hint["index"], len(rows))
-        row = hint["row"] if hint and hint["row"] == f"| `{name}` | {after[name]} |{newline}" else None
+        saved = skillset._ROW.fullmatch(hint["row"]) if hint else None
+        row = hint["row"] if saved and saved[1] == name and saved[2] == after[name] else None
         row = row if row is not None else f"| `{name}` | {after[name]} |{newline}"
         at = rows[index][1] if index < len(rows) else (rows[-1][2] if rows else table_start)
         edits.append((at, at, row))
@@ -353,14 +375,6 @@ def _schema_check(obj, entries, disabled, schema_path):
 # --- files -----------------------------------------------------------------------------------
 
 
-def _folder(config, root):
-    folder = root / f"{date.today().isoformat()}-roster-edit"
-    if config.resolve() != CONFIG.resolve():
-        folder /= hashlib.sha256(os.fsencode(config.resolve())).hexdigest()
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder
-
-
 def _fsync_dir(folder):
     fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -369,24 +383,11 @@ def _fsync_dir(folder):
         os.close(fd)
 
 
-def _backup(config, folder, text, mode):
-    backup = folder / config.name
-    if not backup.exists():
-        with skillset._staged(backup, text, mode) as staged:
-            try:
-                os.link(staged, backup)
-            except FileExistsError:
-                pass
-        _fsync_dir(folder)
-    if not stat.S_ISREG(backup.lstat().st_mode):
-        raise RosterError("the daily config backup is not a regular file")
-    return str(backup)
-
-
 def _save_record(folder, record, mode):
     body = json.dumps(record, indent=2, ensure_ascii=False) + "\n"
+    slug = re.sub(r"[^A-Za-z0-9_-]", "_", record["agent"])[:64]  # never a path part, whatever the name
     for number in range(1, 10000):
-        path = folder / f"undo-{record['agent']}-{number:03d}.json"
+        path = folder / f"undo-{slug}-{number:03d}.json"
         with skillset._staged(path, body, mode) as staged:
             try:
                 os.link(staged, path)
@@ -399,15 +400,22 @@ def _save_record(folder, record, mode):
 
 def _save(config, map_path, backups, text, mode, new_text, map_files, dirs, record=None):
     config, backups = Path(config), Path(backups)
+    saved = []
 
     def prepare():
-        folder = _folder(config, backups)
-        result = {"backup": _backup(config, folder, text, mode)}
+        result = skillset._backup(config, backups, text, mode, "roster-edit")
         if record is not None:
-            result["record_path"] = _save_record(folder, record, mode)
+            folder = skillset._backup_folder(config, backups, "roster-edit")
+            saved.append(_save_record(folder, record, mode))
+            result["record_path"] = saved[0]
         return result
 
-    return skillset._commit([*map_files, (config, text, new_text, mode)], dirs, prepare)
+    try:
+        return skillset._commit([*map_files, (config, text, new_text, mode)], dirs, prepare)
+    except BaseException:
+        for path in saved:  # nothing changed, so the undo record would undo nothing
+            Path(path).unlink(missing_ok=True)
+        raise
 
 
 def _start(config, map_path):
@@ -456,7 +464,8 @@ def _orchestrator_text(name, description, read_only):
 
 
 def add(name, model, variant, description, prompt, skills=(), *, read_only=False, presets=None, mcps=(),
-        orchestrator_prompt=None, color=None, config=CONFIG, map_path=MAP, backups=BACKUPS, schema=None):
+        orchestrator_prompt=None, color=None, config=CONFIG, map_path=MAP, backups=BACKUPS, schema=None,
+        agents_dir=AGENTS_DIR):
     """Add a custom agent to every (or the named) preset, in step with the SKILLS.md table."""
     config, map_path = _start(config, map_path)
     _clean(description, "description", limit=MAX_DESCRIPTION)
@@ -473,7 +482,7 @@ def add(name, model, variant, description, prompt, skills=(), *, read_only=False
         text, mode = skillset._read(config, "config")
         obj = skillset._parse(text)
         selected = skillset._selected(obj, presets)
-        _check_new_name(obj, name, selected)
+        _check_new_name(obj, name, selected, agents_dir)
         installed = skillset._catalogue()
         for skill in skills:
             if skill not in installed:
@@ -502,7 +511,7 @@ def add(name, model, variant, description, prompt, skills=(), *, read_only=False
                      [(map_path, map_text, new_map, map_mode)], dirs)
     return {"agent": name, "kind": "custom", "action": "added", "presets": selected, "changed": True,
             "permission": "read-only" if read_only else "writer", "schema": checked,
-            "backup": info["backup"], "message": RESTART}
+            "backup": info["backup"], "previous": info["previous"], "message": RESTART}
 
 
 # --- remove ----------------------------------------------------------------------------------
@@ -532,7 +541,7 @@ def _turn_off(name, obj, text, presets):
 def remove(name, *, presets=None, config=CONFIG, map_path=MAP, backups=BACKUPS, schema=None):
     """Delete a custom agent's entries, or turn a built-in off; returns and saves an undo record."""
     config, map_path = _start(config, map_path)
-    skillset._name(name, "agent")
+    skillset._agent_name(name)
     with skillset._locked(config, map_path) as dirs:
         text, mode = skillset._read(config, "config")
         obj = skillset._parse(text)
@@ -569,7 +578,7 @@ def remove(name, *, presets=None, config=CONFIG, map_path=MAP, backups=BACKUPS, 
         info = _save(config, map_path, backups, text, mode, new_text, map_files, dirs, record)
     return {"agent": name, "kind": record["kind"], "action": "turned off" if name in BUILTIN else "deleted",
             "presets": where, "changed": True, "record": record, "record_path": info["record_path"],
-            "backup": info["backup"], "warnings": problems, "message": RESTART}
+            "backup": info["backup"], "previous": info["previous"], "warnings": problems, "message": RESTART}
 
 
 # --- restore ---------------------------------------------------------------------------------
@@ -582,7 +591,7 @@ def _check_record(record):
     if not isinstance(record, dict) or record.get("version") != 1 or record.get("op") != "remove":
         bad("expected a version 1 remove record")
     name, kind = record.get("agent"), record.get("kind")
-    skillset._name(name, "agent")
+    skillset._agent_name(name)
     if kind == "built-in":
         if name not in BUILTIN or name in PROTECTED:
             bad("not a built-in agent that can be turned off")
@@ -679,7 +688,7 @@ def restore(record, *, config=CONFIG, map_path=MAP, backups=BACKUPS, schema=None
         info = _save(config, map_path, backups, text, mode, new_text, map_files, dirs)
     return {"agent": name, "kind": record["kind"], "action": "restored",
             "presets": [item["preset"] for item in record.get("presets", [])], "changed": True,
-            "backup": info["backup"], "warnings": problems, "message": RESTART}
+            "backup": info["backup"], "previous": info["previous"], "warnings": problems, "message": RESTART}
 
 
 # --- command ---------------------------------------------------------------------------------
@@ -744,6 +753,7 @@ def main(argv=None):
             sub.add_argument("--mcps", action="append")
             sub.add_argument("--color")
             sub.add_argument("--read-only", action="store_true")
+            sub.add_argument("--agents", type=Path, help="OpenCode's agents folder (default: the real one)")
     args = parser.parse_args(argv)
     as_json = args.json or args.root_json
     files = {"config": args.config or args.root_config or CONFIG}
@@ -757,12 +767,13 @@ def main(argv=None):
             if args.op == "add":
                 result = add(args.name, args.model, args.variant, args.description, _read_prompt(args.prompt_file),
                              _csv(args.skills) or [], read_only=args.read_only, presets=presets,
-                             mcps=_csv(args.mcps) or [], color=args.color, **files)
+                             mcps=_csv(args.mcps) or [], color=args.color,
+                             agents_dir=args.agents or AGENTS_DIR, **files)
             elif args.op == "remove":
                 result = remove(args.name, presets=presets, **files)
             else:
                 result = restore(args.record, **files)
-    except SkillsetError as exc:
+    except (SkillsetError, OSError) as exc:
         if as_json:
             print(json.dumps({"error": str(exc)}))
         else:

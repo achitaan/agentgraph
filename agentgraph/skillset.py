@@ -38,6 +38,13 @@ def _name(value, kind):
         raise SkillsetError(f"invalid {kind} name: use 1–100 characters, no leading '-' or control characters")
 
 
+def _agent_name(value):
+    """An agent name that is safe as a key and as part of a file name."""
+    _name(value, "agent")
+    if "/" in value or "\\" in value or value.startswith(".") or ".." in value:
+        raise SkillsetError("invalid agent name: no '/', '\\', '..' or leading '.'")
+
+
 def _read(path, label):
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -149,7 +156,7 @@ def _roster(obj, config):
 
 def show(agent, *, config=CONFIG, presets=None):
     """Report the active list and presets that differ, without writing."""
-    _name(agent, "agent")
+    _agent_name(agent)
     config = Path(config)
     obj = _parse(_read(config, "config")[0])
     selected = _selected(obj, presets)
@@ -451,27 +458,67 @@ def _staged(path, text, mode):
         Path(name).unlink(missing_ok=True)
 
 
-def _backup(config, root, text, mode):
-    folder = root / f"{date.today().isoformat()}-skills-edit"
+# A busy day keeps at most 1 + MAX_BACKUPS copies of one file (the day's first state, then up to
+# MAX_BACKUPS numbered copies of what later writes replaced; the oldest numbered copy goes first).
+MAX_BACKUPS = 48
+
+
+def _backup_folder(config, root, kind="skills-edit"):
+    folder = root / f"{date.today().isoformat()}-{kind}"
     if config.resolve() != CONFIG.resolve():
         # Tests and alternate configs may share both a backup root and basename.
         folder /= hashlib.sha256(os.fsencode(config.resolve())).hexdigest()
     folder.mkdir(parents=True, exist_ok=True)
-    backup = folder / config.name
-    if not backup.exists():
-        with _staged(backup, text, mode) as staged:
-            try:
-                os.link(staged, backup)
-            except FileExistsError:
-                pass
-        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    return folder
+
+
+def _link_new(folder, path, text, mode):
+    """Write `text` to `path` only if nothing is there yet; return whether it did."""
+    with _staged(path, text, mode) as staged:
         try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-    if not stat.S_ISREG(backup.lstat().st_mode):
-        raise SkillsetError("the daily config backup is not a regular file")
-    return str(backup)
+            os.link(staged, path)
+        except FileExistsError:
+            return False
+    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return True
+
+
+def _backup(config, root, text, mode, kind="skills-edit"):
+    """Save what a write is about to replace. `backup` is the day's first state of the file and
+    `previous` the copy of exactly `text` (the same file when nothing changed since it was saved)."""
+    folder = _backup_folder(config, root, kind)
+    base = folder / config.name
+    if not base.exists():
+        _link_new(folder, base, text, mode)
+    numbered = re.compile(re.escape(config.name) + r"\.(\d{4,})\Z")
+    extras = sorted(((int(m[1]), path) for path in folder.iterdir() if (m := numbered.match(path.name))),
+                    key=lambda item: item[0])
+    for _, path in [(0, base), *extras]:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise SkillsetError("a config backup is not a regular file")
+    latest = extras[-1][1] if extras else base
+    if latest.read_bytes() == text.encode("utf-8"):
+        return {"backup": str(base), "previous": str(latest)}
+    number = extras[-1][0] + 1 if extras else 1
+    while not _link_new(folder, folder / f"{config.name}.{number:04d}", text, mode):
+        number += 1
+    previous = folder / f"{config.name}.{number:04d}"
+    extras.append((number, previous))
+    for _, old in extras[:max(len(extras) - MAX_BACKUPS, 0)]:
+        old.unlink(missing_ok=True)
+    return {"backup": str(base), "previous": str(previous)}
+
+
+def _verify(files):
+    """Refuse when a file is no longer what this edit read (another process wrote it meanwhile)."""
+    for path, old, _, _ in files:
+        if _read(path, path.name)[0] != old:
+            raise SkillsetError(f"{path.name} changed while this edit was being made; nothing was written. "
+                                "Try again.")
 
 
 def _commit(files, dir_fds, prepare):
@@ -480,7 +527,9 @@ def _commit(files, dir_fds, prepare):
         ready = [(path, stack.enter_context(_staged(path, new, mode)),
                   stack.enter_context(_staged(path, old, mode)))
                  for path, old, new, mode in files]
+        _verify(files)
         backup = prepare()
+        _verify(files)  # again, right before the first replace: the backup step takes time
         replaced = []
         try:
             for path, new, old in ready:
@@ -498,7 +547,7 @@ def _commit(files, dir_fds, prepare):
 
 
 def _change(op, agent, skill, *, config, presets, map_path, backups, profiles):
-    _name(agent, "agent")
+    _agent_name(agent)
     if op != "all":
         _name(skill, "skill")
     config, map_path, backups = Path(config), Path(map_path), Path(backups)
@@ -542,7 +591,7 @@ def _change(op, agent, skill, *, config, presets, map_path, backups, profiles):
                          lambda: _backup(config, backups, text, mode))
         return {**_description(new_obj, agent, selected), "changed": True,
                 "changed_presets": [path[1] for path in changes], "warnings": warnings,
-                "backup": backup, "message": RESTART}
+                "backup": backup["backup"], "previous": backup["previous"], "message": RESTART}
 
 
 def add(agent, skill, *, config=CONFIG, presets=None, map_path=MAP, backups=BACKUPS, profiles=PROFILES):
@@ -620,7 +669,7 @@ def main(argv=None):
                 result = set_all(args.agent, **kw)
             else:
                 result = (add if args.op == "add" else remove)(args.agent, args.skill, **kw)
-    except SkillsetError as exc:
+    except (SkillsetError, OSError) as exc:
         if output_json:
             print(json.dumps({"error": str(exc)}))
         else:

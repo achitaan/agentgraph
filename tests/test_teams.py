@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from agentgraph import teams
@@ -150,6 +151,20 @@ class Writing(Base):
         teams.add("verifier", ["designer"], structure_dir=self.root)
         teams.add("reviewer", ["designer"], structure_dir=self.root)
         self.assertEqual([t["id"] for t in teams.teams(self.root)], ["reviewer", "verifier"])
+
+
+class FileLimit(Base):
+    def test_the_limit_counts_files_not_the_teams_that_can_be_read(self):
+        folder = self.root / "teams"
+        folder.mkdir()
+        for index in range(teams.TEAM_FILES_LIMIT):
+            (folder / f"junk-{index:03d}.md").write_text("nothing readable here\n")
+        self.assertEqual(teams.teams(self.root), [])
+        message = self.refused(teams.add, "reviewer", ["impl-openai"], None, self.root)
+        self.assertIn(f"{teams.TEAM_FILES_LIMIT} team files", message)
+        (folder / "junk-000.md").unlink()
+        team, _ = teams.add("reviewer", ["impl-openai"], structure_dir=self.root)
+        self.assertEqual(team["id"], "reviewer")
 
 
 class Refusals(Base):
@@ -337,6 +352,22 @@ class Problems(unittest.TestCase):
                                                          {"id": "b", "agent": ["x"]}, {"agent": "impl-claude"}]}),
                                   (self.TEAM, object()), ({"a": 1}, {"nodes": [{"id": "a", "agent": "x", "depends_on": [[]]}]})]:
             self.assertIsInstance(teams.problems(team_input, graph), list)
+
+    def test_odd_seats_and_deep_or_cyclic_graphs_still_give_a_list(self):
+        graph = self.graph(node("a", "impl-openai", ["a"]), node("b", "impl-claude", ["a", "r"]),
+                           node("r", "reviewer", ["b"]))
+        for seats in (None, [1], "x", 5, {1: 2, "reviewer": 3, "x": ""}, {"reviewer": "impl-"}):
+            self.assertIsInstance(teams.problems(self.TEAM, graph, seats), list)
+        chain = [node(f"n{i}", "impl-openai" if i % 2 else "impl-claude", [f"n{i - 1}"] * (i > 0))
+                 for i in range(3000)]
+        self.assertEqual(len(teams.problems(self.TEAM, self.graph(*chain, node("r", "reviewer", ["n2999"])))), 0)
+        self.assertEqual(len(teams.problems(self.TEAM, self.graph(*chain))), 1)
+
+    def test_a_real_bug_in_the_rule_is_not_swallowed(self):
+        graph = self.graph(node("a", "impl-openai"), node("b", "impl-claude"))
+        with unittest.mock.patch.object(teams, "_names", side_effect=RuntimeError("bug")):
+            with self.assertRaisesRegex(RuntimeError, "bug"):
+                teams.problems(self.TEAM, graph)
 
     def test_a_task_graph_object_is_read_like_its_json(self):
         from agentgraph.contract import Node, TaskGraph

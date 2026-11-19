@@ -37,6 +37,8 @@ class RosterTest(unittest.TestCase):
         self.config = self.root / skillset.CONFIG.name
         self.map = self.root / "SKILLS.md"
         self.backups = self.root / "backups"
+        self.agents = self.root / "agents"
+        self.agents.mkdir()
         shutil.copyfile(skillset.CONFIG, self.config)
         shutil.copyfile(skillset.MAP, self.map)
         self.paths = dict(config=self.config, map_path=self.map, backups=self.backups)
@@ -50,7 +52,7 @@ class RosterTest(unittest.TestCase):
 
     def agent(self, name="scout", **kwargs):
         args = dict(model="anthropic/claude-sonnet-5-5", variant="high", description="Finds things in code.",
-                    prompt="You find things.\nReport file and line.", skills=[SKILLS[0]])
+                    prompt="You find things.\nReport file and line.", skills=[SKILLS[0]], agents_dir=self.agents)
         args.update(kwargs)
         return roster.add(name, args.pop("model"), args.pop("variant"), args.pop("description"),
                           args.pop("prompt"), args.pop("skills"), **(self.paths | args))
@@ -418,6 +420,105 @@ class RosterTest(unittest.TestCase):
                     self.assertEqual(process.returncode, 0, (out, err))
                 self.assertTrue({"one", "two"} <= set(self.customs()))
         self.in_step()
+
+    # --- review round: stale writes, padded rows, reserved and unsafe names ---------------------
+
+    def stale(self, path, other, call):
+        real = skillset._backup
+
+        def second_process(*args, **kwargs):
+            path.write_bytes(other)  # between this edit's read and its write
+            return real(*args, **kwargs)
+
+        with patch.object(skillset, "_backup", side_effect=second_process):
+            with self.assertRaisesRegex(skillset.SkillsetError, "changed while this edit was being made"):
+                call()
+
+    def test_a_changed_preset_file_is_refused_by_add_remove_and_restore(self):
+        other = self.original[0] + b"\n"
+        self.stale(self.config, other, self.agent)
+        self.assertEqual((self.config.read_bytes(), self.map.read_bytes()), (other, self.original[1]))
+        self.config.write_bytes(self.original[0])
+        self.stale(self.config, other, lambda: roster.remove("reviewer", **self.paths))
+        self.assertEqual((self.config.read_bytes(), self.map.read_bytes()), (other, self.original[1]))
+        self.assertEqual(list(self.backups.rglob("undo-*.json")), [])  # nothing was removed, nothing to undo
+        self.config.write_bytes(self.original[0])
+        record = roster.remove("reviewer", **self.paths)["record"]
+        after = self.files()
+        self.stale(self.config, after[0] + b"\n", lambda: roster.restore(record, **self.paths))
+        self.assertEqual((self.config.read_bytes(), self.map.read_bytes()), (after[0] + b"\n", after[1]))
+
+    def test_a_changed_map_is_refused_and_the_preset_file_is_not_written_either(self):
+        other = self.original[1] + b"\nA note.\n"
+        self.stale(self.map, other, self.agent)
+        self.assertEqual((self.config.read_bytes(), self.map.read_bytes()), (self.original[0], other))
+        self.assertEqual(list(self.root.glob("*.tmp")) + list(self.root.glob(".*.tmp")), [])
+
+    def test_restore_puts_a_padded_map_row_back_verbatim(self):
+        padded = self.original[1].replace(b"| `reviewer` | ", b"|   `reviewer`   |    ")
+        padded = padded.replace(b"supabase-postgres-best-practices` |\n| `council`",
+                                b"supabase-postgres-best-practices`   |  \t\n| `council`")
+        self.assertNotEqual(padded, self.original[1])
+        self.map.write_bytes(padded)
+        self.original = self.files()
+        self.in_step()
+        record = roster.remove("reviewer", **self.paths)["record"]
+        roster.restore(record, **self.paths)
+        self.assertEqual(self.files(), self.original)
+
+    def test_names_that_belong_to_the_user_or_to_opencode_are_refused(self):
+        for name in roster.HOST_AGENTS:
+            with self.subTest(name=name):
+                self.refused("reserved for the user or one of OpenCode", self.agent, name)
+        for name in ("build", "plan", "general", "user", "compaction", "summary", "title"):
+            self.assertIn(name, roster.HOST_AGENTS)
+
+    def test_a_name_that_is_an_agent_file_is_refused_and_a_free_one_is_not(self):
+        (self.agents / "scribe.md").write_text("---\nmodel: a/b\n---\n")
+        (self.agents / "other.md.disabled").write_text("x")
+        self.refused("agent file", self.agent, "scribe")
+        self.agent("other")
+        self.agent("scout")
+        missing = self.root / "no-agents-folder"
+        self.agent("fresh", agents_dir=missing)
+        self.assertFalse(missing.exists())  # read only
+        code, out, err = self.cli("add", "scribe", "--model", "a/b", "--description", "d",
+                                  "--prompt-file", "-", "--agents", str(self.agents), "--json", stdin="p")
+        self.assertEqual(code, 1)
+        self.assertIn("agent file", json.loads(out)["error"])
+
+    def test_unsafe_names_are_refused_before_anything_is_written_and_never_a_traceback(self):
+        text = self.original[0].decode().replace('"verifier"', '"a/b"')
+        self.config.write_text(text)
+        self.map.write_bytes(self.original[1].replace(b"| `verifier` |", b"| `a/b` |"))
+        self.original = self.files()
+        self.in_step()
+        for name in ("a/b", "../x", "..", ".hidden", "a\\b", "a..b", "a\x00b", "a\udc80"):
+            with self.subTest(name=name):
+                self.refused("invalid agent name", roster.remove, name)
+                code, out, err = self.cli("remove", name, "--json")
+                self.assertEqual(code, 1)
+                self.assertIn("invalid agent name", json.loads(out)["error"])
+        record = {"version": 1, "op": "remove", "agent": "a/b", "kind": "custom", "map": None,
+                  "presets": [{"preset": "fast", "index": 0, "form": "lead", "member": '"a/b": {"model": "x/y"}',
+                               "before": "", "after": ", ", "value": {"model": "x/y"}}]}
+        self.refused("invalid agent name", roster.restore, record)
+        self.assertFalse(self.backups.exists())
+
+    def test_undo_record_file_names_never_depend_on_the_agent_name(self):
+        folder = self.root / "folder"
+        folder.mkdir()
+        path = Path(roster._save_record(folder, {"agent": "a/../b"}, 0o600))
+        self.assertEqual(path.parent, folder)
+        self.assertRegex(path.name, r"^undo-[A-Za-z0-9_-]+-001\.json$")
+
+    def test_backups_hold_each_state_the_write_replaced(self):
+        first = self.agent()
+        second = roster.remove("scout", **self.paths)
+        self.assertEqual(Path(first["backup"]).read_bytes(), self.original[0])
+        self.assertEqual(second["backup"], first["backup"])
+        self.assertNotEqual(second["previous"], second["backup"])
+        self.assertIn(b'"scout"', Path(second["previous"]).read_bytes())
 
     # --- command ---------------------------------------------------------------------------
 

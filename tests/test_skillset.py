@@ -297,6 +297,72 @@ class SkillsetTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o640)
         self.assertEqual(stat.S_IMODE(self.map.stat().st_mode), 0o600)
 
+    def stale(self, path, other, call):
+        real = skillset._backup
+
+        def second_process(*args, **kwargs):
+            path.write_bytes(other)  # between this edit's read and its write
+            return real(*args, **kwargs)
+
+        with patch.object(skillset, "_backup", side_effect=second_process):
+            with self.assertRaisesRegex(skillset.SkillsetError, "changed while this edit was being made"):
+                call()
+
+    def test_a_config_changed_by_another_process_is_refused_and_nothing_is_written(self):
+        other = self.original[0] + b"\n"
+        self.stale(self.config, other, lambda: skillset.add("impl-openai", TRIAL, **self.options))
+        self.assertEqual(self.config.read_bytes(), other)
+        self.assertEqual(self.map.read_bytes(), self.original[1])
+        self.assertEqual(list(self.root.glob(".*.tmp")), [])
+
+    def test_a_map_changed_by_another_process_is_refused_and_neither_file_is_written(self):
+        other = self.original[1] + b"\nA note.\n"
+        self.stale(self.map, other, lambda: skillset.add("impl-openai", TRIAL, **self.options))
+        self.assertEqual(self.map.read_bytes(), other)
+        self.assertEqual(self.config.read_bytes(), self.original[0])
+        self.assertEqual(list(self.root.glob(".*.tmp")), [])
+
+    def test_backup_holds_what_each_write_replaced(self):
+        first = self.change(skillset.add, "impl-openai", TRIAL)
+        state = self.config.read_bytes()
+        second = self.change(skillset.add, "verifier", TRIAL)
+        self.assertEqual(second["backup"], first["backup"])
+        self.assertEqual(Path(first["previous"]), Path(first["backup"]))
+        self.assertNotEqual(second["previous"], second["backup"])
+        self.assertEqual(Path(second["previous"]).read_bytes(), state)
+        self.assertEqual(Path(second["backup"]).read_bytes(), self.original[0])
+        # saving text that the latest backup already holds adds no copy
+        folder = Path(second["backup"]).parent
+        count = len(list(folder.iterdir()))
+        again = skillset._backup(self.config, self.backups, state.decode(), 0o600)
+        self.assertEqual((again["previous"], len(list(folder.iterdir()))), (second["previous"], count))
+
+    def test_backup_copies_stay_bounded_on_a_busy_day(self):
+        with patch.object(skillset, "MAX_BACKUPS", 3):
+            for _ in range(5):
+                self.change(skillset.add, "impl-openai", TRIAL)
+                self.change(skillset.remove, "impl-openai", TRIAL)
+        folder = next(self.backups.rglob(self.config.name)).parent
+        names = sorted(path.name for path in folder.iterdir())
+        self.assertEqual(len(names), 4)
+        self.assertEqual((folder / self.config.name).read_bytes(), self.original[0])
+        self.assertEqual(names[-1], self.config.name + ".0009")
+
+    def test_refuse_unsafe_agent_names_before_anything_is_written(self):
+        for name in ("a/b", "../x", "..", ".hidden", "a\\b", "a..b", "a\x00b", "a\nb", "a\udc80"):
+            with self.subTest(name=name):
+                for call in (lambda: skillset.show(name, config=self.config),
+                             lambda: skillset.add(name, TRIAL, **self.options),
+                             lambda: skillset.remove(name, TRIAL, **self.options),
+                             lambda: skillset.set_all(name, **self.options)):
+                    with self.assertRaisesRegex(skillset.SkillsetError, "invalid agent name"):
+                        call()
+                code, out, err = self.cli("add", name, TRIAL, "--json")
+                self.assertEqual(code, 1)
+                self.assertIn("invalid agent name", json.loads(out)["error"])
+        self.assertEqual(self.files(), self.original)
+        self.assertFalse(self.backups.exists())
+
     def test_failure_before_rename_leaves_both_files_unchanged(self):
         with patch.object(skillset.os, "replace", side_effect=OSError("simulated before rename")):
             with self.assertRaisesRegex(skillset.SkillsetError, "simulated before rename"):

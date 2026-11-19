@@ -350,6 +350,45 @@ class SkillfilesTest(unittest.TestCase):
         self.assertEqual(list(self.folder.glob(".*.tmp")), [])
         self.assertEqual(next(self.backups.rglob("SKILL.md")).read_bytes(), self.original)
 
+    def test_a_file_changed_by_another_process_is_not_overwritten(self):
+        other = self.original.replace(b"Original description", b"Someone else's description")
+        real = sf._backup_folder
+
+        def second_process(*args, **kwargs):
+            self.path.write_bytes(other)  # between this write's read and its replace
+            return real(*args, **kwargs)
+
+        with patch.object(sf, "_backup_folder", side_effect=second_process):
+            with self.assertRaisesRegex(skillset.SkillsetError, "changed while this edit was being made"):
+                sf.write("example", body="new body\n", **self.edit_options)
+        self.assertEqual(self.path.read_bytes(), other)
+        self.assertEqual(list(self.folder.glob(".*.tmp")), [])
+
+    def test_a_file_changed_just_before_the_replace_is_not_overwritten(self):
+        other = self.original + b"Appended elsewhere.\n"
+        real = skillset._staged
+        calls = []
+
+        def staged(path, *args):
+            calls.append(path.name)
+            if path == self.path:
+                path.write_bytes(other)
+            return real(path, *args)
+
+        with patch.object(skillset, "_staged", side_effect=staged):
+            with self.assertRaisesRegex(skillset.SkillsetError, "changed while this edit was being made"):
+                sf.write("example", body="new body\n", **self.edit_options)
+        self.assertEqual(self.path.read_bytes(), other)
+
+    def test_write_backups_stay_bounded_on_a_busy_day(self):
+        with patch.object(skillset, "MAX_BACKUPS", 3):
+            for number in range(8):
+                sf.write("example", body=f"body {number}\n", **self.edit_options)
+        kept = list(self.backups.rglob("SKILL.md"))
+        self.assertEqual(len(kept), 3)
+        self.assertIn(b"body 6", b"".join(path.read_bytes() for path in kept))
+        self.assertEqual(sf.read("example", **self.options)["body"], "body 7\n")
+
     def test_failed_create_and_delete_leave_tree_unchanged(self):
         original = self.tree()
         with patch.object(sf.os, "rename", side_effect=OSError("simulated rename failure")):

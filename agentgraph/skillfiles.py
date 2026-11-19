@@ -301,6 +301,22 @@ def _previous_description(backups, kind, text, parsed, value):
     return None
 
 
+def _unchanged(path, text):
+    """Refuse when SKILL.md is no longer what this write read (another process wrote it meanwhile)."""
+    if skillset._read(path, "SKILL.md")[0] != text:
+        raise SkillfilesError("SKILL.md changed while this edit was being made; nothing was written. Try again.")
+
+
+def _prune(backup_dir, kind):
+    """Keep the newest skillset.MAX_BACKUPS write backups of one skill in a day's folder."""
+    mine = sorted((p for p in backup_dir.parent.glob(f"{kind}-*") if p.is_dir() and not p.is_symlink()),
+                  key=lambda p: p.lstat().st_mtime_ns)
+    for old in mine[:max(len(mine) - skillset.MAX_BACKUPS, 0)]:
+        if [child.name for child in old.iterdir()] == ["SKILL.md"]:  # only what this module wrote
+            (old / "SKILL.md").unlink()
+            old.rmdir()
+
+
 def write(id, body=None, description=None, *, skills=SKILLS, backups=BACKUPS):
     """Atomically update body/description, preserving all other frontmatter bytes."""
     _id(id)
@@ -330,14 +346,17 @@ def write(id, body=None, description=None, *, skills=SKILLS, backups=BACKUPS):
         if updated == text:
             return {**result, "changed": False, "message": "No change needed."}
         path = root / id / "SKILL.md"
+        _unchanged(path, text)
         backup_dir = _backup_folder(backups, kind)
         backup = backup_dir / "SKILL.md"
         with skillset._staged(backup, text, mode) as staged:
             os.replace(staged, backup)
         _sync(backup_dir)
         with skillset._staged(path, updated, mode) as staged:
+            _unchanged(path, text)  # again, right before the replace
             os.replace(staged, path)
         _sync(path.parent)
+        _prune(backup_dir, kind)
         return {**result, "changed": True, "backup": str(backup)}
 
 
