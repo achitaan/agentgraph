@@ -1128,6 +1128,20 @@
         assertFits(root);
       });
     });
+    await test('the run panel lists every skill and the agents that may load it', async () => {
+      const data = fixture(); data.agents.find(a => a.name === 'impl-openai').skills = ['code-assurance']; data.agents.find(a => a.name === 'reviewer').skills = ['code-assurance']; data.agents[0].skills = ['*'];
+      data.skills = [{ name: 'code-assurance', description: 'Review <b>code</b>' }, { name: 'sympy', description: 'Exact math' }];
+      await using(data, async (root, app) => {
+        root.querySelector('.ag-run-button').click();
+        const fold = [...root.querySelectorAll('.ag-run-fold')].find(item => item.dataset.runFold === 'skills');
+        assert(fold && !fold.open && fold.querySelector('.ag-fold-count').textContent === '2' && !fold.querySelector('.ag-skill-row'), 'skills are not a closed fold with a count');
+        fold.open = true; await sleep(30);
+        const rows = [...fold.querySelectorAll('.ag-skill-row')].map(row => row.textContent);
+        assert(rows.join('|') === 'code-assuranceimpl-openai · reviewerReview <b>code</b>|sympy—Exact math' && !fold.querySelector('b'), 'skill rows are wrong: ' + rows.join('|'));
+        root.querySelector('.ag-close').click(); delete data.skills; await app.refresh(); root.querySelector('.ag-run-button').click();
+        assert(![...root.querySelectorAll('.ag-run-fold')].some(item => item.dataset.runFold === 'skills'), 'an empty skill list is shown');
+      });
+    });
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
   })().catch(error => { document.getElementById('results').textContent = 'RESULT: FAIL ' + error.stack; });
 </script>

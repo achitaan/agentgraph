@@ -107,6 +107,23 @@ class SnapshotDocumentTests(unittest.TestCase):
                     self.assertEqual(busy["groups"][0]["agents"][0], root_name)
                     self.assertIn("orchestrator", busy["groups"][0]["agents"])
 
+    def test_skills_are_listed_with_their_descriptions(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            self.assertEqual(snapshot_json.skills_document(root), [])  # no skills folder
+            def skill(name, text):
+                (root / "skills" / name).mkdir(parents=True)
+                (root / "skills" / name / "SKILL.md").write_text(text)
+            skill("plain", "---\nname: plain\ndescription: Does one thing.\n---\nbody description: not this\n")
+            skill("folded", "---\r\nname: folded\r\ndescription: >\r\n  Spread over\r\n  two lines.\r\nlicense: MIT\r\n---\r\n")
+            skill("bare", "No frontmatter here\n")
+            (root / "skills" / "empty").mkdir()
+            (root / "skills" / "note.txt").write_text("not a skill")
+            self.assertEqual(snapshot_json.skills_document(root), [
+                {"name": "bare", "description": ""}, {"name": "folded", "description": "Spread over two lines."},
+                {"name": "plain", "description": "Does one thing."}])
+
     def test_learning_reports_notes_changes_and_what_is_still_pending(self):
         import tempfile
         from agentgraph import ledger

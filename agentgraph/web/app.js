@@ -989,6 +989,13 @@
           stepRow(groups.get(key), node, true);
         });
       }
+      const catalogue = snapshot.skills || [];
+      if (catalogue.length) runFold('Skills', 'skills', catalogue.length, body => appendList(body, catalogue, skill => {
+        const users = visibleAgents.filter(agent => (agent.skills || []).includes(skill.name)).map(agent => agent.name);
+        const row = el('div', 'ag-skill-row'); row.dataset.skill = text(skill.name);
+        row.append(el('span', 'ag-skill-name', text(skill.name)), el('span', 'ag-skill-users', users.join(' · ') || '—'), el('span', 'ag-skill-about', text(skill.description)));
+        row.title = text(skill.description); body.append(row);
+      }));
       runFold('History', 'history', graph?.events.length || 0, body => section(body, 'Recent activity', graph?.events.length ? [...graph.events].reverse() : 'None', false, event => [event.node, event.event, text(event.note)].filter(Boolean).join(' · ')));
       runFold('Amendments', 'amendments', graph?.amendments.length || 0, body => section(body, 'Amendments', graph?.amendments.length ? graph.amendments : 'None'));
       runFold('Lessons', 'lessons', graph?.lessons.length || 0, body => section(body, 'Lessons', graph?.lessons.length ? graph.lessons : 'None'));

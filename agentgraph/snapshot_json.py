@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 from collections import defaultdict
 from dataclasses import asdict, replace
@@ -271,11 +272,40 @@ def learning_document(home_root: Path | None = None, config_dir: Path | None = N
         return None
 
 
+def skills_document(config_dir: Path | None = None) -> list[dict]:
+    """The installed skills: name and one-line description, read from the head of each SKILL.md."""
+    found: list[dict] = []
+    try:
+        folders = sorted(path for path in (Path(config_dir or CONFIG_DIR) / "skills").iterdir() if path.is_dir())[:200]
+    except OSError:
+        return found
+    for folder in folders:
+        try:
+            with (folder / "SKILL.md").open("rb") as stream:
+                head = stream.read(4096).decode("utf-8", "replace").replace("\r", "")
+        except OSError:
+            continue
+        front = head.split("---", 2)[1] if head.startswith("---") and head.count("---") >= 2 else ""
+        match = re.search(r"^description:[ \t]*(.*)$", front, re.M)
+        description = match.group(1).strip() if match else ""
+        if match and description in ("", ">", "|", ">-", "|-"):  # folded over the following indented lines
+            rest = front[match.end():].split("\n")[1:]
+            lines = []
+            for line in rest:
+                if not line.startswith((" ", "\t")):
+                    break
+                lines.append(line.strip())
+            description = " ".join(lines)
+        found.append({"name": folder.name, "description": description.strip("'\"")[:300]})
+    return found
+
+
 def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, session: str | None = None) -> dict:
     """The snapshot document plus `learning` for a live source."""
     document = snapshot_document(snapshot, source, task, session=session)
     if source == "live":
         document["learning"] = _json_safe(learning_document())
+        document["skills"] = skills_document()
     return document
 
 

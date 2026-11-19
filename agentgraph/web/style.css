@@ -435,3 +435,8 @@
 .agentgraph .ag-note-row { margin: 0 0 8px; }
 .agentgraph .ag-detail-section .ag-note-row .ag-note { margin-bottom: 2px; }
 .agentgraph .ag-note-meta { display: block; padding-left: 10px; font-size: 9.5px; color: var(--ag-muted); }
+
+.agentgraph .ag-skill-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; padding: 6px 0; border-bottom: 1px solid var(--ag-row-divider); font-size: 10.5px; }
+.agentgraph .ag-skill-name { color: var(--ag-ink); font-weight: 600; }
+.agentgraph .ag-skill-users { color: var(--ag-work); overflow-wrap: anywhere; }
+.agentgraph .ag-skill-about { color: var(--ag-muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
