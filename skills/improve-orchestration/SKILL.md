@@ -18,7 +18,9 @@ All paths are under `~/.config/opencode/`.
 | How the orchestrator routes, briefs, evaluates and runs graphs | `oh-my-opencode-slim/orchestrator_append.md` |
 | The same rules in short form for the primary agent | `AGENTS.md` (keep it consistent with the file above) |
 | The loop every implementer follows | `oh-my-opencode-slim/impl-openai_append.md`, and its two identical copies `impl-claude_append.md`, `impl-hard_append.md` (edit all three the same way) |
-| The reviewer's behaviour | `agents/reviewer.md` |
+| The reviewer's or verifier's behaviour | its `prompt` under each preset in `oh-my-opencode-slim.json` (edit every preset the same way) |
+| What an agent knows how to do | one `SKILL.md` or reference file under `skills/<name>/` (shared by every preset; never rename a skill or change what it is for) |
+| Which skills an agent may load | that agent's `skills` list under each preset in `oh-my-opencode-slim.json` |
 | One other agent's behaviour | `oh-my-opencode-slim/<agent>_append.md` (create it if it does not exist) |
 | A fact about one project or one kind of task | `orchestration/LESSONS.md`, not a prompt |
 
@@ -72,3 +74,9 @@ Out of bounds: models, effort levels, permissions and the agent roster. Those ar
 - The base files are read on every run, so every sentence costs tokens forever. If a file has grown past what you can explain line by line, propose a deletion or a merge as the improvement.
 - Procedures that only matter sometimes belong in a skill, loaded when needed, not in a prompt that is always read.
 - `LESSONS.md` holds lessons that are specific. When the same lesson has been written there for two different projects, it is general: propose moving it into a base prompt and delete it from the lessons file.
+
+## Skills and the toolkit repository
+
+- A note from the user tagged with an agent points at that agent's prompt or skills first. The cause may be a rule in a prompt, guidance in a skill the agent loaded, or a skill it needed and was not allowed to load; propose the edit where the cause is.
+- A skill edit follows the same procedure as a prompt edit: one small exact before/after change, a proposal, the user's approval, a backup, then `agentgraph improved`. Skill scripts and data files are out of bounds.
+- After an approved edit is applied, run `sh ~/.config/opencode/orchestration/sync.sh` and show the user its output, so the toolkit repository carries the change. Commit only if the user asks.

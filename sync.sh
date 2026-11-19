@@ -6,7 +6,7 @@ HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 SOURCE=${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}
 # Skills kept out of the toolkit on purpose (personal or employer-specific), space separated.
 SEPARATE=${TOOLKIT_SEPARATE_SKILLS:-shopify-ruby}
-set -- --exclude __pycache__ --exclude .DS_Store --exclude OPENCODE-CHANGES.md --exclude THIRD-PARTY-NOTICES.md --exclude licenses --exclude ui-ux-pro-max
+set -- --exclude __pycache__ --exclude .DS_Store --exclude OPENCODE-CHANGES.md --exclude AUDIT.md --exclude THIRD-PARTY-NOTICES.md --exclude licenses --exclude ui-ux-pro-max
 for name in $SEPARATE; do set -- "$@" --exclude "$name"; done
 rsync -a --delete "$@" "$SOURCE/skills/" "$HERE/skills/"
 cp -p "$SOURCE/oh-my-opencode-slim.json" "$HERE/config/oh-my-opencode-slim.json"
