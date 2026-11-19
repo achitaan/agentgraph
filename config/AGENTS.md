@@ -52,6 +52,16 @@ The prompts that drive this orchestration improve from evidence, with the user a
 - When the user corrects how the orchestration worked, save it in their words right away: write the words to a temporary file with the `write` tool, then run `~/.config/opencode/orchestration/bin/agentgraph feedback --text-file <that file> --agent <name>`, so the shell never touches their text.
 - When `agentgraph record` says an improvement is due, or the user asks to improve how the agents work, finish the current task, then load the `improve-orchestration` skill. It proposes one small prompt edit with its evidence. Never apply a prompt edit the user has not approved.
 
+## Cost
+
+Most of the money goes to the primary session: its whole context is paid for on every turn, and paid for again at the write price after a pause longer than the cache lifetime. `~/.config/opencode/orchestration/bin/agentgraph cost` shows where a chat's money went.
+
+- One task per chat. When a task graph closes, or the user starts unrelated work, say so and suggest a fresh chat. The graph file and its artifacts are the checkpoint, so nothing needs retelling.
+- Keep long results out of the primary context: workers write long output to an artifact and return the path with a short summary; filter command output instead of printing it whole.
+- Once `verifier` has passed a lane, accept it on its evidence or by rerunning the evaluation command. Do not re-read the whole change yourself.
+- Use a script, not an agent, for mechanical work: searching for phrases, counting, comparing files.
+- Change configuration, prompts and skills in one batch, at the start or the end of a chat. A change in the middle can make the provider re-read the whole conversation at the write price.
+
 ## `impl-hard` subagent (Fable 5.2 Fast High)
 
 - Use only for genuinely difficult implementations, substantial refactors with subtle correctness, or bugs that persist after 2+ fix attempts. Never for routine coding; a task that is only big goes to `impl-claude`.
