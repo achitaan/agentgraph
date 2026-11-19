@@ -1,0 +1,1029 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>AgentGraph view regression checks</title>
+<style>/* VIEW_CSS */</style>
+<body style="margin:0">
+<pre id="results">RESULT: RUNNING</pre>
+<div id="fixtures"></div>
+<script>/* VIEW_SOURCE */</script>
+<script>
+  const indexBootstrap = /* INDEX_BOOTSTRAP */;
+  (async () => {
+    const results = [];
+    const assert = (condition, message) => { if (!condition) throw new Error(message); };
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+    const step = (id, agent, extra = {}) => ({ id, agent, type: 'implement', goal: id, status: 'running', session: null, busy: false, attempts: 1, tiers: [], scope: [], changed_paths: [], depends_on: [], artifacts: [], inputs: [], ...extra });
+    const agent = (name, group, extra = {}) => ({ name, group, team: 'main', parent: '', model: 'Test model', effort: 'high', busy: 0, sessions: [], ...extra });
+    function fixture() {
+      return {
+        version: 1, source: 'demo', team: 'main', warnings: [],
+        totals: { sessions: 1, running: 1, cost: 0, tokens_in: 0, tokens_out: 0 },
+        root: { agent: 'orchestrator' },
+        agents: [agent('orchestrator', 'hub'), agent('impl-openai', 'build', { busy: 1, sessions: [{ id: 's1', title: 'Work', busy: true, model: 'Test model', cost: 0 }] }), agent('impl-claude', 'build'), agent('impl-hard', 'build'), agent('reviewer', 'verify'), agent('council', 'council'), agent('councillor-claude', 'council', { parent: 'council' }), agent('team-b-lead', 'hub', { team: 'team-b' }), agent('team-b-worker', 'build', { team: 'team-b' })],
+        escalation: [{ from: 'impl-openai', to: 'impl-claude', used: false }, { from: 'impl-claude', to: 'impl-hard', used: true }],
+        graph: { task: 'view-tests', goal: 'Test the view', status: 'running', progress: { passed: 0, total: 2 }, coverage: { delivered: 0, total: 0 }, objectives: [], problems: [], advice: [], events: [], amendments: [], lessons: [],
+          nodes: [step('stale-step', 'impl-openai', { goal: 'Old unfinished work' }), step('current-step', 'impl-openai', { session: 's1', busy: true, goal: 'Current work', artifacts: [{ id: 'result', revision: 3, path: 'result.md' }], inputs: [{ from: 'upstream', artifact: 'plan', revision: 2, stale: true }] })],
+          flows: [{ from: 'reviewer', to: 'impl-openai', kind: 'data', pairs: [['review', 'current-step']], artifacts: ['plan'], active: false }, { from: 'reviewer', to: 'impl-openai', kind: 'feedback', pairs: [['review', 'current-step']], artifacts: ['review-notes'], active: true }] }
+      };
+    }
+    function host() {
+      const root = document.createElement('div'); root.style.cssText = 'position:relative;width:1100px;height:760px';
+      document.getElementById('fixtures').append(root); return root;
+    }
+    async function using(data, run, options = {}) {
+      const root = host(), app = AgentGraph.mount(root, { fetchSnapshot: async () => data, intervalMs: 60000, motion: 'none', ...options });
+      try { await app.refresh(); await run(root, app); } finally { app.destroy(); root.remove(); }
+    }
+    function open(root, name) { root.querySelector('[data-agent="' + name + '"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); }
+    function move(root, name) { root.querySelector('[data-agent="' + name + '"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', shiftKey: true, bubbles: true })); }
+    const edge = (root, kind, name) => [...root.querySelectorAll('line[data-edge]')].find(e => e.dataset.kind === kind && e.dataset.edge === name);
+    async function resizeTo(root, width, height) {
+      root.style.width = width + 'px'; root.style.height = height + 'px';
+      root.getBoundingClientRect();
+      await sleep(150);
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }
+    function circleBounds(root) {
+      return [...root.querySelectorAll('[data-agent]')].map(node => ({ name: node.dataset.agent, bounds: node.querySelector('.ag-halo').getBoundingClientRect() }));
+    }
+    function assertFits(root) {
+      const viewport = root.querySelector('.ag-viewport').getBoundingClientRect(), circles = circleBounds(root);
+      const compact = root.classList.contains('ag-canvas-compact') || root.classList.contains('ag-compact');
+      const anchor = root.querySelector('[data-agent="orchestrator"] .ag-core') || root.querySelector('[data-agent] .ag-core');
+      const anchorY = anchor?.getBoundingClientRect().y;
+      assert(viewport.width > 0 && viewport.height > 0, 'canvas has no room');
+      circles.forEach(({ name, bounds: b }) => {
+        assert(b.left >= viewport.left - .1 && b.right <= viewport.right + .1, name + ' is horizontally clipped');
+        if (!compact) assert(b.top >= viewport.top - .1 && b.bottom <= viewport.bottom + .1, name + ' is vertically clipped');
+      });
+      circles.forEach(({ name, bounds: a }, i) => circles.slice(i + 1).forEach(({ name: other, bounds: b }) => {
+        const distance = Math.hypot(a.x + a.width / 2 - b.x - b.width / 2, a.y + a.height / 2 - b.y - b.height / 2);
+        assert(distance >= (a.width + b.width) / 2 - .1, name + ' overlaps ' + other);
+      }));
+      const frame = root.getBoundingClientRect();
+      assert(root.scrollWidth <= frame.width + 1, 'content overflows the panel');
+      root.querySelectorAll('.ag-header > *, .ag-summary > *, .ag-controls').forEach(item => {
+        if (!item.getClientRects().length) return;
+        const b = item.getBoundingClientRect();
+        assert(b.left >= frame.left - .1 && b.right <= frame.right + .1, 'header or controls clipped: ' + item.className);
+      });
+      if (compact) {
+        const scale = root.querySelector('.ag-drawing > g').getCTM().a;
+        assert(scale >= .85, 'automatic layout shrank below readable scale: ' + scale);
+        root.querySelectorAll('.ag-agent-name').forEach(label => assert(parseFloat(getComputedStyle(label).fontSize) * scale >= 11, 'agent label is too small'));
+        if (circles.length >= 7) assert(Math.max(...circles.map(c => c.bounds.right)) - Math.min(...circles.map(c => c.bounds.left)) >= viewport.width * .7, 'nodes form a thin strip rather than using the panel width');
+        const overflow = circles.some(({ bounds: b }) => b.top < viewport.top || b.bottom > viewport.bottom);
+        if (overflow) assert(!root.querySelector('.ag-pan-cue').hidden, 'vertical overflow has no cue');
+        // Every clipped agent must be reachable, without zooming out.
+        circles.forEach(({ name }) => {
+          const node = root.querySelector('[data-agent="' + name + '"] .ag-halo'), b = node.getBoundingClientRect();
+          root.querySelector('.ag-viewport').dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: b.y + b.height / 2 - viewport.y - viewport.height / 2 }));
+          const reached = node.getBoundingClientRect();
+          assert(reached.top >= viewport.top - .1 && reached.bottom <= viewport.bottom + .1, name + ' cannot be reached by panning');
+        });
+        if (anchor) root.querySelector('.ag-viewport').dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: anchor.getBoundingClientRect().y - anchorY }));
+      }
+    }
+    function crowdedFixture() {
+      const data = fixture();
+      data.agents.push(agent('lookup-a', 'understand'), agent('lookup-b', 'understand'), agent('advisor-a', 'decide'), agent('advisor-b', 'decide'), agent('impl-extra-a', 'build'), agent('impl-extra-b', 'build'), agent('secondary-hub', 'hub'), agent('councillor-b', 'council', { parent: 'council' }), agent('councillor-c', 'council', { parent: 'council' }));
+      return data;
+    }
+    function loopFixture(data = fixture()) {
+      data.graph.loops = [
+        { id: 'working-loop', worker: 'impl-openai', evaluator: 'reviewer', pairs: [['current-step', 'review-step']], rounds: 3, state: 'working', active: true, artifacts: ['review-findings'] },
+        { id: 'checking-loop', worker: 'impl-claude', evaluator: 'reviewer', pairs: [['build-step', 'check-step']], rounds: 1, state: 'checking', active: true, artifacts: [] },
+        { id: 'closed-loop', worker: 'impl-hard', evaluator: 'reviewer', pairs: [['hard-step', 'final-check']], rounds: 1, state: 'closed', active: false, artifacts: [] },
+        { id: 'unlisted-loop', worker: 'impl-openai', evaluator: 'unlisted-evaluator', pairs: [], rounds: 2, state: 'checking', active: true, artifacts: [] }
+      ];
+      data.graph.flows.push({ from: 'impl-openai', to: 'reviewer', kind: 'data', pairs: [], active: true, artifacts: [] });
+      return data;
+    }
+    function workLoopFixture(data = loopFixture()) {
+      if (!data.graph.loops) loopFixture(data);
+      if (!data.agents.some(a => a.name === 'designer')) data.agents.push(agent('designer', 'build'));
+      if (!data.agents.some(a => a.name === 'explorer')) data.agents.push(agent('explorer', 'understand'));
+      data.graph.work_loops = [
+        { agent: 'impl-openai', nodes: ['current-step'], rounds: 3, state: 'working', active: true },
+        { agent: 'impl-claude', nodes: ['check-step'], rounds: 2, state: 'waiting', active: false },
+        { agent: 'impl-hard', nodes: ['hard-step'], rounds: 4, state: 'stuck', active: false },
+        { agent: 'designer', nodes: ['design-step'], rounds: 1, state: 'closed', active: false },
+        { agent: 'explorer', nodes: [], rounds: 0, state: 'idle', active: false },
+        { agent: 'unlisted-worker', nodes: [], rounds: 1, state: 'working', active: true }
+      ];
+      return data;
+    }
+    function loopHalves(root, id) { return [...root.querySelectorAll('path[data-loop]')].filter(path => path.dataset.loop === id); }
+    function assertLoopShapes(root) {
+      assert(!root.querySelector('rect'), 'network contains a box');
+      root.querySelectorAll('path, ellipse').forEach(shape => assert(shape.hasAttribute('data-loop') || shape.hasAttribute('data-work-loop'), 'curved edge is not a loop'));
+      root.querySelectorAll('[data-edge]').forEach(edge => assert(edge.tagName.toLowerCase() === 'line', 'ordinary edge is not straight'));
+    }
+    function assertLoopCorridors(root, data = loopFixture()) {
+      const visibleLoops = data.graph.loops.filter(loop => root.querySelector('[data-agent="' + loop.worker + '"]') && root.querySelector('[data-agent="' + loop.evaluator + '"]'));
+      assert(root.querySelectorAll('path[data-loop]').length === visibleLoops.length * 2, 'expected two arcs per visible review loop');
+      root.querySelectorAll('path[data-loop]').forEach(path => {
+        const loop = visibleLoops.find(item => item.id === path.dataset.loop), matrix = path.getCTM();
+        const length = path.getTotalLength(), points = Array.from({ length: 81 }, (_, i) => path.getPointAtLength(length * i / 80).matrixTransform(matrix));
+        root.querySelectorAll('[data-agent]').forEach(node => {
+          if ([loop.worker, loop.evaluator].includes(node.dataset.agent)) return;
+          const circle = node.querySelector('.ag-core'), transform = circle.getCTM(), p = { x: transform.e, y: transform.f };
+          const radius = Number(circle.getAttribute('r')) * Math.hypot(transform.a, transform.b);
+          let clearance = Infinity;
+          points.slice(1).forEach((b, i) => {
+            const a = points[i], dx = b.x - a.x, dy = b.y - a.y, t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy)));
+            clearance = Math.min(clearance, Math.hypot(p.x - a.x - t * dx, p.y - a.y - t * dy));
+          });
+          assert(clearance >= radius + 1, root.clientWidth + 'px ' + path.dataset.loop + ' crosses ' + node.dataset.agent + ' (' + clearance.toFixed(1) + ' < ' + (radius + 1).toFixed(1) + ')');
+        });
+      });
+    }
+    async function test(name, run) {
+      try { await run(); results.push('PASS ' + name); } catch (error) { results.push('FAIL ' + name + ': ' + error.message); }
+    }
+
+    await test('document error is visible, one line, and safe', async () => {
+      await using({ version: 1, error: 'python3 was not found\n<img src=x onerror=alert(1)>' }, root => {
+        const notice = root.querySelector('.ag-notice');
+        assert(root.dataset.state === 'error' && !notice.hidden, 'error state missing');
+        assert(notice.textContent.includes('python3 was not found'), 'real error hidden');
+        assert(!notice.textContent.includes('\n') && !root.querySelector('img'), 'unsafe or multiline error');
+        assert(!notice.textContent.includes('Connection interrupted'), 'document error was mislabeled as a connection failure');
+      });
+    });
+    await test('index forwards JSON errors from non-OK responses', async () => {
+      let options;
+      const fakeWindow = { AgentGraph: { mount: (_, value) => { options = value; } } };
+      new Function('window', 'document', 'location', 'fetch', indexBootstrap)(fakeWindow, { getElementById: () => ({ dataset: {} }) }, { search: '' }, async () => ({ ok: false, status: 500, text: async () => JSON.stringify({ error: 'python3 was not found' }) }));
+      let message = ''; try { await options.fetchSnapshot(); } catch (error) { message = error.message; }
+      assert(message === 'python3 was not found', 'HTTP error body discarded: ' + message);
+    });
+    await test('reset clears the old view, choices and positions before fetching', async () => {
+      const data = fixture(), next = deferred(); let waiting = false;
+      await using(data, async (root, app) => {
+        assert(typeof app.reset === 'function', 'reset API missing');
+        const initial = root.querySelector('[data-agent="impl-openai"]').getAttribute('transform');
+        move(root, 'impl-openai'); open(root, 'impl-openai'); root.querySelector('[data-step="current-step"]').open = true;
+        root.querySelector('.ag-run-button').click();
+        const select = root.querySelector('[data-team-switch]'); select.value = 'team-b'; select.dispatchEvent(new Event('change', { bubbles: true })); open(root, 'team-b-worker');
+        waiting = true; const done = app.reset();
+        assert(root.dataset.state === 'loading' && !root.querySelector('[data-agent]'), 'old graph remains during reset');
+        assert(root.querySelector('.ag-detail').hidden && !root.querySelector('[data-step]'), 'old detail remains');
+        next.resolve(data); await done;
+        assert(root.dataset.state === 'ready' && root.dataset.team === 'main', 'reset did not return to root team');
+        assert(root.querySelector('[data-agent="impl-openai"]').getAttribute('transform') === initial, 'dragged position survived reset');
+        open(root, 'impl-openai'); assert(!root.querySelector('[data-step="current-step"]').open, 'expanded step survived reset');
+      }, { fetchSnapshot: () => waiting ? next.promise : Promise.resolve(data) });
+    });
+    await test('reset ignores late requests from the previous session', async () => {
+      const root = host(), old = deferred(), fresh = deferred(); let count = 0;
+      const app = AgentGraph.mount(root, { fetchSnapshot: () => (++count === 1 ? old.promise : fresh.promise), intervalMs: 60000 });
+      try {
+        assert(typeof app.reset === 'function', 'reset API missing');
+        await sleep(0); const done = app.reset(); await sleep(0);
+        assert(count === 2, 'reset reused old pending request');
+        old.resolve(fixture()); await sleep(0);
+        assert(root.dataset.state === 'loading' && !root.querySelector('[data-agent]'), 'old request painted after reset');
+        const next = fixture(); next.agents.push(agent('new-session-agent', 'build')); fresh.resolve(next); await done;
+        assert(root.dataset.state === 'ready' && root.querySelector('[data-agent="new-session-agent"]'), 'new session not rendered');
+      } finally { app.destroy(); root.remove(); }
+    });
+    await test('escalation appears only when used or selected', async () => {
+      await using(fixture(), root => {
+        assert(!edge(root, 'escalation', 'impl-openai->impl-claude'), 'unused route is drawn');
+        assert(!!edge(root, 'escalation', 'impl-claude->impl-hard'), 'used route missing');
+        open(root, 'impl-openai'); assert(!!edge(root, 'escalation', 'impl-openai->impl-claude'), 'selected route missing');
+        root.querySelector('.ag-close').click(); assert(!edge(root, 'escalation', 'impl-openai->impl-claude'), 'deselected route remains');
+      });
+    });
+    await test('resize reflows compact nodes and restores pinned wide positions', async () => {
+      await using(fixture(), async root => {
+        move(root, 'impl-openai'); const pinned = root.querySelector('[data-agent="impl-openai"]').getAttribute('transform');
+        const old = root.querySelector('[data-agent="impl-claude"]').getAttribute('transform'); root.style.width = '400px';
+        await sleep(650);
+        assert(root.querySelector('[data-agent="impl-claude"]').getAttribute('transform') !== old, 'wide layout survived compact resize');
+        assert(root.querySelector('[data-agent="impl-openai"]').getAttribute('transform') !== pinned, 'wide pin prevented compact reflow');
+        await resizeTo(root, 1100, 760);
+        assert(root.querySelector('[data-agent="impl-openai"]').getAttribute('transform') === pinned, 'wide pin was not restored');
+      });
+    });
+    await test('busy labels ignore stale running nodes', async () => {
+      await using(fixture(), root => {
+        const label = root.querySelector('[data-agent="impl-openai"] .ag-agent-work').textContent;
+        assert(label === 'Current work', 'wrong step label: ' + label);
+      });
+    });
+    await test('flow activity is authoritative and feedback artifacts are shown', async () => {
+      await using(fixture(), root => {
+        assert(edge(root, 'data', 'reviewer->impl-openai').dataset.active === 'false', 'data activity inferred from busy consumer');
+        assert(edge(root, 'feedback', 'reviewer->impl-openai').dataset.active === 'true', 'feedback activity overridden');
+        open(root, 'impl-openai');
+        assert(root.querySelector('.ag-flow-row[data-kind="feedback"]').textContent.includes('review-notes'), 'feedback artifacts absent');
+      });
+    });
+    await test('expanded steps expose artifacts, revisions and stale inputs', async () => {
+      await using(fixture(), async root => {
+        open(root, 'impl-openai'); const row = root.querySelector('[data-step="current-step"]'); row.open = true;
+        await sleep(30);
+        assert(row.textContent.includes('result') && row.textContent.includes('r3'), 'artifact revision absent');
+        assert(row.textContent.includes('plan') && row.textContent.includes('r2') && /stale/i.test(row.textContent), 'stale input absent');
+      });
+    });
+    await test('session ownership indexing avoids nested session scans', async () => {
+      const data = fixture(); let probes = 0;
+      data.agents.forEach(a => { a.sessions = new Proxy(a.sessions, { get(target, key, receiver) { if (['map', 'some', 'forEach', Symbol.iterator].includes(key)) probes++; return Reflect.get(target, key, receiver); } }); });
+      data.graph.nodes = Array.from({ length: 150 }, (_, i) => step('n' + i, i % 2 ? 'user' : 'impl-openai', { session: i % 3 ? 'missing-' + i : 's1' }));
+      await using(data, root => {
+        root.querySelector('.ag-run-button').click();
+        assert(probes <= data.agents.length * 5, 'nested session scans: ' + probes);
+        assert(root.querySelector('[data-step="n1"]'), 'unassigned step lost');
+      });
+    });
+    await test('hidden documents pause polling and resume immediately', async () => {
+      const own = Object.getOwnPropertyDescriptor(document, 'hidden'); let hidden = false, calls = 0;
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+      try {
+        await using(fixture(), async () => {
+          hidden = true; document.dispatchEvent(new Event('visibilitychange')); const before = calls;
+          await sleep(560); assert(calls === before, 'hidden page kept polling');
+          hidden = false; document.dispatchEvent(new Event('visibilitychange')); await sleep(30);
+          assert(calls > before, 'visibility did not resume polling');
+        }, { intervalMs: 250, fetchSnapshot: async () => { calls++; return fixture(); } });
+      } finally { if (own) Object.defineProperty(document, 'hidden', own); else delete document.hidden; }
+    });
+    await test('additional hubs do not overlap the root hub', async () => {
+      const data = fixture(); data.agents.push(agent('secondary-hub', 'hub'));
+      await using(data, root => {
+        const a = root.querySelector('[data-agent="orchestrator"] .ag-core').getBoundingClientRect(), b = root.querySelector('[data-agent="secondary-hub"] .ag-core').getBoundingClientRect();
+        assert(Math.hypot(a.x + a.width / 2 - b.x - b.width / 2, a.y + a.height / 2 - b.y - b.height / 2) > (a.width + b.width) / 2 + 3, 'hub circles overlap');
+      });
+    });
+    await test('compact panel fits all circles and restores wide positions after dragging', async () => {
+      await using(crowdedFixture(), async root => {
+        await resizeTo(root, 1200, 800);
+        const node = root.querySelector('[data-agent="impl-openai"]'), circle = node.querySelector('.ag-core').getBoundingClientRect();
+        const beforeDrag = node.getAttribute('transform');
+        const x = circle.x + circle.width / 2, y = circle.y + circle.height / 2;
+        node.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 91, pointerType: 'mouse', button: 0, clientX: x, clientY: y }));
+        root.querySelector('.ag-viewport').dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 91, clientX: x + 18, clientY: y + 8 }));
+        root.querySelector('.ag-viewport').dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 91, clientX: x + 18, clientY: y + 8 }));
+        assert(node.getAttribute('transform') !== beforeDrag, 'wide pointer drag did not move the node');
+        const wide = new Map(circleBounds(root).map(({ name, bounds }) => [name, { x: bounds.x, y: bounds.y }]));
+        const transforms = new Map([...root.querySelectorAll('[data-agent]')].map(n => [n.dataset.agent, n.getAttribute('transform')]));
+        await resizeTo(root, 320, 700); assertFits(root);
+        const compactNode = root.querySelector('[data-agent="impl-openai"]'), before = compactNode.getAttribute('transform');
+        move(root, 'impl-openai'); assert(compactNode.getAttribute('transform') !== before, 'compact node is not draggable');
+        assertFits(root);
+        await resizeTo(root, 1200, 800); assertFits(root);
+        circleBounds(root).forEach(({ name, bounds }) => {
+          const old = wide.get(name);
+          assert(Math.abs(bounds.x - old.x) <= 1 && Math.abs(bounds.y - old.y) <= 1, name + ' did not return to its wide position');
+          assert(root.querySelector('[data-agent="' + name + '"]').getAttribute('transform') === transforms.get(name), name + ' wide pin/layout was changed by compact drag');
+        });
+      });
+    });
+    await test('short 280 by 320 panel stays readable and pannable with usable details', async () => {
+      await using(crowdedFixture(), async root => {
+        await resizeTo(root, 280, 320); assertFits(root);
+        open(root, 'impl-openai'); await sleep(80);
+        const frame = root.getBoundingClientRect(), panel = root.querySelector('.ag-detail').getBoundingClientRect(), close = root.querySelector('.ag-close').getBoundingClientRect();
+        assert(panel.left >= frame.left && panel.right <= frame.right && panel.top >= frame.top && panel.bottom <= frame.bottom, 'details escape the panel');
+        assert(close.top >= panel.top && close.bottom <= panel.bottom, 'close button inaccessible');
+        assert(root.querySelector('.ag-detail-scroll').clientHeight > 40, 'detail scrolling area is too short');
+        root.querySelector('.ag-close').click(); await sleep(80); assertFits(root);
+        await resizeTo(root, 300, 600); open(root, 'impl-openai'); await sleep(80);
+        assert(root.querySelector('.ag-detail').getBoundingClientRect().width <= 300, '300px details are clipped');
+        root.querySelector('.ag-close').click(); await sleep(80); assertFits(root);
+      });
+    });
+    await test('continuous resizing refits within each arrangement and preserves teams', async () => {
+      await using(crowdedFixture(), async (root, app) => {
+        for (const [width, height] of [[2000, 1400], [1000, 300], [650, 500], [640, 500], [400, 820], [280, 1400], [320, 300], [1200, 800]]) {
+          await resizeTo(root, width, height); assertFits(root);
+        }
+        root.querySelector('.ag-run-button').click();
+        const choice = root.querySelector('[data-team-switch]'); choice.value = 'team-b'; choice.dispatchEvent(new Event('change', { bubbles: true })); await app.refresh();
+        root.querySelector('.ag-close').click();
+        assert(root.dataset.team === 'team-b' && root.querySelector('[data-agent="team-b-worker"]'), 'team choice lost on refresh');
+        await resizeTo(root, 300, 600); assertFits(root);
+        root.querySelector('.ag-run-button').click();
+        const panelChoice = root.querySelector('[data-run-team]');
+        assert(panelChoice, 'compact team choice is not available in Run details');
+        panelChoice.value = 'main'; panelChoice.dispatchEvent(new Event('change', { bubbles: true })); await app.refresh();
+        assert(root.dataset.team === 'main', 'compact team choice did not switch the graph');
+      });
+    });
+    await test('single-team switch is hidden and absent relationships are not inferred from names', async () => {
+      const data = fixture(); data.agents = data.agents.filter(a => a.team === 'main' && a.name !== 'council');
+      data.agents.forEach(a => { delete a.team; });
+      const seat = data.agents.find(a => a.name === 'councillor-claude'); delete seat.parent;
+      await using(data, root => {
+        root.querySelector('.ag-run-button').click();
+        assert(!root.querySelector('[data-team-switch]'), 'single-team selector remains visible');
+        root.querySelector('.ag-close').click();
+        assert(root.dataset.team === 'main', 'missing team did not default to main');
+        assert(root.querySelector('[data-agent="councillor-claude"]').dataset.parent === '', 'parent inferred from agent name');
+        assert(![...root.querySelectorAll('line[data-edge]')].some(line => line.dataset.edge.includes('councillor-claude')), 'orphaned seat connects to the hub');
+      });
+    });
+    await test('council seats connect only to their explicit parent', async () => {
+      const data = fixture();
+      data.escalation.push({ from: 'orchestrator', to: 'councillor-claude', used: true });
+      data.graph.flows.push({ from: 'reviewer', to: 'councillor-claude', kind: 'data', pairs: [], artifacts: [], active: true });
+      await using(data, root => {
+        const connections = [...root.querySelectorAll('line[data-edge]')].map(line => line.dataset.edge).filter(name => name.includes('councillor-claude'));
+        assert(connections.length === 1 && connections[0] === 'council->councillor-claude', 'seat has a non-council connection');
+        assertLoopShapes(root);
+      });
+    });
+    await test('review loops form two directed curved lanes and replace ordinary flows', async () => {
+      await using(loopFixture(), root => {
+        const expected = ['working-loop', 'checking-loop', 'closed-loop'];
+        expected.forEach(id => {
+          const halves = loopHalves(root, id); assert(halves.length === 2, id + ' must have exactly two arcs');
+          const forward = halves.find(line => line.dataset.loopHalf === 'forward'), back = halves.find(line => line.dataset.loopHalf === 'return');
+          assert(forward && back, 'missing loop half');
+          const coords = path => { const a = path.getPointAtLength(0), b = path.getPointAtLength(path.getTotalLength()); return [a.x, a.y, b.x, b.y]; };
+          const a = coords(forward), b = coords(back), dx = a[2] - a[0], dy = a[3] - a[1];
+          assert(dx * (b[2] - b[0]) + dy * (b[3] - b[1]) < 0, 'loop arcs point the same way');
+          assert(forward.getAttribute('d').includes(' Q ') && back.getAttribute('d').includes(' Q '), 'review loop is not curved');
+          const middleA = forward.getPointAtLength(forward.getTotalLength() / 2), middleB = back.getPointAtLength(back.getTotalLength() / 2);
+          assert(Math.hypot(middleA.x - middleB.x, middleA.y - middleB.y) >= 14, 'review lanes do not open into a closed cycle');
+          assert(forward.getAttribute('marker-end') && back.getAttribute('marker-end'), 'opposite arrowheads missing');
+        });
+        assert(!loopHalves(root, 'unlisted-loop').length, 'unlisted evaluator was drawn');
+        assert(!edge(root, 'data', 'impl-openai->reviewer') && !edge(root, 'data', 'reviewer->impl-openai') && !edge(root, 'feedback', 'reviewer->impl-openai'), 'loop duplicates ordinary flow');
+        assert(root.querySelector('[data-loop-count="working-loop"]')?.textContent === '×3', 'round count absent');
+        assert(!root.querySelector('[data-loop-count="checking-loop"]'), 'round one adds unnecessary count');
+        assertLoopShapes(root);
+      });
+    });
+    await test('loop states and activity come from the snapshot', async () => {
+      const data = loopFixture();
+      await using(data, async (root, app) => {
+        const live = id => loopHalves(root, id).filter(line => line.dataset.live === 'true').map(line => line.dataset.loopHalf).join(',');
+        assert(live('working-loop') === 'return' && live('checking-loop') === 'forward' && live('closed-loop') === '', 'wrong live half');
+        assert(root.querySelector('[data-loop-id="working-loop"]').dataset.active === 'true' && root.querySelector('[data-loop-id="closed-loop"]').dataset.active === 'false', 'loop activity not taken from the snapshot');
+        assert(root.querySelector('.ag-activity').textContent === '1 working', 'status is more than the working count');
+        data.graph.loops[0].state = 'sent_back'; await app.refresh(); assert(live('working-loop') === 'return', 'sent-back return not emphasised');
+        data.graph.loops[0].state = 'idle'; data.graph.loops[0].active = false; await app.refresh();
+        assert(live('working-loop') === '' && root.querySelector('[data-loop-id="working-loop"]').dataset.state === 'idle', 'idle loop not calm');
+        data.graph.loops[1].active = false; await app.refresh();
+        assert(root.querySelector('[data-loop-id="checking-loop"]').dataset.active === 'false', 'activity inferred instead of trusting active');
+      });
+    });
+    await test('loop halves and round count open accessible live details', async () => {
+      const data = loopFixture();
+      await using(data, async (root, app) => {
+        await resizeTo(root, 400, 820);
+        for (const target of [...loopHalves(root, 'working-loop'), root.querySelector('[data-loop-count="working-loop"]')]) {
+          target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          const content = root.querySelector('.ag-detail').textContent;
+          assert(!root.querySelector('.ag-detail').hidden && ['impl-openai', 'reviewer', '3 rounds', 'review-findings', 'current-step', 'review-step'].every(value => content.includes(value)), 'loop details incomplete');
+          root.querySelector('.ag-close').click();
+        }
+        const loop = root.querySelector('[data-loop-id="working-loop"]');
+        loop.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        assert(!root.querySelector('.ag-detail').hidden, 'loop not keyboard accessible');
+        data.graph.loops[0].rounds = 4; await app.refresh(); assert(root.querySelector('.ag-detail').textContent.includes('4 rounds'), 'open loop details did not update');
+        root.querySelector('.ag-close').click(); open(root, 'impl-openai');
+        assert(loop.dataset.related === 'true', 'agent selection does not emphasise its loop');
+        await app.reset(); assert(root.querySelector('[data-loop-id="working-loop"]'), 'reset did not redraw loops');
+      });
+    });
+    await test('loops preserve compact fit, clear corridors and wide round trips', async () => {
+      await using(loopFixture(crowdedFixture()), async root => {
+        await resizeTo(root, 1200, 800); assertFits(root); assertLoopCorridors(root);
+        move(root, 'impl-openai');
+        const wide = new Map(circleBounds(root).map(({ name, bounds }) => [name, { x: bounds.x, y: bounds.y }]));
+        await resizeTo(root, 320, 700); assertFits(root); assertLoopCorridors(root);
+        await resizeTo(root, 280, 320); assertFits(root); assertLoopCorridors(root);
+        await resizeTo(root, 1200, 800); assertFits(root);
+        circleBounds(root).forEach(({ name, bounds }) => assert(Math.abs(bounds.x - wide.get(name).x) <= 1 && Math.abs(bounds.y - wide.get(name).y) <= 1, name + ' lost its wide position with loops'));
+      });
+    });
+    await test('missing loops remain backward compatible', async () => {
+      await using(fixture(), root => assert(!root.querySelector('[data-loop]'), 'missing loops drew a circuit'));
+    });
+    await test('readable 400 and 320 panels reflow across the width and Fit offers an overview', async () => {
+      await using(loopFixture(crowdedFixture()), async root => {
+        for (const [width, height] of [[400, 820], [320, 700]]) {
+          await resizeTo(root, width, height); assertFits(root);
+          const viewport = root.querySelector('.ag-viewport').getBoundingClientRect();
+          const hub = root.querySelector('[data-agent="orchestrator"] .ag-core').getBoundingClientRect();
+          assert(hub.top >= viewport.top && hub.bottom <= viewport.bottom, 'hub not initially visible');
+          assert(Math.abs(hub.y + hub.height / 2 - viewport.y - viewport.height / 2) <= viewport.height * .1, 'compact view does not open centred on the hub');
+          const line = root.querySelector('path[data-loop]'), bounds = line.getBoundingClientRect(), stage = root.querySelector('.ag-drawing > g');
+          const beforePan = stage.getAttribute('transform'), x = bounds.x + bounds.width / 2, y = bounds.y + bounds.height / 2;
+          line.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 93, pointerType: 'mouse', button: 0, clientX: x, clientY: y }));
+          root.querySelector('.ag-viewport').dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 93, clientX: x, clientY: y - 80 }));
+          root.querySelector('.ag-viewport').dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 93, clientX: x, clientY: y - 80 }));
+          const overflowing = !root.querySelector('.ag-pan-cue').hidden && root.querySelector('.ag-pan-cue').dataset.direction === 'down';
+          assert(root.querySelector('.ag-detail').hidden && (!overflowing || stage.getAttribute('transform') !== beforePan), 'dragging on a loop opened details or did not pan an overflowing canvas');
+          root.querySelector('.ag-viewport').dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -100000 }));
+          root.querySelector('.ag-fit').click();
+          circleBounds(root).forEach(({ name, bounds: b }) => assert(b.left >= viewport.left - .1 && b.right <= viewport.right + .1 && b.top >= viewport.top - .1 && b.bottom <= viewport.bottom + .1, 'Fit does not show ' + name));
+          assert(root.querySelector('.ag-drawing > g').getCTM().a <= 1.0001, 'manual Fit enlarged the sidebar picture');
+        }
+      });
+    });
+    await test('details reserve an uncovered readable canvas at every panel size', async () => {
+      await using(loopFixture(), async root => {
+        for (const [width, height] of [[800, 700], [650, 700], [320, 700], [280, 320]]) {
+          await resizeTo(root, width, height); open(root, 'impl-openai'); await sleep(180);
+          const viewport = root.querySelector('.ag-viewport').getBoundingClientRect(), sheet = root.querySelector('.ag-detail').getBoundingClientRect();
+          assert(width <= 650 ? viewport.bottom <= sheet.top + 1 : viewport.right <= sheet.left + 1, width + 'px details cover the canvas');
+          assert(viewport.height >= 92 && viewport.width > 100, 'details leave too little canvas');
+          assertFits(root);
+          root.querySelector('.ag-close').click(); await sleep(100);
+        }
+      });
+    });
+    await test('changing arrangement cancels an in-flight drag', async () => {
+      await using(fixture(), async root => {
+        const node = root.querySelector('[data-agent="impl-openai"]');
+        node.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 97, pointerType: 'mouse', button: 0, clientX: 300, clientY: 300 }));
+        await resizeTo(root, 320, 700);
+        const position = node.getAttribute('transform');
+        root.querySelector('.ag-viewport').dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 97, clientX: 530, clientY: 420 }));
+        root.querySelector('.ag-viewport').dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 97, clientX: 530, clientY: 420 }));
+        assert(node.getAttribute('transform') === position, 'old drag moved the new layout');
+        assert(root.querySelector('.ag-detail').hidden && root.querySelector('.ag-viewport').dataset.dragging !== 'true', 'old drag left interaction state behind');
+      });
+    });
+    await test('zero-width hiding preserves the arrangement and its pins', async () => {
+      await using(fixture(), async root => {
+        move(root, 'impl-openai'); const node = root.querySelector('[data-agent="impl-openai"]'), before = node.getAttribute('transform');
+        root.style.width = '0px'; await sleep(180);
+        assert(!root.classList.contains('ag-compact') && node.getAttribute('transform') === before, 'hidden panel changed the layout');
+        await resizeTo(root, 1100, 760);
+        assert(node.getAttribute('transform') === before, 'showing panel lost its pin');
+      });
+    });
+    await test('wide and compact pins are independent rather than copied as raw coordinates', async () => {
+      await using(fixture(), async root => {
+        for (let i = 0; i < 30; i++) move(root, 'impl-openai');
+        const node = root.querySelector('[data-agent="impl-openai"]'), wide = node.getAttribute('transform');
+        await resizeTo(root, 320, 700); assertFits(root); move(root, 'impl-openai');
+        const compact = node.getAttribute('transform'); assert(compact !== wide, 'wide coordinates carried into compact layout');
+        await resizeTo(root, 1100, 760); assert(node.getAttribute('transform') === wide, 'compact drag corrupted wide pin');
+        await resizeTo(root, 320, 700); assert(node.getAttribute('transform') === compact, 'compact pin was not restored independently');
+      });
+    });
+    await test('past flow peers are plain text and cannot be selected', async () => {
+      const data = fixture(); data.graph.flows.push({ from: 'past-worker', to: 'impl-openai', kind: 'data', pairs: [['past-step', 'current-step']], artifacts: [], active: false });
+      await using(data, root => {
+        open(root, 'impl-openai');
+        const detail = root.querySelector('.ag-detail'), row = [...detail.querySelectorAll('.ag-flow-row')].find(item => item.textContent.includes('past-worker'));
+        assert(row && row.textContent.includes('past agent'), 'past peer is not identified');
+        assert(row.tagName !== 'BUTTON' && !row.hasAttribute('data-flow-peer') && !detail.querySelector('[data-flow-peer="past-worker"]'), 'past peer is clickable');
+        row.click(); assert(detail.querySelector('.ag-detail-title').textContent === 'impl-openai', 'past peer was selected');
+      });
+    });
+    await test('label measurements update when an agent becomes busy and include display fonts', async () => {
+      const data = fixture();
+      await using(data, async (root, app) => {
+        for (let i = 0; i < 30; i++) move(root, 'impl-claude');
+        data.agents.find(a => a.name === 'impl-claude').busy = 1;
+        data.graph.nodes.push(step('a-long-current-step-name', 'impl-claude', { busy: true, goal: 'Check unusually lengthy output' }));
+        await app.refresh();
+        let viewport = root.querySelector('.ag-viewport').getBoundingClientRect(), label = root.querySelector('[data-agent="impl-claude"] .ag-agent-work').getBoundingClientRect();
+        assert(label.left >= viewport.left && label.right <= viewport.right, 'new busy label is clipped');
+        data.agents.find(a => a.name === 'orchestrator').name = 'coordinating-orchestrator'; data.root.agent = 'coordinating-orchestrator';
+        await app.refresh(); await resizeTo(root, 320, 700);
+        viewport = root.querySelector('.ag-viewport').getBoundingClientRect(); label = root.querySelector('[data-agent="coordinating-orchestrator"] .ag-agent-name').getBoundingClientRect();
+        assert(label.left >= viewport.left && label.right <= viewport.right, 'display-font hub label is clipped');
+      });
+    });
+    await test('non-JSON HTTP failures preserve the response status', async () => {
+      let options;
+      const fakeWindow = { AgentGraph: { mount: (_, value) => { options = value; } } };
+      new Function('window', 'document', 'location', 'fetch', indexBootstrap)(fakeWindow, { getElementById: () => ({ dataset: {} }) }, { search: '' }, async () => ({ ok: false, status: 403, text: async () => '<html>Forbidden</html>', json: async () => { throw new SyntaxError('Unexpected token <'); } }));
+      let message = ''; try { await options.fetchSnapshot(); } catch (error) { message = error.message; }
+      assert(message.includes('403') && !message.includes('Unexpected token'), 'HTTP status was lost: ' + message);
+    });
+    await test('CSS and layout agree at the 650 pixel boundary', async () => {
+      await using(fixture(), async root => {
+        for (const width of [650, 651]) {
+          await resizeTo(root, width, 700);
+          const narrow = width === 650;
+          assert(root.classList.contains('ag-compact') === narrow, 'JS breakpoint disagrees at ' + width);
+          open(root, 'impl-openai'); await sleep(120);
+          const panel = root.querySelector('.ag-detail').getBoundingClientRect(), frame = root.getBoundingClientRect();
+          assert(narrow ? Math.abs(panel.width - frame.width) <= 1 : panel.width < frame.width - 100, 'details breakpoint disagrees at ' + width);
+          root.querySelector('.ag-close').click(); await sleep(80);
+        }
+      });
+    });
+    await test('transport failures show their own message and nothing else', async () => {
+      await using(null, root => {
+        assert(root.dataset.state === 'error' && !root.querySelector('.ag-notice').hidden && root.querySelector('.ag-notice').textContent === 'Failed to fetch', 'transport failure is not shown as its own one-line message');
+      }, { fetchSnapshot: async () => { throw new TypeError('Failed to fetch'); } });
+    });
+    await test('step bodies are lazy and every 5000-entry step list is capped at 200', async () => {
+      const data = fixture(), many = Array.from({ length: 5000 }, (_, i) => 'entry-' + i);
+      const target = data.graph.nodes.find(node => node.id === 'current-step');
+      Object.assign(target, { scope: many, changed_paths: many, artifacts: many.map(id => ({ id, revision: 1 })), inputs: many.map(artifact => ({ artifact, revision: 1 })), depends_on: many, tiers: many, outputs: many });
+      await using(data, async root => {
+        open(root, 'impl-openai');
+        const row = root.querySelector('[data-step="current-step"]');
+        assert(!root.querySelector('.ag-step-body'), 'collapsed steps eagerly built their bodies');
+        row.open = true; await sleep(30);
+        const body = row.querySelector('.ag-step-body'); assert(body, 'opening a step did not build its body');
+        for (const name of ['Scope', 'Changed files', 'Artifacts', 'Inputs', 'Depends on', 'Agent trail', 'Outputs']) {
+          const section = [...body.querySelectorAll('.ag-detail-section')].find(item => item.querySelector('h3').textContent === name);
+          assert(section.querySelectorAll('li').length === 200 && section.textContent.includes('+4800 more'), name + ' did not cap its list');
+          assert(!section.textContent.includes('entry-4999'), name + ' rendered beyond its cap');
+        }
+        row.open = false; await sleep(20); row.open = true; await sleep(20);
+        assert(row.querySelectorAll('.ag-step-body').length === 1, 'reopening duplicated a step body');
+      });
+    });
+    await test('Run details and assigned steps cap 5000-entry lists without eager bodies', async () => {
+      const data = fixture(), many = Array.from({ length: 5000 }, (_, i) => 'entry-' + i);
+      data.graph.nodes = many.map((_, i) => step('bulk-' + i, 'past-worker'));
+      data.graph.objectives = many.map(text => ({ text, delivered: false }));
+      data.graph.events = many.map(node => ({ node, event: 'checked', note: '' }));
+      data.graph.amendments = many; data.graph.lessons = many; data.graph.problems = many; data.warnings = many;
+      await using(data, async (root, app) => {
+        root.querySelector('.ag-run-button').click();
+        assert(root.querySelectorAll('.ag-step').length === 200, 'unassigned step summaries were not capped');
+        assert(!root.querySelector('.ag-step-body'), 'unassigned steps eagerly built bodies');
+        root.querySelectorAll('.ag-run-fold').forEach(fold => { fold.open = true; }); await sleep(30);
+        for (const name of ['Objectives', 'Recent activity', 'Amendments', 'Lessons', 'Validation', 'Warnings', 'Steps']) {
+          const section = [...root.querySelectorAll('.ag-detail-section')].find(item => item.querySelector('h3').textContent === name);
+          assert(section.textContent.includes('+4800 more'), name + ' lost its overflow count');
+          assert(section.querySelectorAll('li').length <= 200, name + ' built too many list items');
+        }
+        data.graph.nodes.forEach(node => { node.agent = 'impl-openai'; }); await app.refresh();
+        root.querySelector('.ag-close').click(); open(root, 'impl-openai');
+        assert(root.querySelectorAll('.ag-step').length === 200 && !root.querySelector('.ag-step-body'), 'assigned step summaries are not bounded and lazy');
+        assert(root.querySelector('.ag-detail').textContent.includes('+4800 more'), 'assigned steps lost their overflow count');
+      });
+    });
+    await test('sidebar uses edge-to-edge width with generous normal-size circle spacing', async () => {
+      await using(loopFixture(crowdedFixture()), async root => {
+        for (const [width, height] of [[320, 700], [400, 820]]) {
+          await resizeTo(root, width, height);
+          const viewport = root.querySelector('.ag-viewport').getBoundingClientRect();
+          const circles = [...root.querySelectorAll('[data-agent] .ag-core')].map(circle => circle.getBoundingClientRect());
+          assert(Math.abs(viewport.width - width) <= 1, 'canvas does not use the full panel width');
+          assert(root.querySelector('.ag-drawing > g').getCTM().a >= 1, 'sidebar shrinks normal-size circles');
+          const left = Math.min(...circles.map(circle => circle.left)), right = Math.max(...circles.map(circle => circle.right));
+          assert(left - viewport.left <= 14 && viewport.right - right <= 14, 'circle margins remain wider than 12px');
+          assert((right - left) / viewport.width >= .9, 'circles do not span 90% of the available width');
+          // Council seats are a tight circle round their lead by design; every other agent keeps its distance.
+          const apart = [...root.querySelectorAll('[data-agent]')].filter(node => !node.dataset.parent).map(node => node.querySelector('.ag-core').getBoundingClientRect());
+          let smallest = Infinity;
+          apart.forEach((a, i) => apart.slice(i + 1).forEach(b => { smallest = Math.min(smallest, Math.hypot(a.x + a.width / 2 - b.x - b.width / 2, a.y + a.height / 2 - b.y - b.height / 2)); }));
+          assert(smallest >= 84, 'automatic circles are crowded: ' + smallest.toFixed(1) + 'px centre spacing');
+          assertFits(root); assertLoopCorridors(root);
+        }
+      });
+    });
+    await test('host colour scheme updates live and falls back to the live media query', async () => {
+      const html = document.documentElement, savedScheme = html.getAttribute('data-color-scheme'), savedBackground = html.style.getPropertyValue('--v2-background-bg-deep');
+      const originalMatchMedia = window.matchMedia, handlers = new Set(); let dark = false;
+      window.matchMedia = () => ({ get matches() { return dark; }, addEventListener: (_, handler) => handlers.add(handler), removeEventListener: (_, handler) => handlers.delete(handler) });
+      html.removeAttribute('data-color-scheme'); html.style.removeProperty('--v2-background-bg-deep');
+      try {
+        await using(fixture(), async root => {
+          assert(root.dataset.agScheme === 'light', 'initial media preference not applied');
+          const lightBackground = getComputedStyle(root).backgroundColor, lightLabel = getComputedStyle(root.querySelector('.ag-agent-name')).fill;
+          html.setAttribute('data-color-scheme', 'dark'); html.style.setProperty('--v2-background-bg-deep', '#080808'); await sleep(20);
+          assert(root.dataset.agScheme === 'dark', 'host dark mode did not update without remount');
+          assert(getComputedStyle(root).backgroundColor === 'rgb(8, 8, 8)' && getComputedStyle(root).backgroundColor !== lightBackground, 'host deep background not used');
+          assert(getComputedStyle(root.querySelector('.ag-agent-name')).fill !== lightLabel, 'label palette did not change');
+          assert(getComputedStyle(root).colorScheme === 'dark', 'native controls do not follow dark mode');
+          assert(getComputedStyle(root.querySelector('.ag-agent-name')).stroke === getComputedStyle(root).backgroundColor, 'label halo does not match the host background');
+          html.removeAttribute('data-color-scheme'); html.style.removeProperty('--v2-background-bg-deep'); await sleep(20);
+          assert(root.dataset.agScheme === 'light', 'removing host preference did not restore media fallback');
+          dark = true; handlers.forEach(handler => handler({ matches: true })); await sleep(0);
+          assert(root.dataset.agScheme === 'dark', 'media preference does not update live');
+          html.setAttribute('data-color-scheme', 'light'); await sleep(20);
+          assert(root.dataset.agScheme === 'light', 'host preference did not take priority over media');
+        });
+      } finally {
+        window.matchMedia = originalMatchMedia;
+        if (savedScheme === null) html.removeAttribute('data-color-scheme'); else html.setAttribute('data-color-scheme', savedScheme);
+        if (savedBackground) html.style.setProperty('--v2-background-bg-deep', savedBackground); else html.style.removeProperty('--v2-background-bg-deep');
+      }
+    });
+    await test('explicit scheme overrides host changes and auto honours ancestor mode', async () => {
+      const html = document.documentElement, saved = html.getAttribute('data-color-scheme'), ancestor = document.getElementById('fixtures');
+      const savedBackground = html.style.getPropertyValue('--v2-background-bg-deep');
+      try {
+        html.setAttribute('data-color-scheme', 'light');
+        html.style.setProperty('--v2-background-bg-deep', '#fafafa');
+        await using(fixture(), async root => {
+          assert(root.dataset.agScheme === 'dark', 'explicit dark override ignored');
+          assert(getComputedStyle(root).backgroundColor !== 'rgb(250, 250, 250)', 'forced dark palette retained a light host background');
+          html.setAttribute('data-color-scheme', 'dark'); await sleep(20);
+          html.setAttribute('data-color-scheme', 'light'); await sleep(20);
+          assert(root.dataset.agScheme === 'dark', 'host changed explicit dark override');
+        }, { scheme: 'dark' });
+        html.setAttribute('data-color-scheme', 'dark');
+        html.style.setProperty('--v2-background-bg-deep', '#080808');
+        await using(fixture(), root => assert(root.dataset.agScheme === 'light', 'explicit light override ignored'), { scheme: 'light' });
+        html.setAttribute('data-color-scheme', 'light'); ancestor.setAttribute('data-color-scheme', 'dark');
+        await using(fixture(), async root => {
+          assert(root.dataset.agScheme === 'dark', 'nearest ancestor scheme ignored');
+          ancestor.setAttribute('data-color-scheme', 'light'); await sleep(20);
+          assert(root.dataset.agScheme === 'light', 'ancestor change not observed');
+        }, { scheme: 'auto' });
+      } finally {
+        ancestor.removeAttribute('data-color-scheme');
+        if (saved === null) html.removeAttribute('data-color-scheme'); else html.setAttribute('data-color-scheme', saved);
+        if (savedBackground) html.style.setProperty('--v2-background-bg-deep', savedBackground); else html.style.removeProperty('--v2-background-bg-deep');
+      }
+    });
+    await test('destroy disconnects colour scheme observers and media listeners', async () => {
+      const NativeObserver = window.MutationObserver, originalMatchMedia = window.matchMedia, handlers = new Set();
+      let observers = 0, disconnected = 0, callbacks = 0;
+      window.MutationObserver = class extends NativeObserver {
+        constructor(callback) { super((...args) => { callbacks++; callback(...args); }); observers++; }
+        disconnect() { disconnected++; super.disconnect(); }
+      };
+      window.matchMedia = () => ({ matches: false, addEventListener: (_, handler) => handlers.add(handler), removeEventListener: (_, handler) => handlers.delete(handler) });
+      const html = document.documentElement, saved = html.getAttribute('data-color-scheme');
+      try {
+        await using(fixture(), () => assert(observers === 1 && handlers.size === 1, 'live scheme observers were not installed'));
+        assert(disconnected === 1 && handlers.size === 0, 'theme observer or listener leaked after destroy');
+        const before = callbacks; html.setAttribute('data-color-scheme', 'dark'); await sleep(20);
+        assert(callbacks === before, 'destroyed view still receives host mutations');
+      } finally {
+        window.MutationObserver = NativeObserver; window.matchMedia = originalMatchMedia;
+        if (saved === null) html.removeAttribute('data-color-scheme'); else html.setAttribute('data-color-scheme', saved);
+      }
+    });
+    await test('work loops are directed circular edges with authoritative states and counts', async () => {
+      await using(workLoopFixture(), root => {
+        const rings = [...root.querySelectorAll('path[data-work-loop]')];
+        assert(rings.length === 5, 'missing work rings or drew an unlisted agent');
+        rings.forEach(ring => {
+          assert(ring.getAttribute('d').includes(' A ') && ring.getAttribute('marker-end'), 'work loop is not a directed circular arc');
+          const circle = root.querySelector('[data-agent="' + ring.dataset.workLoop + '"] .ag-core');
+          assert(ring.getBBox().width > circle.getBBox().width, 'work ring does not surround its agent');
+        });
+        assert(root.querySelector('[data-work-loop="impl-openai"]').dataset.loopState === 'working', 'working state missing');
+        assert(root.querySelector('[data-work-loop="impl-hard"]').dataset.loopState === 'stuck', 'stuck state missing');
+        assert(root.querySelector('[data-work-loop-count="impl-openai"]').textContent === '×3', 'work rounds missing');
+        assert(!root.querySelector('[data-work-loop-count="designer"]'), 'single round adds unnecessary count');
+        assert(root.querySelector('[data-work-loop-id="impl-openai"]').dataset.active === 'true' && root.querySelector('[data-work-loop-id="impl-claude"]').dataset.active === 'false', 'work-loop activity not taken from the snapshot');
+        assertLoopShapes(root);
+      });
+    });
+    await test('work-loop details expose agent rounds state and bounded lazy steps', async () => {
+      const data = workLoopFixture();
+      await using(data, async (root, app) => {
+        root.querySelector('[data-work-loop="impl-openai"]').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        const detail = root.querySelector('.ag-detail');
+        assert(!detail.hidden && ['impl-openai', '3 rounds', 'Working', 'current-step'].every(value => detail.textContent.includes(value)), 'work-loop detail incomplete');
+        assert(detail.querySelector('[data-step="current-step"]') && !detail.querySelector('.ag-step-body'), 'work step list is not lazy');
+        data.graph.work_loops[0].state = 'waiting'; data.graph.work_loops[0].active = false; await app.refresh();
+        assert(detail.querySelector('.ag-detail-intro').textContent.startsWith('Waiting'), 'work-loop detail did not update');
+        root.querySelector('.ag-close').click();
+        root.querySelector('[data-work-loop-id="impl-hard"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        assert(detail.querySelector('.ag-detail-intro').textContent.startsWith('Stuck'), 'stuck work loop is not keyboard accessible');
+        await app.reset(); assert(root.querySelectorAll('path[data-work-loop]').length === 5, 'reset lost work loops');
+      });
+    });
+    await test('circular loops stay clear and readable in narrow dark panels', async () => {
+      await using(workLoopFixture(crowdedFixture()), async root => {
+        for (const [width, height] of [[1200, 800], [400, 820], [320, 700], [280, 320]]) {
+          await resizeTo(root, width, height); assertFits(root); assertLoopCorridors(root); assertLoopShapes(root);
+          const viewport = root.querySelector('.ag-viewport').getBoundingClientRect();
+          root.querySelectorAll('path[data-work-loop]').forEach(ring => {
+            const b = ring.getBoundingClientRect();
+            assert(b.left >= viewport.left && b.right <= viewport.right, 'work ring horizontally clipped');
+          });
+          root.querySelectorAll('[data-work-loop-count]').forEach(count => {
+            const b = count.getBoundingClientRect();
+            assert(b.left >= viewport.left && b.right <= viewport.right, 'work-loop count horizontally clipped');
+          });
+        }
+        assert(root.dataset.agScheme === 'dark', 'dark fixture was not applied');
+        const active = getComputedStyle(root.querySelector('[data-work-loop="impl-openai"]')).stroke;
+        const stuck = getComputedStyle(root.querySelector('[data-work-loop="impl-hard"]')).stroke;
+        assert(active !== stuck, 'stuck state has no distinct appearance');
+      }, { scheme: 'dark' });
+      await using(fixture(), root => assert(!root.querySelector('[data-work-loop]'), 'missing work_loops drew a ring'));
+    });
+    await test('wide groups form a balanced ring with understand opposite decide', async () => {
+      const data = fixture(); data.agents = data.agents.filter(a => a.team === 'main');
+      data.agents.push(agent('explorer', 'understand'), agent('researcher', 'understand'), agent('oracle', 'decide'), agent('oracle-lite', 'decide'), agent('designer', 'build'), agent('councillor-b', 'council', { parent: 'council' }), agent('councillor-c', 'council', { parent: 'council' }));
+      workLoopFixture(data);
+      data.graph.loops.push({ id: 'understand-review', worker: 'explorer', evaluator: 'oracle', pairs: [], rounds: 1, state: 'closed', active: false, artifacts: [] });
+      await using(data, async root => {
+        await resizeTo(root, 1400, 900);
+        const points = data.agents.map(a => { const b = root.querySelector('[data-agent="' + a.name + '"] .ag-core').getBoundingClientRect(); return { ...a, x: b.x + b.width / 2, y: b.y + b.height / 2 }; });
+        const hub = points.find(a => a.name === 'orchestrator'), groups = [...new Set(points.filter(a => a.group !== 'hub').map(a => a.group))];
+        const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y), centres = new Map();
+        groups.forEach(group => {
+          const members = points.filter(a => a.group === group), outside = points.filter(a => a.group !== group);
+          // Every member's nearest neighbour on the ring belongs to its own group.
+          if (members.length > 1) members.forEach(member => {
+            const own = Math.min(...members.filter(other => other !== member).map(other => distance(member, other)));
+            const foreign = Math.min(...outside.filter(other => other.name !== 'orchestrator').map(other => distance(member, other)));
+            assert(own < foreign, member.name + ' sits nearer another group than its own: ' + own.toFixed(1) + ' >= ' + foreign.toFixed(1));
+          });
+          centres.set(group, { x: members.reduce((sum, a) => sum + a.x, 0) / members.length, y: members.reduce((sum, a) => sum + a.y, 0) / members.length });
+        });
+        assert(!root.querySelector('.ag-group-label'), 'group headings remain');
+        const radii = [...centres.values()].map(p => distance(hub, p)), mean = radii.reduce((a, b) => a + b, 0) / radii.length;
+        radii.forEach(radius => assert(Math.abs(radius - mean) <= mean * .25, 'group centre is not on the balanced ring'));
+        const angle = group => Math.atan2(centres.get(group).y - hub.y, centres.get(group).x - hub.x);
+        let separation = Math.abs(angle('understand') - angle('decide')); separation = Math.min(separation, 2 * Math.PI - separation);
+        assert(separation >= 2 * Math.PI / 3 - .001, 'understand and decide are not on opposite sides');
+        assertFits(root); assertLoopCorridors(root, data); assertLoopShapes(root);
+        const wide = new Map([...root.querySelectorAll('[data-agent]')].map(node => [node.dataset.agent, node.getAttribute('transform')]));
+        await resizeTo(root, 400, 820); assertFits(root); assertLoopCorridors(root, data);
+        for (const group of ['understand', 'decide']) {
+          const pair = data.agents.filter(a => a.group === group).map(a => root.querySelector('[data-agent="' + a.name + '"] .ag-core').getBoundingClientRect());
+          assert(Math.hypot(pair[0].x - pair[1].x, pair[0].y - pair[1].y) <= 150, group + ' pair was separated in the narrow arrangement');
+        }
+        await resizeTo(root, 1400, 900);
+        root.querySelectorAll('[data-agent]').forEach(node => assert(node.getAttribute('transform') === wide.get(node.dataset.agent), 'ring position did not return after widening'));
+      });
+    });
+    await test('working hub has a flowing orbit that stops when idle', async () => {
+      const data = fixture(); data.agents[0].busy = 1;
+      await using(data, async (root, app) => {
+        const orbit = root.querySelector('[data-agent="orchestrator"] .ag-hub-orbit');
+        assert(orbit, 'hub orbit is missing');
+        assert(orbit.dataset.active === 'true', 'working hub orbit is not active');
+        if (!matchMedia('(prefers-reduced-motion: reduce)').matches) assert(getComputedStyle(orbit).animationName !== 'none', 'working hub orbit does not flow');
+        data.agents[0].busy = 0; await app.refresh();
+        assert(orbit.dataset.active === 'false' && getComputedStyle(orbit).animationName === 'none', 'idle hub keeps spinning');
+      });
+    });
+    await test('host callback opens newest busy session and hub root while inspect remains available', async () => {
+      const data = fixture(), opened = []; data.root.id = 'root-session'; data.agents[0].busy = 1;
+      data.agents.find(a => a.name === 'impl-openai').sessions = [
+        { id: 'older-session', busy: true, updated: 10, title: 'Older', cost: 0 },
+        { id: 'newer-session', busy: true, updated: 30, title: 'Newer', cost: 0 },
+        { id: 'idle-session', busy: false, updated: 50, title: 'Idle', cost: 0 }
+      ];
+      await using(data, root => {
+        root.querySelector('[data-agent="impl-openai"]').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        assert(opened.length === 1 && opened[0].agent === 'impl-openai' && opened[0].sessionID === 'newer-session', 'newest busy session was not opened');
+        assert(root.querySelector('.ag-detail').hidden, 'chat activation opened details');
+        root.querySelector('[data-agent="orchestrator"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        assert(opened.length === 2 && opened[1].agent === 'orchestrator' && opened[1].sessionID === 'newer-session', 'the working centre did not open the newest working subagent');
+        const agent = root.querySelector('[data-agent="impl-openai"]');
+        assert(agent.dataset.openChat === 'true' && root.querySelector('[data-agent="impl-hard"]').dataset.openChat === 'false' && !root.querySelector('.ag-chat-cue'), 'working agents are not marked as opening their session, or a text cue remains');
+        agent.querySelector('[data-agent-inspect]').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        assert(!root.querySelector('.ag-detail').hidden && opened.length === 2, 'secondary inspect action did not stay local');
+        root.querySelector('.ag-close').click();
+        root.querySelector('[data-agent="impl-hard"]').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        assert(!root.querySelector('.ag-detail').hidden && opened.length === 2, 'idle agent wrongly opened chat');
+      }, { onOpenSession: request => { opened.push(request); return true; } });
+      const alone = fixture(), asked = []; alone.root.id = 'root-session'; alone.agents[0].busy = 1; alone.agents.forEach(a => { if (a.name !== 'orchestrator') { a.busy = 0; a.sessions = []; } });
+      await using(alone, async root => {
+        root.querySelector('[data-agent="orchestrator"]').dispatchEvent(new MouseEvent('click', { bubbles: true })); await sleep(10);
+        assert(asked.length === 1 && asked[0].sessionID === 'root-session' && !root.querySelector('.ag-detail').hidden, 'a centre with no working subagent did not fall back to its own session and details');
+      }, { onOpenSession: request => { asked.push(request); return false; } });
+      for (const answer of [() => false, () => undefined, () => { throw new Error('no host'); }, () => Promise.reject(new Error('no host'))]) {
+        await using(data, async root => {
+          root.querySelector('[data-agent="impl-openai"]').dispatchEvent(new MouseEvent('click', { bubbles: true })); await sleep(10);
+          assert(!root.querySelector('.ag-detail').hidden && root.querySelector('.ag-detail-title').textContent === 'impl-openai', 'a click the host did not handle does not open details');
+          assert(root.querySelector('.ag-notice').hidden, 'an unhandled click raised a notice');
+        }, { onOpenSession: answer });
+      }
+      await using(data, root => {
+        root.querySelector('[data-agent="impl-openai"]').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        assert(!root.querySelector('.ag-detail').hidden, 'standalone view lost normal details');
+      });
+    });
+    await test('Run details lead with current work and group compact expandable steps', async () => {
+      const data = workLoopFixture();
+      data.graph.nodes.push(step('blocked-step', 'impl-hard', { status: 'blocked', busy: false, goal: 'Waiting for a decision' }));
+      data.graph.objectives = [{ text: 'Finished objective', delivered: true }, { text: 'Next objective', delivered: false }];
+      data.graph.events = [{ node: 'old-step', event: 'historical event', note: '' }];
+      data.graph.amendments = ['historical amendment']; data.graph.lessons = ['historical lesson']; data.graph.advice = ['historical advice'];
+      await using(data, async root => {
+        root.querySelector('.ag-run-button').click();
+        assert(root.querySelector('.ag-run-progress')?.textContent.includes('passed'), 'progress is not prominent');
+        const working = root.querySelector('[data-run-section="working"]');
+        assert(working?.textContent.includes('current-step') && !working.textContent.includes('stale-step'), 'current work uses stale running status');
+        assert(root.querySelector('[data-run-section="attention"]')?.textContent.includes('Waiting for a decision'), 'blocked work is not prominent');
+        assert(root.querySelector('[data-run-section="loops"]')?.textContent.includes('3 rounds'), 'loop rounds are not summarized');
+        assert(root.querySelectorAll('.ag-objective[data-complete="true"]').length === 1 && root.querySelectorAll('.ag-objective[data-complete="false"]').length === 1, 'objective status is unclear');
+        assert(root.querySelectorAll('.ag-step-group').length >= 2 && root.querySelector('.ag-step-compact'), 'steps are not grouped compactly by state');
+        const folds = [...root.querySelectorAll('.ag-run-fold')];
+        assert(folds.length === 4 && folds.every(fold => !fold.open), 'supporting history is not collapsed');
+        assert(!root.querySelector('.ag-step-body'), 'Run details eagerly built step bodies');
+        const row = root.querySelector('[data-step="blocked-step"]'); row.open = true; await sleep(30);
+        assert(row.querySelector('.ag-step-body'), 'compact run step cannot expand');
+      });
+    });
+    await test('live loop lists skip absent agents and hubs and keep untouched idle rings quiet', async () => {
+      const data = workLoopFixture();
+      data.graph.loops.push({ id: 'other-team-review', worker: 'team-b-worker', evaluator: 'reviewer', pairs: [], rounds: 2, state: 'working', active: true, artifacts: [] });
+      data.graph.work_loops.push({ agent: 'orchestrator', nodes: [], rounds: 2, state: 'closed', active: false }, { agent: 'team-b-worker', nodes: [], rounds: 1, state: 'working', active: true });
+      await using(data, root => {
+        assert(!root.querySelector('[data-loop="unlisted-loop"]') && !root.querySelector('[data-loop="other-team-review"]'), 'review loop included an agent outside the drawn team');
+        assert(!root.querySelector('[data-work-loop="unlisted-worker"]') && !root.querySelector('[data-work-loop="team-b-worker"]'), 'work loop included an agent outside the drawn team');
+        assert(!root.querySelector('[data-work-loop="orchestrator"]') && root.querySelector('[data-agent="orchestrator"] .ag-hub-orbit'), 'hub has a duplicate work ring');
+        for (const name of ['designer', 'explorer']) {
+          const ring = root.querySelector('[data-work-loop-id="' + name + '"]');
+          assert(!ring || Number(getComputedStyle(ring).opacity) <= .2, 'untouched ' + name + ' work loop is not quiet');
+        }
+      });
+    });
+    function assertNotGreen(value, label) {
+      if (!value || value === 'none' || value === 'transparent') return;
+      const parts = value.match(/^rgba?\(([^)]+)\)$/)?.[1].split(/[\s,/]+/).filter(Boolean).map(Number);
+      assert(parts?.length >= 3, 'unparsed colour ' + label + ': ' + value);
+      const [r, g, b] = parts, max = Math.max(r, g, b) / 255, min = Math.min(r, g, b) / 255, delta = max - min, lightness = (max + min) / 2;
+      const saturation = delta ? delta / (1 - Math.abs(2 * lightness - 1)) : 0;
+      let hue = !delta ? 0 : max === r / 255 ? ((g - b) / 255 / delta) % 6 : max === g / 255 ? (b - r) / 255 / delta + 2 : (r - g) / 255 / delta + 4;
+      hue = (hue * 60 + 360) % 360;
+      assert(!(g > r + 8 && g > b + 8) && !(hue >= 70 && hue <= 170 && saturation > .1), label + ' is green: ' + value);
+    }
+    await test('every computed graph fill and stroke avoids green in both schemes', async () => {
+      for (const scheme of ['light', 'dark']) {
+        await using(workLoopFixture(), root => {
+          root.querySelectorAll('circle, line, path, ellipse, text, polyline').forEach(shape => {
+            const style = getComputedStyle(shape);
+            assertNotGreen(style.fill, scheme + ' ' + shape.tagName + ' fill');
+            assertNotGreen(style.stroke, scheme + ' ' + shape.tagName + ' stroke');
+          });
+          assertNotGreen(getComputedStyle(root).backgroundColor, scheme + ' background');
+        }, { scheme });
+      }
+    });
+    await test('stylesheet colour literals contain no green or green-leaning colours', async () => {
+      const source = document.querySelector('style').textContent;
+      const literals = source.match(/#[\da-fA-F]{3,8}\b|rgba?\([^)]*\)|hsla?\([^)]*\)/g) || [];
+      assert(literals.length > 0, 'no palette literals inspected');
+      const probe = document.createElement('span'); document.body.append(probe);
+      try { literals.forEach(value => { probe.style.color = value; assertNotGreen(getComputedStyle(probe).color, 'CSS literal ' + value); }); }
+      finally { probe.remove(); }
+    });
+    await test('no page chrome or instructions at any width; two icon controls', async () => {
+      const data = fixture(); data.graph.task = 'agentgraph desktop';
+      await using(data, async (root, app) => {
+        for (const [width, height] of [[1100, 760], [320, 700]]) {
+          await resizeTo(root, width, height);
+          assert(!root.querySelector('.ag-header') && !root.querySelector('.ag-footer') && !root.querySelector('.ag-brand') && !root.querySelector('.ag-title'), width + 'px page chrome remains');
+          const text = root.textContent;
+          for (const phrase of ['Agent graph', 'Demo', 'Live', 'agentgraph desktop', 'Drag to move', 'click to inspect', 'Scroll for more', 'More agents', 'Coordinating the run', 'Session active', 'Open in chat', 'Team at rest', 'Retrying', '%']) assert(!text.includes(phrase), width + 'px excess text remains: ' + phrase);
+          assert([...root.querySelectorAll('.ag-controls button')].filter(button => button.getClientRects().length).length === 2, width + 'px has more than two visible controls');
+        }
+        assert(!root.querySelector('.ag-header'), 'page header remains in the sidebar');
+        assert(!root.querySelector('.ag-zoom') && !root.querySelector('.ag-hint'), 'removed hint or zoom readout remains in the sidebar DOM');
+        const frame = root.getBoundingClientRect(), viewport = root.querySelector('.ag-viewport').getBoundingClientRect();
+        assert(Math.abs(viewport.top - frame.top) <= 1 && Math.abs(viewport.width - frame.width) <= 1, 'graph does not start at the panel top or use its full width');
+        const visibleText = () => { const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT); const values = []; let node; while ((node = walker.nextNode())) if (node.parentElement?.getClientRects().length) values.push(node.textContent); return values.join(' '); };
+        for (const phrase of ['Agent graph', 'Demo', 'Live', 'agentgraph desktop', 'Drag to move', 'Scroll for more', 'More agents below', 'Coordinating the run', '%']) {
+          assert(!visibleText().includes(phrase), 'excess sidebar text remains: ' + phrase);
+          assert(!root.textContent.includes(phrase), 'removed sidebar text remains in the DOM: ' + phrase);
+        }
+        assert(root.querySelector('.ag-activity').textContent === '1 working', 'status is not compact');
+        assert([...root.querySelectorAll('.ag-controls button')].filter(button => button.getClientRects().length).length === 2, 'sidebar has more than two visible controls');
+        assert(root.querySelectorAll('.ag-group-label').length === 0, 'group headings remain in the sidebar');
+        root.querySelector('.ag-run-button').click(); await sleep(150);
+        assert(!root.querySelector('.ag-detail').hidden, 'icon cannot open Run details');
+        assert(root.querySelector('.ag-detail-title').textContent === 'Run', 'Run details repeats the task title');
+        assert(!root.querySelector('.ag-run-goal'), 'Run details repeats an explanatory goal paragraph');
+        root.querySelector('.ag-close').click();
+        data.agents.forEach(agent => { agent.busy = 0; }); await app.refresh();
+        assert(root.querySelector('.ag-activity').hidden, 'idle sidebar still shows a status sentence');
+        await resizeTo(root, 1100, 760);
+        assert(!root.querySelector('.ag-header') && root.querySelector('.ag-activity').hidden, 'wide view brought chrome back');
+      });
+    });
+    await test('agents surround the centred orchestrator in wide and sidebar arrangements', async () => {
+      const data = fixture(); data.agents = data.agents.filter(a => a.team === 'main');
+      data.agents.push(agent('explorer', 'understand'), agent('researcher', 'understand'), agent('oracle', 'decide'), agent('oracle-lite', 'decide'), agent('designer', 'build'), agent('councillor-b', 'council', { parent: 'council' }), agent('councillor-c', 'council', { parent: 'council' }));
+      workLoopFixture(data);
+      data.graph.loops.push({ id: 'understand-review', worker: 'explorer', evaluator: 'oracle', pairs: [], rounds: 1, state: 'closed', active: false, artifacts: [] });
+      await using(data, async root => {
+        for (const [width, height] of [[1400, 900], [400, 820], [320, 700], [280, 320]]) {
+          await resizeTo(root, width, height);
+          const circles = [...root.querySelectorAll('[data-agent] .ag-core')].map(node => ({ name: node.parentNode.dataset.agent, box: node.getBoundingClientRect() }));
+          const hub = circles.find(node => node.name === 'orchestrator').box, x = hub.x + hub.width / 2, y = hub.y + hub.height / 2;
+          const left = Math.min(...circles.map(node => node.box.left)), right = Math.max(...circles.map(node => node.box.right)), top = Math.min(...circles.map(node => node.box.top)), bottom = Math.max(...circles.map(node => node.box.bottom));
+          assert(Math.abs(x - (left + right) / 2) <= (right - left) * .1 && Math.abs(y - (top + bottom) / 2) <= (bottom - top) * .1, width + 'px hub is not centred in the agents bounds');
+          const quadrants = new Set(circles.filter(node => node.name !== 'orchestrator').map(({ box }) => (box.x + box.width / 2 >= x ? 'right' : 'left') + (box.y + box.height / 2 >= y ? 'down' : 'up')));
+          assert(quadrants.size >= 3, width + 'px agents do not surround the hub');
+          if (width <= 650) {
+            const viewport = root.querySelector('.ag-viewport').getBoundingClientRect();
+            assert(Math.abs(y - viewport.y - viewport.height / 2) <= viewport.height * .1, 'sidebar does not open on the hub');
+          }
+          assertFits(root); assertLoopCorridors(root, data); assertLoopShapes(root);
+        }
+      });
+    });
+    await test('council seats always sit evenly on a circle round their lead', async () => {
+      for (const seats of [1, 2, 3, 5, 8]) {
+        const data = fixture(); data.agents = data.agents.filter(a => a.team === 'main' && a.name !== 'councillor-claude');
+        data.agents.push(agent('explorer', 'understand'), agent('researcher', 'understand'), agent('oracle', 'decide'), agent('oracle-lite', 'decide'), agent('designer', 'build'));
+        for (let i = 0; i < seats; i++) data.agents.push(agent('councillor-' + String.fromCharCode(97 + i), 'council', { parent: 'council' }));
+        await using(data, async (root, app) => {
+          const centre = node => { const b = node.querySelector('.ag-core').getBoundingClientRect(); return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; };
+          const circle = label => {
+            const lead = centre(root.querySelector('[data-agent="council"]'));
+            const around = [...root.querySelectorAll('[data-agent]')].filter(node => node.dataset.parent === 'council').map(node => { const p = centre(node); return { d: Math.hypot(p.x - lead.x, p.y - lead.y), a: Math.atan2(p.y - lead.y, p.x - lead.x) }; });
+            assert(around.length === seats, label + ': a seat is missing');
+            around.forEach(seat => assert(Math.abs(seat.d - around[0].d) <= 2, label + ': seats are not at one distance from the lead'));
+            const angles = around.map(seat => seat.a).sort((a, b) => a - b), gaps = angles.map((a, i) => (i ? a - angles[i - 1] : a + 2 * Math.PI - angles[angles.length - 1]) * 180 / Math.PI);
+            if (seats > 1) gaps.forEach(gap => assert(Math.abs(gap - 360 / seats) <= 3, label + ': seats are not evenly spaced (' + gap.toFixed(1) + ')'));
+            const lines = [...root.querySelectorAll('line[data-edge]')].map(line => line.dataset.edge).filter(name => name.includes('councillor-'));
+            assert(lines.length === seats && lines.every(name => name.startsWith('council->')), label + ': a seat connects to something other than its lead');
+          };
+          for (const [width, height] of [[1200, 800], [400, 820], [300, 600]]) { await resizeTo(root, width, height); circle(seats + ' seats at ' + width); assertFits(root); }
+          await resizeTo(root, 1200, 800);
+          for (let i = 0; i < 4; i++) root.querySelector('[data-agent="council"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', shiftKey: true, bubbles: true }));
+          circle(seats + ' seats after dragging the lead');
+          const leadBefore = root.querySelector('[data-agent="council"]').getAttribute('transform');
+          move(root, 'councillor-a'); circle(seats + ' seats right after dragging a seat');
+          assert(root.querySelector('[data-agent="council"]').getAttribute('transform') !== leadBefore, 'dragging a seat did not carry the council with it');
+          root.querySelector('.ag-fit').click(); circle(seats + ' seats after Fit');
+          move(root, 'councillor-a'); await resizeTo(root, 400, 820); await resizeTo(root, 1200, 800); circle(seats + ' seats after a resize round trip');
+          await app.reset(); circle(seats + ' seats after reset');
+        });
+      }
+    });
+    await test('work through the orchestrator travels along its spoke, not a second line', async () => {
+      const data = fixture();
+      data.graph.flows.push({ from: 'orchestrator', to: 'impl-claude', kind: 'data', pairs: [], artifacts: [], active: true }, { from: 'impl-hard', to: 'orchestrator', kind: 'data', pairs: [], artifacts: [], active: false });
+      await using(data, root => {
+        assert(!edge(root, 'data', 'orchestrator->impl-claude') && !edge(root, 'data', 'impl-hard->orchestrator'), 'a flow through the hub is drawn beside its spoke');
+        assert(edge(root, 'handoff', 'orchestrator->impl-claude').dataset.active === 'true', 'active work through the hub does not light its spoke');
+        assert(edge(root, 'handoff', 'orchestrator->impl-hard').dataset.active === 'false', 'idle spoke is lit');
+      });
+    });
+    await test('the orchestrator carries the run progress as an arc', async () => {
+      const data = fixture(); data.graph.progress = { passed: 1, total: 4 };
+      await using(data, async (root, app) => {
+        const arc = root.querySelector('[data-agent="orchestrator"] .ag-hub-progress'), parts = arc.getAttribute('stroke-dasharray').split(' ').map(Number);
+        assert(arc.dataset.shown === 'true' && Math.abs(parts[0] / parts[1] - .25) < .001, 'progress arc does not show one quarter');
+        assert(root.querySelector('[data-agent="impl-openai"] .ag-hub-progress').dataset.shown === 'false', 'another agent shows run progress');
+        data.graph.progress = { passed: 0, total: 4 }; await app.refresh();
+        assert(arc.dataset.shown === 'false', 'empty progress still draws an arc');
+      });
+    });
+    await test('opening and closing details never reshuffles the graph', async () => {
+      const data = loopFixture(crowdedFixture());
+      await using(data, async root => {
+        for (const [width, height] of [[400, 820], [800, 700], [1200, 800]]) {
+          await resizeTo(root, width, height);
+          const places = () => [...root.querySelectorAll('[data-agent]')].map(node => node.dataset.agent + node.getAttribute('transform')).join('|');
+          const before = places(), compact = root.classList.contains('ag-canvas-compact');
+          open(root, 'impl-openai'); await sleep(200);
+          assert(places() === before, width + 'px: opening details moved the agents');
+          assert(root.classList.contains('ag-canvas-compact') === compact, width + 'px: opening details switched the arrangement');
+          const viewport = root.querySelector('.ag-viewport').getBoundingClientRect(), chosen = root.querySelector('[data-agent="impl-openai"] .ag-core').getBoundingClientRect();
+          assert(chosen.top >= viewport.top - .5 && chosen.bottom <= viewport.bottom + .5 && chosen.left >= viewport.left - .5 && chosen.right <= viewport.right + .5, width + 'px: the selected agent is hidden behind the details');
+          root.querySelector('.ag-close').click(); await sleep(200);
+          assert(places() === before, width + 'px: closing details moved the agents');
+        }
+      });
+    });
+    await test('an agent whose parent is the hub is drawn on the ring with its spoke', async () => {
+      const data = fixture(); data.agents = data.agents.filter(a => a.team === 'main');
+      data.agents.find(a => a.name === 'councillor-claude').parent = 'orchestrator';
+      await using(data, root => {
+        assert(root.querySelector('[data-agent="councillor-claude"]'), 'a child of the hub is not drawn');
+        assert(edge(root, 'handoff', 'orchestrator->councillor-claude'), 'a child of the hub has no spoke');
+        assertFits(root);
+      });
+    });
+    await test('unknown states print as text, never as a built-in property', async () => {
+      const data = workLoopFixture(); data.graph.work_loops[0].state = 'constructor'; data.graph.loops[0].state = 'toString';
+      await using(data, root => {
+        root.querySelector('[data-work-loop="impl-openai"]').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        assert(root.querySelector('.ag-detail-intro').textContent.startsWith('constructor ·'), 'work-loop state leaked a built-in');
+        root.querySelector('.ag-close').click();
+        loopHalves(root, 'working-loop')[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        assert(root.querySelector('.ag-detail-intro').textContent.startsWith('toString ·'), 'review-loop state leaked a built-in');
+      });
+    });
+    await test('motion is on by default, marks what is working, and can be switched off', async () => {
+      const data = fixture(); data.agents[0].busy = 1;
+      const root = host(), app = AgentGraph.mount(root, { fetchSnapshot: async () => data, intervalMs: 60000 });
+      try {
+        await app.refresh();
+        assert(root.dataset.agMotion === 'full', 'motion is not on by default');
+        if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
+          const names = selector => getComputedStyle(root.querySelector(selector)).animationName;
+          assert(names('[data-agent="impl-openai"] .ag-ping') === 'ag-ping' && getComputedStyle(root.querySelector('[data-agent="impl-hard"] .ag-ping')).display === 'none', 'only working agents should ripple');
+          assert(names('[data-agent="impl-hard"]').includes('ag-drift') && !names('[data-agent="orchestrator"]').includes('ag-drift'), 'idle agents should drift gently and the centre should stay put');
+          assert(names('[data-agent="orchestrator"] .ag-hub-wake') === 'ag-hub-spin-back', 'the working centre has no second ring');
+          assert(![...root.querySelectorAll('[data-agent]')].some(node => node.dataset.parent && getComputedStyle(node).animationName.includes('ag-drift')), 'a council seat drifts off its circle');
+        }
+      } finally { app.destroy(); root.remove(); }
+      await using(data, root => {
+        assert(root.dataset.agMotion === 'none', 'motion could not be switched off');
+        assert(getComputedStyle(root.querySelector('[data-agent="impl-hard"]')).animationName === 'none' && getComputedStyle(root.querySelector('[data-agent="impl-openai"] .ag-ping')).display === 'none', 'a still picture still moves');
+      });
+    });
+    document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
+  })().catch(error => { document.getElementById('results').textContent = 'RESULT: FAIL ' + error.stack; });
+</script>
+</body>
+</html>
