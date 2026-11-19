@@ -115,7 +115,7 @@ def build_mermaid(agents: dict) -> str:
     edge("orchestrator", "explorer", "search, docs")
     edge("orchestrator", "researcher", "research question")
     edge("orchestrator", "oracle", "hard decision")
-    edge("orchestrator", "oracle-lite", "second opinion")
+    edge("orchestrator", "oracle-lite", "challenge")
     for seat in seats:
         edge("orchestrator", seat, "council question" if seat == seats[0] else "")
         edge(seat, "council")

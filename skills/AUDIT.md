@@ -12,9 +12,9 @@ Every skill in the toolkit, what was done with it for OpenCode, and which agents
 | `performance-speedup` | reworded | `oracle`, `oracle-lite`, `impl-hard` | Its delegation section named an agent that does not exist here; it now points at `explorer` and `oracle-lite`. |
 | `research-software-engineering` | reworded | `researcher`, `impl-hard`, `reviewer` | Numerical correctness: for hard implementation, research, and review of numerical code. |
 | `ml-experiment-standards` | reworded | `researcher`, `impl-hard`, `reviewer` | Leakage, splits and honest reporting: for whoever builds, studies or reviews a model. |
-| `math-research` | reworded | `researcher`, `oracle` | Proof work for the advisers; model names became roles. Its runner scripts start the Codex CLI and are used only where that exists. |
-| `sympy` | reworded | `oracle`, `impl-hard` | Exact mathematics for the adviser and the hard implementer, who can run it. |
-| `experimental-design` | reworded | `researcher`, `oracle` | Designing a study before data: research and advice. |
+| `math-research` | reworded | `researcher`, `oracle`, `oracle-lite` | Proof work for the advisers; model names became roles. Its runner scripts start the Codex CLI and are used only where that exists. |
+| `sympy` | reworded | `oracle`, `oracle-lite`, `impl-hard` | Exact mathematics for the adviser and the hard implementer, who can run it. |
+| `experimental-design` | reworded | `researcher`, `oracle`, `oracle-lite` | Designing a study before data: research and advice. |
 | `exa-research` | reworded | `researcher` | Public source discovery for the researcher. |
 | `research-summarizer` | reworded | `researcher` | Summaries of supplied sources for the researcher. |
 | `context7-mcp` | keep | `explorer` | Library docs; only `explorer` has that tool. |
@@ -34,7 +34,7 @@ Every skill in the toolkit, what was done with it for OpenCode, and which agents
 | `find-skills` | keep | orchestrator only | Installing skills changes the setup: orchestrator only. |
 | `personal-orchestrator` | rewritten | orchestrator only | Now a short guide that defers to the orchestration rules. The Codex separate-session controller (38 scripts, four references) was removed from this version. |
 | `improve-orchestration` | rewritten | orchestrator only | The self-adapting part: it may now propose a skill edit or a skill-map change as well as a prompt edit, and ends by syncing the toolkit repository. |
-| `improve-orchestration-2` | rewritten | orchestrator only | The same for the `fast` and `ultra-fast` presets and their private ledgers. |
+| `improve-orchestration-2` | rewritten | orchestrator only | The same for the `fast`, `normal` and `ultra-fast` presets and their private ledgers. |
 | `open-ralph-wiggum` | reworded | orchestrator only | An external loop runner. Implementer loops are native here, so it is for the orchestrator when the user asks for ralph. |
 | `codex-autoresearch` | reworded | orchestrator only | Measured git experiments toward a number: the orchestrator runs it under a session goal. Its detached mode needs the Codex CLI. |
 
@@ -43,6 +43,8 @@ Verdicts: **keep** is unchanged from the Codex toolkit; **reworded** had host, m
 Counts: 9 kept, 21 reworded, 3 rewritten, 33 in all. `shopify-ruby` is kept out of the toolkit as a separate, employer-specific skill.
 
 A second pass removed from 13 worker-loaded skills the instructions a worker here cannot follow (asking the user, committing or resetting history, global installs, attempt caps, a self-review as the final check, pointers to skills that are not installed). The same limits are stated once in every worker's prompt ("Skills serve the brief"), so a skill added later is covered too.
+
+2026-11-19: the user asked for `oracle-lite` and `oracle` to share one skill list and to differ by angle (the oracle works a question in depth; `oracle-lite` challenges the framing and the plan). `oracle-lite` therefore gained `math-research`, `sympy` and `experimental-design`.
 
 ## Left for a later pass
 

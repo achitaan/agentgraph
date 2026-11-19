@@ -2,7 +2,7 @@
 
 A working multi-agent setup for OpenCode, with a live graph on the side so you can see what it is doing.
 
-- **Agents and rules** (`config/`): three presets of the same roster (an orchestrator, implementers, a verifier, a reviewer, advisers, a designer, a council), and the prompts that make them work as a task graph with work-and-check loops.
+- **Agents and rules** (`config/`): four presets of the same roster (an orchestrator, implementers, a verifier, a reviewer, advisers, a designer, a council), and the prompts that make them work as a task graph with work-and-check loops.
 - **Skills** (`skills/`): the personal Codex toolkit's skills, reworded for OpenCode, with each agent allowed only the ones that fit its job. See [SKILLS.md](SKILLS.md).
 - **Visualizer** (`agentgraph/`, `desktop-plugin/`, `tui-plugin/`): the same picture as an OpenCode Desktop side panel, a terminal sidebar and a web page. The orchestrator sits in the centre with every agent round it; loops are drawn as cycles; it shows what needs you, what each agent spent, and what the setup has learned from your corrections.
 - **Graph format and checker** ([GRAPH_FORMAT.md](GRAPH_FORMAT.md), `bin/agentgraph`): how a task is written down as a graph, checked, recorded and learned from.

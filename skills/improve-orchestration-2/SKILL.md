@@ -1,16 +1,16 @@
 ---
 name: improve-orchestration-2
-description: Improve the `ultra-fast` or `fast` preset's prompts, skills and skill map from that preset's private evidence. Use only when one of those presets is active and its private signals report an improvement is due, or when the user asks to improve how that preset works. Proposes one small edit and applies it only after the user approves.
+description: Improve the `ultra-fast`, `fast` or `normal` preset's prompts, skills and skill map from that preset's private evidence. Use only when one of those presets is active and its private signals report an improvement is due, or when the user asks to improve how that preset works. Proposes one small edit and applies it only after the user approves.
 ---
 
-# Improve a secondary preset (ultra-fast, fast)
+# Improve a secondary preset (ultra-fast, fast, normal)
 
-Private improvement loop for one secondary preset of oh-my-opencode-slim (same agent names as `ultra-fast-frontier`, different models and prompts). `<P>` below is the active preset: `ultra-fast` or `fast`. Never read or write another preset's ledger, proposals or prompt folder.
+Private improvement loop for one secondary preset of oh-my-opencode-slim (same agent names as `ultra-fast-frontier`, different models and prompts). `<P>` below is the active preset: `ultra-fast`, `fast` or `normal`. Never read or write another preset's ledger, proposals or prompt folder.
 
 Constants (all under `~/.config/opencode/`):
-- Ledger home `<H>`: `orchestration/memory-o2` for `ultra-fast` (historical name), `orchestration/memory-fast` for `fast`. Every `agentgraph` ledger command carries `--home ~/.config/opencode/<H>`. Record only a named graph produced by this profile (`record --task <current-task-name>`); never bulk-import other profiles' graph files from a shared project directory.
-- Proposals: `orchestration/proposals-o2/` (ultra-fast) or `orchestration/proposals-fast/` (fast)
-- Backups: `backups-o2/` (ultra-fast) or `backups-fast/` (fast)
+- Ledger home `<H>`: `orchestration/memory-o2` for `ultra-fast` (historical name), `orchestration/memory-fast` for `fast`, `orchestration/memory-normal` for `normal`. Every `agentgraph` ledger command carries `--home ~/.config/opencode/<H>`. Record only a named graph produced by this profile (`record --task <current-task-name>`); never bulk-import other profiles' graph files from a shared project directory.
+- Proposals: `orchestration/proposals-o2/` (ultra-fast), `orchestration/proposals-fast/` (fast) or `orchestration/proposals-normal/` (normal)
+- Backups: `backups-o2/` (ultra-fast), `backups-fast/` (fast) or `backups-normal/` (normal)
 
 ## Files you may propose to change (with user approval)
 

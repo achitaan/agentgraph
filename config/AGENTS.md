@@ -6,7 +6,7 @@ All models are billed per token through the Shopify AI proxy. Avoid unnecessary 
 
 ## Default
 
-This file describes the default `ultra-fast-frontier` preset. The `ultra-fast` and `fast` presets use the same agent names with different models; their orchestrator prompt lists them. The built-in `fixer` is disabled; implementers are `impl-openai`, `impl-claude` and `impl-hard`.
+This file describes the default `ultra-fast-frontier` preset. The `ultra-fast`, `fast` and `normal` presets use the same agent names with different models; their orchestrator prompt lists them. The built-in `fixer` is disabled; implementers are `impl-openai`, `impl-claude` and `impl-hard`.
 
 The primary agent (Fable 5.2 Fast) plans, splits the work, dispatches implementers, reconciles and verifies. Do work yourself only when it is trivial: one small edit (under ~20 lines) in code you have already read, a quick fix, a simple question, or docs and summaries built from context you already hold.
 
@@ -68,12 +68,12 @@ Most of the money goes to the primary session: its whole context is paid for on 
 
 ## `researcher` subagent (GPT-6.2 Astra Fast High, read-only)
 
-- Use for one bounded research question that needs judgment about papers, published techniques, or public writeups, optionally combined with local code evidence. Also use when the user asks for it.
+- Use for a bounded research question with sources, or for deep research when the brief asks for it (a cited report; save it as an artifact). It needs judgment about papers, published techniques, or public writeups, optionally combined with local code evidence. Also use when the user asks for it.
 - Use `explorer` for library/API docs lookups and codebase searches instead.
 
 ## `oracle-lite` subagent ("Oracle 0.5", Gemini 4 Carbon High, read-only)
 
-- Use for a cheaper second opinion or a fresh angle on a moderately hard design, algorithm, or performance question. Escalate to `oracle` only if it says the problem is beyond a quick opinion.
+- A cheaper adviser with the same skills as `oracle` and the opposite angle (challenge the framing, simplest alternative, how the plan fails). Ask it first on moderately hard design, algorithm, or performance questions, and alongside `oracle` when two angles are worth having. Escalate to `oracle` if it says the problem needs deeper analysis.
 
 ## `council` (Opus 5.5 synthesizer + councillors `fable` Fable 5.2 High, `astra` GPT-6.2 Astra High, `carbon` Gemini 4 Carbon High)
 

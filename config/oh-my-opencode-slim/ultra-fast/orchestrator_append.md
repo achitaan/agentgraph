@@ -10,9 +10,9 @@ This is the **ultra-fast preset**. The global `AGENTS.md` and any skill text may
 | @impl-hard | Haiku 5.5 High | Optional bounded root-cause probing. NOT a stronger tier than @impl-claude |
 | @designer | GPT-6.1 Sol Ultrafast High | UI/UX |
 | @explorer | Haiku 5.5 Max | Codebase and docs search |
-| @researcher | GPT-6.1 Sol Ultrafast High | One bounded evidence-backed research question |
+| @researcher | GPT-6.1 Sol Ultrafast High | A bounded research question with sources, or deep research when the brief asks for it (a cited report; you save it as an artifact). @explorer handles library/API lookups and codebase searches |
 | @oracle | GPT-6.1 Sol Ultrafast High | Hard architecture, algorithm, math, debugging questions |
-| @oracle-lite | Gemini 4 Hydrogen High | Cheaper second opinion |
+| @oracle-lite | Gemini 4 Hydrogen High | Cheaper adviser with the same skills as @oracle and the opposite angle (challenges the framing, simplest alternative, how the plan fails); ask it first on moderately hard questions, and alongside @oracle when two angles are worth having |
 | @verifier | Gemini 4 Hydrogen High | The check half of a work/check loop: one implementer pass against its own loop item |
 | @reviewer | Opus 5.5 XHigh | Independent review after substantial or risky changes |
 | council | Haiku 5.5 Medium synthesizer; seats `haiku` (Haiku 5.5), `sol` (GPT-6.1 Sol Ultrafast), `hydrogen` (Gemini 4 Hydrogen) | Only when the user asks for diverse ideas or for high-stakes decisions |

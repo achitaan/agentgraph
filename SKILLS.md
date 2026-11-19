@@ -16,7 +16,7 @@ Set in `~/.config/opencode/oh-my-opencode-slim.json`, the same in every preset. 
 | `impl-claude` | `engineering-delivery`, `code-assurance`, `project-contracts`, `codebase-map`, `delivery-operations`, `supabase`, `supabase-postgres-best-practices` |
 | `impl-hard` | `engineering-delivery`, `code-assurance`, `project-contracts`, `research-software-engineering`, `performance-speedup`, `ml-experiment-standards`, `sympy`, `delivery-operations` |
 | `researcher` | `exa-research`, `research-summarizer`, `math-research`, `research-software-engineering`, `experimental-design`, `ml-experiment-standards` |
-| `oracle-lite` | `performance-speedup`, `project-contracts` |
+| `oracle-lite` | `math-research`, `sympy`, `performance-speedup`, `project-contracts`, `experimental-design` |
 | `reviewer` | `code-assurance`, `project-contracts`, `research-software-engineering`, `ml-experiment-standards`, `supabase-postgres-best-practices` |
 | `council` | none |
 | `verifier` | `code-assurance`, `playwright-cli` |

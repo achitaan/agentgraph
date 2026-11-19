@@ -27,8 +27,8 @@ below: report any needed delegation under `Discovered` in your loop report.
 - **A graph:** two or more nodes, or work that divides into independent lanes
   with disjoint write scopes. Run the independent parts in parallel; do not invent
   lanes or dependencies.
-- **Research or advice:** `explorer` for discovery and docs, `researcher` for one
-  bounded research question, `oracle` or `oracle-lite` for a hard design or
+- **Research or advice:** `explorer` for discovery and docs, `researcher` for a
+  bounded research question or, when asked, deep research, `oracle` or `oracle-lite` for a hard design or
   algorithm question, `designer` for UI. Consult them when a wrong guess is
   costly, not for facts a quick read gives you.
 

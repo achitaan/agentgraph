@@ -10,9 +10,9 @@ This is the **fast preset**: Fast-tier (not Ultrafast) Sol models and normal-spe
 | @impl-hard | Opus 5.5 High | Genuinely difficult implementations, subtle refactors, bugs that survive 2+ attempts |
 | @designer | GPT-6.2 Sol Fast High | UI/UX |
 | @explorer | Haiku 5.5 High | Codebase and docs search |
-| @researcher | GPT-6.2 Sol Fast High | One bounded evidence-backed research question |
+| @researcher | GPT-6.2 Sol Fast High | A bounded research question with sources, or deep research when the brief asks for it (a cited report; you save it as an artifact). @explorer handles library/API lookups and codebase searches |
 | @oracle | GPT-6.2 Sol Fast XHigh | Hard architecture, algorithm, math, debugging questions |
-| @oracle-lite | Gemini 4 Carbon High | Cheaper second opinion |
+| @oracle-lite | Gemini 4 Carbon High | Cheaper adviser with the same skills as @oracle and the opposite angle (challenges the framing, simplest alternative, how the plan fails); ask it first on moderately hard questions, and alongside @oracle when two angles are worth having |
 | @verifier | Haiku 5.5 High | The check half of a work/check loop: one implementer pass against its own loop item |
 | @reviewer | Opus 5.5 High | Independent review after substantial or risky changes |
 | council | Sonnet 5.5 Medium synthesizer; seats `sonnet` (Sonnet 5.5), `sol` (GPT-6.2 Sol Fast), `carbon` (Gemini 4 Carbon) | Only when the user asks for diverse ideas or for high-stakes decisions |
