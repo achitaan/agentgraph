@@ -9,19 +9,19 @@ Set in `~/.config/opencode/oh-my-opencode-slim.json`, the same in every preset. 
 | Agent | Skills |
 |---|---|
 | `orchestrator` | all |
-| `oracle` | `math-research`, `sympy`, `performance-speedup`, `project-contracts` |
+| `oracle` | `math-research`, `sympy`, `performance-speedup`, `project-contracts`, `experimental-design` |
 | `explorer` | `codebase-map`, `context7-mcp` |
-| `designer` | `design-taste-frontend`, `ui-ux-pro-max`, `impeccable`, `playwright-cli`, `clone-any-website` |
-| `impl-openai` | `engineering-delivery`, `code-assurance` |
-| `impl-claude` | `engineering-delivery`, `code-assurance`, `project-contracts`, `codebase-map` |
-| `impl-hard` | `code-assurance`, `research-software-engineering`, `performance-speedup`, `engineering-delivery`, `project-contracts` |
-| `researcher` | `exa-research`, `research-summarizer`, `math-research`, `research-software-engineering`, `experimental-design` |
+| `designer` | `design-taste-frontend`, `ui-ux-pro-max`, `impeccable`, `playwright-cli`, `clone-any-website`, `writing-clearly-and-concisely` |
+| `impl-openai` | `engineering-delivery`, `code-assurance`, `supabase-postgres-best-practices` |
+| `impl-claude` | `engineering-delivery`, `code-assurance`, `project-contracts`, `codebase-map`, `delivery-operations`, `supabase`, `supabase-postgres-best-practices` |
+| `impl-hard` | `engineering-delivery`, `code-assurance`, `project-contracts`, `research-software-engineering`, `performance-speedup`, `ml-experiment-standards`, `sympy`, `delivery-operations` |
+| `researcher` | `exa-research`, `research-summarizer`, `math-research`, `research-software-engineering`, `experimental-design`, `ml-experiment-standards` |
 | `oracle-lite` | `performance-speedup`, `project-contracts` |
-| `reviewer` | `code-assurance`, `project-contracts` |
+| `reviewer` | `code-assurance`, `project-contracts`, `research-software-engineering`, `ml-experiment-standards`, `supabase-postgres-best-practices` |
 | `council` | none |
-| `verifier` | `code-assurance` |
+| `verifier` | `code-assurance`, `playwright-cli` |
 
-Why these: implementers get delivery habits and code assurance; `impl-claude` adds interface contracts and the codebase map for cross-module work; `impl-hard` adds numerical and performance guidance; `verifier` and `reviewer` get code assurance; `designer` gets the interface skills; `explorer` gets the codebase map and library docs; `researcher`, `oracle` and `oracle-lite` get the research, math and performance guidance their questions need. `council` loads none.
+The reason for every choice is in [skills/AUDIT.md](skills/AUDIT.md). In short: implementers get delivery habits and code assurance; `impl-claude` adds interface contracts and the codebase map for cross-module work; `impl-hard` adds numerical and performance guidance; `verifier` and `reviewer` get code assurance; `designer` gets the interface skills; `explorer` gets the codebase map and library docs; `researcher`, `oracle` and `oracle-lite` get the research, math and performance guidance their questions need. `council` loads none.
 
 ## Skills reworded for OpenCode
 
