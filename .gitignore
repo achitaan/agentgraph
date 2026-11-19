@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# Personal run records: task graphs, handed-on files, feedback ledgers, generated output.
+.opencode/
+memory*/
+proposals*/
+out/
