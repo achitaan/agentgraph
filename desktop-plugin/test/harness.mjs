@@ -312,6 +312,9 @@ function loadWindow(code, { onAgentGraph } = {}) {
   return { module, gui, solid, unexpected, document, window, context };
 }
 
+const STALE_REV = "0000000000000000"; // a rev the view showed before something else changed the thing
+const CURRENT_REV = "1111111111111111";
+
 function windowContext(definition, overrides = {}) {
   const added = [];
   const opened = [];
@@ -345,6 +348,7 @@ function windowContext(definition, overrides = {}) {
       return {
         flow: async (input, options) => {
           calls.push({ op: "flow", input: JSON.parse(JSON.stringify(input)), options });
+          if (input.expect === STALE_REV) return JSON.stringify({ error: "it changed since you opened it; reload and try again", rev: CURRENT_REV });
           if (input.path.includes("orchestrator reviewer impl-openai")) return JSON.stringify({ error: "the hub orchestrator can only start or end a flow" });
           if (input.op !== "add") return JSON.stringify({ flows: [] });
           const flow = { id: input.path.split(" ").join("-"), path: input.path.split(" "), text: input.text || "Made.", source: "drawn" };
@@ -352,22 +356,26 @@ function windowContext(definition, overrides = {}) {
         },
         skills: async (input, options) => {
           calls.push({ op: "skills", input: JSON.parse(JSON.stringify(input)), options });
+          if (input.expect === STALE_REV) return JSON.stringify({ error: "it changed since you opened it; reload and try again", rev: CURRENT_REV });
           if (input.agent === "councillor-a") return JSON.stringify({ error: "Council seats are model calls defined in the council's own table." });
           const skills = input.op === "all" ? ["*"] : input.op === "add" ? ["alpha", input.skill] : ["alpha"];
           return JSON.stringify({ agent: input.agent, skills, warnings: input.op === "remove" ? ["task-profiles.md: still named."] : [], changed: true, message: "restart" });
         },
         roster: async (input, options) => {
           calls.push({ op: "roster", input: JSON.parse(JSON.stringify(input)), options });
+          if (input.expect === STALE_REV) return JSON.stringify({ error: "it changed since you opened it; reload and try again", rev: CURRENT_REV });
           if (input.name === "orchestrator") return JSON.stringify({ error: "'orchestrator' is the orchestrator, the council or a council seat and cannot be removed here" });
           return JSON.stringify({ agent: input.name || "restored-agent", action: input.op, record: input.op === "remove" ? "/tmp/backups/undo.json" : undefined, message: "restart" });
         },
         skillfile: async (input, options) => {
           calls.push({ op: "skillfile", input: JSON.parse(JSON.stringify(input)), options });
+          if (input.expect === STALE_REV) return JSON.stringify({ error: "it changed since you opened it; reload and try again", rev: CURRENT_REV });
           if (input.id === "shopify-ruby" && input.op !== "read") return JSON.stringify({ error: "shopify-ruby is kept in step with Shopify's own copy; edit it there, not here." });
           return JSON.stringify({ id: input.id || "restored-skill", description: input.description || "D", text: input.text || "T", changed: true });
         },
         team: async (input, options) => {
           calls.push({ op: "team", input: JSON.parse(JSON.stringify(input)), options });
+          if (input.expect === STALE_REV) return JSON.stringify({ error: "it changed since you opened it; reload and try again", rev: CURRENT_REV });
           if (input.lead === "orchestrator") return JSON.stringify({ error: "the hub cannot lead a group" });
           if (input.op === "remove") return JSON.stringify({ teams: [] });
           const team = { id: input.id || input.lead, lead: input.lead || "reviewer", members: input.members ? input.members.split(" ") : ["a"], text: input.text || "Made." };
@@ -1412,6 +1420,129 @@ await check("panel render: the view gets actions.roster, actions.skillfile and a
     assert.equal(await failure(team, bad), "Bad group request.", JSON.stringify(bad));
   assert.equal(w.calls.length, count, "a bad request reached main");
   rendered.dispose();
+});
+
+await check("every change but an add, a read and a restore passes the view's rev as `--expect REV` before --json; a stale answer keeps its rev; a bad rev spawns nothing", async () => {
+  const python = path.join(TMP, "fake-expect-python");
+  fs.writeFileSync(python, `#!/bin/sh
+cat > /dev/null
+case "$*" in
+  *"--expect ${STALE_REV}"*) printf '{"error": "flow x changed since you opened it; reload and try again", "rev": "${CURRENT_REV}"}\\n'; exit 1;;
+esac
+case "$3" in
+  agentgraph.structure) printf '{"flows": [], "text": "message"}\\n';;
+  agentgraph.skillset) printf '{"agent": "a", "skills": []}\\n';;
+  agentgraph.roster) printf '{"agent": "a", "action": "x"}\\n';;
+  agentgraph.skillfiles) printf '{"id": "a"}\\n';;
+  agentgraph.teams) printf '{"teams": []}\\n';;
+esac
+`, { mode: 0o700 });
+  const log = [];
+  const loaded = loadMain(CODE, log);
+  const m = mainContext({ home: ORCHESTRATION, python });
+  resolveDefault(loaded.module.exports).main(m.ctx);
+  const impl = m.provided[0].impl;
+  const rev = "0123456789abcdef";
+  const tail = ["--expect", rev, "--json"];
+  const blank = { op: "", name: "", record: "", model: "", variant: "", description: "", prompt: "", skills: "", read_only: "", copy_of: "", template: "", to: "" };
+  const flowBlank = { op: "", id: "", path: "", text: "" };
+  const calls = [
+    [impl.flow, { ...flowBlank, op: "text", id: "f", text: "T", expect: rev }, ["text", "f", "--text-file", "-"]],
+    [impl.flow, { ...flowBlank, op: "name", id: "f", text: "nm", expect: rev }, ["name", "f", "nm"]],
+    [impl.flow, { ...flowBlank, op: "command", id: "f", text: "on", expect: rev }, ["command", "f", "--on"]],
+    [impl.flow, { ...flowBlank, op: "prompt", id: "f", text: "goal", expect: rev }, ["prompt", "f", "--goal-file", "-"]],
+    [impl.flow, { ...flowBlank, op: "remove", id: "f", expect: rev }, ["remove", "f"]],
+    [impl.skills, { op: "add", agent: "impl-openai", skill: "code-assurance", expect: rev }, ["add", "impl-openai", "code-assurance"]],
+    [impl.skills, { op: "all", agent: "impl-openai", skill: "", expect: rev }, ["all", "impl-openai"]],
+    [impl.roster, { ...blank, op: "text", name: "checker", prompt: "P", expect: rev }, ["text", "checker", "--text-file", "-"]],
+    [impl.roster, { ...blank, op: "rename", name: "checker", to: "auditor", expect: rev }, ["rename", "checker", "auditor"]],
+    [impl.roster, { ...blank, op: "remove", name: "checker", expect: rev }, ["remove", "checker"]],
+    [impl.skillfile, { op: "write", id: "s", record: "", description: "", text: "T", assign: "", expect: rev }, ["write", "s", "--text-file", "-"]],
+    [impl.skillfile, { op: "delete", id: "s", record: "", description: "", text: "", assign: "", expect: rev }, ["delete", "s"]],
+    [impl.team, { op: "members", id: "r", lead: "", members: "a b", text: "", expect: rev }, ["members", "r", "a", "b"]],
+    [impl.team, { op: "text", id: "r", lead: "", members: "", text: "T", expect: rev }, ["text", "r", "--text-file", "-"]],
+    [impl.team, { op: "remove", id: "r", lead: "", members: "", text: "", expect: rev }, ["remove", "r"]],
+  ];
+  for (const [method, input, args] of calls) {
+    log.length = 0;
+    const doc = JSON.parse(await method(input));
+    assert.equal(doc.error, undefined, JSON.stringify(input));
+    assert.deepEqual(log[0].args.slice(-args.length - tail.length), args.concat(tail), JSON.stringify(input));
+  }
+  log.length = 0;
+  await impl.team({ op: "remove", id: "r", lead: "", members: "", text: "" });
+  assert.deepEqual(log[0].args, ["-P", "-m", "agentgraph.teams", "remove", "r", "--json"], "no expect: the command as before");
+  const stale = JSON.parse(await impl.flow({ ...flowBlank, op: "remove", id: "f", expect: STALE_REV }));
+  assert.deepEqual(stale, { error: "flow x changed since you opened it; reload and try again", rev: CURRENT_REV });
+  log.length = 0;
+  for (const [method, input] of [[impl.flow, { ...flowBlank, op: "add", path: "a b", expect: rev }], [impl.flow, { ...flowBlank, op: "remove", id: "f", expect: "--json" }],
+    [impl.flow, { ...flowBlank, op: "remove", id: "f", expect: "ABCDEF0123456789" }], [impl.flow, { ...flowBlank, op: "remove", id: "f", expect: 7 }],
+    [impl.flow, { ...flowBlank, op: "remove", id: "f", expect: "" }], [impl.team, { op: "remove", id: "r", lead: "", members: "", text: "", expect: "" }],
+    [impl.skills, { op: "add", agent: "impl-openai", skill: "code-assurance", expect: "" }], [impl.roster, { ...blank, op: "remove", name: "checker", expect: "" }],
+    [impl.skillfile, { op: "delete", id: "s", record: "", description: "", text: "", assign: "", expect: "" }], [impl.flow, { ...flowBlank, op: "remove", id: "f", expect: null }],
+    [impl.roster, { ...blank, op: "read", name: "checker", expect: rev }], [impl.roster, { ...blank, op: "restore", record: "/r.json", expect: rev }],
+    [impl.roster, { ...blank, op: "add", name: "x", template: "verifier", expect: rev }], [impl.skillfile, { op: "read", id: "s", record: "", description: "", text: "", assign: "", expect: rev }],
+    [impl.team, { op: "add", id: "", lead: "r", members: "a", text: "", expect: rev }]])
+    assert.equal(typeof JSON.parse(await method(input)).error, "string", JSON.stringify(input));
+  assert.equal(log.length, 0, "a bad or misplaced rev spawned a command");
+});
+
+await check("panel render: every action passes `expect` to main as it is, and a stale refusal rejects with the current rev", async () => {
+  const definition = windowLoad.gui.defined[0];
+  const session = { key: "srv\nses_a", id: "ses_a", directory: ORCHESTRATION };
+  const props = { get session() { return session; }, screen: {} };
+  const w = windowContext(definition, { session });
+  definition.setup(w.ctx);
+  const rendered = windowLoad.solid.runWithOwner(() => value(w.added[1].item).render(props));
+  const { flow, skills, roster, skillfile, team } = mountCalls[mountCalls.length - 1].options.actions;
+  const rev = "0123456789abcdef";
+  await flow({ op: "text", id: "f", text: "T", expect: rev });
+  await skills({ agent: "impl-openai", skill: "alpha", on: true, expect: rev });
+  await roster({ op: "remove", name: "checker", expect: rev });
+  await skillfile({ op: "delete", id: "s", expect: rev });
+  await team({ op: "remove", id: "r", expect: rev });
+  await team({ op: "remove", id: "r" });
+  const sent = w.calls.filter((c) => c.input).map((c) => c.input.expect);
+  assert.deepEqual(sent, [rev, rev, rev, rev, rev, undefined]);
+  for (const [action, request] of [[flow, { op: "remove", id: "f" }], [skills, { agent: "impl-openai", skill: "alpha", on: false }],
+    [roster, { op: "text", name: "checker", text: "x" }], [skillfile, { op: "write", id: "s", text: "x" }], [team, { op: "text", id: "r", text: "x" }]]) {
+    let caught = null;
+    try {
+      await action({ ...request, expect: STALE_REV });
+    } catch (error) {
+      caught = error;
+    }
+    assert.ok(caught, JSON.stringify(request));
+    assert.match(caught.message, /changed since you opened it/);
+    assert.equal(caught.rev, CURRENT_REV);
+  }
+  const count = w.calls.length;
+  for (const [action, request, message] of [[flow, { op: "remove", id: "f", expect: 5 }, "Bad flow request."], [team, { op: "remove", id: "r", expect: [] }, "Bad group request."],
+    [flow, { op: "remove", id: "f", expect: "" }, "Bad flow request."], [skills, { agent: "impl-openai", skill: "alpha", on: false, expect: "" }, "Bad skills request."],
+    [roster, { op: "remove", name: "checker", expect: "" }, "Bad roster request."], [skillfile, { op: "delete", id: "s", expect: "" }, "Bad skill request."],
+    [team, { op: "remove", id: "r", expect: "" }, "Bad group request."], [flow, { op: "remove", id: "f", expect: null }, "Bad flow request."]]) {
+    let text = "";
+    try {
+      await action(request);
+    } catch (error) {
+      text = error.message;
+    }
+    assert.equal(text, message);
+  }
+  assert.equal(w.calls.length, count, "a bad expect reached main");
+  rendered.dispose();
+});
+
+await check("the name patterns are agentgraph/names.py's own: AGENT_NAME, FLOW_ID, FLOW_NAME and SKILL_NAME equal them", () => {
+  const python = childProcess.execFileSync("python3", ["-P", "-c", "import json; from agentgraph import names; print(json.dumps(names.PLUGIN_CONSTANTS))"],
+    { cwd: ORCHESTRATION, env: { ...process.env, PYTHONPATH: ORCHESTRATION }, encoding: "utf8" });
+  const wanted = JSON.parse(python);
+  const source = fs.readFileSync(path.join(PLUGIN_DIR, "src", "plugin.cjs"), "utf8");
+  for (const [constant, pattern] of Object.entries(wanted)) {
+    const found = source.match(new RegExp("^const " + constant + " = /(.*)/;", "m"));
+    assert.ok(found, constant);
+    assert.equal(found[1], "^" + pattern + "$", constant);
+  }
 });
 
 await check("flow counts the instruction limit in characters: 2000 emoji (4000 UTF-16 units) go to the command, 2001 do not", async () => {

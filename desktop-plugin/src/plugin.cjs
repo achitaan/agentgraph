@@ -45,9 +45,14 @@ const SNAPSHOT_MAX_BYTES = 8 * 1024 * 1024;
 const DEFAULT_INTERVAL_MS = 4000;
 const ERROR_MAX_CHARS = 300;
 const SESSION_ID = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$/;
-const AGENT_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
+// The names: the same patterns as agentgraph/names.py, the one definition (tests/test_review4.py and the harness prove them equal).
+const AGENT_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
 const FLOW_ID = /^[a-z0-9][a-z0-9-]{0,79}$/;
-const SKILL_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/;
+const SKILL_NAME = /^[a-z][a-z0-9-]{0,63}$/;
+const VARIANT_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/; // a model's variant: not a name the toolkit defines
+// A thing's `rev` (agentfiles.rev: 16 hex digits). A change from the view sends the rev it was showing as `expect`;
+// the command refuses it, changing nothing, when the thing changed since (the answer is { error, rev }).
+const REV = /^[0-9a-f]{16}$/;
 const FLOW_STEPS_LIMIT = 20;
 // The command's own limit, counted the same way: in characters (code points), not UTF-16 units.
 const FLOW_TEXT_MAX_CHARS = 2000;
@@ -348,7 +353,8 @@ function runCommand(deps, request, label, accept) {
       } catch (_) {
         doc = undefined;
       }
-      if (isPlainObject(doc) && typeof doc.error === "string" && doc.error) return fail(doc.error);
+      if (isPlainObject(doc) && typeof doc.error === "string" && doc.error)
+        return typeof doc.rev === "string" && REV.test(doc.rev) ? { error: oneLine(doc.error), rev: doc.rev } : fail(doc.error);
       const answer = !error && isPlainObject(doc) ? accept(doc) : null;
       if (answer) return answer;
       if (error && error.code === "ENOENT")
@@ -383,6 +389,25 @@ function runCommand(deps, request, label, accept) {
 // Main process: run `python3 -P -m agentgraph.structure flow add|text|name|command|prompt|remove ... --json` without a
 // shell; the instruction and the goal go to the command on stdin (`--text-file -`, `--goal-file -`), never on the
 // command line.
+
+// The `--expect REV` arguments for a request's optional `expect` (absent: none), or null when it is not a rev. An
+// `expect` that is given must be a rev: an empty one is bad input, never taken as none (the endpoints answer 400).
+function expectArgs(input) {
+  if (input.expect === undefined) return [];
+  return typeof input.expect === "string" && REV.test(input.expect) ? ["--expect", input.expect] : null;
+}
+
+// A command's request with `--expect REV` put before its final `--json`; { error } when `expect` is not a rev or the
+// op takes none (an add, a read or a restore names nothing the view was showing).
+function withExpect(request, input, allowed, fail) {
+  if (request.error) return request;
+  const extra = expectArgs(input);
+  if (extra === null) return fail("The change needs the rev the view was showing, or none.");
+  if (!extra.length) return request;
+  if (!allowed) return fail("This change takes no rev.");
+  const args = request.args.slice(0, -1).concat(extra, request.args.slice(-1));
+  return Object.assign({}, request, { args });
+}
 
 function createFlowRunner(deps) {
   // deps: { execFile, path, env, home, python, demo, signal, timeoutMs, maxBytes }
@@ -432,6 +457,9 @@ function createFlowRunner(deps) {
     return fail("Bad flow request.");
   }
 
+  const checked = (input) => withExpect(command(input), isPlainObject(input) ? input : {},
+    isPlainObject(input) && input.op !== "add" && input.op !== "add-command", fail);
+
   const run = (request) => runCommand(deps, request, "The structure command", (doc) => {
     if (request.prompt) return typeof doc.text === "string" ? { text: doc.text } : null;
     if (!Array.isArray(doc.flows)) return null;
@@ -448,7 +476,7 @@ function createFlowRunner(deps) {
     // Never rejects: failures become { error }. One change at a time, in the order asked. The run message is
     // read-only, so the demo gives it too.
     flow(input) {
-      const request = command(input);
+      const request = checked(input);
       if (request.error) return Promise.resolve(request);
       if (deps.demo && !request.prompt) return Promise.resolve(fail("The demo cannot change the structure."));
       const next = queue.then(() => run(request));
@@ -478,6 +506,7 @@ function createSkillRunner(deps) {
     }
     return fail("Bad skills request.");
   }
+  const checked = (input) => withExpect(command(input), isPlainObject(input) ? input : {}, true, fail);
   const run = (request) => runCommand(deps, request, "The skills command", (doc) => {
     if (typeof doc.agent !== "string" || !Array.isArray(doc.skills)) return null;
     return { agent: doc.agent, skills: doc.skills, warnings: Array.isArray(doc.warnings) ? doc.warnings : [], changed: doc.changed !== false, message: typeof doc.message === "string" ? doc.message : "" };
@@ -486,7 +515,7 @@ function createSkillRunner(deps) {
   return {
     // Never rejects: failures become { error }. One change at a time, in the order asked.
     skills(input) {
-      const request = command(input);
+      const request = checked(input);
       if (request.error) return Promise.resolve(request);
       if (deps.demo) return Promise.resolve(fail("The demo cannot change skills."));
       const next = queue.then(() => run(request));
@@ -560,7 +589,7 @@ function createRosterRunner(deps) {
       args.push("--model", model);
     }
     if (variant) {
-      if (!SKILL_NAME.test(variant)) return fail("The variant is not a valid name.");
+      if (!VARIANT_NAME.test(variant)) return fail("The variant is not a valid name.");
       args.push("--variant", variant);
     }
     if (copyOf) {
@@ -589,7 +618,9 @@ function createRosterRunner(deps) {
     return { args, stdin: prompt.trim() ? prompt : "" };
   }
   const accept = (doc) => (typeof doc.agent === "string" && typeof doc.action === "string" ? doc : null);
-  return { roster: serialRunner(deps, command, "The roster command", accept, "The demo cannot change the agents.") };
+  const checked = (input) => withExpect(command(input), isPlainObject(input) ? input : {},
+    isPlainObject(input) && ["remove", "text", "rename"].includes(input.op), fail);
+  return { roster: serialRunner(deps, checked, "The roster command", accept, "The demo cannot change the agents.") };
 }
 
 function createSkillFileRunner(deps) {
@@ -625,7 +656,9 @@ function createSkillFileRunner(deps) {
     return { args, stdin: text };
   }
   const accept = (doc) => (typeof doc.id === "string" ? doc : null);
-  return { skillfile: serialRunner(deps, command, "The skill command", accept, "The demo cannot change skills.") };
+  const checked = (input) => withExpect(command(input), isPlainObject(input) ? input : {},
+    isPlainObject(input) && (input.op === "write" || input.op === "delete"), fail);
+  return { skillfile: serialRunner(deps, checked, "The skill command", accept, "The demo cannot change skills.") };
 }
 
 function createTeamRunner(deps) {
@@ -661,7 +694,9 @@ function createTeamRunner(deps) {
     if (Array.isArray(doc.notes)) answer.notes = doc.notes;
     return answer;
   };
-  return { team: serialRunner(deps, command, "The groups command", accept, "The demo cannot change the structure.") };
+  const checked = (input) => withExpect(command(input), isPlainObject(input) ? input : {},
+    isPlainObject(input) && input.op !== "add", fail);
+  return { team: serialRunner(deps, checked, "The groups command", accept, "The demo cannot change the structure.") };
 }
 
 function nonEmptyString(value) {
@@ -820,6 +855,18 @@ function renderPanel(ctx, solid, props) {
   // so it gets no flow action and the view only shows the flows. The requests are the loopback endpoint's
   // (/api/structure/flow): {op: "add", path, text?, name?, command?}, {op: "text", id, text}, {op: "name", id, name},
   // {op: "command", id, on}, {op: "prompt", id, goal} (answers {text}) and {op: "remove", id}.
+  // A change may carry the `rev` the view was showing as `expect` (text, not empty: anything else is refused here); main
+  // checks it as a rev. A refusal because the thing changed since comes back as an Error whose `rev` is the current one.
+  const carryExpect = (request, input, bad) => {
+    if (request.expect === undefined) return input;
+    if (typeof request.expect !== "string" || request.expect === "") throw new Error(bad);
+    return Object.assign(input, { expect: request.expect });
+  };
+  const refusal = (doc, fallback) => {
+    const error = new Error(oneLine(isPlainObject(doc) && doc.error ? doc.error : fallback));
+    if (isPlainObject(doc) && typeof doc.rev === "string") error.rev = doc.rev;
+    return error;
+  };
   const flow = async (request) => {
     if (!alive) throw new Error("The panel is closed.");
     if (!isPlainObject(request)) throw new Error("Bad flow request.");
@@ -851,6 +898,7 @@ function renderPanel(ctx, solid, props) {
     } else if (op === "add-command") {
       throw new Error("Bad flow request.");
     }
+    carryExpect(request, input, "Bad flow request.");
     const text = await ctx.main(snapshotIpc(ctx.id)).flow(input, { signal: ctx.signal });
     let doc;
     try {
@@ -859,8 +907,7 @@ function renderPanel(ctx, solid, props) {
       throw new Error("The structure command did not answer with JSON.");
     }
     const valid = op === "prompt" ? (answer) => typeof answer.text === "string" : (answer) => Array.isArray(answer.flows);
-    if (!isPlainObject(doc) || doc.error || !valid(doc))
-      throw new Error(oneLine(isPlainObject(doc) && doc.error ? doc.error : "The flow could not be changed."));
+    if (!isPlainObject(doc) || doc.error || !valid(doc)) throw refusal(doc, "The flow could not be changed.");
     return doc;
   };
   // Run a path: the run message for the flow and the goal (from main, as `agentgraph flow prompt` gives it), sent
@@ -900,6 +947,7 @@ function renderPanel(ctx, solid, props) {
     const input = { op: all ? "all" : request.on === true ? "add" : request.on === false ? "remove" : "", agent: request.agent, skill: all ? "" : request.skill };
     if (!input.op || ![input.agent, input.skill].every((name) => typeof name === "string" && !/\s/.test(name) && !name.startsWith("-")))
       throw new Error("Bad skills request.");
+    carryExpect(request, input, "Bad skills request.");
     const text = await ctx.main(snapshotIpc(ctx.id)).skills(input, { signal: ctx.signal });
     let doc;
     try {
@@ -907,8 +955,7 @@ function renderPanel(ctx, solid, props) {
     } catch (_) {
       throw new Error("The skills command did not answer with JSON.");
     }
-    if (!isPlainObject(doc) || doc.error || !Array.isArray(doc.skills))
-      throw new Error(oneLine(isPlainObject(doc) && doc.error ? doc.error : "The skills could not be changed."));
+    if (!isPlainObject(doc) || doc.error || !Array.isArray(doc.skills)) throw refusal(doc, "The skills could not be changed.");
     return doc;
   };
   // The roster, skill-file and groups actions take the requests of the loopback endpoints (/api/roster,
@@ -925,8 +972,7 @@ function renderPanel(ctx, solid, props) {
     } catch (_) {
       throw new Error("The " + label + " command did not answer with JSON.");
     }
-    if (!isPlainObject(doc) || doc.error || !valid(doc))
-      throw new Error(oneLine(isPlainObject(doc) && doc.error ? doc.error : "The " + label + " change did not work."));
+    if (!isPlainObject(doc) || doc.error || !valid(doc)) throw refusal(doc, "The " + label + " change did not work.");
     return doc;
   };
   const roster = async (request) => {
@@ -964,6 +1010,7 @@ function renderPanel(ctx, solid, props) {
       if (readOnly !== "" && typeof readOnly !== "boolean") throw new Error("Bad roster request.");
       input.read_only = readOnly === "" ? "" : String(readOnly);
     }
+    carryExpect(request, input, "Bad roster request.");
     return askMain("roster", input, "roster", (doc) => typeof doc.agent === "string");
   };
   const skillfile = async (request) => {
@@ -985,6 +1032,7 @@ function renderPanel(ctx, solid, props) {
       }
       if (input.assign && !plainName(input.assign)) throw new Error("Bad skill request.");
     }
+    carryExpect(request, input, "Bad skill request.");
     return askMain("skillfile", input, "skill", (doc) => typeof doc.id === "string");
   };
   const team = async (request) => {
@@ -1007,6 +1055,7 @@ function renderPanel(ctx, solid, props) {
       if (typeof text !== "string") throw new Error("Bad group request.");
       input.text = text;
     }
+    carryExpect(request, input, "Bad group request.");
     return askMain("team", input, "groups", (doc) => Array.isArray(doc.teams));
   };
   const actions = ctx.options && ctx.options.demo === true ? undefined : { flow, skills, roster, skillfile, team, run };
