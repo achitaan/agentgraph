@@ -24,6 +24,7 @@ import ctypes
 import ctypes.util
 from datetime import date
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -31,6 +32,7 @@ from pathlib import Path
 import re
 import secrets
 import stat
+import unicodedata
 
 from . import skillset, sources
 
@@ -56,13 +58,34 @@ VERIFIER_TEXT = ("You are given a goal and the work done for it. Check the work 
 VERIFIER_DESCRIPTION = "Checks work against a goal and reports pass or fail, with the evidence for each."
 TEMPLATES = ("blank", "verifier")
 
-# The plugin's (OpenCode 1) permission keys and the OpenCode 2 actions they become. Every file-editing tool is
-# `edit`; `task` (start another agent) is `subagent`.
-ACTIONS = {"bash": "shell", "edit": "edit", "write": "edit", "apply_patch": "edit", "ast_grep_replace": "edit",
-           "patch": "edit", "multiedit": "edit", "task": "subagent"}
+# How OpenCode 2.3.2 resolves an agent's rules, as a scratch host answered `POST /api/session/{id}/permission`
+# (the n99 proof): the host puts HOST_HEAD before an agent file's rules and HOST_TAIL after them, and the last rule
+# whose action and resource both match (`*` any text, `?` one character, a trailing " *" also matching nothing)
+# decides; no match is a deny.
+HOST_HEAD = ({"action": "*", "resource": "*", "effect": "allow"}, {"action": "read", "resource": "*.env", "effect": "ask"},
+             {"action": "read", "resource": "*.env.*", "effect": "ask"},
+             {"action": "read", "resource": "*.env.example", "effect": "allow"})
+HOST_TAIL = ({"action": "browser", "resource": "*", "effect": "deny"},
+             {"action": "skill", "resource": "browser", "effect": "deny"})
+
+# A plugin preset entry's `permission` (OpenCode 1 keys) becomes rules in the plugin (oh-my-opencode-slim 3.0.6,
+# adaptPermissions): its own first rules (`* * allow`, `external_directory * ask`, the .env reads), then one rule
+# per key and pattern in the entry's order (`bash` is `shell`, `task` is `subagent`), then denies of its own tools
+# and of every skill, then the agent's skills. A copy keeps that order. Its allows are limited to the host's own
+# tools below: anything else (an MCP tool, a plugin tool the plugin denies after the entry's rules) is not copied
+# as an allow. The plugin keeps `write`, `apply_patch` and the like as actions of their own; a deny of one of them
+# also denies `edit`, an allow never allows `edit`.
 READ_TOOLS = ("read", "grep", "glob", "list")
+COPYABLE = (*READ_TOOLS, "edit", "write", "apply_patch", "patch", "multiedit", "shell", "webfetch", "websearch",
+            "codesearch", "todowrite", "todoread", "lsp", "external_directory")
+EDIT_KEYS = ("write", "apply_patch", "patch", "multiedit", "ast_grep_replace")
+# The plugin's first rules after its `* * allow`, which a copy stands in for with the read tools.
+PLUGIN_READS = ({"action": "read", "resource": "*.env", "effect": "ask"},
+                {"action": "read", "resource": "*.env.*", "effect": "ask"},
+                {"action": "read", "resource": "*.env.example", "effect": "allow"})
 FIRST = {"action": "*", "resource": "*", "effect": "deny"}
 LAST = {"action": "subagent", "resource": "*", "effect": "deny"}
+_BIDI = set("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 
 
 class AgentfilesError(skillset.SkillsetError):
@@ -80,8 +103,9 @@ def _clean_text(value, kind, limit, *, single):
     if not isinstance(value, str):
         raise AgentfilesError(f"{kind} must be text")
     value = value.replace("\r\n", "\n")
-    if "\0" in value or any(ord(c) < 32 and c not in "\n\t" for c in value):
-        raise AgentfilesError(f"{kind} holds control characters")
+    for c in value:
+        if c not in "\n\t" and (unicodedata.category(c) in ("Cc", "Cs", "Zl", "Zp") or c in _BIDI):
+            raise AgentfilesError(f"{kind} holds control characters (U+{ord(c):04X})")
     if single and "\n" in value.strip():
         raise AgentfilesError(f"{kind} must be one line")
     value = value.strip() if single else value.strip("\n")
@@ -102,20 +126,43 @@ def _rule(rule):
 
 
 def narrow(rules):
-    """The rules an added agent may have: deny everything first, no wildcard allow, `subagent` denied last;
-    exact repeats dropped (keeping the last, which is the one that counts)."""
+    """The rules an added agent may have, in their order: deny everything first, no allow (or ask) for a wildcard
+    action, `subagent` denied last; exact repeats dropped (keeping the last, which is the one that counts). A deny
+    of everything later in the list stays where it is: it overrides every rule before it."""
     kept = []
     for rule in map(_rule, rules):
-        if rule["action"] == "subagent" or (rule["action"] == "*" and rule["effect"] != "deny"):
-            continue
-        if rule == FIRST:
+        if rule["action"] == "subagent" or ("*" in rule["action"] and rule["effect"] != "deny"):
             continue
         kept.append(rule)
-    out = []
-    for index, rule in enumerate(kept):
-        if rule not in kept[index + 1:]:
-            out.append(rule)
+    out = [rule for index, rule in enumerate(kept) if rule not in kept[index + 1:]]
+    while out and out[0] == FIRST:  # the leading deny of everything is written once, below
+        out.pop(0)
     return [dict(FIRST), *out, dict(LAST)]
+
+
+@functools.lru_cache(maxsize=16384)
+def matches(pattern, text):
+    """Whether a rule's action or resource pattern matches, as OpenCode matches them (the n99 proof): `*` any
+    text, `?` one character, a trailing " *" also matching nothing ("git *" matches "git")."""
+    expression = re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
+    for space in (r"\ .*", " .*"):
+        if expression.endswith(space):
+            expression = expression[:-len(space)] + "( .*)?"
+            break
+    return re.fullmatch(expression, text, re.S) is not None
+
+
+def resolve(rules, action, resource):
+    """The effect of the last rule in `rules` that matches, or "deny" when none does."""
+    for rule in reversed(rules):
+        if matches(rule["action"], action) and matches(rule["resource"], resource):
+            return rule["effect"]
+    return "deny"
+
+
+def host_effect(permissions, action, resource):
+    """What OpenCode lets an agent file with these rules do: HOST_HEAD, the file's rules and HOST_TAIL, resolved."""
+    return resolve([*HOST_HEAD, *permissions, *HOST_TAIL], action, resource)
 
 
 def _rule_lines(rules):
@@ -143,7 +190,11 @@ def render(description, model, permissions, text):
 _QUOTED = r'("(?:[^"\\\n]|\\.)*")'
 _FIELDS = {"description": re.compile(r"description: " + _QUOTED), "mode": re.compile(r"mode: subagent"),
            "model": re.compile(r"model: " + _QUOTED), "permissions": re.compile(r"permissions:")}
-_OWNED = re.compile(r"(description|mode|model|permissions)[ \t]*:")
+_OWNED = re.compile(r"[\"']?(description|mode|model|permissions)[\"']?[ \t]*:")
+# Keys that give an agent rights too: OpenCode 2.3.2 still reads OpenCode 1's `permission` and `tools` maps in an
+# agent file (the n99 proof), and a YAML merge key could bring in any key. A hand-added one is a hand change the
+# writer cannot keep: the file is read-only here, and what the view says it may do would not be the whole story.
+_RIGHTS = re.compile(r"[\"']?(permission|tools|<<)[\"']?[ \t]*:")
 _RULE_LINE = (re.compile(r'  - action: ("[^"\n]*")'), re.compile(r"    resource: " + _QUOTED),
               re.compile(r"    effect: (allow|ask|deny)"))
 
@@ -160,8 +211,9 @@ def parse(data):
     The toolkit's own lines are the marker, `description`, `mode: subagent`, `model`, the `permissions` block (in
     the order and shape `with_skills` writes) and the text after the frontmatter. Any other frontmatter line (a
     hand-added `temperature: 0.2`, say) is kept byte for byte by every change (`rebuild`). The writer cannot keep a
-    file whose own lines repeat or are not in its shape, or whose `permissions` block continues in lines it does not
-    write: such a file is read-only here, with the same reason for every change (HAND_CHANGED)."""
+    file whose own lines repeat or are not in its shape, whose `permissions` block continues in lines it does not
+    write, or that gives rights another way (a hand-added `permission` or `tools` map): such a file is read-only
+    here, with the same reason for every change (HAND_CHANGED)."""
     try:
         text = data.decode("utf-8")
     except (UnicodeDecodeError, AttributeError):
@@ -179,6 +231,8 @@ def parse(data):
     fields, spans, index = {}, {}, 1
     try:
         while index < len(head):
+            if _RIGHTS.match(head[index]):
+                return None
             key = _OWNED.match(head[index])
             if not key:
                 index += 1
@@ -242,42 +296,76 @@ def with_skills(permissions, skills):
 
 
 def read_only(permissions):
-    """Whether the last `edit` rule (or the first wildcard) denies editing."""
+    """Whether the agent may edit no file outright: no rule allows an `edit` that a later deny (or ask) of editing
+    everything does not override. (`effect` decides one action and resource; this is every resource at once.)"""
     for rule in reversed(permissions):
-        if rule["action"] in ("edit", "*") and rule["resource"] == "*":
-            return rule["effect"] != "allow"
-    return True
+        if not matches(rule["action"], "edit"):
+            continue
+        if rule["effect"] == "allow":
+            return False
+        if set(rule["resource"]) == {"*"}:
+            return True  # every earlier rule is overridden for editing
+    return False  # nothing matched: the host's own first rule allows everything
+
+
+def _note(notes, text):
+    if text not in notes:
+        notes.append(text)
+
+
+def _copied(key, pattern, effect, notes):
+    """The rules one key and pattern of a plugin permission become in a copy (see COPYABLE)."""
+    if key == "task":
+        if effect != "deny":
+            _note(notes, "the new agent may not start other agents: subagent is denied")
+        return []
+    if key == "skill":
+        return []  # the plugin denies every skill after the entry's rules, then allows the agent's skills
+    if key == "*":
+        reads = [{"action": tool, "resource": pattern, "effect": effect} for tool in READ_TOOLS]
+        if effect == "deny":
+            return [{"action": "*", "resource": pattern, "effect": "deny"}]
+        _note(notes, "the new agent gets no wildcard allow: the '*' rule only lets it read (read, grep, glob, list)")
+        if effect == "ask":  # every action asks from here on in the source: in the copy, all but reading is denied
+            return [{"action": "*", "resource": pattern, "effect": "deny"}, *reads]
+        return reads
+    action = "shell" if key == "bash" else key
+    out = []
+    if effect == "deny" or action in COPYABLE:
+        out.append({"action": action, "resource": pattern, "effect": effect})
+    elif effect == "ask":  # an ask may override an earlier allow in the source: the copy denies instead
+        out.append({"action": action, "resource": pattern, "effect": "deny"})
+    else:
+        _note(notes, f"the new agent gets no {effect} for {key!r}: only OpenCode's own tools are copied as allowed")
+    if key in EDIT_KEYS and effect == "deny":
+        out.append({"action": "edit", "resource": pattern, "effect": "deny"})
+    return out
 
 
 def from_plugin(permission, skills=()):
-    """Rules from a plugin preset entry's `permission` (OpenCode 1 keys) and `skills`; never wider: no wildcard
-    allow, `task` denied. No permission at all (the host default, as impl-claude) becomes the writer shape.
-    Returns (rules, notes)."""
+    """Rules from a plugin preset entry's `permission` (OpenCode 1 keys) and `skills`, in the order the plugin
+    gives them (see COPYABLE); never wider than the source under the host's last-match-wins: the plugin's first
+    `* * allow` and any '*' allow only let the copy read, a later deny stays where it is, `task` is denied.
+    No permission at all (the host default, as impl-claude) becomes the writer shape. Returns (rules, notes)."""
     notes = []
-    rules = [{"action": tool, "resource": "*", "effect": "allow"} for tool in READ_TOOLS]
+    rules = [*({"action": tool, "resource": "*", "effect": "allow"} for tool in READ_TOOLS), *PLUGIN_READS]
     if permission is None:
         permission = {"bash": "allow", "edit": "allow"}
+    if isinstance(permission, str) and permission in EFFECTS:
+        permission = {"*": permission}  # as the plugin reads a permission given as one word
     if not isinstance(permission, dict):
         raise AgentfilesError("the permission to copy is not an object")
     for key, value in permission.items():
         if not isinstance(key, str) or not ACTION.fullmatch(key):
             raise AgentfilesError(f"the permission {key!r} is not one this tool can copy")
-        action = ACTIONS.get(key, key)
-        if action == "subagent":
-            if value != "deny":
-                notes.append("the new agent may not start other agents: subagent is denied")
-            continue
-        if action == "*":
-            if value != "deny":
-                notes.append("the new agent gets no wildcard allow: the '*' rule was left out")
-            continue
         if isinstance(value, str) and value in EFFECTS:
-            rules.append({"action": action, "resource": "*", "effect": value})
+            patterns = [("*", value)]
         elif isinstance(value, dict) and value and all(isinstance(k, str) and k and v in EFFECTS for k, v in value.items()):
-            ordered = sorted(value.items(), key=lambda item: item[0] != "*")  # the general rule first
-            rules += [{"action": action, "resource": pattern, "effect": effect} for pattern, effect in ordered]
+            patterns = list(value.items())  # in the source's order: the last that matches wins
         else:
             raise AgentfilesError(f"the permission for {key!r} is not one this tool can copy")
+        for pattern, effect in patterns:
+            rules += _copied(key, pattern, effect, notes)
     if "*" in skills:
         rules.append({"action": "skill", "resource": "*", "effect": "allow"})
     else:
@@ -457,9 +545,12 @@ def _shown(name, parsed):
 
 def summary(permissions):
     """What an added agent may do, from its rules (the last rule that matches wins): `default` (the first rule:
-    always deny), `rules` (the tool rules after it, in order, without the skill rules), `skills`, `start_agents`
-    (the last rule: always deny) and `read_only`. No rule allows every action."""
-    middle = [dict(rule) for rule in permissions if rule != FIRST and rule != LAST and rule["action"] != "skill"]
+    always deny), `rules` (the tool rules after it, in order, without the skill rules; a later deny of everything
+    is one of them), `skills`, `start_agents` (the last rule: always deny) and `read_only`. No rule allows every
+    action."""
+    start = 1 if permissions and permissions[0] == FIRST else 0
+    end = len(permissions) - 1 if len(permissions) > start and permissions[-1] == LAST else len(permissions)
+    middle = [dict(rule) for rule in permissions[start:end] if rule["action"] != "skill"]
     return {"default": permissions[0]["effect"] if permissions and permissions[0] == FIRST else "allow",
             "rules": middle, "skills": skills_of(permissions),
             "start_agents": permissions[-1]["effect"] if permissions and permissions[-1] == LAST else "allow",
@@ -570,6 +661,25 @@ def save_record(backups, kind, name, record):
     return str(path)
 
 
+def prune_records(record):
+    """Keep the newest skillset.MAX_BACKUPS undo records of one kind and agent in a day's folder (as skill writes
+    keep theirs); `record` itself is always kept. Only folders holding nothing but a record are removed."""
+    folder = Path(record).parent
+    found = re.fullmatch(r"((?:text|remove)-[a-z][a-z0-9_-]{0,63})-[0-9a-f]{12}", folder.name)
+    if not found:
+        return
+    same = re.compile(re.escape(found.group(1)) + r"-[0-9a-f]{12}")
+    try:
+        mine = sorted((path for path in folder.parent.iterdir() if path != folder and same.fullmatch(path.name)
+                       and stat.S_ISDIR(path.lstat().st_mode)), key=lambda path: path.lstat().st_mtime_ns)
+        for old in mine[:max(len(mine) + 1 - skillset.MAX_BACKUPS, 0)]:
+            if [child.name for child in old.iterdir()] == ["record.json"]:
+                (old / "record.json").unlink()
+                old.rmdir()
+    except OSError:
+        pass  # pruning is tidying: a record that cannot be removed now is removed by a later change
+
+
 def drop_record(record):
     """Take back an undo record whose change failed: its file, its folder and the day's folder when left empty."""
     path = Path(record)
@@ -662,6 +772,7 @@ def _change(name, change, *, agents_dir, backups, kind="text"):
         except BaseException:
             drop_record(record)
             raise
+    prune_records(record)
     return _shown(name, parse(after)), record, True
 
 
@@ -701,4 +812,5 @@ def restore_text(record, *, agents_dir=AGENTS_DIR, backups=BACKUPS):
         except BaseException:
             drop_record(undo)
             raise
+    prune_records(undo)
     return {**_shown(name, parse(before)), "changed": True, "record": undo, "message": LIVE}

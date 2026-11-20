@@ -20,7 +20,8 @@ from . import agentfiles, skillset, sources
 from . import structure as structure_module
 from . import teams as teams_module
 from .skillset import BACKUPS, CONFIG, MAP, SkillsetError
-from .snapshot_json import FLOW_FILES_LIMIT, FLOW_ID, FLOWS_FOLDER, STRUCTURE_DIR, TEAMS_FOLDER, read_flow, read_settings
+from .snapshot_json import (FLOW_FILES_LIMIT, FLOW_ID, FLOWS_FOLDER, STRUCTURE_DIR, TEAMS_FOLDER, flow_fields, read_flow,
+                            read_settings)
 
 RESTART = skillset.RESTART
 
@@ -122,7 +123,80 @@ def _agent_files(agents_dir):
         raise RosterError(f"cannot read the agents folder: {exc}") from exc
 
 
-def _check_new_name(obj, name, selected, agents_dir=AGENTS_DIR):
+def _display_names(obj):
+    """Every `displayName` the plugin may give an agent, as it reads them (a leading '@' dropped), lowercased: each
+    preset entry's and each entry of the preset file's top-level `agents` map. The plugin merges an agent file of
+    that name into the agent that has it (the n99 proof: `boss.md` turned the orchestrator's `boss` into a
+    subagent with the file's model and instruction)."""
+    found = set()
+    groups = [*(preset for preset in obj.get("presets", {}).values() if isinstance(preset, dict)), obj.get("agents")]
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        for entry in group.values():
+            value = entry.get("displayName") if isinstance(entry, dict) else None
+            if isinstance(value, str):
+                found.add(value.strip().removeprefix("@").strip().lower())
+    return found
+
+
+def _strip_jsonc(text):
+    """JSON text from JSONC: comments and trailing commas outside strings dropped."""
+    out, index, length = [], 0, len(text)
+    while index < length:
+        char = text[index]
+        if char == '"':
+            end = index + 1
+            while end < length and text[end] != '"':
+                end += 2 if text[end] == "\\" else 1
+            out.append(text[index:end + 1])
+            index = end + 1
+        elif text.startswith("//", index):
+            index = text.find("\n", index) if "\n" in text[index:] else length
+        elif text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            index = length if end < 0 else end + 2
+        else:
+            out.append(char)
+            index += 1
+    return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
+
+
+def _host_names(opencode_dir):
+    """The agent names OpenCode's own config gives (the keys of the `agent` map in `opencode.json` or
+    `opencode.jsonc`, and their `displayName`s), lowercased; refused when such a file cannot be read."""
+    names = set()
+    for file in ("opencode.json", "opencode.jsonc"):
+        path = Path(opencode_dir) / file
+        if not path.exists():
+            continue
+        try:
+            text = skillset._read(path, file)[0]
+            data = json.loads(_strip_jsonc(text) if file.endswith("c") else text)
+        except (SkillsetError, ValueError) as exc:
+            raise RosterError(f"cannot read {file} to check the name against its agents: {exc}") from None
+        agents = data.get("agent") if isinstance(data, dict) else None
+        if isinstance(agents, dict):
+            for key, entry in agents.items():
+                names.add(str(key).lower())
+                value = entry.get("displayName") if isinstance(entry, dict) else None
+                if isinstance(value, str):
+                    names.add(value.strip().removeprefix("@").strip().lower())
+    return names
+
+
+def _legacy_files(opencode_dir, name):
+    """The files in OpenCode's legacy `agent/` folder that hold `name`."""
+    try:
+        with os.scandir(Path(opencode_dir) / "agent") as entries:
+            return sorted(e.name for e in entries if e.name == name + ".md" or e.name.startswith(name + ".md."))
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise RosterError(f"cannot read the agent folder: {exc}") from exc
+
+
+def _check_new_name(obj, name, selected, agents_dir=AGENTS_DIR, opencode_dir=None):
     if not isinstance(name, str) or not NAME.fullmatch(name):
         raise RosterError("invalid agent name: use a lowercase letter, then lowercase letters, digits, '_' or '-' (64 at most)")
     if name in BUILTIN or name in ALIASES:
@@ -135,6 +209,15 @@ def _check_new_name(obj, name, selected, agents_dir=AGENTS_DIR):
         raise RosterError(f"{name!r} is reserved for the user or one of OpenCode's own agents")
     if name in _agent_files(agents_dir):
         raise RosterError(f"{name!r} is already an agent file in the agents folder")
+    # OpenCode's own config folder: the one that holds the agents folder, unless given.
+    opencode_dir = Path(os.path.abspath(agents_dir)).parent if opencode_dir is None else Path(opencode_dir)
+    if name in _display_names(obj):
+        raise RosterError(f"{name!r} is the display name of an agent in the presets; choose another name")
+    legacy = _legacy_files(opencode_dir, name)
+    if legacy:
+        raise RosterError(f"{name!r} is already an agent file in OpenCode's agent folder ({', '.join(legacy)})")
+    if name in _host_names(opencode_dir):
+        raise RosterError(f"{name!r} is an agent in OpenCode's own config (opencode.json); choose another name")
     taken = [preset for preset in selected if name in obj["presets"][preset]]
     if taken:
         raise RosterError(f"agent {name!r} already exists in preset {', '.join(taken)}")
@@ -814,8 +897,11 @@ def _structure_removal(root, root_fd, name, with_file):
         return []
     changes = []
     for file, data in _listing(root_fd, FLOWS_FOLDER):
-        flow = read_flow(data)
-        if flow is not None and name in flow[0]:
+        flow = flow_fields(data)
+        if flow is not None and name in flow["path"]:
+            if flow["command"] and flow["name"]:  # its command file is outside this record: never left behind
+                raise RosterError(f"flow {file[:-3]} through {name} has the command /{flow['name']}; turn it off first "
+                                  f"(agentgraph flow command {file[:-3]} --off), then remove {name}. Nothing was changed")
             changes.append({"folder": FLOWS_FOLDER, "name": file, "before": data, "after": None})
     groups = _listing(root_fd, TEAMS_FOLDER)
     if groups:
@@ -883,26 +969,32 @@ def _tidy(root_fd, changes):
                 pass
 
 
-def _apply(root_fd, changes):
-    """Make each change after checking the file is still what was read; on a failure, put back what was done."""
+def _apply(root_fd, changes, failed=None):
+    """Make each change after checking the file is still what was read; on a failure, put back what was done
+    (the changes that could not be put back are added to `failed`)."""
     done = []
     try:
         for change in changes:
             _change_file(root_fd, change)
             done.append(change)
     except BaseException:
-        _revert(root_fd, done)
+        missed = _revert(root_fd, done)
+        if failed is not None:
+            failed += missed
         raise
     _tidy(root_fd, changes)
 
 
 def _revert(root_fd, changes):
+    """Undo changes, newest first; returns "folder/name" of each one that could not be undone."""
+    missed = []
     for change in reversed(changes):
         try:
             _change_file(root_fd, {**change, "before": change["after"], "after": change["before"]}, check=False)
         except (OSError, RosterError):
-            pass
+            missed.append(f"{change['folder']}/{change['name']}")
     _tidy(root_fd, changes)
+    return missed
 
 
 def _encode(changes):
@@ -1218,6 +1310,8 @@ def add_agent(name, *, model=None, variant=None, description=None, prompt=None, 
         _word(model, "model", agentfiles.MODEL, "expected provider/model")
     if variant is not None:
         skillset._name(variant, "variant")
+        if not re.fullmatch(r"[^#\s\"\\/]+", variant):
+            raise RosterError("invalid variant: no spaces, '#', '/', '\"' or '\\'")
     if read_only is not None and not isinstance(read_only, bool):
         raise RosterError("read_only must be true or false")
     if skills is not None:
@@ -1238,8 +1332,15 @@ def add_agent(name, *, model=None, variant=None, description=None, prompt=None, 
         obj, name, model=model, variant=variant, description=description, prompt=prompt, skills=skills,
         read_only=read_only, copy_of=copy_of, template=template, agents_dir=agents_dir,
         installed=set(skillset._catalogue(skills_dir)) if skills else set())
-    data = agentfiles.render(agentfiles._clean_text(text_description, "description", agentfiles.MAX_DESCRIPTION,
-                                                    single=True), text_model, rules,
+    # The final model, whatever it came from (a copy's source, a variant): the shape OpenCode reads.
+    if not isinstance(text_model, str) or not agentfiles.MODEL.fullmatch(text_model):
+        raise RosterError("model must be provider/model (optionally #variant), with no spaces or quotes")
+    text_description = agentfiles._clean_text(text_description, "description", agentfiles.MAX_DESCRIPTION, single=True)
+    # The structure file starts with the description when the source has no settings: a description that reads
+    # as a setting (`seats: impl-`) would become one.
+    if read_settings((text_description + "\n").encode("utf-8"))[0]:
+        raise RosterError("the description may not start like a structure setting (pool:, escalates_to: or seats:)")
+    data = agentfiles.render(text_description, text_model, rules,
                              agentfiles._clean_text(text, "the instruction", agentfiles.MAX_TEXT, single=False))
     root = Path(structure) if structure is not None else STRUCTURE_DIR
     with _structure_locked(root) as root_fd:
@@ -1282,16 +1383,22 @@ def _remove_added(name, *, backups, root, agents_dir):
         record = agentfiles.save_record(backups, "remove", name, {
             "version": 1, "op": "remove", "agent": name, "kind": "added", "file": agentfiles.b64(data),
             "structure": _encode(changes)})
+        failed = []
         try:
-            _apply(root_fd, changes)
+            _apply(root_fd, changes, failed)
             try:
                 agentfiles.replace(name, data, None, agents_dir=agents_dir)
             except BaseException:
-                _revert(root_fd, changes)
+                failed += _revert(root_fd, changes)
                 raise
-        except BaseException:
-            agentfiles.drop_record(record)
-            raise
+        except BaseException as exc:
+            if not failed:
+                agentfiles.drop_record(record)
+                raise
+            # Some of what was taken could not be put back: the record is the only copy of it, so it stays.
+            raise RosterError(f"the removal of {name!r} failed ({exc}) and {', '.join(failed)} could not be put "
+                              f"back; the undo record {record} keeps them") from exc
+    agentfiles.prune_records(record)
     return {"agent": name, "kind": "added", "action": "deleted", "presets": [], "changed": True, "record": record,
             "removed": _removed(changes, name), "warnings": [], "message": agentfiles.LIVE}
 
@@ -1360,7 +1467,7 @@ def _restore_added(record, *, backups, root, agents_dir):
     if set(data) != {"version", "op", "agent", "kind", "file", "structure"} or data["kind"] != "added":
         raise RosterError("invalid undo record: not an added agent's removal")
     file = agentfiles.unb64(data["file"], "the agent file")
-    if file is None or not agentfiles.is_added(file):
+    if file is None or not agentfiles.is_added(file) or agentfiles.parse(file) is None:
         raise RosterError("invalid undo record: the file is not an added agent's")
     removed = _decode(data)
     with _structure_locked(root) as root_fd:

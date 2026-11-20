@@ -487,6 +487,32 @@ class RosterTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("agent file", json.loads(out)["error"])
 
+    def test_a_display_name_a_legacy_agent_file_or_an_opencode_json_agent_is_refused(self):
+        # The plugin merges an agent file named after an agent's displayName into that agent (the n99 proof), and
+        # OpenCode reads its legacy `agent/` folder and the `agent` map of opencode.json alongside `agents/`.
+        obj = self.data()
+        obj["presets"][obj["preset"]]["orchestrator"]["displayName"] = "@Boss"
+        self.config.write_text(json.dumps(obj, indent=2) + "\n")
+        self.original = self.files()
+        (self.root / "agent").mkdir()
+        (self.root / "agent" / "legacy.md").write_text("---\nmodel: a/b\n---\n")
+        (self.root / "opencode.json").write_text(json.dumps({"agent": {"helper": {}, "x": {"displayName": "Shown"}}}))
+        structure = self.root / "structure"
+        for name, pattern in (("boss", "display name"), ("legacy", "agent folder"), ("helper", "opencode.json"),
+                              ("shown", "opencode.json")):
+            with self.subTest(name=name):
+                self.refused(pattern, self.agent, name)
+                self.refused(pattern, roster.add_agent, name, model="a/b", description="d", prompt="p",
+                             agents_dir=self.agents, structure=structure)
+        self.assertFalse(structure.exists())
+        (self.root / "opencode.json").unlink()
+        (self.root / "opencode.jsonc").write_text('{\n  // mine\n  "agent": {"jhelper": {},},\n}\n')
+        self.refused("opencode.json", self.agent, "jhelper")
+        (self.root / "opencode.jsonc").write_text("{ not json")
+        self.refused("cannot read opencode.jsonc", self.agent, "free")
+        (self.root / "opencode.jsonc").unlink()
+        self.agent("free")
+
     def test_unsafe_names_are_refused_before_anything_is_written_and_never_a_traceback(self):
         text = self.original[0].decode().replace('"verifier"', '"a/b"')
         self.config.write_text(text)

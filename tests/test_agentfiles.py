@@ -532,6 +532,254 @@ class PermissionSummary(Base):
             self.assertEqual(shown, agentfiles.summary(agentfiles.parse(self.file(name))["permissions"]))
 
 
+# --- the n13 r4 security review (n99) ----------------------------------------------------------------------
+
+# How oh-my-opencode-slim 3.0.6 gives a preset entry's `permission` to OpenCode 2.3.2, as a scratch host listed a
+# plugin agent's rules (`GET /api/agent/{id}`, the n99 proof): the plugin's first rules, the entry's keys and
+# patterns in order (`bash` is `shell` and `bash`, `task` is `subagent`, '*' is every action), the plugin's denies
+# of its own tools and of every skill (each only when the entry does not name that key), the agent's skills, the
+# plugin's denies of MCP tools the agent has not got, then the host's tail.
+PLUGIN_FIRST = [("*", "*", "allow"), ("external_directory", "*", "ask"), ("read", "*.env", "ask"),
+                ("read", "*.env.*", "ask"), ("read", "*.env.example", "allow")]
+PLUGIN_DENIES = ("question", "task_cancel", "task_message", "task_reply", "task_status", "acp_run",
+                 "interview_submit_state", "wait_for_user", "marketplace_inspect", "marketplace_manage", "skill")
+PLUGIN_MCP_DENIES = ("context7_*", "gh_grep_*")
+RANK = {"deny": 0, "ask": 1, "allow": 2}
+PROBE_ACTIONS = ("read", "grep", "edit", "write", "shell", "bash", "external_directory", "question", "browser",
+                 "skill", "subagent", "context7_resolve", "ast_grep_replace", "exec")
+PROBE_RESOURCES = ("*", "x.py", "src/a.py", ".env", "git status", "code-assurance", "browser")
+KEYS = ("*", "edit", "write", "bash", "shell", "read", "task", "webfetch", "question", "browser", "skill",
+        "context7_x", "ast_grep_replace", "e*", "external_directory")
+EFFECTS = ("allow", "ask", "deny")
+
+
+def plugin_rules(permission, skills=()):
+    """The rules OpenCode resolves for a plugin agent with this `permission` and these skills."""
+    permission = {"*": permission} if isinstance(permission, str) else (permission or {})
+    rules = list(PLUGIN_FIRST)
+    for key, value in permission.items():
+        actions = ["subagent"] if key == "task" else ["shell", "bash"] if key == "bash" else [key]
+        for pattern, effect in ([("*", value)] if isinstance(value, str) else value.items()):
+            rules += [(action, pattern, effect) for action in actions]
+    rules += [(action, "*", "deny") for action in PLUGIN_DENIES if action not in permission]
+    rules += [("skill", skill, "allow") for skill in skills]
+    rules += [(action, "*", "deny") for action in PLUGIN_MCP_DENIES if action not in permission]
+    return [{"action": a, "resource": r, "effect": e} for a, r, e in rules] + list(agentfiles.HOST_TAIL)
+
+
+def values(key):
+    """Every value a key gets in the generated sources: one word, and a two-pattern map in both orders."""
+    pattern = {"bash": "git *", "shell": "git *", "read": "*.env"}.get(key, "src/*")
+    out = list(EFFECTS)
+    for first in EFFECTS:
+        for second in EFFECTS:
+            out += [{"*": first, pattern: second}, {pattern: second, "*": first}]
+    return out
+
+
+def sources():
+    """Generated source permissions: each key alone with every value; the wildcard (every word, and a map) first
+    and last beside every other key with one word or a map in either order; and seeded random triples."""
+    import random
+    out = [{key: value} for key in KEYS for value in values(key)]
+    wildcards = [*EFFECTS, {"src/*": "allow", "*": "ask"}, {"*": "deny", "src/*": "allow"}]
+    for wildcard in wildcards:
+        for key in KEYS[1:]:
+            for value in [*EFFECTS, *values(key)[3::5]]:
+                out += [{"*": wildcard, key: value}, {key: value, "*": wildcard}]
+    pick = random.Random(99)
+    for _ in range(200):
+        keys = pick.sample(KEYS, 3)
+        out.append({key: pick.choice(values(key)) for key in keys})
+    return out
+
+
+class CopyNeverWider(Base):
+    """A copy allows nothing its source does not, under the rule order OpenCode really uses (the n99 proof)."""
+
+    def wider(self, permission, skills=()):
+        """(action, resource, source effect, copy effect) where the copy is let do more than the source."""
+        source = plugin_rules(permission, skills)
+        rules = agentfiles.from_plugin(permission, skills)[0]
+        found = []
+        for action in PROBE_ACTIONS:
+            for resource in PROBE_RESOURCES:
+                was, now = agentfiles.resolve(source, action, resource), agentfiles.host_effect(rules, action, resource)
+                if RANK[now] > RANK[was]:
+                    found.append((action, resource, was, now))
+        return found
+
+    def test_the_reviewers_three_sources_give_copies_no_wider_than_they_are(self):
+        rules = agentfiles.from_plugin({"edit": "allow", "*": "deny"})[0]
+        self.assertTrue(agentfiles.read_only(rules))
+        for action in ("edit", "read", "grep", "shell"):
+            self.assertEqual(agentfiles.host_effect(rules, action, "x.py"), "deny", action)
+        self.assertTrue(agentfiles.summary(rules)["read_only"])
+        rules = agentfiles.from_plugin({"bash": {"git *": "allow", "*": "deny"}})[0]
+        self.assertEqual(agentfiles.host_effect(rules, "shell", "git status"), "deny")
+        rules = agentfiles.from_plugin({"*": "deny", "bash": "allow"})[0]
+        self.assertEqual(agentfiles.host_effect(rules, "read", "x.py"), "deny")
+        self.assertEqual(agentfiles.host_effect(rules, "shell", "ls"), "allow")
+        for permission in ({"edit": "allow", "*": "deny"}, {"bash": {"git *": "allow", "*": "deny"}},
+                           {"*": "deny", "bash": "allow"}):
+            self.assertEqual(self.wider(permission), [], permission)
+
+    def test_no_generated_source_gives_a_wider_copy(self):
+        cases = sources()
+        self.assertGreater(len(cases), 1000)
+        for index, permission in enumerate(cases):
+            for skills in ((), ("code-assurance",)) if index % 4 == 0 else ((),):
+                found = self.wider(permission, skills)
+                if found:
+                    self.fail(f"{permission} with skills {list(skills)}: the copy may do more: {found[:3]}")
+
+    def test_the_summary_agrees_with_what_the_host_resolves(self):
+        for permission in sources()[::7]:
+            rules = agentfiles.from_plugin(permission)[0]
+            shown = agentfiles.summary(rules)
+            self.assertEqual(shown["rules"], [r for r in rules[1:-1] if r["action"] != "skill"], permission)
+            edits = any(agentfiles.host_effect(rules, "edit", resource) == "allow"
+                        for resource in ("x.py", "src/a.py", "*"))
+            self.assertEqual(shown["read_only"], not edits, permission)
+            self.assertEqual(agentfiles.parse(agentfiles.render("d", "a/b", rules, "t"))["permissions"], rules)
+
+    def test_honest_copies_keep_what_their_source_has_and_no_more(self):
+        obj = json.loads(self.config.read_bytes())
+        for name, options in (("impl-claude", {"copy_of": "impl-claude"}), ("reviewer", {"copy_of": "reviewer"}),
+                              ("researcher", {"copy_of": "researcher"}), ("verifier", {"template": "verifier"})):
+            spec = roster._source_spec(obj, name)
+            if spec is None:
+                continue
+            with self.subTest(name=name):
+                self.add(f"copy-{name}", **options)
+                rules = agentfiles.parse(self.file(f"copy-{name}"))["permissions"]
+                skills = [] if "template" in options else spec.get("skills", [])
+                source = plugin_rules(spec.get("permission"), skills)
+                for action in PROBE_ACTIONS:
+                    for resource in PROBE_RESOURCES:
+                        was = agentfiles.resolve(source, action, resource)
+                        now = agentfiles.host_effect(rules, action, resource)
+                        self.assertLessEqual(RANK[now], RANK[was], (action, resource))
+                        if action in ("read", "grep", "list", "edit", "shell"):
+                            self.assertEqual(now, was, (action, resource))
+
+
+class HandRights(Base):
+    def test_a_hand_added_permission_or_tools_map_makes_the_file_hand_changed(self):
+        # OpenCode 2.3.2 reads OpenCode 1's `permission` and `tools` maps in an agent file (the n99 proof).
+        self.add(template="verifier")
+        original = self.file()
+        for line in (b"permission:\n  edit: allow", b"tools:\n  bash: true", b'"permission": {edit: allow}',
+                     b"<<: *rights", b"'permissions': []"):
+            with self.subTest(line=line):
+                (self.agents / "checker.md").write_bytes(original.replace(b"\nmode: subagent\n",
+                                                                          b"\nmode: subagent\n" + line + b"\n", 1))
+                self.assertIsNone(agentfiles.parse(self.file()))
+                self.assertFalse(agentfiles.listing(self.agents)["checker"]["editable"])
+                self.refused("changed by hand", roster.read_agent, "checker", agents_dir=self.agents)
+        (self.agents / "checker.md").write_bytes(original)
+        self.assertIsNotNone(agentfiles.parse(self.file()))
+
+
+class CraftedText(Base):
+    def test_bidi_and_line_separator_characters_are_refused_in_agent_text(self):
+        for bad in ("\u202e", "\u2066", "\u2028", "\u2029"):
+            with self.subTest(char=hex(ord(bad))):
+                self.refused("control character", self.add, "plain", model="a/b", description=f"Plain{bad}.",
+                             prompt="Work.")
+                self.refused("control character", self.add, "plain", model="a/b", description="Plain.",
+                             prompt=f"Work{bad}.")
+        self.add(template="verifier")
+        self.refused("control character", roster.text_agent, "checker", "New\u202e.", agents_dir=self.agents,
+                     backups=self.backups)
+
+    def test_add_with_crafted_description_prompt_model_and_variant(self):
+        injected = '---\npermissions:\n  - action: "*"\n    resource: "*"\n    effect: allow\n---\nmode: primary'
+        result = self.add("quoted", template="verifier", description='Says "hi" \\ there',
+                          prompt='Quote " and\n' + injected)
+        parsed = agentfiles.parse(self.file("quoted"))
+        self.assertEqual(parsed["description"], 'Says "hi" \\ there')
+        self.assertEqual(parsed["text"].rstrip("\n"), 'Quote " and\n' + injected)
+        self.assertEqual(parsed["permissions"], agentfiles.from_plugin(
+            roster._source_spec(json.loads(self.config.read_bytes()), "verifier").get("permission"))[0])
+        self.assertEqual(self.file("quoted").count(b"\npermissions:\n"), 2)  # the frontmatter's, then the text's
+        self.assertEqual(result["permission"], "read-only")
+        for kwargs in ({"description": "x\n---\npermissions:"}, {"description": "x\u2028mode: primary"},
+                       {"model": 'a/b"'}, {"model": "a/b\u2028"}, {"model": "a/b\n---\npermissions:"},
+                       {"variant": 'high"'}, {"variant": "hi gh"}, {"variant": "x\u2028"},
+                       {"variant": "x\n---\npermissions:"}, {"variant": "a#b"}):
+            with self.subTest(**{key: repr(value) for key, value in kwargs.items()}):
+                with self.assertRaises(skillset.SkillsetError):
+                    self.add("crafted", template="verifier", **kwargs)
+                self.assertFalse((self.agents / "crafted.md").exists())
+
+    def test_a_copied_model_that_opencode_would_not_read_is_refused(self):
+        obj = json.loads(self.config.read_bytes())
+        obj["presets"][obj["preset"]]["impl-claude"]["model"] = 'anthropic/claude "x"'
+        self.config.write_text(json.dumps(obj, indent=2) + "\n")
+        self.start = self.snapshot()
+        self.refused("model must be provider/model", self.add, "copy", copy_of="impl-claude")
+
+    def test_a_description_that_reads_as_a_structure_setting_is_refused(self):
+        for text in ("seats: impl-", "escalates_to: x", "Pool: big", "  pool: big"):
+            with self.subTest(text=text):
+                self.refused("structure setting", self.add, "plain", model="a/b", description=text, prompt="Work.")
+        self.add("plain", model="a/b", description="Checks: the tests.", prompt="Work.")
+
+
+class Records(Base):
+    def test_agent_file_undo_records_are_pruned_like_skill_backups(self):
+        self.add(template="verifier")
+        with patch.object(skillset, "MAX_BACKUPS", 3):
+            records = [roster.text_agent("checker", f"Text {n}.", agents_dir=self.agents,
+                                         backups=self.backups)["record"] for n in range(6)]
+        kept = sorted(p.parent for p in self.backups.rglob("text-checker-*/record.json"))
+        self.assertEqual(len(kept), 3)
+        self.assertIn(Path(records[-1]).parent, kept)
+        self.assertNotIn(Path(records[0]).parent, kept)
+        roster.restore_agent(records[-1], **self.paths)
+        self.assertTrue(self.file().endswith(b"---\nText 4.\n"))
+
+    def test_a_failed_remove_whose_put_back_failed_too_keeps_its_undo_record(self):
+        self.add(template="verifier")
+        structure_module.add_flow(["checker", "reviewer"], None, self.structure)
+        forward = roster._change_file
+
+        def change(root_fd, item, check=True):
+            if not check:
+                raise OSError("simulated put-back failure")
+            return forward(root_fd, item, check)
+
+        with patch.object(agentfiles, "replace", side_effect=OSError("simulated")), \
+                patch.object(roster, "_change_file", side_effect=change):
+            with self.assertRaisesRegex(skillset.SkillsetError, "could not be put back"):
+                roster.remove_agent("checker", **self.paths)
+        records = list(self.backups.rglob("remove-checker-*/record.json"))
+        self.assertEqual(len(records), 1)
+        data = json.loads(records[0].read_text())
+        self.assertTrue(any(item["folder"] == "flows" for item in data["structure"]))
+
+    def test_a_forged_remove_record_is_refused(self):
+        self.add(template="verifier")
+        record = roster.remove_agent("checker", **self.paths)["record"]
+        path = Path(record)
+        data = json.loads(path.read_text())
+        wide = agentfiles.unb64(data["file"], "file").replace(
+            b'permissions:\n  - action: "*"\n    resource: "*"\n    effect: deny\n',
+            b'permissions:\n  - action: "*"\n    resource: "*"\n    effect: allow\n', 1)
+        self.assertNotEqual(wide, agentfiles.unb64(data["file"], "file"))
+        for forged in ({**data, "file": agentfiles.b64(wide)},
+                       {**data, "file": agentfiles.b64(b"---\ndescription: mine\n---\nBody\n")},
+                       {**data, "kind": "custom"}, {**data, "op": "text"},
+                       {**data, "structure": [{"folder": "30-build", "name": "reviewer.md",
+                                               "before": agentfiles.b64(b"x"), "after": None}]}):
+            with self.subTest(keys=sorted(k for k in forged if forged[k] != data.get(k))):
+                path.write_text(json.dumps(forged))
+                self.refused("invalid undo record", roster.restore_agent, record, **self.paths)
+        path.write_text(json.dumps(data))
+        roster.restore_agent(record, **self.paths)
+
+
 class Command(Base):
     def cli(self, *args, stdin=""):
         out, err = io.StringIO(), io.StringIO()
