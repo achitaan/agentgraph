@@ -56,8 +56,23 @@ def _tail(path: Path, limit: int) -> bytes:
         return stream.read(limit)
 
 
-def output_edits(home: Path, since: float) -> dict[str, list[dict]]:
-    """{agent: [{"time", "task", "lines"}]} of the log's edits at or after `since` that were not undone."""
+def _saved(item: dict, backups: Path | None) -> bool:
+    """False for a line whose save was stopped before the graph was written: no line counts and no undo record
+    (`<backups>/<date>-outputs/edit-<id>/record.json`). Without `backups`, every line counts."""
+    if backups is None or type(item.get("lines_added")) is int or type(item.get("lines_removed")) is int:
+        return True
+    edit_id = item.get("id")
+    if not isinstance(edit_id, str) or not re.fullmatch(r"[0-9a-f]{12}", edit_id):
+        return False
+    try:
+        return any((day / f"edit-{edit_id}" / "record.json").is_file() for day in Path(backups).glob("*-outputs"))
+    except OSError:
+        return False
+
+
+def output_edits(home: Path, since: float, backups: Path | None = None) -> dict[str, list[dict]]:
+    """{agent: [{"time", "task", "lines"}]} of the log's edits at or after `since` that were not undone. With
+    `backups`, a line whose save never reached the graph (see `_saved`) is not an edit."""
     try:
         raw = _tail(Path(home) / LOG, LOG_READ)
     except OSError:
@@ -70,7 +85,7 @@ def output_edits(home: Path, since: float) -> dict[str, list[dict]]:
             continue
         if not (isinstance(item, dict) and _number(item.get("time")) and item["time"] >= since
                 and item.get("undone") is not True and isinstance(item.get("agent"), str) and item["agent"]
-                and isinstance(item.get("task"), str)):
+                and isinstance(item.get("task"), str) and _saved(item, backups)):
             continue
         lines = sum(item[key] for key in ("lines_added", "lines_removed") if type(item.get(key)) is int)
         found.setdefault(item["agent"], []).append({"time": item["time"], "task": item["task"], "lines": lines})
@@ -193,7 +208,7 @@ def measure(home: Path, now: float | None = None, *, days: float = DAYS, backups
     backups = default_backups if backups is None else Path(backups)
     agents_dir = default_agents if agents_dir is None else Path(agents_dir)
     outputs: dict[str, dict] = {}
-    for agent, edits in output_edits(home, since).items():
+    for agent, edits in output_edits(home, since, backups).items():
         cutoff = _cutoff(improvements or [], agent)
         edits = [edit for edit in edits if cutoff is None or edit["time"] > cutoff]
         if edits:

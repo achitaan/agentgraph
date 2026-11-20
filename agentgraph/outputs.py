@@ -776,18 +776,67 @@ def _event_note(entry: dict) -> str:
             f"{entry.get('revision')} ({entry.get('path')})")
 
 
-def lost_edits(graph, home) -> list[str]:
+def _has_record(backups, edit_id) -> bool:
+    """Whether the undo record of the edit `edit_id` (the log line's `id`) is in `backups`."""
+    if not isinstance(edit_id, str) or not re.fullmatch(r"[0-9a-f]{12}", edit_id):
+        return False
+    try:
+        return any((day / f"edit-{edit_id}" / "record.json").is_file() for day in Path(backups).glob("*-outputs"))
+    except OSError:
+        return False
+
+
+def _backups_of(home) -> Path:
+    """The backups folder beside the memory home's orchestration folder, as in `~/.config/opencode`."""
+    return Path(home).expanduser().parent.parent / "backups"
+
+
+def _never_saved(entry: dict, graph, backups) -> bool:
+    """Whether the log line is of a save stopped before the graph was written: its line counts were never made, it
+    has no undo record, and the graph neither records its revision and path nor holds its `changed` event."""
+    if entry.get("lines_added") is not None or entry.get("lines_removed") is not None:
+        return False
+    node = next((item for item in graph.nodes if item.id == entry["node"]), None)
+    artifact = next((item for item in node.artifacts if item.id == entry["artifact"]), None) if node else None
+    if artifact is not None and (artifact.revision, artifact.path) == (entry["revision"], entry.get("path")):
+        return False
+    if any(event.node == entry["node"] and event.event == "changed" and event.note == _event_note(entry)
+           for event in graph.events):
+        return False
+    return not _has_record(backups, entry.get("id"))
+
+
+def unsaved_edits(graph, home, backups=None) -> list[str]:
+    """`check`'s warnings for edits whose save was stopped before the graph was written (killed, or the power went):
+    the line is in the edit log, the graph never had the edit, and its file is left with no record of it."""
+    if home is None:
+        return []
+    backups = _backups_of(home) if backups is None else backups
+    key = _graph_key(graph.path)
+    return [f"{entry['node']} output {entry['artifact']!r}: a hand edit's save was stopped before the graph was "
+            f"written, so the graph never had it; its file {entry.get('path', '?')} is no recorded revision and can "
+            "be deleted" for entry in read_log(Path(home))
+            if entry.get("undone") is False and _graph_key(entry["graph"]) == key
+            and _never_saved(entry, graph, backups)]
+
+
+def lost_edits(graph, home, backups=None) -> list[str]:
     """`check`'s problems for outputs edited by hand after the graph last recorded them: an edit in the log, not
     undone, whose revision and path the graph does not record, unless the graph records a later revision and still
     holds the edit's `changed` event (a later run built on it). Such an edit was lost when an orchestrator rewrote the
-    graph from an older copy."""
+    graph from an older copy. An edit whose save was stopped before the graph was written is left to
+    `unsaved_edits`. `backups` (the undo records) defaults to the folder beside the memory home's orchestration
+    folder."""
     if home is None:
         return []
+    backups = _backups_of(home) if backups is None else backups
     key = _graph_key(graph.path)
     newest: dict[tuple[str, str], dict] = {}
     for entry in read_log(Path(home)):
         if entry.get("undone") is not False or _graph_key(entry["graph"]) != key:
             continue
+        if _never_saved(entry, graph, backups):
+            continue  # a warning (unsaved_edits), never a problem
         pair = (entry["node"], entry["artifact"])
         if pair not in newest or entry["revision"] >= newest[pair]["revision"]:
             newest[pair] = entry
@@ -815,7 +864,9 @@ def lost_edits(graph, home) -> list[str]:
 # --- undo records --------------------------------------------------------------------------------------
 
 
-def _save_record(backups, record: dict) -> str:
+def _save_record(backups, record: dict, edit_id: str) -> str:
+    """Save the undo record as `<backups>/<date>-outputs/edit-<edit_id>/record.json` (the edit log's `id`, so the
+    log line leads to its record)."""
     root = Path(backups)
     folder = root / f"{date.today().isoformat()}-outputs"
     root.parent.mkdir(parents=True, exist_ok=True)
@@ -826,7 +877,7 @@ def _save_record(backups, record: dict) -> str:
             pass
         if not stat.S_ISDIR(os.lstat(path).st_mode):
             raise OutputError(f"{path} is not a plain folder")
-    target = folder / f"edit-{secrets.token_hex(6)}"
+    target = folder / f"edit-{edit_id}"
     os.mkdir(target, 0o700)
     path = target / "record.json"
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -966,98 +1017,34 @@ def write_output(task, node_id, artifact_id, text, *, dirs, home, backups, expec
         raise OutputError(f"the graph file {graph_path} is not in a project's .opencode/graph folder")
     now = time.time() if now is None else now
     name = graph_path.name
-    with _GraphFolder(graph_path.parent) as folder:
-        base = _read_graph(folder, name)
-        raw = _parse(base, name)
-        node, artifact = _locate(raw, node_id, artifact_id)
-        found = _inspect(project, task, node, artifact)
-        _expect(expect, found["rev"], _what(node_id, artifact_id))
-        if not found["editable"]:
-            raise OutputError(f"{_what(node_id, artifact_id)} cannot be edited here: {found['why']}")
-        before = _record_of(artifact)
-        if found["data"] == data:
-            return {"task": task, "node": node_id, "artifact": artifact_id, "changed": False,
-                    "output": shown_output(project, task, node, artifact), "rev": found["rev"],
-                    "stale": _readers(raw, node_id, artifact_id, before["revision"]),
-                    "message": "The text is the same; nothing was changed."}
-        parts = _next_parts(node, artifact, found["parts"])
-        after = {"path": "/".join([".opencode", "artifacts", task, *parts]), "revision": before["revision"] + 1}
-        if raw.get("events") is not None and isinstance(raw.get("events"), list) and len(raw["events"]) >= MAX_EVENTS:
-            raise OutputError(f"the graph already holds {MAX_EVENTS} events, the most `check` allows; nothing was "
-                              "written")
-        edit_id = secrets.token_hex(6)
-        old_text, new_text = found["data"].decode("utf-8"), text
-        # The log line goes in before the graph is saved, its line counts null until they are made (after the lock
-        # is released): a write stopped at any point after the graph is saved still leaves its line.
-        entry = {"time": now, "id": edit_id, "task": task, "graph": _graph_key(graph_path), "node": node_id,
-                 "agent": str(node.get("agent", "")), "artifact": artifact_id, "from_revision": before["revision"],
-                 "revision": after["revision"], "path": after["path"], "chars_before": len(old_text),
-                 "chars_after": len(new_text), "lines_added": None, "lines_removed": None, "undone": False}
-        event = {"time": now, "node": node_id, "event": "changed", "note": _event_note(entry)}
-
-        def merged(current: bytes) -> bytes:
-            fresh = _parse(current, name)
-            fresh_node, fresh_artifact = _locate(fresh, node_id, artifact_id)
-            if _record_of(fresh_artifact) != before:
-                raise OutputError(f"{_what(node_id, artifact_id)} was changed in the graph while this edit was being "
-                                  f"saved (it is now revision {fresh_artifact['revision']} at "
-                                  f"{fresh_artifact['path']}); nothing was changed")
-            fresh_artifact.update(after)
-            events = fresh.get("events")
-            if not isinstance(events, list):
-                events = fresh["events"] = []
-            if len(events) >= MAX_EVENTS:
-                raise OutputError(f"the graph already holds {MAX_EVENTS} events, the most `check` allows; nothing "
-                                  "was written")
-            events.append(dict(event))
-            fresh["updated"] = now
-            return _serialize(fresh)
-
-        created: list[str] = []
-        warnings: list[str] = []
-        task_fd = _task_folder(project, task)
+    edit_id = secrets.token_hex(6)
+    warnings: list[str] = []
+    # The log line goes in before the graph lock is taken (so an edit never waits on the memory home's lock while it
+    # holds the graph's) and before the graph is saved, its line counts null until they are made after the lock is
+    # released: a write stopped at any point after the graph is saved still leaves its line. It is planned from the
+    # graph as it is now; the save under the lock refuses when the graph says otherwise, and a refused save takes the
+    # line back after the lock is released.
+    planned = _plan_entry(graph_path, project, task, node_id, artifact_id, data, text, expect, now, edit_id)
+    logged = False
+    if planned is not None:
         try:
-            target = _folder_of(task_fd, parts[:-1], create=True, created=created)
-            try:
-                written_file = False
-                logged = False
-                try:
-                    _write_new(target, parts[-1], data)
-                    written_file = True
-                    _hook("file")
-                    try:
-                        _append_log(Path(home), entry)
-                        logged = True
-                    except OSError as exc:
-                        warnings.append(f"the edit log could not be written: {exc}")
-                    used, written = _replace_graph(folder, name, merged)
-                except BaseException:
-                    if logged:
-                        _drop_line(home, edit_id)
-                    if written_file:
-                        os.unlink(parts[-1], dir_fd=target)
-                    _remove_created(task_fd, created)
-                    raise
-            finally:
-                os.close(target)
-            record_data = {"version": 1, "op": "edit", "task": task, "graph": _graph_key(graph_path),
-                           "node": node_id, "artifact": artifact_id, "before": before, "after": after,
-                           "before_digest": _digest(found["data"]), "after_digest": _digest(data),
-                           "graph_before": base64.b64encode(used).decode("ascii"), "graph_after": _digest(written),
-                           "event": event, "created": created, "log": edit_id}
-            try:
-                record = _save_record(backups, record_data)
-            except BaseException:
-                _undo_graph(folder, name, used, written)
-                _remove_file(task_fd, parts, _digest(data), created)
-                if logged:
-                    _drop_line(home, edit_id)
-                raise
-        finally:
-            os.close(task_fd)
-        fresh = _parse(written, name)
-        fresh_node, fresh_artifact = _locate(fresh, node_id, artifact_id)
-        shown = shown_output(project, task, fresh_node, fresh_artifact)
+            _append_log(Path(home), planned)
+            logged = True
+        except OSError as exc:
+            warnings.append(f"the edit log could not be written: {exc}")
+    kept = False
+    try:
+        with _GraphFolder(graph_path.parent) as folder:
+            answer = _write_locked(folder, name, graph_path, project, task, node_id, artifact_id, data, text, expect,
+                                   now, edit_id, planned, backups)
+        kept = answer["changed"]
+    finally:
+        if logged and not kept:
+            _drop_line(home, edit_id)
+    if not answer["changed"]:
+        return answer
+    entry, record, old_text, new_text, written, shown = (answer.pop(key) for key in
+                                                           ("entry", "record", "old", "new", "written", "shown"))
     _prune_records(record)
     added, removed = _line_counts(old_text, new_text)  # no lock held: never delays another writer
     if logged:
@@ -1065,13 +1052,139 @@ def write_output(task, node_id, artifact_id, text, *, dirs, home, backups, expec
             _rewrite_log(Path(home), edit_id, lambda item: {**item, "lines_added": added, "lines_removed": removed})
         except OSError as exc:
             warnings.append(f"the edit log's line counts could not be written: {exc}")
-    stale = _readers(fresh, node_id, artifact_id, after["revision"])
+    elif planned is None:  # the graph could not be read before the lock: the line goes in now, whole
+        try:
+            _append_log(Path(home), {**entry, "lines_added": added, "lines_removed": removed})
+        except OSError as exc:
+            warnings.append(f"the edit log could not be written: {exc}")
+    fresh = _parse(written, name)
+    stale = _readers(fresh, node_id, artifact_id, entry["revision"])
     named = ", ".join(f"{item['id']} ({item['agent']})" for item in stale)
-    message = (f"Saved as revision {after['revision']}." + (f" These steps read revision {before['revision']} and now "
-               f"need a rerun: {named}." if stale else " No step reads it yet.") + " Nothing was run.")
+    message = (f"Saved as revision {entry['revision']}." + (f" These steps read revision {entry['from_revision']} "
+               f"and now need a rerun: {named}." if stale else " No step reads it yet.") + " Nothing was run.")
     return {"task": task, "node": node_id, "artifact": artifact_id, "changed": True, "output": shown,
             "rev": shown["rev"], "stale": stale, "record": record, "message": message,
             **({"warnings": warnings} if warnings else {})}
+
+
+def _new_entry(graph_path, task, node, node_id, artifact_id, before, after, old_text, new_text, now, edit_id):
+    return {"time": now, "id": edit_id, "task": task, "graph": _graph_key(graph_path), "node": node_id,
+            "agent": str(node.get("agent", "")), "artifact": artifact_id, "from_revision": before["revision"],
+            "revision": after["revision"], "path": after["path"], "chars_before": len(old_text),
+            "chars_after": len(new_text), "lines_added": None, "lines_removed": None, "undone": False}
+
+
+def _plan_entry(graph_path, project, task, node_id, artifact_id, data, text, expect, now, edit_id):
+    """The edit's log line as the graph and the output are now, read without the graph lock; None when the save
+    would change nothing or be refused, or the graph cannot be read now (the read under the lock decides). Never
+    raises."""
+    try:
+        folder = os.open(graph_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            raw = _parse(_read_graph(folder, graph_path.name), graph_path.name)
+        finally:
+            os.close(folder)
+        node, artifact = _locate(raw, node_id, artifact_id)
+        found = _inspect(project, task, node, artifact)
+        if not found["editable"] or found["data"] == data or (expect is not None and expect != found["rev"]):
+            return None
+        before = _record_of(artifact)
+        parts = _next_parts(node, artifact, found["parts"])
+        after = {"path": "/".join([".opencode", "artifacts", task, *parts]), "revision": before["revision"] + 1}
+        here = Path(project) / ".opencode" / "artifacts" / task
+        for index, part in enumerate(parts):
+            here = here / part
+            if here.is_symlink() or (index == len(parts) - 1 and os.path.lexists(here)):
+                return None  # the save is refused: something is already where the next revision goes
+        return _new_entry(graph_path, task, node, node_id, artifact_id, before, after, found["data"].decode("utf-8"),
+                          text, now, edit_id)
+    except (OutputError, OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
+def _write_locked(folder, name, graph_path, project, task, node_id, artifact_id, data, text, expect, now, edit_id,
+                  planned, backups) -> dict:
+    """The part of write_output done under the graph lock: {"changed": False, ...} (the reply) when the text is the
+    same, else {"changed": True, "entry", "record", "old", "new", "written", "shown"}."""
+    base = _read_graph(folder, name)
+    raw = _parse(base, name)
+    node, artifact = _locate(raw, node_id, artifact_id)
+    found = _inspect(project, task, node, artifact)
+    _expect(expect, found["rev"], _what(node_id, artifact_id))
+    if not found["editable"]:
+        raise OutputError(f"{_what(node_id, artifact_id)} cannot be edited here: {found['why']}")
+    before = _record_of(artifact)
+    if found["data"] == data:
+        return {"task": task, "node": node_id, "artifact": artifact_id, "changed": False,
+                "output": shown_output(project, task, node, artifact), "rev": found["rev"],
+                "stale": _readers(raw, node_id, artifact_id, before["revision"]),
+                "message": "The text is the same; nothing was changed."}
+    parts = _next_parts(node, artifact, found["parts"])
+    after = {"path": "/".join([".opencode", "artifacts", task, *parts]), "revision": before["revision"] + 1}
+    if raw.get("events") is not None and isinstance(raw.get("events"), list) and len(raw["events"]) >= MAX_EVENTS:
+        raise OutputError(f"the graph already holds {MAX_EVENTS} events, the most `check` allows; nothing was "
+                          "written")
+    old_text, new_text = found["data"].decode("utf-8"), text
+    entry = _new_entry(graph_path, task, node, node_id, artifact_id, before, after, old_text, new_text, now,
+                       edit_id)
+    if planned is not None and planned != entry:
+        raise OutputError(f"{_what(node_id, artifact_id)} was changed in the graph while this edit was being "
+                          f"saved (it is now revision {before['revision']} at {before['path']}); nothing was "
+                          "changed")
+    event = {"time": now, "node": node_id, "event": "changed", "note": _event_note(entry)}
+
+    def merged(current: bytes) -> bytes:
+        fresh = _parse(current, name)
+        fresh_node, fresh_artifact = _locate(fresh, node_id, artifact_id)
+        if _record_of(fresh_artifact) != before:
+            raise OutputError(f"{_what(node_id, artifact_id)} was changed in the graph while this edit was being "
+                              f"saved (it is now revision {fresh_artifact['revision']} at "
+                              f"{fresh_artifact['path']}); nothing was changed")
+        fresh_artifact.update(after)
+        events = fresh.get("events")
+        if not isinstance(events, list):
+            events = fresh["events"] = []
+        if len(events) >= MAX_EVENTS:
+            raise OutputError(f"the graph already holds {MAX_EVENTS} events, the most `check` allows; nothing "
+                              "was written")
+        events.append(dict(event))
+        fresh["updated"] = now
+        return _serialize(fresh)
+
+    created: list[str] = []
+    task_fd = _task_folder(project, task)
+    try:
+        target = _folder_of(task_fd, parts[:-1], create=True, created=created)
+        try:
+            written_file = False
+            try:
+                _write_new(target, parts[-1], data)
+                written_file = True
+                _hook("file")
+                used, written = _replace_graph(folder, name, merged)
+            except BaseException:
+                if written_file:
+                    os.unlink(parts[-1], dir_fd=target)
+                _remove_created(task_fd, created)
+                raise
+        finally:
+            os.close(target)
+        record_data = {"version": 1, "op": "edit", "task": task, "graph": _graph_key(graph_path),
+                       "node": node_id, "artifact": artifact_id, "before": before, "after": after,
+                       "before_digest": _digest(found["data"]), "after_digest": _digest(data),
+                       "graph_before": base64.b64encode(used).decode("ascii"), "graph_after": _digest(written),
+                       "event": event, "created": created, "log": edit_id}
+        try:
+            record = _save_record(backups, record_data, edit_id)
+        except BaseException:
+            _undo_graph(folder, name, used, written)
+            _remove_file(task_fd, parts, _digest(data), created)
+            raise
+    finally:
+        os.close(task_fd)
+    fresh_node, fresh_artifact = _locate(_parse(written, name), node_id, artifact_id)
+    return {"changed": True, "entry": entry, "record": record, "old": old_text, "new": new_text, "written": written,
+            "shown": shown_output(project, task, fresh_node, fresh_artifact)}
 
 
 def _remove_created(task_fd: int, created: list[str]) -> None:
@@ -1123,6 +1236,10 @@ def restore_output(record, *, backups, home, dirs, now=None) -> dict:
     task, node_id, artifact_id = data["task"], data["node"], data["artifact"]
     before, after = data["before"], data["after"]
     graph_path = Path(data["graph"])
+    if _graph_key(graph_path) != str(graph_path):
+        # Every lock and write below uses this path: it must be the one checked here (a write's record holds the
+        # real path; a path through a link would let the project, its artifacts or the lock be another folder's).
+        raise OutputError(f"the undo record's graph path is not its real path ({graph_path}); nothing was restored")
     if os.path.dirname(_graph_key(graph_path)) not in {_graph_key(folder) for folder in dirs}:
         raise OutputError(f"the undo record is for a graph that is not in this project ({graph_path}); nothing was "
                           "restored")

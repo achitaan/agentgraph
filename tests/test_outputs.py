@@ -601,6 +601,8 @@ from agentgraph import outputs
 args = json.loads(sys.stdin.read())
 if args.get("die_while_counting"):
     outputs._line_counts = lambda *a: os._exit(9)  # killed after the graph is saved, before the log line is done
+if args.get("die_at"):  # killed at one of the module's test-hook stages ("file", "replace")
+    outputs._HOOK = lambda stage: os._exit(9) if stage == args["die_at"] else None
 started = time.monotonic()
 outputs.write_output("t1", "n1", "report", args["text"], dirs=[Path(args["graphs"])], home=Path(args["home"]),
                      backups=Path(args["backups"]))
@@ -792,6 +794,116 @@ class Review7SnapshotCost(Base):
         self.assertNotEqual(third["rev"], first["n1"][0]["rev"])
         self.assertEqual(third["rev"], self.rev())
         self.assertLessEqual(len(outputs._SEEN), outputs.SEEN_LIMIT)
+
+
+# --- back-end review round 8 (`.opencode/artifacts/agentgraph-desktop/n8/r8/backend-findings.md`, rulings) --------
+
+
+class Review8Orphan(Base):
+    """N1: a write killed after its log line and before the graph is saved leaves a line for an edit that never
+    reached the graph: `check` warns, naming the orphan revision file, and the edit is not counted."""
+
+    def setUp(self):
+        super().setUp()
+        # The memory home and the backups folder side by side, as in ~/.config/opencode, so `check` finds the undo
+        # records the way it does for the user.
+        self.home = self.root / "config" / "orchestration" / "memory"
+        self.backups = self.root / "config" / "backups"
+        self.where = {"dirs": [self.graphs], "home": self.home, "backups": self.backups}
+
+    def killed(self, **how):
+        done = fresh_python(WRITE, {"text": "line one\nline 2\n", "graphs": str(self.graphs), "home": str(self.home),
+                                    "backups": str(self.backups), **how})
+        self.assertIsNotNone(done)
+        self.assertEqual(done.returncode, 9, done.stderr)
+
+    def test_n1_an_edit_that_never_reached_the_graph_is_a_warning_naming_its_file_and_is_not_counted(self):
+        graph = self.graph.read_bytes()
+        self.killed(die_at="replace")  # inside the graph save, before the swap
+        self.assertEqual(self.graph.read_bytes(), graph, "the graph was not saved")
+        orphan = ".opencode/artifacts/t1/n1/r2/report.md"
+        self.assertTrue((self.project / orphan).is_file())
+        [entry] = self.log()
+        self.assertEqual((entry["revision"], entry["path"], entry["lines_added"]), (2, orphan, None))
+        self.assertEqual(list(self.backups.glob("*-outputs/edit-*/record.json")), [])
+        code, out = self.check()
+        self.assertNotIn("was edited by hand after the graph last recorded it", out)
+        self.assertEqual(code, 0, out)
+        [warning] = [line for line in out.splitlines() if orphan in line]
+        self.assertIn("warning:", warning)
+        self.assertIn("can be deleted", warning)
+        self.assertEqual(handedits.measure(self.home, backups=self.backups, now=time.time())["outputs"], {})
+        # An edit that did reach the graph (its undo record exists), whose line counts were never made, and that an
+        # orchestrator then dropped from the graph, is still lost: a problem, as before.
+        (self.project / orphan).unlink()  # as the warning says
+        older = self.raw()
+        self.killed(die_while_counting=True)
+        self.assertEqual(self.raw()["nodes"][0]["artifacts"][0]["revision"], 2)
+        write_whole(self.graph, older)
+        code, out = self.check()
+        self.assertEqual(code, 1, out)
+        self.assertIn("n1 output 'report' was edited by hand after the graph last recorded it", out)
+        counted = handedits.measure(self.home, backups=self.backups, now=time.time())["outputs"]
+        self.assertEqual(counted["explorer"]["edits"], 1, counted)
+
+
+class Review8RecordPath(Base):
+    """N2: an undo record whose graph path is not its real path is refused; nothing is locked or written outside the
+    folder that was checked. A file symlink is already refused (the graph is opened without following a link); a
+    symlinked folder is not: here another project's `.opencode/graph` is a symlink to this project's, so the check
+    passes on the real path while the project (and so the artifacts the undo removes) came from the other path."""
+
+    def test_n2_a_record_naming_its_graph_through_a_symlinked_folder_is_refused_and_nothing_is_written(self):
+        answer = self.write()
+        other = self.root / "other"
+        (other / ".opencode").mkdir(parents=True)
+        (other / ".opencode" / "graph").symlink_to(self.graphs, target_is_directory=True)
+        for revision, text in (("r1", TEXT), ("r2", "line one\nline 2\nline three\n")):
+            copy = other / ".opencode" / "artifacts" / "t1" / "n1" / revision / "report.md"
+            copy.parent.mkdir(parents=True)
+            copy.write_text(text)
+        record = Path(answer["record"])
+        data = json.loads(record.read_text())
+        data["graph"] = str(other / ".opencode" / "graph" / "t1.json")
+        record.write_text(json.dumps(data, indent=2) + "\n")
+        before = tree(self.project), tree(other)
+        with self.assertRaisesRegex(outputs.OutputError, "real path"):
+            outputs.restore_output(str(record), backups=self.backups, home=self.home, dirs=[self.graphs])
+        self.assertEqual((tree(self.project), tree(other)), before)
+        self.assertTrue(record.is_file())
+
+
+class Review8LockOrder(Base):
+    """N3: an output edit never takes the memory home's lock while it holds the graph's."""
+
+    def test_n3_the_memory_homes_lock_is_never_taken_under_the_graph_lock(self):
+        held = []
+        real = outputs._Ledger.__enter__
+
+        def spy(ledger):
+            held.append(outputs._LOCK.locked())
+            return real(ledger)
+        with patch.object(outputs._Ledger, "__enter__", spy):
+            saved = self.write()  # saved
+            self.write("line one\nline 2\nline three\n", expect=saved["rev"])  # unchanged
+            hook = lambda stage: stage == "replace" and write_whole(self.graph, {**self.raw(), "updated": 3})
+            with patch.object(outputs, "_HOOK", hook):
+                again = self.write("again\n", expect=saved["rev"])  # saved after a concurrent change
+            outputs.restore_output(again["record"], backups=self.backups, home=self.home, dirs=[self.graphs])
+            raw = self.raw()
+
+            def taken(stage):  # the orchestrator records another revision of the same output meanwhile
+                if stage == "replace":
+                    changed = json.loads(json.dumps(raw))
+                    changed["nodes"][0]["artifacts"][0].update(revision=9, path=".opencode/artifacts/t1/n1/r9/x.md")
+                    write_whole(self.graph, changed)
+            log = (self.home / outputs.EDIT_LOG).read_bytes()
+            with patch.object(outputs, "_HOOK", taken):
+                with self.assertRaisesRegex(outputs.OutputError, "was changed in the graph"):
+                    self.write("refused\n")
+            self.assertEqual((self.home / outputs.EDIT_LOG).read_bytes(), log, "the refused edit's line was dropped")
+        self.assertTrue(held)
+        self.assertNotIn(True, held, "the memory home's lock was taken while the graph's was held")
 
 
 if __name__ == "__main__":

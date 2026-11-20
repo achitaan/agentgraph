@@ -516,6 +516,7 @@ def main(argv: list[str] | None = None) -> int:
 
     graphs: list[tuple[str, TaskGraph | None, list[str]]] = []
     warnings: list[str] = []
+    unsaved: dict[int, list[str]] = {}
     for path in files:
         raw, issues = _read_raw(path)
         graph = None
@@ -524,6 +525,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue  # Another task's graph: never validated, so it cannot slow this check.
             graph, issues = _graph_and_issues(raw, path, flows, hubs, seats, teams, escalation)
             issues = issues + outputs.lost_edits(graph, edits)  # an edit by hand the graph no longer records
+            unsaved[id(graph)] = outputs.unsaved_edits(graph, edits)  # a save stopped before the graph: a warning
         if graph is None:
             # A non-object is readable JSON with a schema problem; preserve
             # the CLI's distinction between it and a read or decode failure.
@@ -561,7 +563,7 @@ def main(argv: list[str] | None = None) -> int:
         if graph is not None:
             for advice in shape_advice(graph):
                 _print(f"advice: {advice}")
-            for warning in folder_warnings(graph, pools, seats):
+            for warning in folder_warnings(graph, pools, seats) + unsaved.get(id(graph), []):
                 _print(f"warning: {warning}")
         failed = failed or bool(issues)
 
