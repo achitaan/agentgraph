@@ -9,15 +9,15 @@ Set in `~/.config/opencode/oh-my-opencode-slim.json`, the same in every preset. 
 | Agent | Skills |
 |---|---|
 | `orchestrator` | all |
-| `oracle` | `math-research`, `sympy`, `performance-speedup`, `experimental-design`, `engineering-delivery` |
+| `oracle` | `math-research`, `performance-speedup`, `engineering-delivery` |
 | `explorer` | `codebase-map` |
 | `designer` | `design-taste-frontend`, `ui-ux-pro-max`, `impeccable`, `playwright-cli`, `clone-any-website` |
 | `impl-openai` | `engineering-delivery`, `code-assurance`, `supabase-postgres-best-practices` |
 | `impl-claude` | `engineering-delivery`, `code-assurance`, `codebase-map`, `supabase`, `supabase-postgres-best-practices` |
-| `impl-hard` | `engineering-delivery`, `code-assurance`, `research-software-engineering`, `performance-speedup`, `ml-experiment-standards`, `sympy` |
-| `researcher` | `exa-research`, `math-research`, `research-software-engineering`, `experimental-design`, `ml-experiment-standards` |
-| `oracle-lite` | `math-research`, `sympy`, `performance-speedup`, `experimental-design`, `engineering-delivery` |
-| `reviewer` | `code-assurance`, `research-software-engineering`, `ml-experiment-standards`, `supabase-postgres-best-practices`, `engineering-delivery` |
+| `impl-hard` | `code-assurance`, `research-software-engineering`, `performance-speedup`, `ml-experiment-standards`, `sympy` |
+| `researcher` | `exa-research`, `math-research`, `research-software-engineering`, `experimental-design` |
+| `oracle-lite` | `math-research`, `performance-speedup`, `engineering-delivery` |
+| `reviewer` | `code-assurance`, `research-software-engineering`, `ml-experiment-standards` |
 | `council` | none |
 | `verifier` | `code-assurance`, `playwright-cli` |
 
