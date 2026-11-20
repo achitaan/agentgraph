@@ -28,6 +28,10 @@ Measured on a scratch OpenCode 2.3.2 server with the plugin loaded (`.opencode/a
 
 **Stale changes.** A path's `rev` (16 hex digits) is computed from its flow file's bytes; `flow command ID --on|--off`, `flow name`, `flow text`, `flow prompt` and `flow remove` take `--expect REV` and change nothing when the path changed since (`... changed since you opened it; reload and try again (rev now X)`, exit 1). An empty `--expect` is bad input, never taken as no `--expect`. A path removed and drawn again with identical bytes has the same `rev`: it is the same path, so a change expecting that `rev` is accepted.
 
+## Path task graphs
+
+`agentgraph flow scaffold P --task T` writes the task graph a path's run message describes (`GRAPH_FORMAT.md`, "Pool, escalation and groups from the structure folder"), so the orchestrator fills in goals and checks instead of laying out nodes. The run message ends by naming it; a command file's body names it too, and like the rest of that body it does not list which other paths or groups bind (the scaffold works that out when it runs). The command body before this line was added (`0859580`) is in `agentgraph/flowearlier.py`.
+
 ## Agents
 
 `agentgraph agent add NAME` with no other option adds a blank agent (description "An agent you added. Open it to say what it does.", an empty instruction, the default verifier's model, writer permissions). `--template verifier` or `--copy-of AGENT` start from the verifier or a copy instead; `--model`, `--variant`, `--description`, `--prompt-file`, `--skills` and `--read-only/--no-read-only` replace a default. `agentgraph agent rename NAME TO` renames an added agent with its flows, groups and path commands in one undoable step; `agentgraph agent remove NAME` is refused while a path through the agent is a command (turn it off first). `agent text|rename|remove`, `skills add|remove|all`, `skill write|delete` and `team members|text|remove` take `--expect REV` as the path commands do. Every option of these commands is listed in `WEB_API.md`, "2. The commands".

@@ -145,7 +145,7 @@ def _active_graph(graphs: list[TaskGraph], sessions: list[Session], task: str | 
 
 
 STRUCTURE_DIR = ORCHESTRATION_GRAPH_DIR.parent.parent / "structure"
-SETTING_KEYS = ("pool", "escalates_to", "seats")
+SETTING_KEYS = ("pool", "escalates_to", "seats", "use_when")  # use_when: agentgraph.routing
 HEAD_BYTES = 4096  # only the start of an agent's file is read for its settings and description
 SETTING_LINES = 12
 

@@ -138,6 +138,14 @@ A **run** of a flow is a task graph that followed it, by the one definition `che
 
 Nothing is written; an unknown number is `null`, never an estimate.
 
+### Pool, escalation and groups from the structure folder
+
+- **`escalates_to`** (a problem). A node's `tiers` list the agents tried in order; a move from one agent to another is an escalation. When the earlier agent has `escalates_to` in the structure folder, the move must go to that agent: `n4 was escalated from impl-openai to impl-hard; impl-openai escalates to impl-claude (structure folder)`. The same agent twice in a row is a resumed session; an agent without the setting may move anywhere. A council seat counts as its council. None of the graphs on disk when this was added breaks it.
+- **`pool`** (a warning). When more nodes of one agent than its `pool` could run at once (no one depends on another, directly or through other nodes, whatever their status: the largest such set), `check` prints `warning: 4 nodes of impl-openai can run at once (n1, n2, n3, n4), more than its pool of 3 (structure folder)` after the `advice:` lines. It never changes the exit code: a graph that passed on disk has 9 parallel `impl-claude` nodes against a pool of 2, and the delegation policy starts more instances when there are more independent lanes than slots.
+- **Groups** (`structure/teams/`, `agentgraph.teams`): where two or more nodes are run by a group's members, one node run by its lead depends on each of them. The run message (`flow prompt`) names each group this rule would fail the run's graph on, with its members, under "These groups apply: give each lead a join node depending on every node of its members:".
+
+`agentgraph flow scaffold P --task T [--dir DIR]` (P a flow id or a path's name) writes the graph the run message describes to `.opencode/graph/T.json` (the nearest such folder, else `./.opencode/graph`; `--dir` another): the path's nodes with `depends_on`, gates with `feedback_to` and `pattern: evaluate`, every other drawn path that binds (check nodes where a path would start again without end), a `join` node of each lead whose group applies, one artifact per node at `.opencode/artifacts/T/<node>/r1/handoff.md` with an input per edge, every status `pending`. The task's `goal`, each node's `goal` and `done_when` and the objective's `text` are empty; filled, the graph passes `check` with every drawn path and group. It never writes over a file: an existing `T.json` is refused and left as it was.
+
 ## Recording a finished graph
 
 `agentgraph record` saves graphs whose `status` is `passed`, and which pass `check`, to the run ledger in `~/.config/opencode/orchestration/memory/`. `agentgraph record --task NAME --abandoned` saves one unfinished graph, for a task that was given up. The ledger is what the `improve-orchestration` skill reads.

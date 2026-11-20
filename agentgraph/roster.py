@@ -1359,7 +1359,8 @@ def add_agent(name, *, model=None, variant=None, description=None, prompt=None, 
         # The structure file starts with the description when the source has no settings: a description that reads
         # as a setting (`seats: impl-`) would become one.
         if read_settings((text_description + "\n").encode("utf-8"))[0]:
-            raise RosterError("the description may not start like a structure setting (pool:, escalates_to: or seats:)")
+            raise RosterError("the description may not start like a structure setting (pool:, escalates_to:, seats: "
+                              "or use_when:)")
         data = agentfiles.render(text_description, text_model, rules,
                                  "" if not text.strip() else  # a blank agent's instruction starts empty
                                  agentfiles._clean_text(text, "the instruction", agentfiles.MAX_TEXT, single=False))
@@ -2194,7 +2195,8 @@ def annotate(document, *, config=CONFIG, map_path=MAP, agents_dir=AGENTS_DIR, st
     """Add to a snapshot document, in place: per agent `added` (an agent file this toolkit wrote), whether Delete
     can remove it (`removable`, `removable_reason`, "" when it can) and, for an added agent, its `skills`; and
     `roster` ({"editable", "why" when not, "models": the distinct "provider/model#variant" the presets and added
-    agents use}). Each agent gets its `rev` (agent_rev). A hand-written agent file is listed but read-only, with the
+    agents use}). Each agent gets its `rev` (agent_rev) and its `use_when` (the setting in its structure file, ""
+    without one or without `structure`: agentgraph.routing). A hand-written agent file is listed but read-only, with the
     reason. An agent on a flow whose
     command is on is not removable, with the removal's own refusal as the reason. `structure`: the structure folder
     the writers use (give it: the rev covers the agent's structure file, and removable reads the flow files as the
@@ -2226,6 +2228,7 @@ def annotate(document, *, config=CONFIG, map_path=MAP, agents_dir=AGENTS_DIR, st
     except RosterError:
         off = set()
     commanded = _command_refusals(document, structure)
+    from .routing import use_when_of  # routing imports this module
     rev_obj, rev_map = _rev_inputs(config, map_path)
     root_fd = _structure_fd(structure) if structure is not None else None
     for agent in document.get("agents", []):
@@ -2257,8 +2260,9 @@ def annotate(document, *, config=CONFIG, map_path=MAP, agents_dir=AGENTS_DIR, st
         reason = reason or commanded.get(name, "")
         agent["removable"] = not reason
         agent["removable_reason"] = reason
-        agent["rev"] = _agent_rev(name, _agent_bytes(agents_dir, name) if name else None, rev_obj, rev_map,
-                                  _own_file(root_fd, name) if name else None)
+        own = _own_file(root_fd, name) if name else None
+        agent["rev"] = _agent_rev(name, _agent_bytes(agents_dir, name) if name else None, rev_obj, rev_map, own)
+        agent["use_when"] = use_when_of(own)  # when the orchestrator picks it (agentgraph.routing)
     if root_fd is not None:
         os.close(root_fd)
     return document

@@ -8,10 +8,13 @@ This folder is the shape of the agent team, and the graph is drawn from it.
   - `pool: 3`: how many of this agent stand ready;
   - `escalates_to: impl-claude`: where its work goes when it fails twice;
   - `seats: councillor-`: agents whose names start with this sit in a circle round it.
+  - `use_when: Bounded, well-specified tasks with a check to run`: one line (at most 240 characters) saying when the orchestrator picks this agent. Shown in the snapshot as `agents[].use_when` and by `agentgraph route`; set it with `agentgraph route use-when NAME --text TEXT [--expect REV]` (an empty text takes it away; the answer names an undo record for `agentgraph route restore RECORD`).
 
 Settings are read from the first 4096 bytes and at most the first 12 lines; blank lines before them are skipped, a blank line after them closes them, and the first other line starts the description.
 
 The text after the settings is the agent's description: two or three plain sentences on what it does, when the orchestrator uses it and what it hands back, under 320 characters, with no model names (models come from the preset). It is carried in the snapshot as `agents[].about` and shown first in the agent's details in the graph view. `tests/test_structure_descriptions.py` checks it.
+
+`agentgraph route [--json]` prints, from this folder alone (and `SKILLS.md` for skills), one line per agent: its group, pool, `escalates_to`, `use_when`, skills, the groups it leads or reports to and the drawn paths that start at it. `agentgraph check` holds task graphs to `escalates_to` (a problem) and `pool` (a warning): see `GRAPH_FORMAT.md`.
 
 Settings are data: they show in the agent's details and never draw a line by themselves. A fresh download has agents and no connections; at rest the graph draws only the hub's lines to the agents and the council's to its seats. Every other line comes from a flow the user drew, or from a running task graph.
 
