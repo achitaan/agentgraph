@@ -528,6 +528,22 @@ def _print_bloat(report: dict) -> None:
         print(line)
 
 
+def _hand_edits(home: Path, now: float | None, improvements: list[dict] | None = None, options: dict | None = None) -> dict:
+    """The hand-edit signal (`handedits.signal`); `options` may carry days, min_edits, min_tasks, min_rewrites,
+    backups, agents_dir."""
+    from . import handedits
+    if improvements is None:
+        improvements = _records(_read(home / _IMPROVEMENTS, _valid_improvement))
+    return handedits.signal(home, now, improvements=improvements, **{k: v for k, v in (options or {}).items()
+                                                                     if v is not None})
+
+
+def _print_hand_edits(report: dict) -> None:
+    from . import handedits
+    for line in handedits.signal_lines(report or {}):
+        print(line)
+
+
 def _open_message_db(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(path.expanduser().resolve().as_uri() + "?mode=ro", uri=True, timeout=0.25)
 
@@ -731,8 +747,10 @@ def _due_fields(runs: list[dict], responses: list[dict]) -> dict:
 
 
 def signals(home: Path, now: float | None, *, all_items: bool = False, cost_db: Path | None = None,
-            settings_log: Path | None = None, feedback_ids: bool = False, message_db: Path | None = None) -> dict:
-    """Read the ledger and aggregate pending or historical signals."""
+            settings_log: Path | None = None, feedback_ids: bool = False, message_db: Path | None = None,
+            hand_edits: dict | None = None) -> dict:
+    """Read the ledger and aggregate pending or historical signals. `hand_edits` overrides the hand-edit window,
+    thresholds and folders (see `_hand_edits`)."""
     generated = _now(now)
     with _lock(home, writing=False) as locked:
         rows, responses, improvements = _history(home)
@@ -764,6 +782,7 @@ def signals(home: Path, now: float | None, *, all_items: bool = False, cost_db: 
         "escalations": _escalations(scope),
         "amendments": sum(run["amendments"] for run in scope), "trend": trend, "improvements": improvements,
         "bloat": _bloat(home),
+        "hand_edits": _hand_edits(home, generated, improvements, hand_edits),
     }
     if message_db is not None:
         report.update(_message_report(message_db, generated, messages_since, keep, responses, handled))
@@ -804,6 +823,7 @@ def _sizes_text(sizes: dict) -> str:
 def _print_report(report: dict) -> None:
     _print_due(report)
     _print_bloat(report.get("bloat") or {})
+    _print_hand_edits(report.get("hand_edits") or {})
     _print_cost(report)
     for title, field in (("Feedback", "feedback"), ("Lessons", "lessons"), ("Discovered", "discovered")):
         if report[field]:
@@ -901,6 +921,11 @@ def _improvement_fields(args: argparse.Namespace) -> dict:
     return supplied
 
 
+def _hand_options(args: argparse.Namespace) -> dict:
+    return {"days": args.hand_days, "min_edits": args.hand_edits, "min_tasks": args.hand_tasks,
+            "min_rewrites": args.hand_rewrites, "backups": args.backups, "agents_dir": args.agents_dir}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentgraph ledger", description=__doc__)
     parser.add_argument("--home", type=Path, help="ledger directory (default: $AGENTGRAPH_HOME or ~/.config/opencode/orchestration/memory)")
@@ -940,6 +965,13 @@ def main(argv: list[str] | None = None) -> int:
     signals_parser.add_argument("--cost-db", type=Path, help="OpenCode session database for the chat cost trend")
     signals_parser.add_argument("--settings-log", type=Path, help="log of the cost settings over time")
     signals_parser.add_argument("--config", type=Path, help="OpenCode config file")
+    for command_parser in (record_parser, signals_parser):
+        command_parser.add_argument("--hand-days", type=float, help="window of the hand-edit signal (default 14)")
+        command_parser.add_argument("--hand-edits", type=int, help="output edits that make it due (default 3)")
+        command_parser.add_argument("--hand-tasks", type=int, help="tasks those edits must span (default 2)")
+        command_parser.add_argument("--hand-rewrites", type=int, help="instruction rewrites that make it due (default 3)")
+        command_parser.add_argument("--backups", type=Path, help="backups folder (default: beside the home's orchestration folder)")
+        command_parser.add_argument("--agents-dir", type=Path, help="agent files folder (default: beside the backups folder)")
     for command_parser in (record_parser, feedback_parser, improved_parser, signals_parser):
         command_parser.add_argument("--home", type=Path, default=argparse.SUPPRESS, help="ledger directory")
 
@@ -967,6 +999,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"recorded {run['task']}: {run['nodes_passed']}/{run['nodes_total']} nodes passed ({run['path']})")
             _print_due(result.due)
             _print_bloat(_bloat(home))
+            _print_hand_edits(_hand_edits(home, None, options=_hand_options(args)))
             return result.code
         if args.command == "feedback":
             if feedback(home, None, _feedback_text(args), agent=args.agent, task=args.task) is None:
@@ -994,7 +1027,7 @@ def main(argv: list[str] | None = None) -> int:
                     pass
             report = signals(home, None, all_items=args.all, settings_log=log,
                              cost_db=None if args.no_cost else args.cost_db or sources.DB_PATH,
-                             feedback_ids=args.feedback_ids,
+                             feedback_ids=args.feedback_ids, hand_edits=_hand_options(args),
                              message_db=(args.db or sources.DB_PATH) if args.messages else None)
             if args.json:
                 print(json.dumps(report, allow_nan=False))
