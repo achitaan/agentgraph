@@ -467,6 +467,24 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   somewhere else since you opened it. The view now shows the latest; try again." (announced); trying again
 //   expects the latest rev. A snapshot without rev sends no expect. index.html passes the response status and
 //   rev on the thrown error.
+// 3D view (orbit lane n105; the terminal's model in tui-plugin/src/scene.js): a button beside the controls (named
+//   "3D view", aria-pressed) and the key D (wherever the view has the keys, not while typing) switch 2D and 3D; the
+//   camera moves between them over 700 ms (at once with reduced motion). In 3D the orchestrator is the sun, each
+//   group its own ring tilted differently, its agents on it near their 2D places, council seats and a group's
+//   members round their lead; nearer agents are larger, fully opaque and drawn over farther ones (which dim); names
+//   stay upright and at 11 px or more. Every line, loop (a closed dotted ring), group line, badge and pick follows
+//   the agents. Going back puts the 2D view back exactly (pan, zoom, every position). The choice is kept in the
+//   page and across a reload (key "<positions key>:view"; no storage: the page only). The system turns by itself
+//   once in 40 s, only in 3D, never with reduced motion, while the page is hidden or during a press. A drag (over
+//   5 px, on empty space or starting on an agent) turns it: across turns, up and down tilt it between nearly along
+//   its plane and straight down (never past); arrow keys on the canvas turn and tilt it; R or a double-click on
+//   empty canvas resets the angle; Escape during a drag puts the angle back. Turning by hand pauses the self-turn
+//   for 3 s. Wheel and pinch zoom; there is no pan in 3D. Clicks and keys are as in 2D (pick, right-click details,
+//   Delete, undo, N, G, Escape, drawing a path by clicks; lines do not bend round agents). Moving an agent is 2D
+//   only: a drag on an agent turns the system and Alt/Shift+arrow on one moves nothing; the status line says
+//   "Agents move in 2D: press D to go back". A frame is drawn only when the angle or the data changed. root carries
+//   data-ag-view ("2d"/"3d"), data-ag-blend (0 to 1), data-ag-turn, data-ag-elevation, data-ag-frames and
+//   data-ag-frame-ms (mean of the last frames) for hosts and tests.
 // options.motion: "full" (default) or "none" for a still picture (tests, screenshots). The system's
 //   reduced-motion setting is always honoured.
 // options.autofocus: true to give the canvas keyboard focus once the graph is first drawn (N, F and the arrows
