@@ -216,9 +216,12 @@ export const FLOW_PROMPT_TIMEOUT_MS = 20000;
 export const FLOW_PROMPT_MAX_BYTES = 256 * 1024;
 export const GOAL_LIMIT = 4000; // characters (the back end's flowrun.GOAL_LIMIT)
 const FLOW_ID = /^[a-z0-9][a-z0-9-]{0,79}$/;
+const FLOW_REV = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/; // render.js FLOW_REV
+const STALE = /changed since you opened it/;
 
 // deps: { spawn, path, env, home, python, timeoutMs?, structure? } (structure: a structure folder, for tests)
-export function runFlowPrompt(deps, id, goal) {
+// -> {text} | {error} | {error, stale: true} (`--expect rev` refused: the path changed since the snapshot showed it).
+export function runFlowPrompt(deps, id, goal, rev) {
   const timeoutMs = deps.timeoutMs || FLOW_PROMPT_TIMEOUT_MS;
   const fail = (message) => ({ error: oneLine(message) });
   if (typeof deps.python !== "string" || !deps.path.isAbsolute(deps.python)) {
@@ -229,6 +232,7 @@ export function runFlowPrompt(deps, id, goal) {
   return new Promise((resolve) => {
     const args = ["-P", "-m", "agentgraph.structure", "flow", "prompt", id, "--goal-file", "-"];
     if (deps.structure) args.push("--structure", deps.structure);
+    if (typeof rev === "string" && FLOW_REV.test(rev)) args.push("--expect", rev);
     const env = Object.assign({}, deps.env, { PYTHONPATH: deps.home, PYTHONIOENCODING: "utf-8" });
     const out = [];
     const err = [];
@@ -253,6 +257,7 @@ export function runFlowPrompt(deps, id, goal) {
         return fail("This agentgraph has no `flow prompt` command yet; update the orchestration folder.");
       }
       if (outcome.code === 0) return fail("agentgraph flow prompt printed nothing.");
+      if (STALE.test(stderr)) return Object.assign(fail(detail.replace(/^agentgraph structure:\s*/, "")), { stale: true });
       const status = typeof outcome.code === "number" ? "exited with status " + outcome.code : outcome.signal ? "was terminated by " + outcome.signal : "failed";
       return fail(detail ? detail.replace(/^agentgraph structure:\s*/, "") : "agentgraph flow prompt " + status + ".");
     };

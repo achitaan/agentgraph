@@ -47,6 +47,14 @@ The list (what the panel opens on):
                     is sent, no back end runs (the demo never sends anyway), and the plugin's debug log must show
                     `action: choose` and no `action: send`, `run` or `open`. Not with --demo, --dialog, --open,
                     --gcheck, --fullscreen or --view3d.
+    --live-paths    a live snapshot, not the demo: copies agentgraph/ and structure/ into SCRATCH/live-orch, adds two
+                    named paths there (`agentgraph flow add ... --structure <scratch> --commands <scratch>`), and starts
+                    the app with AGENTGRAPH_TUI_HOME=<scratch> (the plugin's snapshot and `flow prompt` run there) and
+                    AGENTGRAPH_TUI_NOSEND=1 (`r` stops after the run message). Requires the plugin's debug log to say
+                    both before any key, the `2 paths` row, the chooser listing both, `Goal for deep-change`; types a
+                    goal and presses Enter, and requires `action: prompt explorer-oracle-impl-claude N chars for
+                    <session>, not sent` with N the length `flow prompt` returns when this script runs it. Nothing is
+                    sent. Alone, and never with --session.
     --selftest      check list_report on built-in screens and exit (no app, no pyte).
 
 The orbit (the full-panel scene):
@@ -91,8 +99,14 @@ except ImportError:
     pyte = None  # --selftest needs no terminal; everything else stops in main()
 
 HUB = "◉ orchestrator"
+# Every wait is on an event (a line on screen, a line in the plugin's debug log) with this ceiling, never a fixed
+# sleep: on a loaded machine (load average 70 to 110) a dialog took more than the 1.5 s the first version slept.
+CEILING = 60.0
+GRAPH_ITEM = re.compile(r"/graph\s+Agent graph")  # the command list's row for /graph, before Enter
 TOAST = re.compile(r"Plugin failed|Open plugins|run opencode plugin update|Run /plugins")
 DEBUG_LOG = os.environ.get("AGENTGRAPH_TUI_DEBUG", "")
+EXTRA_ENV = {}  # more environment for the app (--live-paths: AGENTGRAPH_TUI_HOME, AGENTGRAPH_TUI_NOSEND)
+ORCHESTRATION = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEMO = ""  # AGENTGRAPH_TUI_DEMO for the app, set from --demo ("1") or --paths ("paths") in main()
 BRAILLE = re.compile(r"[\u2801-\u28ff]")
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -236,6 +250,9 @@ class Term:
             os.environ.pop("OPENCODE_SESSION_ID", None)
             if DEBUG_LOG:
                 os.environ["AGENTGRAPH_TUI_DEBUG"] = DEBUG_LOG
+            for key in ("AGENTGRAPH_TUI_HOME", "AGENTGRAPH_TUI_NOSEND"):
+                os.environ.pop(key, None)
+            os.environ.update(EXTRA_ENV)
             if DEMO:
                 os.environ["AGENTGRAPH_TUI_DEMO"] = DEMO
             else:
@@ -282,6 +299,15 @@ class Term:
             if predicate(self.lines()):
                 return True
         return predicate(self.lines())
+
+    def wait_log(self, predicate, seconds):
+        """Pump until predicate(the plugin's debug log lines) holds, at most `seconds`."""
+        end = time.time() + seconds
+        while time.time() < end and self.alive:
+            if predicate(debug_lines()):
+                return True
+            self.pump(0.25)
+        return predicate(debug_lines())
 
     def lines(self):
         return [line.rstrip() for line in self.screen.display]
@@ -536,7 +562,8 @@ def drive_dialog(term, found_lines):
     before = cursor_row(found_lines, found) if found else None
     opened_before = sum("action: open" in l for l in debug_lines())
     term.write(b"s")
-    term.pump(1.5)
+    term.wait_for(lambda ls: any("Stop impl-claude?" in l for l in ls), CEILING)
+    term.pump(0.5)
     shown = term.lines()
     screens.append(("after s", shown))
     if not any("Stop impl-claude?" in l for l in shown):
@@ -546,7 +573,9 @@ def drive_dialog(term, found_lines):
     under = term.lines()
     screens.append(("down in the dialog", under))
     term.write(b"\r")  # Enter answers the confirm, and must not also reach the panel
-    term.pump(2.0)
+    term.wait_for(lambda ls: not any("Stop impl-claude?" in l for l in ls), CEILING)
+    term.wait_log(lambda log: any("action: stop " in l for l in log), CEILING)  # the plugin saw the answer
+    term.pump(1.0)  # time for a leaked Enter to act, if it did
     after = term.lines()
     screens.append(("Enter in the dialog", after))
     if any("Stop impl-claude?" in l for l in after):
@@ -571,7 +600,8 @@ def drive_open(term, lines, session):
     if found is None or row != found[0]:
         problems.append(f"open: the cursor is not on the hub row (cursor {row}, hub {found[0] if found else None})")
     term.write(b"\r")
-    term.pump(2.5)
+    term.wait_log(lambda log: any("action: open" in l or " open:" in l for l in log), CEILING)
+    term.wait_for(lambda ls: any("ctrl+p" in l or "commands" in l for l in ls), CEILING)
     after = term.lines()
     log = debug_lines()
     asked = [l for l in log if "action: open" in l]
@@ -605,7 +635,8 @@ def drive_paths(term, lines):
         problems.append("paths: no `r run` in the key line")
     before = sum(1 for l in debug_lines() if "action:" in l)
     term.write(b"r")
-    term.pump(1.5)
+    term.wait_for(lambda ls: any("Run a path" in l for l in ls) and all(any(n in l for l in ls) for n in PATHS_SAMPLE)
+                  and any("3 runs · $1.20 avg · 2.0 rounds" in l for l in ls), CEILING)
     chooser = term.lines()
     screens.append(("after r", chooser))
     if not any("Run a path" in l for l in chooser):
@@ -618,13 +649,14 @@ def drive_paths(term, lines):
     if not any("impl-openai → verifier → impl-openai" in l for l in chooser):
         problems.append("paths: no `impl-openai → verifier → impl-openai` in the chooser")
     term.write(b"\r")  # the first row (impl-loop, run last) is the current one
-    term.pump(1.5)
+    term.wait_for(lambda ls: any("Goal for impl-loop" in l for l in ls), CEILING)
     goal = term.lines()
     screens.append(("Enter in the chooser", goal))
     if not any("Goal for impl-loop" in l for l in goal):
         problems.append("paths: no `Goal for impl-loop` prompt after Enter")
     term.write(b"\x1b")  # Escape: no goal, nothing sent
-    term.pump(1.5)
+    term.wait_for(lambda ls: not any("Goal for impl-loop" in l or "Run a path" in l for l in ls), CEILING)
+    term.pump(0.5)
     after = term.lines()
     screens.append(("Escape in the goal prompt", after))
     if any("Goal for impl-loop" in l or "Run a path" in l for l in after):
@@ -639,19 +671,128 @@ def drive_paths(term, lines):
     return problems, facts, screens
 
 
-def drive(term, args):
-    started = term.wait_for(lambda ls: any("ctrl+p" in l or "commands" in l for l in ls), 40)
+def view_shown(ls):
+    found = find_view(ls)
+    return found is not None and len([v for v in found[2] if v]) >= 2
+
+
+def app_started(term):
+    started = term.wait_for(lambda ls: any("ctrl+p" in l or "commands" in l for l in ls), 2 * CEILING)
     term.pump(4)  # let plugins load and the first sidebar snapshot arrive
+    return started
+
+
+LIVE_PATHS = [  # (name, agents): the two named paths of --live-paths' scratch structure folder
+    ("review-loop", ["impl-openai", "verifier", "impl-openai"]),
+    ("deep-change", ["explorer", "oracle", "impl-claude"]),
+]
+LIVE_GOAL = "Tune a new blue cache"  # no panel key in it (s m r g q f d), should a keystroke ever reach the panel
+
+
+def scratch_orchestration():
+    """--live-paths: a scratch orchestration folder (SCRATCH/live-orch) with copies of agentgraph/ and structure/ and
+    two named paths added there by `agentgraph flow add` (--structure and --commands point into the scratch folder,
+    so neither the real structure folder nor the real commands folder is touched). -> (folder, python)"""
+    import shutil
+    root = os.path.join(SCRATCH, "live-orch")
+    shutil.rmtree(root, ignore_errors=True)
+    skip = shutil.ignore_patterns("__pycache__", "*.pyc")
+    shutil.copytree(os.path.join(ORCHESTRATION, "agentgraph"), os.path.join(root, "agentgraph"), ignore=skip)
+    shutil.copytree(os.path.join(ORCHESTRATION, "structure"), os.path.join(root, "structure"), ignore=skip)
+    flows = os.path.join(root, "structure", "flows")
+    if os.path.isdir(flows):
+        shutil.rmtree(flows)
+    env = dict(os.environ, PYTHONPATH=root)
+    for name, agents in LIVE_PATHS:
+        subprocess.run([sys.executable, "-P", "-m", "agentgraph.structure", "flow", "add", *agents, "--name", name,
+                        "--structure", os.path.join(root, "structure"), "--commands", os.path.join(root, "commands")],
+                       env=env, cwd=root, check=True, stdout=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+    return root
+
+
+def flow_prompt(root, flow_id, goal):
+    """The run message as the plugin gets it: `python -P -m agentgraph.structure flow prompt ID --goal-file -`."""
+    done = subprocess.run([sys.executable, "-P", "-m", "agentgraph.structure", "flow", "prompt", flow_id, "--goal-file", "-"],
+                          input=goal.encode(), env=dict(os.environ, PYTHONPATH=root), cwd=root, capture_output=True, timeout=60)
+    return done.returncode, done.stdout.decode().rstrip(), done.stderr.decode().strip()
+
+
+def drive_live_paths(term, lines, root, session):
+    """--live-paths: the list at rest from a live snapshot of the scratch folder, `r`, the chooser with its two named
+    paths, Enter, the goal typed, Enter: the plugin gets the run message from `flow prompt` and, with
+    AGENTGRAPH_TUI_NOSEND, stops before the send. -> (problems, facts, screens)"""
+    problems, facts, screens = [], [], []
+    labels = [f"{name}  {' → '.join(agents)}" for name, agents in LIVE_PATHS]
+    modes = [l.split(" ", 1)[1] for l in debug_lines() if " mode: " in l]
+    facts += modes
+    if not any("nosend" in m for m in modes) or not any(f"home {root}" in m for m in modes):
+        return ["live paths: the plugin did not log nosend and the scratch home: not pressing r"], facts, screens
+    term.wait_for(lambda ls: (lambda f: f is not None and any(r.startswith("2 paths") for r in list_rows(ls, f)))(find_view(ls)), CEILING)
+    lines = term.lines()
+    found = find_view(lines)
+    rows = list_rows(lines, found) if found else []
+    facts.append(f"{len(rows)} rows at rest: " + " | ".join(rows))
+    if not any(r == "2 paths" for r in rows):
+        problems.append("live paths: no `2 paths` row (the live snapshot of the scratch folder)")
+    if not rows or not re.search(r"\br run\b", rows[-1]):
+        problems.append("live paths: no `r run` in the key line")
+    if problems:
+        return problems, facts, screens
+    term.write(b"r")
+    term.wait_for(lambda ls: any("Run a path" in l for l in ls) and all(any(x in l for l in ls) for x in labels), CEILING)
+    chooser = term.lines()
+    screens.append(("after r", chooser))
+    for label in labels:
+        if not any(label in l for l in chooser):
+            problems.append(f"live paths: `{label}` is not in the chooser")
+    first = "deep-change"  # neither has run: the snapshot's order, by id (explorer-… before impl-…)
+    term.write(b"\r")
+    if not term.wait_for(lambda ls: any(f"Goal for {first}" in l for l in ls), CEILING):
+        problems.append(f"live paths: no `Goal for {first}` prompt after Enter")
+        term.write(b"\x1b")
+        return problems, facts, screens + [("after Enter", term.lines())]
+    for ch in LIVE_GOAL:
+        term.write(ch.encode())
+        term.pump(0.05)
+    typed = term.wait_for(lambda ls: any(LIVE_GOAL in l for l in ls) and any(f"Goal for {first}" in l for l in ls), CEILING)
+    screens.append(("goal typed", term.lines()))
+    if not typed:
+        problems.append("live paths: the goal is not in the prompt; not pressing Enter")
+        term.write(b"\x1b")
+        return problems, facts, screens
+    term.write(b"\r")
+    term.wait_log(lambda log: any(" action: prompt " in l or " run:" in l for l in log), CEILING)
+    term.wait_for(lambda ls: any("Not sent" in l for l in ls), CEILING / 2)
+    screens.append(("Enter in the goal prompt", term.lines()))
+    actions = [l.split(" ", 1)[1] for l in debug_lines() if "action:" in l or " run:" in l]
+    facts += actions
+    flow_id = "explorer-oracle-impl-claude"
+    made = [a for a in actions if a.startswith(f"action: prompt {flow_id} ") and a.endswith(f"for {session}, not sent")]
+    if not made:
+        problems.append(f"live paths: the plugin did not log `action: prompt {flow_id} N chars for {session}, not sent`")
+    if any(re.match(r"action: (send|open|stop)\b", a) for a in actions):
+        problems.append("live paths: " + "; ".join(a for a in actions if re.match(r"action: (send|open|stop)\b", a)))
+    code, text, err = flow_prompt(root, flow_id, LIVE_GOAL)
+    facts.append(f"flow prompt {flow_id} (the same command, run here): exit {code}, {len(text)} chars"
+                 + (f", stderr {err}" if err else ""))
+    facts += ["  > " + line for line in text.splitlines()[:3]]
+    if code != 0 or LIVE_GOAL not in text:
+        problems.append("live paths: `flow prompt` did not return a message with the goal")
+    elif made and f" {len(text)} chars " not in made[-1]:
+        problems.append(f"live paths: the plugin's message length ({made[-1]}) is not {len(text)}")
+    return problems, facts, screens
+
+
+def drive(term, args):
+    started = app_started(term)
     if not args.no_graph:
-        for ch in "/graph":
-            term.write(ch.encode())
-            term.pump(0.12)
-        term.pump(0.8)
-        term.write(b"\r")
-        term.wait_for(lambda ls: find_view(ls) is not None and len([v for v in find_view(ls)[2] if v]) >= 2, args.wait)
+        open_panel(term, args)
     if args.fullscreen and find_view(term.lines()) is not None:
+        col = find_view(term.lines())[1]
         term.write(b"f")
-        term.pump(1.5)
+        # full screen moves the view to the left edge; with --demo the orbit then shows
+        term.wait_for(lambda ls: find_view(ls) is not None and find_view(ls)[1] != col and (not args.demo or orbit_on(ls)), args.wait)
+        term.pump(0.5)
     # toasts (plugin update notices, load warnings) draw over the right side for a few seconds: wait them out
     term.wait_for(lambda ls: not any(TOAST.search(l) for l in ls), args.settle)
     term.pump(args.keep_open)
@@ -659,7 +800,7 @@ def drive(term, args):
         term.pump(2.0)  # the orbit never stands still: no waiting for a quiet screen
     else:
         # the app redraws only the cells that change: wait until two captures 1.5 s apart are the same
-        previous, end = None, time.time() + 10
+        previous, end = None, time.time() + CEILING / 2
         while time.time() < end:
             term.pump(1.5)
             if term.lines() == previous:
@@ -673,7 +814,8 @@ def drive(term, args):
     view3d = None
     if args.view3d and find_view(lines) is not None:
         term.write(b"d")  # the orbit's 2D/3D key: the camera tilts over 0.7 s
-        term.pump(1.0)
+        term.wait_for(three_d_on, args.wait)
+        term.pump(0.5)
         first3 = term.lines()
         seen3d = screen_colours(term.screen)
         term.pump(1.0)
@@ -683,6 +825,8 @@ def drive(term, args):
         extra = ("dialog",) + drive_dialog(term, lines)
     elif args.paths and find_view(lines) is not None:
         extra = ("paths",) + drive_paths(term, lines)
+    elif args.live_paths and find_view(lines) is not None:
+        extra = ("live paths",) + drive_live_paths(term, lines, args.live_root, args.session_id)
     elif args.open and find_view(lines) is not None:
         p, f, after = drive_open(term, lines, args.session_id)
         extra = ("open", p, f, [("after Enter", after)])
@@ -690,8 +834,9 @@ def drive(term, args):
     after_q = None
     if not args.no_graph and find_view(lines) is not None:
         # `q` is this plugin's close key while its panel has the keyboard
+        col = find_view(lines)[1]
         term.write(b"q")
-        term.pump(2.0)
+        term.wait_for(lambda ls: find_view(ls) is None or find_view(ls)[1] != col, CEILING / 2)
         after_q = term.lines()
     return lines, colours, after_q, started, second, seen2d, view3d
 
@@ -707,24 +852,39 @@ def orbit_on(lines):
     return any(lines[r].find("◉", found[1] + 2) >= 0 for r in range(rows[0], rows[1] + 1))
 
 
+def three_d_on(lines):
+    """True when the canvas shows the 3D view: `@` on it and no braille (spinner glyphs aside)."""
+    found = find_view(lines)
+    rows = canvas_rows(lines, found) if found else None
+    if rows is None:
+        return False
+    body = "".join(lines[r][found[1]:] for r in range(rows[0], rows[1] + 1))
+    return "@" in body and not any(BRAILLE.match(ch) and ch not in SPIN for ch in body)
+
+
 def open_panel(term, args):
+    """Type /graph, wait for its row in the command list, then Enter, and wait for the view. Without the row the
+    input is cleared (ctrl+u) and nothing is submitted, so /graph never goes to the session as a message."""
     for ch in "/graph":
         term.write(ch.encode())
         term.pump(0.12)
-    term.pump(0.8)
+    if not term.wait_for(lambda ls: any(GRAPH_ITEM.search(l) for l in ls), args.wait):
+        term.write(b"\x15")
+        term.pump(0.5)
+        return False
     term.write(b"\r")
-    term.wait_for(lambda ls: find_view(ls) is not None and len([v for v in find_view(ls)[2] if v]) >= 2, args.wait)
+    return term.wait_for(view_shown, args.wait)
 
 
 def drive_g(term, args):
     """-> (started, steps): steps = [(label, lines, orbit_on)] for the capture before `g`, after `g`, after `g` again."""
-    started = term.wait_for(lambda ls: any("ctrl+p" in l or "commands" in l for l in ls), 40)
-    term.pump(4)
+    started = app_started(term)
     open_panel(term, args)
     for key in args.pre:
         if key == "R":
+            col = find_view(term.lines())[1] if find_view(term.lines()) else None
             term.write(b"q")
-            term.pump(2.0)
+            term.wait_for(lambda ls: find_view(ls) is None or find_view(ls)[1] != col, CEILING / 2)
             open_panel(term, args)
         else:
             term.write(key.encode())
@@ -733,8 +893,11 @@ def drive_g(term, args):
     term.pump(2.0)
     steps = [("before g", term.lines())]
     for label in ("after g", "after g again"):
+        was = orbit_on(term.lines())
         term.write(b"g")
-        term.pump(1.5)
+        # g switches between the list and the orbit: wait for the switch (a FAIL below if it never comes)
+        term.wait_for(lambda ls: find_view(ls) is not None and orbit_on(ls) != was, args.wait)
+        term.pump(0.5)
         steps.append((label, term.lines()))
     return started, [(label, lines, orbit_on(lines)) for label, lines in steps]
 
@@ -969,9 +1132,9 @@ def main():
     parser.add_argument("--binary", default=os.environ.get("OPENCODE_CLI", DEFAULT_BINARY))
     parser.add_argument("--session", default=os.environ.get("AGENTGRAPH_REAL_SESSION"))
     parser.add_argument("--no-graph", action="store_true", help="do not type /graph; report the sidebar only")
-    parser.add_argument("--wait", type=float, default=12.0, help="seconds to wait for the view after /graph")
+    parser.add_argument("--wait", type=float, default=CEILING, help="most seconds to wait for each view change (the view after /graph, f, d, g)")
     parser.add_argument("--keep-open", type=float, default=0.0, help="extra seconds before the capture")
-    parser.add_argument("--settle", type=float, default=12.0, help="seconds to wait for toasts to go away")
+    parser.add_argument("--settle", type=float, default=CEILING, help="most seconds to wait for toasts to go away")
     parser.add_argument("--demo", action="store_true", help="AGENTGRAPH_TUI_DEMO=1: the moving demo; require the orbit")
     parser.add_argument("--fullscreen", action="store_true", help="press f (full screen) once the view shows")
     parser.add_argument("--expect-scene", action="store_true", help="require the orbit (the hub ring) without --demo")
@@ -981,13 +1144,17 @@ def main():
     parser.add_argument("--dialog", action="store_true", help="with --demo: s, then down and Enter in the confirm; nothing leaks")
     parser.add_argument("--open", action="store_true", help="without --demo: Enter on the hub row opens its session")
     parser.add_argument("--paths", action="store_true", help="the demo at rest with sample paths: r, the chooser, the goal prompt, Escape; nothing sent")
+    parser.add_argument("--live-paths", action="store_true", help="a scratch orchestration folder with two named paths: the live chooser and flow prompt; nothing sent")
     parser.add_argument("--selftest", action="store_true", help="check list_report on built-in screens and exit")
     args = parser.parse_args()
     if args.selftest:
         return selftest()
     why = refuse(args.demo, args.dialog, any(a == "--session" or a.startswith("--session=") for a in sys.argv[1:]))
-    if not why and args.paths and (args.demo or args.dialog or args.open or args.gcheck or args.fullscreen or args.view3d):
-        why = "--paths runs alone (with --size, --binary, --wait, --settle, --keep-open)"
+    if not why and (args.paths or args.live_paths) and (args.paths and args.live_paths or args.demo or args.dialog or args.open
+                                                         or args.gcheck or args.fullscreen or args.view3d):
+        why = "--paths and --live-paths run alone (with --size, --binary, --wait, --settle, --keep-open)"
+    if not why and args.live_paths and any(a == "--session" or a.startswith("--session=") for a in sys.argv[1:]):
+        why = "--live-paths types a goal: only in this script's throwaway session, not with --session"
     if why:
         print("real-host.py: " + why, file=sys.stderr)
         return 2
@@ -998,7 +1165,7 @@ def main():
     DEMO = "paths" if args.paths else "1" if args.demo else ""
     if args.gcheck and not DEBUG_LOG:
         DEBUG_LOG = os.path.join(SCRATCH, "gcheck-debug.log")
-    if (args.dialog or args.open or args.paths) and not DEBUG_LOG:
+    if (args.dialog or args.open or args.paths or args.live_paths) and not DEBUG_LOG:
         DEBUG_LOG = os.path.join(SCRATCH, "actions-debug.log")
     args.list_mode = args.demo and not args.fullscreen and not args.expect_scene and not args.view3d
     cols, rows = (int(n) for n in args.size.lower().split("x"))
@@ -1006,12 +1173,15 @@ def main():
     os.makedirs(SCRATCH, exist_ok=True)
     session = args.session or ensure_session(args.binary, proj)
     args.session_id = session
+    if args.live_paths:
+        args.live_root = scratch_orchestration()
+        EXTRA_ENV.update({"AGENTGRAPH_TUI_HOME": args.live_root, "AGENTGRAPH_TUI_NOSEND": "1"})
 
-    label = f"{cols}x{rows}{'-nograph' if args.no_graph else ''}{'-demo' if args.demo else ''}{'-dialog' if args.dialog else ''}{'-open' if args.open else ''}{'-paths' if args.paths else ''}{'-full' if args.fullscreen else ''}{'-3d' if args.view3d else ''}{'-g' + args.pre if args.gcheck else ''}"
+    label = f"{cols}x{rows}{'-nograph' if args.no_graph else ''}{'-demo' if args.demo else ''}{'-dialog' if args.dialog else ''}{'-open' if args.open else ''}{'-paths' if args.paths else ''}{'-livepaths' if args.live_paths else ''}{'-full' if args.fullscreen else ''}{'-3d' if args.view3d else ''}{'-g' + args.pre if args.gcheck else ''}"
     term = None
     try:
         term = Term([args.binary, "--standalone", "-s", session, proj], proj, cols, rows, os.path.join(SCRATCH, f"raw-{label}.bin"))
-        if DEBUG_LOG and (args.gcheck or args.dialog or args.open or args.paths):
+        if DEBUG_LOG and (args.gcheck or args.dialog or args.open or args.paths or args.live_paths):
             open(DEBUG_LOG, "w").close()
         term.start()
         if args.gcheck:
@@ -1086,9 +1256,9 @@ def main():
             print(f"===== {label}: FAIL, scene: " + "; ".join(problems))
             return 1
     extra = getattr(args, "extra", None)
-    if args.dialog or args.open or args.paths:
+    if args.dialog or args.open or args.paths or args.live_paths:
         if extra is None:
-            print(f"===== {label}: FAIL, {'dialog' if args.dialog else 'paths' if args.paths else 'open'}: no view to press keys in")
+            print(f"===== {label}: FAIL, {'dialog' if args.dialog else 'paths' if args.paths or args.live_paths else 'open'}: no view to press keys in")
             return 1
         kind, p_extra, f_extra, screens = extra
         for name, shot in screens:

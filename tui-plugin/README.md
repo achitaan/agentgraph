@@ -98,7 +98,7 @@ view, the list opens as a session panel:
 | `Enter` | open the row's session (`ui.router.navigate`): the agent's running session, the root session for the hub, the session that asked for a request (that is where the host lets you answer it) |
 | `s` | stop the selected working agent: asks `ui.dialog.confirm`, then `client.session.interrupt`; the result is a toast |
 | `m` | message the selected working agent: `ui.dialog.prompt`, then `client.session.prompt` with `delivery: "steer"` into its running session; the result is a toast |
-| `r` | run a drawn path (only when the snapshot has one): the host's chooser (`ui.dialog.select`, widened with `ui.dialog.set({ size: "large" })`; skipped with one path) lists `name  a → b → a` (the id when unnamed), most recently run first, with `3 runs · $1.20 avg · 2.0 rounds` from its stats (a dash for a null field, nothing without stats); then `ui.dialog.prompt` for the goal (required, at most 4,000 characters, refused with a toast); then the run message from `agentgraph flow prompt ID --goal-file -` (below); then `client.session.prompt({ sessionID, text })`, a normal user message, to the orchestrator's session (the snapshot's root session, never a child). A toast says sent, or the back end's or the host's error. `r` is off from the press until it is sent or given up, so nothing is sent twice |
+| `r` | run a drawn path (only when the snapshot has one): the host's chooser (`ui.dialog.select`, widened with `ui.dialog.set({ size: "large" })`; skipped with one path) lists `name  a → b → a` (the id when unnamed), most recently run first, with `3 runs · $1.20 avg · 2.0 rounds` from its stats (a dash for a null field, nothing without stats); then `ui.dialog.prompt` for the goal (required, at most 4,000 characters, refused with a toast); then the run message from `agentgraph flow prompt ID --goal-file -` (below); then `client.session.prompt({ sessionID, text })`, a normal user message, to the orchestrator's session (the snapshot's root session, never a child). A toast says sent, or the back end's or the host's error. `r` is off from the press until it is sent or given up, so nothing is sent twice, and `r run` leaves the key line for that time. The `r` layer is registered while the snapshot has a path and unregistered when the paths go. The selected row does not matter: a busy child selected still sends to the root. When the snapshot gives the path a `rev`, it goes along as `--expect REV`: path ids are reused (a removed and redrawn path can get the same id), and a path that changed since the chooser showed it is refused by the back end ("changed since you opened it"); then nothing is sent, both views refresh at once, a warning toast says `<name> changed since you opened it: nothing was sent. Press r again.`, and the next goal prompt for that id starts with the goal typed (not another path's prompt: the goal waits for its own path). Without `rev` (an older back end) no `--expect` is passed |
 | `f` | full screen on and off; full screen shows the orbit, back to a side panel the list |
 | `q` | close the panel |
 | `g` | orbit or list (remembered while the app runs) |
@@ -152,7 +152,11 @@ characters, and ends exactly on the target view's steady frame.
 
 Frames: 10 a second while work moves or the camera moves; when idle 4 a second in 2D and 6 in 3D. A frame equal to
 the last one drawn is not pushed to the host, and rows whose text and colours are unchanged keep their nodes. A
-160×45 frame computes in about 0.6 ms in 2D and 0.9 ms in 3D (1.3 ms with a new document each frame).
+160×45 frame computes in about 0.6 ms in 2D and 0.9 ms in 3D (1.3 ms with a new document each frame). The test
+reports these times but does not fail on them: it counts a frame in reference frames (a fixed piece of per-cell
+work timed in the same process, best of interleaved batches), today 5.0 in 2D and 7.7 in 3D (7.1 and 11.0 with a new
+document each frame), and fails at four times today's count: a frame five times slower fails, and machine load does
+not get there (at load average 110 to 240 the counts stayed under 2.6 times, mostly under 1.3).
 
 **Colours.** Each group colours its agents' glyphs, names, spokes and pulses. The hub is plain, stuck or failed is
 the theme's danger colour, resting detail is muted. An agent at rest is its group colour mixed half way toward the
@@ -181,6 +185,14 @@ of running the snapshot process (nothing is spawned), with a growing context his
 2 s at most. `AGENTGRAPH_TUI_DEMO=paths` draws the same team at rest (nobody works, no task graph) with three sample
 paths, so the paths row and `r` can be seen; in the demo `r` goes as far as the goal and then says
 `Demo: impl-loop is not sent.`: no back end runs and nothing is sent.
+
+**For checks.** The throwaway host loads the plugin from the user's config, so a check cannot give it options;
+two environment switches stand in. `AGENTGRAPH_TUI_HOME=<folder>` points the snapshot and `flow prompt` at a scratch
+orchestration folder with its own `structure/` (over the `home` option), honoured only for an existing folder inside
+the system temp folder (`os.tmpdir()`, both resolved through links); anything else is ignored, so the environment
+cannot make the panel run code from another folder. `AGENTGRAPH_TUI_NOSEND=1` makes `r` stop after the run message: a toast
+`Not sent (AGENTGRAPH_TUI_NOSEND): <name>, a message of N characters for <session>` and nothing sent. With
+`AGENTGRAPH_TUI_DEBUG` set, both are written to the debug log when the plugin starts.
 
 Real host, 120×40, demo, full screen, 2D (`real-host.py --size 120x40 --demo --fullscreen --view3d`):
 
@@ -315,7 +327,8 @@ the session changed is dropped. The cleanup stops both timers and kills a runnin
 
 `r` gets the run message the same way: `<python> -P -m agentgraph.structure flow prompt <ID> --goal-file -` (what
 `agentgraph flow prompt` runs), no shell, `PYTHONPATH=<home>`, in `home`, the goal on standard input, SIGKILL after
-20 s, output capped at 256 KiB. Exit 0 with text: the message. Otherwise the last line of its standard error is the
+20 s, output capped at 256 KiB; `--expect <rev>` is added when the chosen path has a `rev` that is a plain token (never one
+starting with `-`). Exit 0 with text: the message. Otherwise the last line of its standard error is the
 toast (`there is no flow 'x'`); an agentgraph without the command (`No module named agentgraph.structure`,
 `invalid choice: 'prompt'`) says ``This agentgraph has no `flow prompt` command yet; update the orchestration
 folder.``
@@ -428,7 +441,18 @@ Enter on the hub row and requires the plugin to ask the host to open that sessio
 checks the list check itself on built-in screens (run by `test/run.mjs`). `--paths` (alone) runs the
 `AGENTGRAPH_TUI_DEMO=paths` demo, requires the 4 rows at rest with the paths row and `r run`, presses `r` and requires
 the host's chooser with the sample paths and their stats, Enter and requires the goal prompt, then Escape: it stops
-before any goal, so nothing is sent and no back end runs.
+before any goal, so nothing is sent and no back end runs. `--live-paths` (alone, never with `--session`) uses a live
+snapshot instead of the demo: it copies `agentgraph/` and `structure/` into `SCRATCH/live-orch`, adds two named
+paths there with `agentgraph flow add ... --structure <scratch> --commands <scratch>` (the real structure and
+commands folders are not touched), and starts the app with `AGENTGRAPH_TUI_HOME=<scratch>` and
+`AGENTGRAPH_TUI_NOSEND=1`. It requires both in the debug log before any key, the `2 paths` row, the chooser listing
+both, the goal prompt; types a goal, presses Enter, and requires the plugin to log the run message for the chosen
+path with the length `flow prompt` returns when the script runs it, and nothing sent.
+
+Every wait in the script is on an event (a line on screen, a line in the debug log) with a 60 s ceiling (`--wait`,
+`--settle`), not a fixed sleep: under load (load average 70 to 230) a dialog or a view switch took longer than the
+fixed 1.5 s sleeps of the first version. `/graph` is submitted only after its row shows in the command list; without
+it the input is cleared, so `/graph` never goes to the session as a message.
 ## Not verified
 
 - `{ prepend: "sidebar.content" }`; that the returned cleanup of `ui.slot` and `keymap.layer` is called.

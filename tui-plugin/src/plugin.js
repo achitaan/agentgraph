@@ -287,10 +287,32 @@ export function createPlugin(host) {
     }
   }
 
+  // The real path of `dir` when it is an existing folder inside (not equal to) the system temp folder, else "".
+  function scratchHome(dir) {
+    try {
+      if (typeof dir !== "string" || !dir.trim() || !host.path.isAbsolute(dir.trim())) return "";
+      const temp = host.fs.realpathSync(host.os.tmpdir());
+      const real = host.fs.realpathSync(dir.trim());
+      return real.startsWith(temp + host.path.sep) && host.fs.statSync(real).isDirectory() ? real : "";
+    } catch (_) {
+      return "";
+    }
+  }
+
   function setup(ctx, secondOptions) {
     ctx = ctx || {};
     const options = resolveOptions(isPlainObject(ctx.options) ? ctx.options : secondOptions, host);
     const demo = demoRequested(host.env);
+    // For checks on a throwaway host, which loads the plugin from the user's config and so cannot give it options:
+    // AGENTGRAPH_TUI_HOME is the orchestration folder for the snapshot and `flow prompt` (a scratch copy with its own
+    // structure/), honoured only for an existing folder inside the system temp folder (resolved through links), so
+    // the environment cannot point the panel at code anywhere else. AGENTGRAPH_TUI_NOSEND: `r` stops after the run
+    // message, before the send (it can only prevent a send).
+    const envHome = scratchHome(host.env && host.env.AGENTGRAPH_TUI_HOME);
+    if (envHome) options.home = envHome;
+    const noSend = !!host.env && typeof host.env.AGENTGRAPH_TUI_NOSEND === "string" && !["", "0"].includes(host.env.AGENTGRAPH_TUI_NOSEND.trim());
+    if (envHome && options.home === envHome) report("mode", `home ${envHome} (AGENTGRAPH_TUI_HOME)`); // debug log only
+    if (noSend) report("mode", "nosend: r stops before the send (AGENTGRAPH_TUI_NOSEND)");
     if (demo) options.intervalMs = Math.min(options.intervalMs, DEMO_INTERVAL_MS);
     const runner = demo
       ? createDemoRunner({ fs: host.fs, file: host.demoFile, now: clock, paths: String(host.env.AGENTGRAPH_TUI_DEMO).trim() === "paths" })
@@ -429,7 +451,7 @@ export function createPlugin(host) {
       }
 
       const retime = () => spinner(state().doc);
-      const watcher = { state, frame, watch, poll, stop, reopen, setScene, retime, beforeTick: null, sceneInterval: null };
+      const watcher = { state, frame, watch, poll, stop, reopen, setScene, retime, refresh, beforeTick: null, sceneInterval: null };
       watchers.push(watcher);
       return watcher;
     }
@@ -580,7 +602,13 @@ export function createPlugin(host) {
     const canMessage = () => !!(ctx.client && ctx.client.session && has(ctx.client.session.prompt) && ctx.ui && ctx.ui.dialog && has(ctx.ui.dialog.prompt));
     const canRun = canMessage; // the goal's prompt and the send are the calls `m` uses; the chooser is optional
     let runBusy = false; // a path is being run: from `r` until it was sent or given up
-    let runKeyWanted = null; // the mounted panel's addRunKey: `r` is added once the snapshot has a path
+    const [runShown, setRunShown] = host.createSignal(true); // the key line's `r run`: hidden while runBusy
+    const setRunBusy = (busy) => {
+      runBusy = busy;
+      setRunShown(!busy);
+      requestRender();
+    };
+    let runKeyWanted = null; // the mounted panel's setRunKey(want): `r` is there while the snapshot has a path
     // The key line for the selected row: only keys that do something there.
     const keyPieces = (item, items, result) => {
       const pieces = [];
@@ -588,7 +616,7 @@ export function createPlugin(host) {
       if (item && item.open && canOpen()) pieces.push(["⏎", "open"]);
       if (item && item.busy && canStop()) pieces.push(["s", "stop"]);
       if (item && item.busy && canMessage()) pieces.push(["m", "message"]);
-      if (result && Array.isArray(result.flows) && result.flows.length && canRun()) pieces.push(["r", "run"]);
+      if (result && Array.isArray(result.flows) && result.flows.length && canRun() && runShown()) pieces.push(["r", "run"]);
       pieces.push(["g", "graph"], ["q", "close"]);
       return pieces;
     };
@@ -603,7 +631,7 @@ export function createPlugin(host) {
         rows.flows = Array.isArray(result.flows) ? result.flows : [];
         rows.root = typeof result.root === "string" ? result.root : null;
         rows.session = typeof result.session === "string" ? result.session : null;
-        if (rows.flows.length && runKeyWanted) runKeyWanted();
+        if (Array.isArray(result.flows) && runKeyWanted) runKeyWanted(result.flows.length > 0); // a list's layout, not the orbit's
       },
     };
     const toast = (message, variant = "info") => {
@@ -733,11 +761,12 @@ export function createPlugin(host) {
         ctx.ui.dialog.prompt({ title: "Run which path? " + flows.map((f, i) => `${i + 1} ${flowName(f)}`).join("  "), placeholder: "1" }),
       ).then((answer) => flows[Math.floor(Number(String(answer || "").trim())) - 1] || null);
     };
+    let keptGoal = null; // {id, goal}: the goal typed for a path that had changed, offered again on the next `r`
     const runPath = () => {
       const flows = rows.flows.slice();
       if (runBusy || !flows.length || !canRun()) return;
       const sessionID = rows.root || rows.session;
-      runBusy = true;
+      setRunBusy(true);
       let chosen = null;
       Promise.resolve()
         .then(() => choosePath(flows))
@@ -745,8 +774,16 @@ export function createPlugin(host) {
           if (!flow) return undefined;
           chosen = flow;
           report("action", `choose ${flow.id}`); // debug log only (real-host.py --paths)
+          // offered only for the path it was typed for; kept while another path is chosen
+          const kept = keptGoal && keptGoal.id === flow.id ? keptGoal.goal : null;
+          if (kept) keptGoal = null;
           return withDialog(() =>
-            ctx.ui.dialog.prompt({ title: `Goal for ${flowName(flow)}`, description: flow.path.join(" → "), placeholder: "The task for the orchestrator to run on this path" }),
+            ctx.ui.dialog.prompt(
+              Object.assign(
+                { title: `Goal for ${flowName(flow)}`, description: flow.path.join(" → "), placeholder: "The task for the orchestrator to run on this path" },
+                kept ? { value: kept } : {},
+              ),
+            ),
           ).then((answer) => {
             const goal = typeof answer === "string" ? answer.trim() : "";
             if (!goal) {
@@ -767,9 +804,23 @@ export function createPlugin(host) {
               toast(`Could not run ${flowName(flow)}: no orchestrator session.`, "error");
               return undefined;
             }
-            return runFlowPrompt({ spawn: host.spawn, path: host.path, env: host.env, home: options.home, python: options.python }, flow.id, goal).then((made) => {
+            // flow.rev (when the snapshot has one) is the version the chooser showed: `--expect` refuses a path
+            // that changed since (ids are reused: a removed and redrawn path can get the same id)
+            return runFlowPrompt({ spawn: host.spawn, path: host.path, env: host.env, home: options.home, python: options.python }, flow.id, goal, flow.rev).then((made) => {
+              if (made && made.stale) {
+                report("action", `stale ${flow.id} ${flow.rev}`);
+                keptGoal = { id: flow.id, goal };
+                for (const watcher of watchers) watcher.refresh();
+                toast(`${flowName(flow)} changed since you opened it: nothing was sent. Press r again.`, "warning");
+                return undefined;
+              }
               if (!made || typeof made.text !== "string") {
                 toast(`Could not run ${flowName(flow)}: ${(made && made.error) || "no run message"}`, "error");
+                return undefined;
+              }
+              if (noSend) {
+                report("action", `prompt ${flow.id} ${[...made.text].length} chars for ${sessionID}, not sent`);
+                toast(`Not sent (AGENTGRAPH_TUI_NOSEND): ${flowName(flow)}, a message of ${[...made.text].length} characters for ${sessionID}`);
                 return undefined;
               }
               report("action", `send ${flow.id} ${sessionID}`);
@@ -781,9 +832,7 @@ export function createPlugin(host) {
           report("run", error);
           toast(`Could not send ${chosen ? flowName(chosen) : "the path"}: ${errorMessage(error)}`, "error");
         })
-        .finally(() => {
-          runBusy = false;
-        });
+        .finally(() => setRunBusy(false));
     };
     // The terminal's size, which is the panel's size in full screen; null when the host does not say.
     const screenSize = () => {
@@ -1093,7 +1142,8 @@ export function createPlugin(host) {
       const remove = () => {
         if (removed) return;
         removed = true;
-        if (runKeyWanted === addRunKey) runKeyWanted = null;
+        if (runKeyWanted === setRunKey) runKeyWanted = null;
+        dropRunKey();
         panelLayers.delete(remove);
         for (const fn of unregisters) {
           try {
@@ -1119,26 +1169,39 @@ export function createPlugin(host) {
           report("view key", error);
         }
       };
-      // `r` (run a path), added once the first snapshot with a path is drawn: no paths, no key. Added after the
-      // render that saw the path (a timer), outside the host's render.
-      let runKey = false;
-      const addRunKey = () => {
-        if (runKey || removed || !canRun()) return;
-        runKey = true;
+      // `r` (run a path): registered while the list's snapshot has a path, unregistered when the paths go: no
+      // paths, no key. Changed after the render that saw it (a timer), outside the host's render.
+      let runKey = false; // wanted
+      let runOff = null; // the registered layer's unregister
+      const setRunKey = (want) => {
+        want = !!want && canRun();
+        if (want === runKey || removed) return;
+        runKey = want;
         setTimeout(() => {
           if (removed) return;
-          try {
-            unregisters.push(
-              ctx.keymap.layer(() => ({
+          if (runKey && !runOff) {
+            try {
+              runOff = ctx.keymap.layer(() => ({
                 commands: [{ id: PANEL_NAME + ".run", bind: "r", enabled: () => ours() && onList() && !runBusy && rows.flows.length > 0, run: () => ours() && onList() && runPath() }],
-              })),
-            );
-          } catch (error) {
-            report("run key", error);
+              }));
+            } catch (error) {
+              report("run key", error);
+            }
+          } else if (!runKey && runOff) {
+            dropRunKey();
           }
         }, 0);
       };
-      runKeyWanted = addRunKey;
+      const dropRunKey = () => {
+        const off = runOff;
+        runOff = null;
+        try {
+          if (typeof off === "function") off();
+        } catch (_) {
+          /* ignore */
+        }
+      };
+      runKeyWanted = setRunKey;
       panelLayers.add(remove);
       return { remove, addViewKey, sized };
     }

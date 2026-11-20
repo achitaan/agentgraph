@@ -759,6 +759,8 @@ function costRow(doc, width) {
 // Paths: the agent paths the user drew (snapshot `structure.flows`, WEB_API.md); `r` in the panel runs one.
 
 const FLOW_ID = /^[a-z0-9][a-z0-9-]{0,79}$/;
+// A plain token (never starting with "-", so it cannot read as an option on the command line).
+export const FLOW_REV = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const PATH_ARROW = " → ";
 const DASH = "–";
 
@@ -773,6 +775,8 @@ export function flowsOf(doc) {
       name: typeof f.name === "string" && clean(f.name) ? clean(f.name) : null,
       stats: isObject(f.stats) ? f.stats : null,
       command: typeof f.command === "string" ? f.command : null,
+      // the version the snapshot saw (a short hash of the path's file): `flow prompt --expect` refuses when it changed
+      rev: typeof f.rev === "string" && FLOW_REV.test(f.rev) ? f.rev : null,
     }));
 }
 
