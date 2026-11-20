@@ -14,6 +14,8 @@ Global command files live in `~/.config/opencode/commands/`; the toolkit's copie
 
 `H` is the active preset's ledger home; `F` is a temporary file. For `/learn`, `--feedback-ids` exposes the IDs used in the `{ "id": "reason" }` marking file. Marks are append-only in `H/feedback-handled.jsonl`; they do not rewrite notes, advance the watermark, or erase history. Recording an approved batch edit keeps the existing watermark, so notes not settled by that run remain pending.
 
+Bloat: `agentgraph signals --json` carries `bloat` (`due`, the agents over budget or grown, each one's largest source); it is due only after `agentgraph bloat --set-baseline --home H`, and then `record` and `signals` print `improvement due: bloat`, which `/learn` and the improve skills answer with one shrinking edit. An applied edit's JSON may carry `size_change` (`{agent: characters}`); with a baseline, `improved` also records the measured change (`size_actual`). `agentgraph bloat` itself is read-only and never prints prompt text.
+
 `--messages` reads the OpenCode V2 database in read-only mode. It returns up to 150 root-chat user messages, with at most 600 characters per excerpt and 30,000 characters of excerpt text total, plus a count of eligible messages omitted. It prefers original display text when available and excludes identifiable slash commands. A template saved as ordinary user text without presentation metadata cannot reliably be distinguished. A batch checkpoint advances separately from the single-proposal watermark; capped scans keep their backlog.
 
 ## Paths as commands
