@@ -91,6 +91,7 @@ Node:
 - `pattern`: the shape this node is part of, one of `chain`, `route`, `parallel`, `vote`, `orchestrate`, `evaluate` or `synthesize` (the agent patterns Anthropic describes). Optional.
 - `artifacts`: the files this node hands on to later nodes, so they can read the work itself instead of a retelling. Each is `{"id": "handoff", "path": ".opencode/artifacts/<task>/<node>/r<revision>/<name>", "revision": 1}`. Use a new path for each revision and never rewrite an older one. A writer node's artifact paths must be inside its `scope`; a read-only node (empty `scope`) has its report saved by the orchestrator under `.opencode/artifacts/`. Optional.
 - `inputs`: the upstream artifacts this node reads directly: `[{"from": "n1", "artifact": "handoff", "revision": 1}]`. `from` must be one of this node's `depends_on`, or a node whose `feedback_to` names this node (a reviewer's findings sent back for rework); the artifact must be declared on that node. Optional.
+- `base`: the project's commit (a hash of 7 to 64 lower-case hex digits) when the node was dispatched. Optional. When a worker node later turns out to have needed more than one attempt, `agentgraph record` keeps it as a case (`agentgraph cases`), and a case can be run again in a scratch worktree only if it knows this commit; without it the case is kept and marked not replayable. `check` refuses a `base` that is not a commit id (an empty string means unknown).
 - `feedback_to`: for a node that evaluates other nodes' work, the ids of the nodes it sends that work back to when it does not pass. It is not a dependency: it draws as an edge going back, and it does not affect the order nodes run in. When a gate refutes, the nodes it names run again on the same sessions and their `attempts` go up; no new node is added for the rework.
 
 Event (`events` is append-only, newest last):
@@ -111,6 +112,7 @@ It reports:
 - Scope: two nodes that can run in parallel and share a write scope, and a `changed_paths` entry outside the node's `scope`. Paths are relative to the project root and compared as paths, so `src/a.py` and `./src/a.py` are the same file. A scope of `.` covers the project and nothing outside it; a path that starts with `..` needs a scope entry that names it. A node with an empty `scope` is read-only.
 - Readiness: a node that is `running` or `returned` while one of its dependencies has not passed.
 - Artifacts: an artifact without an id, path or integer revision; duplicate artifact ids on one node; a writer node's artifact path outside its `scope`, or a read-only node's outside `.opencode/artifacts/`; an input whose `from` is neither in `depends_on` nor a node that sends feedback to it, whose artifact the producer does not declare, or whose revision is higher than the producer's; and a node that is `running`, `returned` or `passed` while one of its inputs is older than the producer's current revision (it read stale work).
+- Base: a `base` that is not 7 to 64 lower-case hex digits (or empty).
 - Shape fields: a `pattern` that is not one of the names above, and a `feedback_to` entry that names an unknown node, the node itself, or a node that comes after it.
 - Lifecycle: a graph marked `passed` with a node that has not passed or an objective not delivered, a `gate` marked `passed` whose `verdict` is not `confirmed`, and a node marked `passed` with no `evidence`.
 
@@ -148,7 +150,7 @@ Nothing is written; an unknown number is `null`, never an estimate.
 
 ## Recording a finished graph
 
-`agentgraph record` saves graphs whose `status` is `passed`, and which pass `check`, to the run ledger in `~/.config/opencode/orchestration/memory/`. `agentgraph record --task NAME --abandoned` saves one unfinished graph, for a task that was given up. The ledger is what the `improve-orchestration` skill reads.
+`agentgraph record` saves graphs whose `status` is `passed`, and which pass `check`, to the run ledger in `~/.config/opencode/orchestration/memory/`. `agentgraph record --task NAME --abandoned` saves one unfinished graph, for a task that was given up. The ledger is what the `improve-orchestration` skill reads. Recording also keeps each worker node that did not pass first time as a case (`cases.jsonl`; see `agentgraph cases` in the README).
 
 ## Outputs edited by hand
 

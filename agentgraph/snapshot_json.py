@@ -76,7 +76,8 @@ def _graph_document(graph: TaskGraph, busy_ids: set[str], handoffs: set[tuple[st
         transitions = {(a, b) for a, b in pairwise(node.tiers) if a != b}
         handoffs.update(transitions)
         nodes.append({
-            **asdict(node), "busy": contract.node_busy(node, busy_ids),
+            **{key: value for key, value in asdict(node).items() if key != "base"},  # `base` is the ledger's (cases)
+            "busy": contract.node_busy(node, busy_ids),
             "wave": wave_by_id[node.id], "escalated": bool(transitions),
             "inputs": [{"from": entry.from_node, "artifact": entry.artifact, "revision": entry.revision,
                         "stale": (node.id, entry.from_node, entry.artifact, entry.revision) in stale}

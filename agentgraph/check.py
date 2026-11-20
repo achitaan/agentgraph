@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Iterator
 from math import isfinite
@@ -27,6 +28,7 @@ _NODE_LISTS = ("depends_on", "scope", "tiers", "changed_paths", "feedback_to")
 _NOT_OBJECT = "graph must be an object"
 _INVALID_TASK = "graph task must be a non-blank string"
 _MAX_LIST_ISSUES = 100
+COMMIT_ID = re.compile(r"[0-9a-f]{7,64}")  # a node's `base`: an abbreviated or full hash, lower case (git's own output)
 
 
 def _nonblank(value: object) -> bool:
@@ -145,6 +147,8 @@ def _raw_issues(raw: dict) -> list[str]:
         for field in ("evidence", "baseline", "outputs", "pattern"):
             if field in node and not isinstance(node[field], str):
                 issues.append(f"{label} {field} must be a string")
+        if "base" in node and node["base"] != "" and not (isinstance(node["base"], str) and COMMIT_ID.fullmatch(node["base"])):
+            issues.append(f"{label} base must be a commit id (7 to 64 lower-case hex digits) or empty")
         for field in ("started", "finished"):
             value = node.get(field)
             if value is not None and not _number(value):

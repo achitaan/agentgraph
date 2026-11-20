@@ -6,6 +6,7 @@
 #   agentgraph feedback --stdin     save a correction from the user, read from stdin (--agent NAME, --task NAME)
 #   agentgraph signals [--json]     what the ledger says should improve
 #   agentgraph improved ...         mark that a prompt improvement was applied
+#   agentgraph cases [--agent A] [--held-out | --tune] [--json]   past failures kept to try a prompt edit on (--brief ID, --result ID ...)
 #   agentgraph serve [--port N]     the same view as a local web page (http://127.0.0.1:4747/)
 #   agentgraph snapshot             the data behind the view, as one line of JSON
 #   agentgraph structure flows      the drawn flows, the user's paths (--stats: how their runs went)
@@ -37,6 +38,9 @@ case "$1" in
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.check "$@" ;;
   record|feedback|signals|improved)
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.ledger "$@" ;;
+  cases)
+    shift
+    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.cases "$@" ;;
   serve)
     shift
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.server "$@" ;;

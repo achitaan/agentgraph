@@ -175,6 +175,7 @@ class Node:
     feedback_to: list[str] = field(default_factory=list)  # rework edges, not dependencies
     artifacts: list[Artifact] = field(default_factory=list)
     inputs: list[ArtifactInput] = field(default_factory=list)
+    base: str = ""  # the project's commit when the node was dispatched (optional; lets a failure be tried again there)
 
 
 @dataclass

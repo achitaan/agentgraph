@@ -334,6 +334,7 @@ def _node(raw: dict, over: Counter | None = None) -> Node:
         verdict=_str(raw.get("verdict")),
         pattern=pattern if isinstance(pattern, str) else "",
         feedback_to=feedback,
+        base=_str(raw.get("base")),
         artifacts=[Artifact(entry["id"], entry["path"], entry["revision"])
                    for entry in _artifact_entries(_capped(raw, "artifacts", over), ("id", "path"))],
         inputs=[ArtifactInput(entry["from"], entry["artifact"], entry["revision"])
