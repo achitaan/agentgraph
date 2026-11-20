@@ -1804,7 +1804,7 @@
         Promise.resolve(work).then(finish(resolve), finish(reject));
       });
     }
-    function isStale(error) { return !!error && typeof error === 'object' && (error.status === 409 || error.stale === true || /changed since you opened it/i.test(text(error.message || ''))); }
+    function isStale(error) { return !!error && typeof error === 'object' && (error.status === 409 || error.stale === true); }
     // A write's reply gives the thing's new rev; until a snapshot fetched after that reply is drawn, it is the one shown.
     let fetchesStarted = 0, renderedFetch = 0;
     const replyRevs = new Map(), writing = new Map();

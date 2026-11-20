@@ -5474,6 +5474,102 @@
         } finally { app.destroy(); again.remove(); }
       }, { actions: world.actions });
     });
+    // ---- Round 3 (n88): what makes a refusal stale, a refused save that is never resent, markup in a read reply, two saves at once ----
+    // A path's text save whose refusal is the given error: the state line and the box afterwards.
+    async function refusedWith(make) {
+      const data = pathFixture(), host = pathHost(data), seen = {};
+      const actions = { ...host.actions, flow: request => { if (request.op === 'text') throw make(); return host.flow(request); } };
+      await using(data, async root => {
+        openStep(root, 'f1'); await settle();
+        const box = root.querySelector('[data-route-text]'); box.focus(); typeIn(box, 'Mine.'); press(box, 'Enter', { ctrlKey: true }); await settled();
+        seen.state = root.querySelector('[data-route-state]')?.textContent || ''; seen.kept = root.querySelector('[data-route-text]')?.value;
+      }, { actions });
+      return seen;
+    }
+    await test('stale is the error\'s status 409 or stale: true: with an unrelated message either keeps the typing and says it changed elsewhere', async () => {
+      const problems = [];
+      for (const [label, extra] of [['status 409', { status: 409 }], ['stale: true', { stale: true }]]) {
+        const seen = await refusedWith(() => Object.assign(new Error('the disk is full'), extra));
+        if (!(/changed somewhere else/.test(seen.state) && seen.kept === 'Mine.')) problems.push(label + ' with an unrelated message was not treated as stale: ' + JSON.stringify(seen));
+      }
+      assert(!problems.length, problems.join('; '));
+    });
+    await test('the phrase "changed since you opened it" alone is not stale: with no status 409 and no stale flag (or another status) it is a plain refusal', async () => {
+      const problems = [], PHRASE = 'changed since you opened it; reload and try again';
+      for (const [label, extra] of [['no status and no flag', {}], ['status 500', { status: 500 }], ['stale: false', { stale: false }]]) {
+        const seen = await refusedWith(() => Object.assign(new Error(PHRASE), extra));
+        if (/changed somewhere else/.test(seen.state) || !seen.state || seen.state === 'Saved') problems.push(label + ' was treated as stale (or not refused): ' + JSON.stringify(seen));
+      }
+      assert(!problems.length, problems.join('; '));
+    });
+    await test('a save refused as stale sends nothing more by itself: past every delay on the fake clock the back end has one request for the path, and the user\'s next save sends exactly one, with the fresh rev', async () => {
+      const clock = fakeClock(), data = pathFixture(), host = pathHost(data), sent = [];
+      const flow = request => { if (request.op === 'text') sent.push(request); return host.flow(request); };
+      await using(data, async root => {
+        openStep(root, 'f1'); await settle(); flowElsewhere(data);
+        const staleRev = data.structure.flows[0].rev;
+        const box = root.querySelector('[data-route-text]'); box.focus(); typeIn(box, 'Mine.'); press(box, 'Enter', { ctrlKey: true }); await settled();
+        assert(sent.length === 1 && root.querySelector('[data-route-state]').textContent === STALE, 'the refusal did not happen: ' + sent.length + ' / ' + root.querySelector('[data-route-state]').textContent);
+        const fresh = stampRevs(data).structure.flows[0].rev;
+        assert(fresh !== staleRev && sent[0].expect === staleRev, 'the fixture did not move the rev: ' + [staleRev, fresh, sent[0].expect]);
+        for (let step = 0; step < 6; step++) { clock.tick(60000); await settled(); }
+        assert(sent.length === 1 && root.querySelector('[data-route-text]').value === 'Mine.', 'the refused save was sent again by itself: ' + JSON.stringify(sent.map(request => request.expect)));
+        const again = root.querySelector('[data-route-text]'); again.focus(); press(again, 'Enter', { ctrlKey: true }); await settled();
+        assert(sent.length === 2 && sent[1].expect === fresh && sent[1].text === 'Mine.' && data.structure.flows[0].text === 'Mine.', 'the explicit save was not one request with the fresh rev: ' + JSON.stringify(sent.map(request => [request.text, request.expect])));
+        for (let step = 0; step < 3; step++) { clock.tick(60000); await settled(); }
+        assert(sent.length === 2, 'a save was sent again after the explicit one: ' + sent.length);
+      }, { actions: { ...host.actions, flow }, clock });
+    });
+    await test('an agent\'s instruction read reply that is markup is shown as text: the box\'s value is the string and no element is made from it', async () => {
+      const problems = [];
+      for (const hostile of ['<img src=x onerror="window.__pwned=1">', '</textarea><script>window.__pwned=1<\/script><b id="made">bold</b>', '<img src=x onerror=window.__pwned=1></textarea><script>1<\/script>']) {
+        const data = worldFixture();
+        data.agents.push(agent('scout', 'build', { added: true, removable: true, skills: [], skills_editable: true }));
+        data[AGENT_TEXTS] = { scout: hostile };
+        const world = worldHost(data);
+        window.__pwned = 0;
+        await using(data, async root => {
+          open(root, 'scout'); await settled();
+          const box = root.querySelector('.ag-detail [data-agent-text="scout"]');
+          if (!(box && box.tagName === 'TEXTAREA' && box.value === hostile)) problems.push('not shown as the string: ' + JSON.stringify(box?.value));
+          const made = root.querySelectorAll('.ag-detail img, .ag-detail script, .ag-detail b, #made, [onerror]');
+          if (made.length || box?.children.length || box?.textContent !== hostile && box?.textContent !== '') problems.push('an element was made from the reply: ' + [...made].map(item => item.outerHTML).join() + ' / ' + box?.innerHTML);
+          if (window.__pwned) problems.push('the markup ran');
+        }, { actions: world.actions });
+      }
+      assert(!problems.length, problems.join('; '));
+    });
+    await test('two pages with a save each in flight at once on one back end: exactly one wins, the other is refused, keeps its typing, says it changed elsewhere and sends nothing more', async () => {
+      const data = pathFixture(), host = pathHost(data), sent = [], arrived = [], clock = fakeClock();
+      // Both saves reach the back end before either is answered: each waits for the other to have arrived.
+      const both = deferred();
+      const flow = async request => {
+        if (request.op !== 'text') return host.flow(request);
+        sent.push(request); arrived.push(request); if (arrived.length === 2) both.resolve(); await both.promise;
+        return host.flow(request);
+      };
+      const actions = { ...host.actions, flow };
+      clearPositions();
+      const mountOn = () => { const root = host_(); return { root, app: AgentGraph.mount(root, { fetchSnapshot: async () => stampRevs(data), intervalMs: 60000, motion: 'none', actions, clock }) }; };
+      const host_ = () => { const root = document.createElement('div'); root.style.cssText = 'position:relative;width:1100px;height:760px'; document.getElementById('fixtures').append(root); return root; };
+      const a = mountOn(), b = mountOn();
+      try {
+        await a.app.refresh(); await b.app.refresh();
+        for (const page of [a, b]) { page.root.scrollIntoView({ block: 'start' }); await sleep(20); openStep(page.root, 'f1'); await settle(); }
+        const boxA = a.root.querySelector('[data-route-text]'), boxB = b.root.querySelector('[data-route-text]');
+        boxA.focus(); typeIn(boxA, 'From A.'); press(boxA, 'Enter', { ctrlKey: true });
+        boxB.focus(); typeIn(boxB, 'From B.'); press(boxB, 'Enter', { ctrlKey: true });
+        await settled(); await settled();
+        assert(sent.length === 2 && sent[0].expect === sent[1].expect, 'both saves were not in flight together: ' + JSON.stringify(sent.map(request => [request.text, request.expect])));
+        const stateOf = root => root.querySelector('[data-route-state]')?.textContent || '', valueOf = root => root.querySelector('[data-route-text]')?.value;
+        const winner = data.structure.flows[0].text, loser = winner === 'From A.' ? b : a, won = winner === 'From A.' ? a : b;
+        assert(winner === 'From A.' || winner === 'From B.', 'neither save won: ' + winner);
+        assert(stateOf(loser.root) === STALE && valueOf(loser.root) === (winner === 'From A.' ? 'From B.' : 'From A.'), 'the refused page did not keep its typing and say so: ' + JSON.stringify([stateOf(loser.root), valueOf(loser.root)]));
+        assert(stateOf(won.root) !== STALE && valueOf(won.root) === winner, 'the winning page is not clean: ' + JSON.stringify([stateOf(won.root), valueOf(won.root)]));
+        for (let step = 0; step < 6; step++) { clock.tick(60000); await settled(); }
+        assert(sent.length === 2 && data.structure.flows[0].text === winner && stateOf(loser.root) === STALE, 'the refused page sent something again or lost its state: ' + JSON.stringify([sent.length, data.structure.flows[0].text, stateOf(loser.root)]));
+      } finally { a.app.destroy(); b.app.destroy(); a.root.remove(); b.root.remove(); }
+    });
     // ==== write lane: end ====
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
   })().catch(error => { document.getElementById('results').textContent = 'RESULT: FAIL ' + error.stack; });
