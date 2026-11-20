@@ -19,6 +19,8 @@
 #   agentgraph skill show ID        a skill's text (skill create ID / write ID --text-file F|-, skill delete ID, skill restore RECORD)
 #   agentgraph cost [--session ID]  where one chat's money went, and what would have made it cheaper
 #   agentgraph cost --trend         cost per turn over time, split at each change to the cost settings
+#   agentgraph route [--json]       who gets which work, from the structure folder (route use-when NAME --text T,
+#                                   route restore RECORD; flow scaffold P --task T writes a path's task graph)
 # -P: do not put the current directory on the import path, so a project that
 # has its own "agentgraph" package cannot shadow this tool.
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -56,6 +58,9 @@ case "$1" in
   team)
     shift
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.teams "$@" ;;
+  route)
+    shift
+    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.routing "$@" ;;
   *)
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph "$@" ;;
 esac

@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentgraph import check, flowrun, roster, snapshot_json, sources, structure, teams
+from agentgraph import check, flowrun, roster, routing, snapshot_json, sources, structure, teams
 from tests.test_structure import graph as graph_of, make_structure, node, tree
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -41,6 +41,149 @@ class Scratch(unittest.TestCase):
 
     def file(self, rel):
         return (self.root / rel).read_bytes()
+
+
+class UseWhen(Scratch):
+    def test_it_is_a_setting_not_the_description(self):
+        (self.root / "20-build" / "impl-openai.md").write_text(
+            "pool: 3\nuse_when: Bounded tasks with a check to run\nescalates_to: impl-claude\n\nThe default.\n")
+        shape = snapshot_json.load_structure(self.root)
+        self.assertEqual(shape["about"]["impl-openai"], "The default.")
+        self.assertEqual(shape["pool"]["impl-openai"], 3)
+        self.assertIn(("impl-openai", "impl-claude"), shape["escalation"])
+        self.assertEqual(routing.use_when_of(self.file("20-build/impl-openai.md")), "Bounded tasks with a check to run")
+
+    def test_set_replace_and_take_away_keep_every_other_byte(self):
+        for rel, expected in (
+                ("20-build/designer.md", "use_when: interface work\n\nDesigns things.\nSecond line: with a colon.\n"),
+                ("20-build/impl-openai.md", "pool: 3\nescalates_to: impl-claude\nuse_when: interface work\n\n"
+                                            "The default implementer.\n"),
+                ("40-understand/researcher.md", "use_when: interface work\n\nFinds things out.\n")):
+            with self.subTest(rel=rel):
+                name = Path(rel).stem
+                before = self.file(rel)
+                about = snapshot_json.load_structure(self.root)["about"].get(name)
+                done = routing.set_use_when(name, "  interface work ", self.root, backups=self.backups, **self.where)
+                self.assertTrue(done["changed"])
+                self.assertEqual(self.file(rel).decode(), expected)
+                self.assertEqual(snapshot_json.load_structure(self.root)["about"].get(name), about)
+                again = routing.set_use_when(name, "interface work", self.root, backups=self.backups, **self.where)
+                self.assertFalse(again["changed"])
+                routing.set_use_when(name, "other work: with a colon", self.root, backups=self.backups, **self.where)
+                self.assertEqual(routing.use_when_of(self.file(rel)), "other work: with a colon")
+                routing.set_use_when(name, "", self.root, backups=self.backups, **self.where)
+                self.assertEqual(self.file(rel), before)
+
+    def test_the_undo_record_puts_the_bytes_back_and_can_be_undone_in_turn(self):
+        before = self.file("30-verify/reviewer.md")
+        done = routing.set_use_when("reviewer", "the final gate", self.root, backups=self.backups, **self.where)
+        after = self.file("30-verify/reviewer.md")
+        back = routing.restore_use_when(done["record"], self.root, backups=self.backups)
+        self.assertEqual(self.file("30-verify/reviewer.md"), before)
+        self.assertEqual(back["use_when"], "")
+        routing.restore_use_when(back["record"], self.root, backups=self.backups)
+        self.assertEqual(self.file("30-verify/reviewer.md"), after)
+        with self.assertRaisesRegex(routing.RouteError, "changed after that edit"):
+            routing.restore_use_when(back["record"], self.root, backups=self.backups)
+        for bad in ("", str(self.temporary / "x.json"), done["record"] + "x", None):
+            with self.subTest(record=bad), self.assertRaisesRegex(routing.RouteError, "invalid undo record"):
+                routing.restore_use_when(bad, self.root, backups=self.backups)
+
+    def test_refusals_write_nothing(self):
+        state = tree(self.root)
+        for name, text, why in (("reviewer", "two\nlines", "one line"), ("reviewer", "x" * 241, "240"),
+                                ("reviewer", "`quoted`", "quote"), ("reviewer", "a\x07b", "control"),
+                                ("reviewer", 3, "text"), ("ghost", "work", "no ghost.md"), ("Bad", "work", "lowercase")):
+            with self.subTest(text=text), self.assertRaisesRegex(routing.RouteError, why):
+                routing.set_use_when(name, text, self.root, backups=self.backups, **self.where)
+        self.assertEqual(tree(self.root), state)
+        self.assertFalse(self.backups.exists())
+
+    def test_a_stale_view_is_refused_with_the_current_rev(self):
+        rev = roster.agent_rev("reviewer", structure=self.root, **self.where)
+        stale = "0" * 16
+        state = tree(self.root)
+        with self.assertRaises(routing.StaleError) as caught:
+            routing.set_use_when("reviewer", "the final gate", self.root, expect=stale, backups=self.backups,
+                                 **self.where)
+        self.assertEqual(caught.exception.rev, rev)
+        self.assertEqual(tree(self.root), state)
+        done = routing.set_use_when("reviewer", "the final gate", self.root, expect=rev, backups=self.backups,
+                                    **self.where)
+        self.assertNotEqual(done["rev"], rev)
+        self.assertEqual(done["rev"], roster.agent_rev("reviewer", structure=self.root, **self.where))
+        with self.assertRaisesRegex(routing.RouteError, "16 lowercase hex"):
+            routing.set_use_when("reviewer", "x", self.root, expect="nope", backups=self.backups, **self.where)
+
+    def test_the_snapshot_carries_it_as_use_when(self):
+        routing.set_use_when("verifier", "one loop item, every round", self.root, backups=self.backups, **self.where)
+        document = {"agents": [{"name": "verifier"}, {"name": "reviewer"}, {"name": "ghost"}]}
+        roster.annotate(document, structure=self.root, **self.where)
+        self.assertEqual([agent["use_when"] for agent in document["agents"]], ["one loop item, every round", "", ""])
+
+    def test_the_command_sets_and_restores(self):
+        code, out, _ = capture(routing.main, ["use-when", "reviewer", "--text", "the final gate", "--structure",
+                                              str(self.root), "--backups", str(self.backups), "--json",
+                                              "--config", str(self.where["config"]), "--map",
+                                              str(self.where["map_path"]), "--agents-dir",
+                                              str(self.where["agents_dir"])])
+        self.assertEqual(code, 0, out)
+        record = json.loads(out)["record"]
+        self.assertEqual(routing.use_when_of(self.file("30-verify/reviewer.md")), "the final gate")
+        code, out, err = capture(routing.main, ["restore", record, "--structure", str(self.root),
+                                                "--backups", str(self.backups)])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.file("30-verify/reviewer.md"), b"Reviews a finished change.\n")
+        code, out, _ = capture(routing.main, ["use-when", "reviewer", "--text", "a\nb", "--structure", str(self.root),
+                                              "--backups", str(self.backups), "--json"])
+        self.assertEqual(code, 1)
+        self.assertIn("one line", json.loads(out)["error"])
+
+
+class Route(Scratch):
+    def skills_md(self):
+        path = self.temporary / "SKILLS.md"
+        path.write_text("| Agent | Skills |\n|---|---|\n| `orchestrator` | all |\n| `impl-openai` | `code-assurance`, "
+                        "`engineering-delivery` |\n| `reviewer` | none |\n")
+        return path
+
+    def test_the_table_comes_from_the_folder(self):
+        routing.set_use_when("impl-openai", "bounded tasks", self.root, backups=self.backups, **self.where)
+        teams.add("reviewer", ["impl-openai", "impl-claude"], structure_dir=self.root)
+        loop = structure.add_flow(["impl-openai", "verifier", "impl-openai"], None, self.root)[0]
+        found = routing.table(self.root, self.skills_md())
+        rows = {row["name"]: row for row in found["agents"]}
+        self.assertNotIn("councillor-a", rows)  # a seat: its council stands for it
+        self.assertEqual(rows["council"]["seats"], "councillor-")
+        self.assertEqual(rows["impl-openai"], {
+            "name": "impl-openai", "group": "build", "pool": 3, "escalates_to": "impl-claude",
+            "use_when": "bounded tasks", "seats": None, "skills": ["code-assurance", "engineering-delivery"],
+            "leads": [], "reports_to": ["reviewer"],
+            "paths": [{"id": loop["id"], "name": None, "path": ["impl-openai", "verifier", "impl-openai"]}]})
+        self.assertEqual(rows["reviewer"]["leads"], [{"id": "reviewer", "members": ["impl-openai", "impl-claude"]}])
+        self.assertEqual(rows["reviewer"]["skills"], [])
+        self.assertEqual(rows["orchestrator"]["skills"], ["all"])
+        self.assertIsNone(rows["designer"]["skills"])  # not in SKILLS.md
+        text = routing.text(found)
+        self.assertIn("impl-openai [build, pool 3, up impl-claude]: bounded tasks; skills code-assurance, "
+                      "engineering-delivery; reports to reviewer; paths impl-openai → verifier → impl-openai\n", text)
+        self.assertIn("reviewer [verify]: -; skills none; leads impl-openai, impl-claude\n", text)
+
+    def test_the_command_prints_plain_or_json(self):
+        code, out, _ = capture(routing.main, ["--structure", str(self.root), "--map", str(self.skills_md())])
+        self.assertEqual(code, 0)
+        self.assertTrue(out.startswith("Routing (agentgraph route"))
+        code, out, _ = capture(routing.main, ["--structure", str(self.root), "--json"])
+        self.assertEqual({row["name"] for row in json.loads(out)["agents"]} >= {"impl-openai", "council"}, True)
+        code, _, err = capture(routing.main, ["--structure", str(self.temporary / "none")])
+        self.assertEqual(code, 1)
+        self.assertIn("no structure folder", err)
+
+    def test_the_real_folder_stays_small(self):
+        found = routing.table(ROOT / "structure", ROOT / "SKILLS.md")
+        self.assertEqual(len(found["agents"]), 12)
+        size = len(routing.text(found))
+        self.assertLess(size, 4000, size)
 
 
 # --- the task graph by script ---------------------------------------------------------------------
