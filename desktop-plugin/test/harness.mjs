@@ -1630,6 +1630,83 @@ esac
   assert.deepEqual(hostDecode(undeclared, { op: "remove", expect: rev }), { op: "remove" });
 });
 
+// The host's PluginCall, as the installed app has it (read from its main bundle, never run): the input is decoded with
+// the method's schema, main's answer is encoded with the output schema (a String here) and crosses as is, and an error
+// main throws crosses as {code, message} only: any other property on it (a `rev`, a `status`) is lost.
+async function hostCall(token, method, impl, input) {
+  const value = hostDecode(token.spec.methods[method].input, input);
+  let answer;
+  try {
+    answer = await impl[method](value, { window: 1, signal: new AbortController().signal });
+  } catch (error) {
+    throw new Error(error instanceof Error ? error.message : String(error));
+  }
+  assert.equal(typeof answer, "string", `${method} answers a String`);
+  return structuredClone(answer);
+}
+
+// n99 r5 (from the verifier's note): a refusal over Ipc has the web page's shape. A stale refusal (the back end's reply
+// carries the current rev) reaches the panel's action as an Error with status 409, stale true and that rev; any other
+// refusal has no stale and no status (none is known: the commands have no HTTP status). The rev crosses the host's
+// boundary inside main's answer (a String), and the Error is made on the window's side, so nothing depends on an
+// error's own properties surviving the bridge, which they do not.
+await check("a refusal over Ipc has the web page's shape: stale (409, stale, rev) or not (no stale, no status), through the host's call", async () => {
+  const current = "fedcba9876543210";
+  const python = path.join(TMP, "fake-refusing-python");
+  fs.writeFileSync(python, `#!/bin/sh
+cat > /dev/null
+case "$*" in
+  *" --expect "*) printf '{"error": "it was changed since you opened it", "rev": "${current}"}\\n';;
+  *) printf '{"error": "refused for another reason"}\\n';;
+esac
+`, { mode: 0o700 });
+  const log = [];
+  const loaded = loadMain(CODE, log);
+  const m = mainContext({ home: ORCHESTRATION, python });
+  resolveDefault(loaded.module.exports).main(m.ctx);
+  const impl = m.provided[0].impl;
+  const definition = windowLoad.gui.defined[0];
+  const session = { key: "srv\nses_a", id: "ses_a", directory: ORCHESTRATION };
+  const props = { get session() { return session; }, screen: {} };
+  const w = windowContext(definition, { session });
+  w.ctx.main = (token) => Object.fromEntries(Object.keys(token.spec.methods).map((method) =>
+    [method, (input) => hostCall(token, method, impl, input)]));
+  definition.setup(w.ctx);
+  const rendered = windowLoad.solid.runWithOwner(() => value(w.added[1].item).render(props));
+  const { flow, skills, roster, skillfile, team } = mountCalls[mountCalls.length - 1].options.actions;
+  const ops = [
+    ["flow text", flow, { op: "text", id: "f", text: "T" }],
+    ["skills add", skills, { agent: "impl-openai", skill: "code-assurance", on: true }],
+    ["agent text", roster, { op: "text", name: "checker", text: "New." }],
+    ["skill write", skillfile, { op: "write", id: "s", text: "New." }],
+    ["group text", team, { op: "text", id: "r", text: "New." }],
+  ];
+  const refusalOf = async (promise) => {
+    try {
+      await promise;
+    } catch (error) {
+      return error;
+    }
+    assert.fail("not refused");
+  };
+  for (const [what, action, request] of ops) {
+    const stale = await refusalOf(action({ ...request, expect: "0123456789abcdef" }));
+    assert.equal(Object.prototype.toString.call(stale), "[object Error]", what); // made in the window's realm
+    assert.equal(stale.message, "it was changed since you opened it", `${what}: ${stale.message}`);
+    assert.deepEqual({ status: stale.status, stale: stale.stale, rev: stale.rev }, { status: 409, stale: true, rev: current }, what);
+    const other = await refusalOf(action(request));
+    assert.equal(other.message, "refused for another reason", what);
+    assert.equal("stale" in other, false, `${what}: not stale`);
+    assert.equal(other.status, undefined, `${what}: no status is known`);
+    assert.equal(other.rev, undefined, what);
+  }
+  rendered.dispose();
+  // The host's boundary keeps an error's message only: properties put on an error in main would never arrive.
+  const thrower = { flow: async () => { throw Object.assign(new Error("m"), { rev: current, status: 409 }); } };
+  const lost = await refusalOf(hostCall({ spec: { methods: { flow: { input: { _tag: "Struct", fields: {} } } } } }, "flow", thrower, {}));
+  assert.deepEqual([lost.message, lost.rev, lost.status], ["m", undefined, undefined]);
+});
+
 // Review n8 r5 (major): the server path was tested, the Desktop path was not. Here the plugin's own main runs its
 // exact command lines against a scratch copy of the orchestration (options.home) with HOME in scratch, so every
 // default folder (agents, commands, backups, skills, the preset file, structure/, SKILLS.md) is a scratch one: the

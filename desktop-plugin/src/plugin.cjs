@@ -861,8 +861,10 @@ function renderPanel(ctx, solid, props) {
   // (/api/structure/flow): {op: "add", path, text?, name?, command?}, {op: "text", id, text}, {op: "name", id, name},
   // {op: "command", id, on}, {op: "prompt", id, goal} (answers {text}) and {op: "remove", id}.
   // A change may carry the `rev` the view was showing as `expect` (a rev, REV: anything else is refused here, as main
-  // and the commands refuse it). A refusal because the thing changed since comes back as an Error whose `rev` is the
-  // current one.
+  // and the commands refuse it). A refusal has the web page's shape (index.html `post`): one because the thing changed
+  // since (the reply carries the current rev) is an Error with `status` 409, `stale` true and that `rev`; any other has
+  // no `stale` and no `status` (the commands have none). It is made here, on the window's side: the rev crosses the
+  // host's bridge inside main's answer (a String), while an Error thrown in main would cross as its message only.
   const carryExpect = (request, input, bad) => {
     if (request.expect === undefined) return input;
     if (typeof request.expect !== "string" || !REV.test(request.expect)) throw new Error(bad);
@@ -870,7 +872,8 @@ function renderPanel(ctx, solid, props) {
   };
   const refusal = (doc, fallback) => {
     const error = new Error(oneLine(isPlainObject(doc) && doc.error ? doc.error : fallback));
-    if (isPlainObject(doc) && typeof doc.rev === "string") error.rev = doc.rev;
+    if (isPlainObject(doc) && typeof doc.rev === "string" && REV.test(doc.rev))
+      Object.assign(error, { status: 409, stale: true, rev: doc.rev });
     return error;
   };
   const flow = async (request) => {
