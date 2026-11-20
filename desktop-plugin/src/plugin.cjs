@@ -11,7 +11,9 @@
  *     message that runs it on a goal (`agentgraph structure flow`),
  *     the skills command that adds or removes one of an agent's skills or gives it all (`agentgraph skills`),
  *     the roster command that adds, renames, removes or restores an agent (`agentgraph agent`), the skill-file command
- *     that reads or edits a skill's text (`agentgraph skill`) and the groups command (`agentgraph team`).
+ *     that reads or edits a skill's text (`agentgraph skill`), the groups command (`agentgraph team`) and the
+ *     outputs command that reads a step's output, saves a new text as its next revision or undoes that
+ *     (`agentgraph output`).
  * The host evaluates the bundle as `Function("require", "module", "exports", code)`, so `__dirname` and
  * `__filename` do not exist, and `require` only knows the modules the app shares. Keep each process's code inside
  * its own setup; module scope must stay safe in both.
@@ -67,6 +69,10 @@ const SKILL_TEXT_MAX_CHARS = 200000;
 const SKILL_FILE_MAX_BYTES = 4 * 1024 * 1024;
 const MODEL_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.:@+-]{0,127}\/[A-Za-z0-9_][A-Za-z0-9_.:@+\/-]{0,199}$/;
 const RECORD_MAX_CHARS = 4096;
+// A step's output (agentgraph/outputs.py): its text is at most TEXT_LIMIT bytes of UTF-8; the task, step and output
+// are named as the graph names them, each one argument, so none may start with "-" or hold a space or a control.
+const OUTPUT_TEXT_MAX_BYTES = 256 * 1024;
+const OUTPUT_NAME = /^[^\s\-\u0000-\u001f\u007f][^\s\u0000-\u001f\u007f]{0,199}$/;
 
 const HOST_CSS = [
   ".agentgraph-desktop-panel,.agentgraph-desktop-view{box-sizing:border-box;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden}",
@@ -200,6 +206,19 @@ function snapshotIpc(pluginId) {
         // spaces) and text (on stdin). Output: JSON text, {"team"?, "teams": [...], "notes"?} or {"error": "..."}.
         team: {
           input: Schema.Struct({ op: Schema.String, id: Schema.String, lead: Schema.String, members: Schema.String, text: Schema.String, expect }),
+          output: Schema.String,
+        },
+        // Read a step's output, save a new text as its next revision (the steps that read the old one become stale;
+        // one undoable step), or undo that. Input: op ("read", "write" or "restore"), directory (the session's: the
+        // task graph is found from it as the snapshot finds it; "" for restore), task, node and artifact (the output;
+        // "" for restore), record (restore only) and text (write only, on stdin); "" when not given. Output: JSON
+        // text, the command's answer ({"task", "node", "artifact", "text"?, "rev", "output"?, "stale"?, "record"?,
+        // ...}) or {"error": "...", "rev"?}.
+        output: {
+          input: Schema.Struct({
+            op: Schema.String, directory: Schema.String, task: Schema.String, node: Schema.String, artifact: Schema.String,
+            record: Schema.String, text: Schema.String, expect,
+          }),
           output: Schema.String,
         },
       },
@@ -704,6 +723,40 @@ function createTeamRunner(deps) {
   return { team: serialRunner(deps, checked, "The groups command", accept, "The demo cannot change the structure.") };
 }
 
+// Main process: `python3 -P -m agentgraph.outputs output read|write|restore ... --json` without a shell; the new text
+// goes on stdin (`--text-file -`), the session's folder as `--from DIR` (the graph is found from it, as the snapshot
+// finds it from its working folder).
+function createOutputRunner(deps) {
+  const fail = (message) => ({ error: oneLine(message) });
+  const KEYS = ["op", "directory", "task", "node", "artifact", "record", "text"];
+  function command(input) {
+    if (!isPlainObject(input) || !KEYS.every((key) => typeof input[key] === "string")) return fail("Bad output request.");
+    const { op, directory, task, node, artifact, record, text } = input;
+    const base = ["-P", "-m", "agentgraph.outputs", "output"];
+    if (op === "restore") {
+      if (directory || task || node || artifact || text || !recordPath(record)) return fail("The undo needs the record a save returned.");
+      return { args: base.concat(["restore", record, "--json"]), stdin: "" };
+    }
+    if (op !== "read" && op !== "write") return fail("Bad output request.");
+    if (record) return fail("Bad output request.");
+    if (!directory || directory.length > 4096 || directory.includes("\0") || !deps.path.isAbsolute(directory))
+      return fail("The session has no usable directory.");
+    if (![task, node, artifact].every((name) => OUTPUT_NAME.test(name))) return fail("The output needs its task, step and name.");
+    const where = [task, node, artifact, "--from", deps.path.resolve(directory)];
+    if (op === "read") {
+      if (text) return fail("Bad output request.");
+      return { args: base.concat(["read"], where, ["--json"]), stdin: "" };
+    }
+    if (text.includes("\0") || new TextEncoder().encode(text).length > OUTPUT_TEXT_MAX_BYTES)
+      return fail("The text is larger than 256 KiB, the most an output may be to be edited here.");
+    return { args: base.concat(["write"], where, ["--text-file", "-", "--json"]), stdin: text };
+  }
+  const accept = (doc) => (typeof doc.task === "string" ? doc : null);
+  const checked = (input) => withExpect(command(input), isPlainObject(input) ? input : {},
+    isPlainObject(input) && input.op === "write", fail);
+  return { output: serialRunner(deps, checked, "The outputs command", accept, "The demo cannot change outputs.") };
+}
+
 function nonEmptyString(value) {
   return typeof value === "string" && value.trim() !== "";
 }
@@ -772,6 +825,7 @@ function main(ctx) {
   const roster = createRosterRunner(commandDeps(FLOW_MAX_BYTES));
   const skillFiles = createSkillFileRunner(commandDeps(SKILL_FILE_MAX_BYTES));
   const groups = createTeamRunner(commandDeps(FLOW_MAX_BYTES));
+  const outputs = createOutputRunner(commandDeps(SKILL_FILE_MAX_BYTES));
 
   ctx.provide(snapshotIpc(ctx.id), {
     snapshot: (input) => runner.snapshot(input).then((doc) => JSON.stringify(doc)),
@@ -780,6 +834,7 @@ function main(ctx) {
     roster: (input) => roster.roster(input).then((doc) => JSON.stringify(doc)),
     skillfile: (input) => skillFiles.skillfile(input).then((doc) => JSON.stringify(doc)),
     team: (input) => groups.team(input).then((doc) => JSON.stringify(doc)),
+    output: (input) => outputs.output(input).then((doc) => JSON.stringify(doc)),
   });
 
   if (ctx.log && typeof ctx.log.write === "function") {
@@ -1068,7 +1123,30 @@ function renderPanel(ctx, solid, props) {
     carryExpect(request, input, "Bad group request.");
     return askMain("team", input, "groups", (doc) => Array.isArray(doc.teams));
   };
-  const actions = ctx.options && ctx.options.demo === true ? undefined : { flow, skills, roster, skillfile, team, run };
+  // A step's output takes the requests of the loopback endpoint (/api/output): {op: "read", task, node, artifact},
+  // {op: "write", task, node, artifact, text, expect?} and {op: "restore", record}; the session's folder goes with
+  // them, so main finds the task graph the snapshot showed.
+  const output = async (request) => {
+    if (!alive) throw new Error("The panel is closed.");
+    if (!isPlainObject(request) || !["read", "write", "restore"].includes(request.op)) throw new Error("Bad output request.");
+    const input = { op: request.op, directory: "", task: "", node: "", artifact: "", record: "", text: "" };
+    if (request.op === "restore") {
+      if (typeof request.record !== "string" || !request.record || request.record.startsWith("-")) throw new Error("Bad output request.");
+      input.record = request.record;
+    } else {
+      const where = sessionRequest();
+      if (!where || !where.directory) throw new Error("No session is open.");
+      if (![request.task, request.node, request.artifact].every(plainName)) throw new Error("Bad output request.");
+      Object.assign(input, { directory: where.directory, task: request.task, node: request.node, artifact: request.artifact });
+    }
+    if (request.op === "write") {
+      if (typeof request.text !== "string") throw new Error("Bad output request.");
+      input.text = request.text;
+    }
+    carryExpect(request, input, "Bad output request.");
+    return askMain("output", input, "output", (doc) => typeof doc.task === "string");
+  };
+  const actions = ctx.options && ctx.options.demo === true ? undefined : { flow, skills, roster, skillfile, team, output, run };
 
   const showSessionToast = (sessionID, copied) => {
     try {

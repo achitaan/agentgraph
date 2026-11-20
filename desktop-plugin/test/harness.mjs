@@ -464,7 +464,7 @@ function mainContext(options) {
 }
 
 let handler;
-await check("main registers exactly one Ipc (<id>.snapshot) with snapshot, flow, skills, roster, skillfile and team methods", async () => {
+await check("main registers exactly one Ipc (<id>.snapshot) with snapshot, flow, skills, roster, skillfile, team and output methods", async () => {
   const definition = resolveDefault(mainLoad.module.exports);
   const m = mainContext({ home: ORCHESTRATION });
   const cleanup = await definition.main(m.ctx);
@@ -476,7 +476,8 @@ await check("main registers exactly one Ipc (<id>.snapshot) with snapshot, flow,
   assert.equal(token.id, `${PLUGIN_ID}.snapshot`);
   assert.ok(token.id === m.ctx.id || token.id.startsWith(`${m.ctx.id}.`), "Ipc id is under the plugin id");
   // Round 2: the skills method joined snapshot and flow.
-  assert.deepEqual(Object.keys(token.spec.methods), ["snapshot", "flow", "skills", "roster", "skillfile", "team"]);
+  // n110: the output method (a step's output: read, write, restore) joined them.
+  assert.deepEqual(Object.keys(token.spec.methods), ["snapshot", "flow", "skills", "roster", "skillfile", "team", "output"]);
   // Round 3: roster, skillfile and team, each with string fields only.
   // n96: "to" (the new name of a rename) joined the roster's fields.
   // n99 r4: "expect" (the view's rev) is declared, optional, on every method whose ops take one: the host's decoding
@@ -486,7 +487,8 @@ await check("main registers exactly one Ipc (<id>.snapshot) with snapshot, flow,
   assert.deepEqual(Object.keys(token.spec.methods.roster.input.fields), ["op", "name", "record", "model", "variant", "description", "prompt", "skills", "read_only", "copy_of", "template", "to", "expect"]);
   assert.deepEqual(Object.keys(token.spec.methods.skillfile.input.fields), ["op", "id", "record", "description", "text", "assign", "expect"]);
   assert.deepEqual(Object.keys(token.spec.methods.team.input.fields), ["op", "id", "lead", "members", "text", "expect"]);
-  for (const method of ["roster", "skillfile", "team"]) {
+  assert.deepEqual(Object.keys(token.spec.methods.output.input.fields), ["op", "directory", "task", "node", "artifact", "record", "text", "expect"]);
+  for (const method of ["roster", "skillfile", "team", "output"]) {
     assert.ok(stringsAndExpect(token.spec.methods[method].input.fields), method);
     assert.equal(token.spec.methods[method].output._tag, "String");
     assert.ok(typeof impl[method] === "function", method);
@@ -1754,6 +1756,112 @@ await check("an answer that carries a rev but no error is not a stale refusal", 
   rendered.dispose();
 });
 
+// n110: a step's output, opened and edited from the graph view. The panel's own `output` action goes through the
+// window's Ipc token, the host's decoding and the real main: a write with the rev the view showed arrives as
+// `--expect REV --json` after the text on stdin and the session's folder as `--from`, a read and an undo take no rev,
+// and a stale refusal reaches the panel in the web page's shape (409, stale, the current rev).
+await check("output: read, write and undo cross the host's decoding; a write's rev arrives as --expect REV and a stale one is a 409 refusal", async () => {
+  const current = "fedcba9876543210";
+  const python = path.join(TMP, "fake-outputs-python");
+  fs.writeFileSync(python, `#!/bin/sh
+cat > /dev/null
+case "$*" in
+  *" --expect 0000000000000000 "*) printf '{"error": "step n1\\x27s output report changed since you opened it; reload and try again", "rev": "${current}"}\\n';;
+  *" no-such-output "*) printf '{"error": "step n1 has no output"}\\n';;
+  *" restore "*) printf '{"task": "t1", "node": "n1", "artifact": "report", "restored": true, "rev": "${current}"}\\n';;
+  *) printf '{"task": "t1", "node": "n1", "artifact": "report", "rev": "${current}", "text": "x"}\\n';;
+esac
+`, { mode: 0o700 });
+  const log = [];
+  const loaded = loadMain(CODE, log);
+  const m = mainContext({ home: ORCHESTRATION, python });
+  resolveDefault(loaded.module.exports).main(m.ctx);
+  const impl = m.provided[0].impl;
+  const definition = windowLoad.gui.defined[0];
+  const session = { key: "srv\nses_a", id: "ses_a", directory: ORCHESTRATION };
+  const props = { get session() { return session; }, screen: {} };
+  const w = windowContext(definition, { session });
+  w.ctx.main = (token) => Object.fromEntries(Object.keys(token.spec.methods).map((method) =>
+    [method, (input) => hostCall(token, method, impl, input)]));
+  definition.setup(w.ctx);
+  const rendered = windowLoad.solid.runWithOwner(() => value(w.added[1].item).render(props));
+  const { output } = mountCalls[mountCalls.length - 1].options.actions;
+  assert.equal(typeof output, "function", "the panel has an output action");
+  const where = { task: "t1", node: "n1", artifact: "report" };
+  const base = ["-P", "-m", "agentgraph.outputs", "output"];
+
+  const read = await output({ op: "read", ...where });
+  assert.equal(read.text, "x");
+  assert.deepEqual(log[0].args, base.concat(["read", "t1", "n1", "report", "--from", ORCHESTRATION, "--json"]));
+  assert.equal(log[0].cwd, ORCHESTRATION);
+
+  log.length = 0;
+  const rev = "0123456789abcdef";
+  const saved = await output({ op: "write", ...where, text: "new text\n", expect: rev });
+  assert.equal(saved.rev, current);
+  assert.deepEqual(log[0].args, base.concat(["write", "t1", "n1", "report", "--from", ORCHESTRATION, "--text-file", "-", "--expect", rev, "--json"]));
+  assert.equal(log[0].stdin, "new text\n", "the text goes on stdin");
+  log.length = 0;
+  await output({ op: "write", ...where, text: "new text\n" });
+  assert.equal(log[0].args.includes("--expect"), false, "a write without a rev runs as before");
+
+  log.length = 0;
+  const record = "/tmp/backups/2026-11-20-outputs/edit-0123456789ab/record.json";
+  const undone = await output({ op: "restore", record });
+  assert.equal(undone.restored, true);
+  assert.deepEqual(log[0].args, base.concat(["restore", record, "--json"]));
+
+  const refusalOf = async (promise) => {
+    try {
+      await promise;
+    } catch (error) {
+      return error;
+    }
+    assert.fail("not refused");
+  };
+  log.length = 0;
+  const stale = await refusalOf(output({ op: "write", ...where, text: "mine\n", expect: STALE_REV }));
+  assert.equal(Object.prototype.toString.call(stale), "[object Error]");
+  assert.match(stale.message, /changed since you opened it; reload and try again/);
+  assert.deepEqual({ status: stale.status, stale: stale.stale, rev: stale.rev }, { status: 409, stale: true, rev: current });
+  const other = await refusalOf(output({ op: "read", task: "t1", node: "n1", artifact: "no-such-output" }));
+  assert.equal(other.message, "step n1 has no output");
+  assert.deepEqual(["stale" in other, other.status, other.rev], [false, undefined, undefined]);
+  assert.equal(log.length, 2);
+
+  // Refused before main: a rev on a read or an undo, a malformed rev, a name holding a space or starting with "-".
+  for (const request of [
+    { op: "read", ...where, expect: rev },
+    { op: "restore", record, expect: rev },
+    { op: "write", ...where, text: "x", expect: "ABCDEF0123456789" },
+    { op: "write", ...where, text: "x", expect: "" },
+    { op: "write", ...where, text: "x", expect: 7 },
+    { op: "read", task: "t1", node: "-n1", artifact: "report" },
+    { op: "read", task: "t 1", node: "n1", artifact: "report" },
+    { op: "write", ...where },
+    { op: "delete", ...where },
+  ]) {
+    log.length = 0;
+    await refusalOf(output(request));
+    assert.equal(log.length, 0, JSON.stringify(request));
+  }
+  rendered.dispose();
+
+  // Main checks the same again, whatever reaches it.
+  const blank = { op: "", directory: "", task: "", node: "", artifact: "", record: "", text: "" };
+  const call = async (input) => JSON.parse(await impl.output(input, { window: 1, signal: new AbortController().signal }));
+  log.length = 0;
+  for (const input of [
+    { ...blank, op: "read", directory: "relative", task: "t1", node: "n1", artifact: "report" },
+    { ...blank, op: "read", directory: ORCHESTRATION, task: "--help", node: "n1", artifact: "report" },
+    { ...blank, op: "read", directory: ORCHESTRATION, task: "t1", node: "n1", artifact: "report", expect: rev },
+    { ...blank, op: "write", directory: ORCHESTRATION, task: "t1", node: "n1", artifact: "report", text: "a".repeat(256 * 1024 + 1) },
+    { ...blank, op: "restore", record: "-x" },
+    { ...blank, op: "restore", record, task: "t1" },
+  ]) assert.match((await call(input)).error || "", /./, JSON.stringify(input).slice(0, 120));
+  assert.equal(log.length, 0, "a bad request reached the command line");
+});
+
 // Review n8 r5 (major): the server path was tested, the Desktop path was not. Here the plugin's own main runs its
 // exact command lines against a scratch copy of the orchestration (options.home) with HOME in scratch, so every
 // default folder (agents, commands, backups, skills, the preset file, structure/, SKILLS.md) is a scratch one: the
@@ -1836,6 +1944,83 @@ await check("real Python on scratch folders: one write per kind with the snapsho
     assert.equal(entry.cwd, entry.args.includes("agentgraph.snapshot_json") ? project : orch, entry.args.join(" "));
     assert.equal(entry.args.some((arg) => /^--(structure|agents|config|map|backups|commands|skills)\b/.test(arg)), false,
       "the plugin passes no folder: " + entry.args.join(" "));
+  }
+});
+
+// n110: the Desktop path for a step's output on real Python and scratch folders only. The snapshot runs in the
+// session's folder (a project inside HOME, where graph discovery looks) and shows each output's rev; the outputs
+// command runs in home with `--from` that folder, takes that rev as `--expect`, refuses an older one with the
+// current rev and nothing changed, and after a write the step that read the old revision is stale. Undo puts the
+// project back byte for byte.
+await check("real Python on scratch folders: a step's output is read and written with the snapshot's rev, an older rev is refused, undo restores it", async () => {
+  const scratch = path.join(fs.realpathSync(TMP), "desktop-outputs");
+  const orch = path.join(scratch, "orchestration");
+  const home = path.join(scratch, "home");
+  const project = path.join(home, "project");
+  fs.cpSync(path.join(ORCHESTRATION, "agentgraph"), path.join(orch, "agentgraph"), {
+    recursive: true,
+    filter: (source) => !/(^|\/)(__pycache__|web)$/.test(source),
+  });
+  fs.cpSync(path.join(ORCHESTRATION, "structure"), path.join(orch, "structure"), { recursive: true });
+  fs.copyFileSync(path.join(ORCHESTRATION, "SKILLS.md"), path.join(orch, "SKILLS.md"));
+  fs.mkdirSync(path.join(home, ".config", "opencode"), { recursive: true });
+  fs.mkdirSync(path.join(project, ".opencode", "graph"), { recursive: true });
+  fs.mkdirSync(path.join(project, ".opencode", "artifacts", "t1", "n1", "r1"), { recursive: true });
+  fs.writeFileSync(path.join(project, ".opencode", "artifacts", "t1", "n1", "r1", "report.md"), "line one\n");
+  fs.writeFileSync(path.join(project, ".opencode", "graph", "t1.json"), JSON.stringify({
+    task: "t1", goal: "g", status: "running", revision: 1, created: 1, updated: 2,
+    objectives: [{ id: "o1", text: "x", nodes: ["n1", "n2"] }],
+    nodes: [
+      { id: "n1", type: "research", agent: "explorer", goal: "find", depends_on: [], scope: [], done_when: "list", status: "passed",
+        evidence: "e", artifacts: [{ id: "report", path: ".opencode/artifacts/t1/n1/r1/report.md", revision: 1 }] },
+      { id: "n2", type: "implement", agent: "impl-openai", goal: "do", depends_on: ["n1"], scope: ["src/"], done_when: "tests",
+        status: "passed", evidence: "e", inputs: [{ from: "n1", artifact: "report", revision: 1 }] },
+    ],
+    events: [],
+  }, null, 1));
+  const listing = (root) => fs.readdirSync(root, { recursive: true }).sort().map((name) => {
+    const full = path.join(root, name);
+    return [name, fs.statSync(full).isFile() ? fs.readFileSync(full, "utf8") : "dir"];
+  });
+  const pristine = listing(project);
+
+  const definition = resolveDefault(mainLoad.module.exports);
+  const m = mainContext({ home: orch });
+  await definition.main(m.ctx);
+  const impl = m.provided[0].impl;
+  const caller = { window: 1, signal: new AbortController().signal };
+  const call = async (method, input) => JSON.parse(await impl[method](input, caller));
+  const outputOf = (document) => document.graph.nodes.find((node) => node.id === "n1").artifacts[0];
+  const request = { op: "write", directory: project, task: "t1", node: "n1", artifact: "report", record: "", text: "line one\nline two\n" };
+  const realHome = process.env.HOME;
+  const spawned = spawns.length;
+  process.env.HOME = home;
+  try {
+    const shown = outputOf(await call("snapshot", { directory: project, session: "" }));
+    assert.deepEqual([shown.editable, shown.size, shown.why], [true, 9, ""], JSON.stringify(shown));
+    assert.match(shown.rev || "", /^[0-9a-f]{16}$/);
+    const opened = await call("output", { ...request, op: "read", text: "" });
+    assert.deepEqual([opened.text, opened.rev], ["line one\n", shown.rev], JSON.stringify(opened));
+    const stale = await call("output", { ...request, expect: "0123456789abcdef" });
+    assert.match(stale.error || "", /reload and try again/, JSON.stringify(stale));
+    assert.equal(stale.rev, shown.rev);
+    assert.deepEqual(listing(project), pristine, "a stale write changed nothing");
+    const saved = await call("output", { ...request, expect: shown.rev });
+    assert.equal(saved.error, undefined, String(saved.error));
+    assert.deepEqual(saved.stale.map((item) => item.id), ["n2"]);
+    assert.ok(saved.record.startsWith(path.join(home, ".config", "opencode", "backups") + path.sep), saved.record);
+    const after = await call("snapshot", { directory: project, session: "" });
+    assert.equal(outputOf(after).rev, saved.rev);
+    assert.deepEqual(after.graph.nodes.find((node) => node.id === "n2").inputs.map((input) => input.stale), [true]);
+    const undone = await call("output", { op: "restore", directory: "", task: "", node: "", artifact: "", record: saved.record, text: "" });
+    assert.equal(undone.restored, true, JSON.stringify(undone));
+    assert.deepEqual(listing(project), pristine, "undo put the project back byte for byte");
+  } finally {
+    process.env.HOME = realHome;
+  }
+  for (const entry of spawns.slice(spawned)) {
+    assert.equal(entry.cwd, entry.args.includes("agentgraph.snapshot_json") ? project : orch, entry.args.join(" "));
+    assert.equal(entry.args.some((arg) => /^--(dir|home|backups)\b/.test(arg)), false, "the plugin passes no folder: " + entry.args.join(" "));
   }
 });
 
