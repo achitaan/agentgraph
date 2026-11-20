@@ -304,7 +304,7 @@ def brief(case: dict, edit: str | None = None) -> str:
     data = case["untrusted"]
     name = edit if edit and EDIT_NAME.fullmatch(edit) else "NAME"
     lines = [
-        f"Replay brief for case {case['id']}: a {case['type']} node of agent {case['agent']} ({case['task']}/{case['node']}), "
+        f"Replay brief for case {case['id']}: a node of type {case['type']} run by agent {case['agent']} ({case['task']}/{case['node']}), "
         f"{case['split']}, {case['attempts']} attempts, failure kind {case['failure_kind'] or 'none recorded'}, "
         f"why: {', '.join(case['why']) or 'none'}.",
         f"Dispatch one lane of {case['agent']} in a scratch git worktree of the project at commit {case['base']} "
