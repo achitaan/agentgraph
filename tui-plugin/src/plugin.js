@@ -13,7 +13,9 @@
  * The panel opens on the list. It draws the orbit (src/scene.js) when asked: `g`, or `f` (full screen), and only when
  * it has at least 64 columns and 22 rows; its size is measured from the panel's own box (OpenTUI `onSizeChange`,
  * `width`, `height`), because the documented panel input has no height. `d` switches the orbit between its 2D view
- * (the ring from above, braille dots) and its 3D view (a turning figure in depth characters). In the list, ↑/↓ select
+ * (the ring from above, braille dots) and its 3D view (a turning figure in depth characters). On the 3D view ←/→ turn
+ * it round its upright axis, ↑/↓ change the elevation and `0` resets, named on its bottom row; a click on the orbit
+ * switches the views as `d` does and a drag turns the 3D view (OpenTUI mouse events). In the list, ↑/↓ select
  * a row, Enter opens that row's session (`ui.router.navigate`), `s` stops a working agent (`client.session.interrupt`,
  * after `ui.dialog.confirm`) and `m` sends it a message (`ui.dialog.prompt`, `client.session.prompt`); each key exists
  * only when the host has the call it needs. Pending permission requests and questions come from `ctx.data`.
