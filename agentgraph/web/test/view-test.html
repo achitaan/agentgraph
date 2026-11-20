@@ -6380,6 +6380,62 @@
         }
         assert(!problems.length, problems.length + ' problems: ' + problems.slice(0, 80).join('; '));
       });
+      await test('n114 item 7 (review r8 minor 4): at 620 px with everything in view a drag on empty canvas moves nothing and does not make the view the user\'s: agents added afterwards come into view as they do without the drag', async () => {
+        const cameraOf = root => root.querySelector('.ag-drawing > g').getAttribute('transform'), seen = {}, problems = [];
+        for (const way of ['plain', 'dragged']) {
+          const data = n103Data();
+          await using(data, async (root, app) => {
+            await resizeTo(root, 620, 800); await settled();
+            if (way === 'dragged') {
+              const before = cameraOf(root), viewport = viewportOf(root), spot = n114Empty(root);
+              if (!spot) { problems.push('no empty canvas to drag'); return; }
+              const id = ++pointerSeq;
+              pointerOn(document.elementFromPoint(spot.x, spot.y), 'pointerdown', id, spot);
+              for (let i = 1; i <= 4; i++) pointerOn(viewport, 'pointermove', id, { x: spot.x + 15 * i, y: spot.y + 12 * i });
+              pointerOn(viewport, 'pointerup', id, { x: spot.x + 60, y: spot.y + 48 }); await settled();
+              if (cameraOf(root) !== before) problems.push('the drag moved a view that fits (' + before + ' -> ' + cameraOf(root) + ')');
+            }
+            data.agents.push(agent('scout-one', 'build'), agent('scout-two', 'build'), agent('scout-three', 'verify'), agent('scout-four', 'understand'), agent('scout-five', 'decide'));
+            await app.refresh(); await settled();
+            seen[way] = cameraOf(root);
+            const view = viewportOf(root).getBoundingClientRect(), out = circleBounds(root).filter(({ bounds: b }) => b.left < view.left - .5 || b.right > view.right + .5 || b.top < view.top - .5 || b.bottom > view.bottom + .5).map(item => item.name);
+            if (out.length) problems.push(way + ': ' + out.join(', ') + ' out of view');
+          }, { positionsKey: 'n114.item7.' + way + '.' + Date.now() });
+        }
+        if (seen.plain !== seen.dragged) problems.push('after the drag the view is ' + seen.dragged + ', without it ' + seen.plain);
+        assert(!problems.length, problems.join(' | '));
+      });
+      await test('n114 item 8 (review r8 minor 5): no text in the details or the sheet is under 11 px with an agent (skills, outputs, history, notes), an output open, a path, a group, an added agent and the learning panel open, at 1100 and 620 px', async () => {
+        const problems = [];
+        for (const width of [1100, 620]) {
+          const data = pathFixture(), now = Date.now() / 1000;
+          data.structure.teams = [{ id: 't1', lead: 'impl-claude', members: ['researcher'], text: 'Report to impl-claude.' }];
+          data.agents.push(agent('scout', 'build', { added: true, removable: true, skills: [], skills_editable: true }));
+          data.graph.nodes = outputFixture().graph.nodes;
+          data.graph.events = [{ time: now - 600, node: 'write-report', event: 'attempt', note: 'first pass' }, { time: now - 30, node: 'write-report', event: 'returned', note: 'claims PASS' }];
+          data.learning = { total: 3, pending: 1, due: true, runs: 2, improvements: 1, last_improvement: 10, lessons: ['Review early'], changes: [{ time: now - 7200, summary: 'Ask for small diffs', file: 'impl.md' }],
+            notes: [{ time: now - 50, agent: 'impl-openai', task: 't', text: 'Keep the diff small' }, { time: now - 40, agent: 'impl-openai', task: 't', text: 'Run the tests' }] };
+          const world = worldHost(data), output = outputHost(data);
+          await using(data, async root => {
+            await resizeTo(root, width, 800); await settled();
+            const views = [
+              ['agent', async () => { open(root, 'impl-openai'); }],
+              ['output', async () => { await openOutput(root); }],
+              ['path', async () => { openStep(root, 'f1', 0); }],
+              ['group', async () => { open(root, 'impl-claude'); }],
+              ['added agent', async () => { open(root, 'scout'); }],
+              ['learning', async () => { root.querySelector('[data-agent="orchestrator"] [data-learning]').dispatchEvent(new MouseEvent('click', { bubbles: true })); }]];
+            for (const [what, show] of views) {
+              await show(); await settled(); await settleSheet(root);
+              const label = width + ' ' + what, detail = root.querySelector('.ag-detail');
+              if (detail.hidden) { problems.push(label + ': the details did not open'); continue; }
+              const texts = [...detail.querySelectorAll('*')].filter(e => (e.matches('input, textarea, select, button') || [...e.childNodes].some(n => n.nodeType === 3 && n.textContent.trim())) && e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden');
+              texts.filter(e => parseFloat(getComputedStyle(e).fontSize) < 11 - .01).slice(0, 12).forEach(e => problems.push(label + ': "' + e.textContent.trim().slice(0, 16) + '" (' + (e.getAttribute('class') || e.tagName.toLowerCase()) + ') at ' + getComputedStyle(e).fontSize));
+            }
+          }, { actions: { ...world.actions, output: output.output }, positionsKey: 'n114.item8.' + width + '.' + Date.now() });
+        }
+        assert(!problems.length, problems.length + ' under 11 px: ' + problems.slice(0, 40).join('; '));
+      });
     }
     // ---- geometry lane (n103) ----
     // ---- orbit lane (n105) ----
@@ -7445,6 +7501,96 @@
           press(viewportOf(root), 'd'); await until(() => in2d(root)); await settle();
           assert(offers.test(liveRegion(root)), 'back in 2D the line does not offer drawing: ' + liveRegion(root));
         }, { actions: host.actions });
+      });
+      // ---- Review r8 minors 1 to 3: the 2D camera across a trip to 3D (whatever happens in 3D, back in 2D an automatic
+      // view is the automatic view for the canvas it returns to, a view the user placed is where they left it, and
+      // neither counts as a user move). Each compared with the same steps done all in 2D. ----
+      const cameraNow = root => root.querySelector('.ag-drawing > g').getAttribute('transform');
+      async function calm(root) {
+        let seen = 0;
+        const watch = new ResizeObserver(() => { seen++; });
+        watch.observe(root); watch.observe(viewportOf(root));
+        await settled(); await frame();
+        for (let last = -1, rounds = 0; last !== seen && rounds < 30; rounds++) { last = seen; await frame(); await frame(); }
+        watch.disconnect(); await settled();
+      }
+      const wheelIn = (root, x = .3, y = .35) => { const view = viewportOf(root).getBoundingClientRect(); viewportOf(root).dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -200, clientX: view.left + view.width * x, clientY: view.top + view.height * y })); };
+      // (The focus moved without scrolling, as the D key finds it: a plain focus() would scroll the pane to the canvas.)
+      const to3d = async root => { viewportOf(root).focus({ preventScroll: true }); press(viewportOf(root), 'd'); await until(() => in3d(root)); await calm(root); };
+      const to2d = async root => { viewportOf(root).focus({ preventScroll: true }); press(viewportOf(root), 'd'); await until(() => in2d(root)); await calm(root); };
+      const closeDetail = async root => { root.querySelector('.ag-close').click(); await calm(root); };
+      await test('n105 item 24 (review r8 minor 1): the details opened while 3D shows never record the 3D camera as the view to go back to: at 620 px, back in 2D and the details closed, an automatic view is where closing them in 2D puts it, and a view the user placed stays on screen as the canvas moves and goes back where they left it', async () => {
+        const problems = [];
+        for (const placed of [false, true]) {
+          const seen = {};
+          for (const way of ['2d', '3d']) {
+            await using(n105Data(), async root => {
+              await resizeTo(root, 620, 800); await calm(root);
+              if (placed) { wheelIn(root); await calm(root); }
+              const start = cameraNow(root), hub = centre(root, 'orchestrator');
+              if (way === '3d') {
+                await to3d(root); wheelIn(root, .6, .5); await calm(root);
+                press(nodeOf(root, 'impl-openai'), 'Enter'); await calm(root);
+                if (!detailOpen(root)) problems.push((placed ? 'placed' : 'automatic') + ': Enter in 3D did not open the details');
+                await to2d(root);
+                const now = centre(root, 'orchestrator');
+                if (placed && Math.hypot(now.x - hub.x, now.y - hub.y) > 1) problems.push('placed: back in 2D with the details open the drawing moved on screen by ' + Math.round(now.x - hub.x) + ',' + Math.round(now.y - hub.y) + ' px');
+              } else { open(root, 'impl-openai'); await calm(root); }
+              await closeDetail(root);
+              seen[way] = cameraNow(root); seen.start = start;
+            });
+          }
+          const kind = placed ? 'placed' : 'automatic';
+          if (seen['3d'] !== seen['2d']) problems.push(kind + ': closed after 3D the view is ' + seen['3d'] + ', in 2D ' + seen['2d']);
+          if (placed && seen['2d'] !== seen.start) problems.push('placed: the 2D reference did not go back to ' + seen.start);
+        }
+        assert(!problems.length, problems.join(' | '));
+      });
+      await test('n105 item 25 (review r8 minor 2): the return to 2D is not a move of the user\'s: a view the user placed, the details opened in 2D, 3D and back, then the details closed: the view goes back where they left it, as in 2D', async () => {
+        const seen = {};
+        for (const way of ['2d', '3d']) {
+          await using(n105Data(), async root => {
+            await resizeTo(root, 620, 800); await calm(root);
+            wheelIn(root); await calm(root); seen.start = cameraNow(root);
+            open(root, 'impl-openai'); await calm(root);
+            if (way === '3d') { await to3d(root); await to2d(root); }
+            await closeDetail(root);
+            seen[way] = cameraNow(root);
+          });
+        }
+        assert(seen['2d'] === seen.start && seen['3d'] === seen['2d'], 'closed after 3D and back the view is ' + seen['3d'] + ', in 2D ' + seen['2d'] + ' (placed at ' + seen.start + ')');
+      });
+      await test('n105 item 26 (review r8 minor 3): the canvas size the 2D camera was placed for comes back with it: an automatic view, the details opened in 2D, then in 3D closed and Fit pressed, then 2D: the view is where closing them in 2D puts it', async () => {
+        const seen = {};
+        for (const way of ['2d', '3d']) {
+          await using(n105Data(), async root => {
+            await resizeTo(root, 620, 800); await calm(root); seen.start = cameraNow(root);
+            open(root, 'impl-openai'); await calm(root);
+            if (way === '3d') { await to3d(root); await closeDetail(root); root.querySelector('.ag-fit').click(); await calm(root); await to2d(root); }
+            else await closeDetail(root);
+            seen[way] = cameraNow(root);
+          });
+        }
+        assert(seen['3d'] === seen['2d'], 'after 3D (closed, Fit) the view is ' + seen['3d'] + ', in 2D ' + seen['2d'] + ' (it started at ' + seen.start + ')');
+      });
+      await test('n105 item 27 (review r8 minor 6): an output closed and opened again while its save is out shows as saving; a Save on it before the answer goes after the answer with the fresh rev (not refused as changed elsewhere), and what was typed is saved', async () => {
+        let release = null, writes = 0;
+        const data = outputFixture(), order = [];
+        const host = outputHost(data, { gate: request => { if (request.op !== 'write') return undefined; writes++; order.push('sent ' + writes); return writes === 1 ? new Promise(resolve => { release = () => { order.push('answered 1'); resolve(); }; }) : undefined; } });
+        await using(data, async root => {
+          const opener = () => root.querySelector('.ag-detail [data-output-open]');
+          await openOutput(root);
+          outputBox(root).focus(); typeIn(outputBox(root), 'mine\n'); press(outputBox(root), 'Enter', { ctrlKey: true });
+          await until(() => release !== null);
+          opener().click(); await settled(); opener().click(); await settled();
+          const box = outputBox(root);
+          assert(box?.value === 'mine\n' && /saving/i.test(outputState(root)), 'the output opened again does not show the save out (' + outputState(root) + ')');
+          typeIn(box, 'mine, more\n'); root.querySelector('.ag-detail [data-output-save]').click(); await settled();
+          const early = order.slice();
+          release(); await until(() => host.writes().length === 2); await settled();
+          assert(early.length === 1, 'the second save went while the first was out: ' + early.join(', '));
+          assert(host.writes().length === 2 && order.join(', ') === 'sent 1, answered 1, sent 2' && host.files['write-report/report'].text === 'mine, more\n' && !/changed/i.test(outputState(root)), 'the save typed meanwhile was not saved after the answer (' + order.join(', ') + '; ' + JSON.stringify(host.files['write-report/report'].text) + '; ' + outputState(root) + ')');
+        }, { actions: { output: host.output } });
       });
       await test('n105 item 21 (verifier gap): a loop\'s ring keeps at least 8 px clear of the orchestrator and of every agent not on it (their drawn circles, and their names: the layout\'s RING_SPACE margin), at 1400 and 620 px', async () => {
         const problems = [];

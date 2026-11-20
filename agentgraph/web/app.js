@@ -2586,6 +2586,8 @@
       else {
         const box = el('textarea', 'ag-route-text ag-output-text');
         box.value = view.draft ?? view.text; box.dataset.outputText = key; box.dataset.outputAgent = selected?.key || ''; box.dataset.saved = view.text; if (view.rev) box.dataset.rev = view.rev;
+        // Opened again while a save of it is out: saving too, so a Save here waits for that answer and its rev.
+        if (view.out?.dataset.saving === 'true') box.dataset.saving = 'true';
         box.rows = 12; box.spellcheck = false; box.setAttribute('aria-label', 'Text of ' + artifact + ' from ' + node); box.setAttribute('aria-keyshortcuts', 'Control+Enter Meta+Enter');
         const row = el('div', 'ag-route-actions'), state = el('p', 'ag-route-state', view.note || (view.draft != null ? 'Changed' : 'Saved')), save = el('button', 'ag-text-button', 'Save');
         state.dataset.outputState = view.noteKind || (view.draft != null ? 'unsaved' : 'saved'); state.setAttribute('aria-live', 'polite');
@@ -2665,11 +2667,26 @@
       if (entry?.editable !== true) { setOutputState(key, 'error', text(entry?.why) || 'This output cannot be edited here.'); return; }
       const wasSave = document.activeElement?.dataset?.outputSave === key;
       let reply = null;
+      // While it is out, a box drawn again for this output (closed and opened) is saving too; once answered it is free,
+      // and a Save asked on it meanwhile goes then, with the answer's rev (after a refusal it is not resent).
+      const sendOutput = out => {
+        view.out = box;
+        const free = ok => () => {
+          if (view.out === box) view.out = null;
+          const live = detailScroll.querySelector('[data-output-text="' + CSS.escape(key) + '"]');
+          if (!live || live === box || live.dataset.saving !== 'true') return;
+          const queued = live.dataset.queued === 'true';
+          live.dataset.saving = 'false'; delete live.dataset.queued; delete live.dataset.queuedExplicit;
+          if (ok) later(() => { if (!alive || !live.isConnected) return; if (queued) saveOutput(live); else setOutputState(key, live.value === live.dataset.saved ? 'saved' : 'unsaved'); }, 0);
+        };
+        out.then(free(true), free(false));
+        return out;
+      };
       saveTyped(box, true, {
         key: 'output:' + key, selector: '[data-output-text="' + CSS.escape(key) + '"]', state: (kind, said) => setOutputState(key, kind, said), limit: outputLimit,
         shown: () => outputViews.get(key)?.rev || text(outputEntry(task, node, artifact)?.rev || ''),
         // Checked again when it goes (a save queued behind another goes later, perhaps after a snapshot said no).
-        send: (value, rev, answered) => outputEntry(task, node, artifact)?.editable !== true ? Promise.reject(new Error(text(outputEntry(task, node, artifact)?.why) || 'This output cannot be edited here.')) : ask(outputAction, withRev({ op: 'write', task, node, artifact, text: value }, rev)).then(async got => {
+        send: (value, rev, answered) => sendOutput(outputEntry(task, node, artifact)?.editable !== true ? Promise.reject(new Error(text(outputEntry(task, node, artifact)?.why) || 'This output cannot be edited here.')) : ask(outputAction, withRev({ op: 'write', task, node, artifact, text: value }, rev)).then(async got => {
           if (!alive) return got;
           reply = got; answered(got);
           // The output closed and opened again while this was out: the box shown now saves on from this answer.
@@ -2681,7 +2698,7 @@
           await afterChange();
           if (alive && wasSave && !detailScroll.contains(document.activeElement)) detailScroll.querySelector('[data-output-save="' + CSS.escape(key) + '"]')?.focus({ preventScroll: true });
           return got;
-        }),
+        })),
         savedOf: (got, value) => value, revOf: got => typeof got.rev === 'string' ? got.rev : '',
         // The latest is read again (an output's text is not in the snapshot).
         latest: () => ask(outputAction, { op: 'read', task, node, artifact }).then(got => {
@@ -4594,7 +4611,9 @@
       if (trail.length && orbit.want === '2d') announce(); // not for 2D's moment inside 3D (a team change)
       const saved = orbit.saved, view = viewport.getBoundingClientRect(), settle = orbit.settle; orbit.settle = null;
       const resized = !!saved && (Math.abs(view.width - saved.width) > .5 || Math.abs(view.height - saved.height) > .5);
-      if (saved && camera.initialized) Object.assign(camera, { x: saved.x, y: saved.y, scale: saved.scale, own: saved.own, touched: saved.touched });
+      // All of the 2D camera, the canvas size and offset it was placed for included (a Fit or the details in 3D change
+      // them); whose view it is and the count of the user's moves are put back as they were, not counted as a move.
+      if (saved && camera.initialized) { Object.assign(camera, { x: saved.x, y: saved.y, scale: saved.scale, touched: saved.touched, width: saved.width, height: saved.height, top: saved.top }); ownView = saved.own; userMoves = saved.moves; }
       orbit.base = null; orbit.saved = null; orbit.from3d = null; orbit.figure = null; orbit.frame = null;
       orbitLayer.replaceChildren(); orbitLayer.style.opacity = ''; skyClear(); delete root.dataset.agCameraElevation;
       orbitOrder(false); orbit.dom = null;
@@ -4657,7 +4676,7 @@
       if (!orbit.shown) {
         stopLayout();
         orbit.base = new Map(); positions.forEach((p, name) => orbit.base.set(name, { x: p.x, y: p.y }));
-        orbit.saved = { x: camera.x, y: camera.y, scale: camera.scale, own: camera.own, touched: camera.touched, width: camera.width, height: camera.height };
+        orbit.saved = { x: camera.x, y: camera.y, scale: camera.scale, own: camera.own, moves: userMoves, touched: camera.touched, width: camera.width, height: camera.height, top: camera.top };
         orbit.figure = null; orbit.shown = true; orbit.k = 0; orbit.order = ''; orbit.dom = [...nodeLayer.children];
         if (trail.length) announce();
         orbit.frame = orbitFrame();
@@ -5254,8 +5273,11 @@
       const dx = event.clientX - drag.startX, dy = event.clientY - drag.startY;
       // One threshold for every drag: the background pans, like an agent moves, only past MOVE_PX.
       if (!drag.moved && Math.hypot(dx, dy) <= MOVE_PX) return;
-      drag.moved = true; camera.touched = true; camera.own = true; suppressClick = true; viewport.dataset.dragging = 'true';
-      camera.x = drag.x + dx; camera.y = drag.y + dy; clampPan(); transform();
+      drag.moved = true; suppressClick = true; viewport.dataset.dragging = 'true';
+      camera.x = drag.x + dx; camera.y = drag.y + dy; clampPan();
+      // The view becomes the user's only when the camera actually moved (a narrow view that fits is held in place).
+      if (Math.abs(camera.x - drag.x) > .01 || Math.abs(camera.y - drag.y) > .01) { camera.touched = true; camera.own = true; }
+      transform();
     });
     function pointerUp(event) {
       if (!pointers.has(event.pointerId)) return;
@@ -5411,8 +5433,10 @@
       });
     }
     // The view as the details open (before anything pans for them), to go back to when they close.
+    // While 3D is shown it is the 2D view kept for the way back (orbit.saved, orbit.base), never the 3D camera.
     function rememberClosedView() {
-      closedView = camera.initialized ? { x: camera.x, y: camera.y, scale: camera.scale, moves: userMoves, pane: root.clientWidth + 'x' + root.clientHeight, arrangement, at: new Map(visibleAgents.map(a => [a.name, JSON.stringify(finalOf(a.name) && [finalOf(a.name).x, finalOf(a.name).y])])) } : null;
+      const flat = orbit.shown ? orbit.saved : { ...camera, moves: userMoves }, place = name => orbit.shown ? orbit.base.get(name) : finalOf(name);
+      closedView = camera.initialized ? { x: flat.x, y: flat.y, scale: flat.scale, moves: flat.moves, pane: root.clientWidth + 'x' + root.clientHeight, arrangement, at: new Map(visibleAgents.map(a => [a.name, JSON.stringify(place(a.name) && [place(a.name).x, place(a.name).y])])) } : null;
     }
     const resize = new ResizeObserver(scheduleResize);
     root.classList.toggle('ag-compact', root.clientWidth > 0 && root.clientWidth <= 650);

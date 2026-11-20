@@ -484,10 +484,10 @@
 
 .agentgraph .ag-open-session { display: block; margin: 0 0 12px; border: 1px solid var(--ag-control-border); border-radius: 6px; padding: 4px 9px; background: none; font: inherit; color: var(--ag-work); }
 .agentgraph .ag-open-session:hover { background: var(--ag-control-hover); }
-.agentgraph .ag-history-row { display: grid; grid-template-columns: 2.6em minmax(0, 1fr); gap: 0 8px; padding: 4px 0; font-size: 10.5px; }
+.agentgraph .ag-history-row { display: grid; grid-template-columns: 2.6em minmax(0, 1fr); gap: 0 8px; padding: 4px 0; font-size: 11px; }
 .agentgraph .ag-history-when { grid-row: span 2; color: var(--ag-muted); font-variant-numeric: tabular-nums; }
 .agentgraph .ag-history-note { color: var(--ag-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agentgraph .ag-detail-section .ag-note { margin: 0 0 6px; padding-left: 8px; border-left: 2px solid var(--ag-work); font-size: 10.5px; line-height: 1.5; white-space: normal; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.agentgraph .ag-detail-section .ag-note { margin: 0 0 6px; padding-left: 8px; border-left: 2px solid var(--ag-work); font-size: 11px; line-height: 1.5; white-space: normal; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .agentgraph .ag-detail-section .ag-learning-line { margin-bottom: 8px; color: var(--ag-muted); }
 .agentgraph .ag-detail-section .ag-learning-line[data-due="true"] { color: var(--ag-work); }
 
@@ -502,15 +502,15 @@
 .agentgraph .ag-learn-bead[data-fresh="true"] { fill: var(--ag-work); stroke: var(--ag-work); }
 .agentgraph .ag-note-row { margin: 0 0 8px; }
 .agentgraph .ag-detail-section .ag-note-row .ag-note { margin-bottom: 2px; }
-.agentgraph .ag-note-meta { display: block; padding-left: 10px; font-size: 9.5px; color: var(--ag-muted); }
+.agentgraph .ag-note-meta { display: block; padding-left: 10px; font-size: 11px; color: var(--ag-muted); }
 
-.agentgraph .ag-skill-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; padding: 6px 0; border-bottom: 1px solid var(--ag-row-divider); font-size: 10.5px; }
+.agentgraph .ag-skill-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; padding: 6px 0; border-bottom: 1px solid var(--ag-row-divider); font-size: 11px; }
 .agentgraph .ag-skill-name { color: var(--ag-ink); font-weight: 600; }
 .agentgraph .ag-skill-users { color: var(--ag-work); overflow-wrap: anywhere; }
 .agentgraph .ag-skill-about { color: var(--ag-muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .agentgraph .ag-skill-row.ag-skill-editable { grid-template-columns: minmax(0, 1fr) auto; column-gap: 10px; }
 .agentgraph .ag-skill-row.ag-skill-editable > .ag-skill-about { grid-column: 1; }
-.agentgraph .ag-skill-row.ag-skill-editable > .ag-skill-control { grid-column: 2; grid-row: 1; padding: 0; font-size: 10.5px; }
+.agentgraph .ag-skill-row.ag-skill-editable > .ag-skill-control { grid-column: 2; grid-row: 1; padding: 0; font-size: 11px; }
 .agentgraph .ag-skill-control:disabled { opacity: .45; text-decoration: none; }
 .agentgraph .ag-skill-row[data-pending="true"], .agentgraph .ag-skill-all[data-pending="true"] { opacity: .55; }
 .agentgraph .ag-skill-row[data-pending="true"] .ag-skill-control, .agentgraph .ag-skill-all[data-pending="true"] .ag-skill-control { color: var(--ag-work); opacity: 1; }
@@ -564,7 +564,7 @@
 .agentgraph .ag-form { margin-top: 10px; }
 .agentgraph .ag-field { display: grid; gap: 3px; margin-top: 8px; }
 .agentgraph .ag-field[hidden] { display: none; }
-.agentgraph .ag-form-label { margin: 8px 0 3px; font-size: 10.5px; font-weight: 400; color: var(--ag-muted); }
+.agentgraph .ag-form-label { margin: 8px 0 3px; font-size: 11px; font-weight: 400; color: var(--ag-muted); }
 .agentgraph .ag-field > .ag-form-label { margin: 0; }
 .agentgraph .ag-input { display: block; width: 100%; min-width: 0; box-sizing: border-box; margin: 0; padding: 5px 7px; border: 1px solid var(--ag-control-border); border-radius: 6px; background: var(--ag-control-bg); color: var(--ag-ink); font: 11px/1.45 ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace; }
 .agentgraph .ag-input:focus-visible { outline: 2px solid var(--ag-work); outline-offset: -2px; }
@@ -627,7 +627,7 @@
 .agentgraph .ag-detail-section .ag-output-step-name { margin: 2px 0; font-size: 11px; color: var(--ag-muted); overflow-wrap: anywhere; }
 .agentgraph .ag-output-row { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 10px; }
 .agentgraph .ag-output-row .ag-output-open, .agentgraph .ag-output-row .ag-output-name { padding: 3px 0; font-size: 12px; overflow-wrap: anywhere; }
-.agentgraph .ag-output-row .ag-output-size { font-size: 10.5px; color: var(--ag-muted); white-space: nowrap; }
+.agentgraph .ag-output-row .ag-output-size { font-size: 11px; color: var(--ag-muted); white-space: nowrap; }
 .agentgraph .ag-output-row .ag-output-why { flex-basis: 100%; margin: 0 0 2px; }
 .agentgraph .ag-output-editor { margin: 4px 0 2px; }
 .agentgraph .ag-output-text { min-height: 120px; max-height: 50vh; overflow: auto; white-space: pre; }
