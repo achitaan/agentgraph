@@ -535,6 +535,23 @@
 .agentgraph .ag-detail-section .ag-note-row .ag-note { margin-bottom: 2px; }
 .agentgraph .ag-note-meta { display: block; padding-left: 10px; font-size: 11px; color: var(--ag-muted); }
 
+/* MCP servers: the row in an agent's details (read-only chips) and the list of all of them. Never green: connected is the
+   plain ink, failed the danger colour, off muted, needs sign-in the accent. */
+.agentgraph .ag-mcp-chips { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+.agentgraph .ag-mcp-chip { display: inline-flex; align-items: baseline; gap: 6px; max-width: 100%; padding: 2px 7px; border: 1px solid var(--ag-line); border-radius: 5px; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.agentgraph .ag-mcp-name { color: var(--ag-ink); font-weight: 600; overflow-wrap: anywhere; }
+.agentgraph .ag-mcp-state, .agentgraph .ag-mcp-meta, .agentgraph .ag-mcp-none { color: var(--ag-muted); font-size: 11px; }
+.agentgraph [data-state="connected"] > .ag-mcp-state, .agentgraph [data-state="on"] > .ag-mcp-state { color: var(--ag-ink); }
+.agentgraph [data-state="failed"] > .ag-mcp-state, .agentgraph .ag-mcp-reason[data-state="failed"] { color: var(--ag-danger); }
+.agentgraph [data-state="needs sign-in"] > .ag-mcp-state, .agentgraph .ag-mcp-reason[data-state="needs sign-in"] { color: var(--ag-work); }
+.agentgraph [data-state="off"] > .ag-mcp-state, .agentgraph .ag-mcp-chip[data-state="off"] .ag-mcp-name, .agentgraph .ag-mcp-row[data-state="off"] .ag-mcp-name { color: var(--ag-muted); }
+.agentgraph .ag-detail-section .ag-mcp-reason, .agentgraph .ag-mcp-reason { margin: 4px 0 0; font-size: 11px; line-height: 1.5; color: var(--ag-muted); white-space: normal; overflow-wrap: anywhere; }
+.agentgraph .ag-mcp-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; padding: 6px 0; border-bottom: 1px solid var(--ag-row-divider); font-size: 11px; }
+.agentgraph .ag-mcp-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.agentgraph .ag-mcp-row .ag-mcp-reason { display: block; margin: 0; }
+.agentgraph .ag-mcp-agents { display: flex; flex-wrap: wrap; gap: 0 10px; }
+.agentgraph .ag-mcp-agents .ag-family-link { display: inline; padding: 0; font-size: 11px; }
+.agentgraph .ag-mcp-agent { color: var(--ag-muted); font-size: 11px; }
 .agentgraph .ag-skill-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; padding: 6px 0; border-bottom: 1px solid var(--ag-row-divider); font-size: 11px; }
 .agentgraph .ag-skill-name { color: var(--ag-ink); font-weight: 600; }
 .agentgraph .ag-skill-users { color: var(--ag-work); overflow-wrap: anywhere; }

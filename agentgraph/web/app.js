@@ -36,6 +36,14 @@
   }
   function text(value) { return value == null ? '' : typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value); }
   function cost(value) { return '$' + (Number(value) || 0).toFixed(2); }
+  // MCP servers (read only): what the snapshot says of each, as text. A state outside this list is not trusted; a host's
+  // reason is untrusted text: one line, cut at 200 characters, drawn with textContent only.
+  const MCP_STATES = ['on', 'off', 'connected', 'failed', 'needs sign-in'];
+  function mcpState(row) { return MCP_STATES.includes(row?.state) ? row.state : row?.enabled === false ? 'off' : 'on'; }
+  function mcpReason(row) {
+    if (typeof row?.reason !== 'string' || !['failed', 'needs sign-in'].includes(mcpState(row))) return '';
+    return Array.from(row.reason.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim()).slice(0, 200).join('');
+  }
   // How full and how worn the root session is, from `root.wear`; null when the snapshot has none.
   function wearOf(root) {
     const wear = root && root.wear;
@@ -2131,6 +2139,26 @@
         if (error) later(() => error.isConnected && error.scrollIntoView({ block: 'nearest' }), 0);
       }
     }
+    // The MCP servers an agent may use, by name, each with its state (settings alone: on or off; the Desktop app adds what
+    // the host knows). Read only. An agent the plugin does not manage has no list (`mcps` null): no row.
+    function mcpSection(agent) {
+      if (!Array.isArray(agent.mcps)) return;
+      const known = new Map((Array.isArray(snapshot.mcp) ? snapshot.mcp : []).filter(row => row && typeof row.name === 'string').map(row => [row.name, row]));
+      const names = agent.mcps.filter(name => typeof name === 'string');
+      const holder = section(detailScroll, 'MCP' + (names.length ? ' · ' + names.length : '')); holder.classList.add('ag-mcp-section');
+      if (!names.length) { holder.append(el('p', 'ag-mcp-none', 'none')); return; }
+      const chips = el('div', 'ag-mcp-chips'); holder.append(chips);
+      const failed = [];
+      appendList(holder, names, name => {
+        const row = known.get(name), state = mcpState(row), reason = mcpReason(row);
+        const chip = el('span', 'ag-mcp-chip'); chip.dataset.mcp = name; chip.dataset.state = state;
+        chip.append(el('span', 'ag-mcp-name', name), el('span', 'ag-mcp-state', state));
+        chip.title = name + ' · ' + state + (reason ? ' · ' + reason : '');
+        chips.append(chip);
+        if (reason) failed.push({ name, reason, state });
+      });
+      failed.forEach(item => { const line = el('p', 'ag-mcp-reason', item.name + ' · ' + item.reason); line.dataset.state = item.state; holder.append(line); });
+    }
     function redrawDetail() {
       if (!selected || selected.type !== 'agent') return;
       const key = document.activeElement?.closest?.('[data-skill-key]')?.dataset.skillKey;
@@ -2921,6 +2949,26 @@
       };
       lazySteps.set(row, fill); if (row.open) fill(); detailScroll.append(row);
     }
+    // One server in the list of all of them: its name and state, where it is declared, why it failed (the host's words, as
+    // text), and the agents that may use it; an agent's name picks that agent as a click on it would.
+    function mcpRow(server) {
+      const state = mcpState(server), reason = mcpReason(server);
+      const row = el('div', 'ag-mcp-row'); row.dataset.mcp = server.name; row.dataset.state = state;
+      const head = el('div', 'ag-mcp-head'); head.dataset.state = state; head.append(el('span', 'ag-mcp-name', server.name), el('span', 'ag-mcp-state', state)); row.append(head);
+      const meta = [server.kind === 'local' || server.kind === 'remote' ? server.kind : '', server.source === 'opencode' ? 'from OpenCode\'s settings' : server.source === 'plugin' ? 'from the plugin' : ''].filter(Boolean).join(' · ');
+      if (meta) row.append(el('span', 'ag-mcp-meta', meta));
+      if (reason) { const line = el('span', 'ag-mcp-reason', reason); line.dataset.state = state; row.append(line); }
+      const users = (Array.isArray(server.agents) ? server.agents : []).filter(name => typeof name === 'string');
+      const agents = el('div', 'ag-mcp-agents');
+      if (!users.length) agents.append(el('span', 'ag-mcp-none', '—'));
+      users.slice(0, LIST_LIMIT).forEach(name => {
+        if (agentsByName.has(name)) { const link = el('button', 'ag-family-link', name); link.type = 'button'; link.dataset.flowPeer = name; agents.append(link); }
+        else agents.append(el('span', 'ag-mcp-agent', name));
+      });
+      row.append(agents);
+      row.title = server.name + ' · ' + state + (reason ? ' · ' + reason : '');
+      return row;
+    }
     function renderRunDetail(graph) {
       eyebrow.textContent = '';
       detailScroll.append(el('h2', 'ag-detail-title ag-run-title', 'Run'));
@@ -3008,6 +3056,13 @@
         row.append(el('span', 'ag-skill-name', text(skill.name)), el('span', 'ag-skill-users', users.join(' · ') || '—'), el('span', 'ag-skill-about', text(skill.description)));
         row.title = text(skill.description); body.append(row);
       }));
+      if (Array.isArray(snapshot.mcp)) {
+        const servers = snapshot.mcp.filter(row => row && typeof row.name === 'string');
+        runFold('MCP servers', 'mcp', servers.length, body => {
+          if (!servers.length) body.append(el('p', 'ag-run-empty', 'None'));
+          appendList(body, servers, server => body.append(mcpRow(server)));
+        });
+      }
       runFold('History', 'history', graph?.events.length || 0, body => section(body, 'Recent activity', graph?.events.length ? [...graph.events].reverse() : 'None', false, event => [event.node, event.event, text(event.note)].filter(Boolean).join(' · ')));
       runFold('Amendments', 'amendments', graph?.amendments.length || 0, body => section(body, 'Amendments', graph?.amendments.length ? graph.amendments : 'None'));
       runFold('Lessons', 'lessons', graph?.lessons.length || 0, body => section(body, 'Lessons', graph?.lessons.length ? graph.lessons : 'None'));
@@ -3495,6 +3550,7 @@
         agentActions(agent);
         agentTextSection(agent);
         skillSection(agent);
+        mcpSection(agent);
         teamSection(agent);
         if (sessionToOpen(agent)) { const opener = el('button', 'ag-open-session', 'Open session'); opener.type = 'button'; opener.dataset.openSession = agent.name; detailScroll.append(opener); }
         const record = snapshot.learning?.agents && Object.hasOwn(snapshot.learning.agents, agent.name) ? snapshot.learning.agents[agent.name] : null;
@@ -5545,7 +5601,7 @@
     function render(data) {
       const previousTeam = activeTeam;
       snapshot = { ...data, agents: prepareRoster(data) };
-      const stamp = JSON.stringify([data.agents, data.graph, data.warnings, data.totals, data.escalation, data.root?.wear, data.structure, data.skill_warnings, data.skills, data.roster]);
+      const stamp = JSON.stringify([data.agents, data.graph, data.warnings, data.totals, data.escalation, data.root?.wear, data.structure, data.skill_warnings, data.skills, data.roster, data.mcp]);
       if (stamp !== renderStamp) { renderStamp = stamp; renderRevision++; }
       // The host's answer stands for an agent's skills only until a snapshot shows the same list.
       skillOverride.forEach((list, name) => { const agent = (data.agents || []).find(item => item?.name === name); if (!agent || JSON.stringify(agent.skills) === JSON.stringify(list)) skillOverride.delete(name); });
