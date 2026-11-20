@@ -133,10 +133,59 @@
       return data;
     }
     function loopHalves(root, id) { return [...root.querySelectorAll('path[data-loop]')].filter(path => path.dataset.loop === id); }
+    // The screen circle and name box of each agent, and whether the straight chord between two agents' rims would pass
+    // through, or within `margin` px of, a third agent's circle or name (the one case a line may bend).
+    function agentShapes(root) {
+      return [...root.querySelectorAll('[data-agent]')].map(node => {
+        const circle = node.querySelector('.ag-core'), m = circle.getCTM(), r = Number(circle.getAttribute('r')) * Math.hypot(m.a, m.b);
+        const box = circle.getBoundingClientRect(), label = node.querySelector('.ag-agent-name')?.getBoundingClientRect();
+        return { name: node.dataset.agent, x: box.left + box.width / 2, y: box.top + box.height / 2, r, label };
+      });
+    }
+    function nearSegment(p, a, b) {
+      const dx = b.x - a.x, dy = b.y - a.y, t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy || 1)));
+      return Math.hypot(p.x - a.x - t * dx, p.y - a.y - t * dy);
+    }
+    function pointsOf(element, count = 60) {
+      const m = element.getScreenCTM();
+      if (element.tagName.toLowerCase() === 'line') {
+        const a = new DOMPoint(+element.getAttribute('x1'), +element.getAttribute('y1')).matrixTransform(m), b = new DOMPoint(+element.getAttribute('x2'), +element.getAttribute('y2')).matrixTransform(m);
+        return Array.from({ length: count + 1 }, (_, i) => ({ x: a.x + (b.x - a.x) * i / count, y: a.y + (b.y - a.y) * i / count }));
+      }
+      const length = element.getTotalLength();
+      return Array.from({ length: count + 1 }, (_, i) => element.getPointAtLength(length * i / count).matrixTransform(m));
+    }
+    // How far a drawn line comes into a third agent: the worst overlap with a circle or a name box, in px (<= 0 clear).
+    function intrusion(points, shapes, ends) {
+      let worst = -Infinity, into = '';
+      shapes.forEach(shape => {
+        if (ends.includes(shape.name)) return;
+        points.forEach(p => {
+          const circle = shape.r - Math.hypot(p.x - shape.x, p.y - shape.y);
+          const l = shape.label, name = l && l.width ? Math.min(p.x - l.left, l.right - p.x, p.y - l.top, l.bottom - p.y) : -Infinity;
+          const value = Math.max(circle, name);
+          if (value > worst) { worst = value; into = shape.name + (name > circle ? ' (name)' : ''); }
+        });
+      });
+      return { worst, into };
+    }
+    function chordBlocked(root, from, to, margin = 3, shapes = agentShapes(root)) {
+      const a = shapes.find(s => s.name === from), b = shapes.find(s => s.name === to);
+      if (!a || !b) return false;
+      const d = Math.hypot(b.x - a.x, b.y - a.y) || 1, ux = (b.x - a.x) / d, uy = (b.y - a.y) / d;
+      const p = { x: a.x + ux * a.r, y: a.y + uy * a.r }, q = { x: b.x - ux * b.r, y: b.y - uy * b.r };
+      const points = Array.from({ length: 61 }, (_, i) => ({ x: p.x + (q.x - p.x) * i / 60, y: p.y + (q.y - p.y) * i / 60 }));
+      return intrusion(points, shapes.map(s => ({ ...s, r: s.r + margin, label: s.label && { left: s.label.left - margin, right: s.label.right + margin, top: s.label.top - margin, bottom: s.label.bottom + margin, width: s.label.width } })), [from, to]).worst > 0;
+    }
     function assertLoopShapes(root) {
       assert(!root.querySelector('rect'), 'network contains a box');
-      root.querySelectorAll('path, ellipse').forEach(shape => assert(shape.hasAttribute('data-loop') || shape.hasAttribute('data-work-loop'), 'curved edge is not a loop'));
-      root.querySelectorAll('[data-edge]').forEach(edge => assert(edge.tagName.toLowerCase() === 'line', 'ordinary edge is not straight'));
+      const shapes = agentShapes(root);
+      // An ordinary edge is straight unless its straight chord would cross a third agent (Build 5: then it bends round it).
+      const bent = shape => { const pair = (shape.dataset.edge || shape.dataset.overlayOf)?.split('->'); return !!pair && chordBlocked(root, pair[0], pair[1], 3, shapes); };
+      // A loop's own click band (rule B) is the loop's shape again, invisible.
+      const band = shape => shape.classList.contains('ag-line-hit') && !!shape.closest('[data-loop-id], [data-work-loop-id]') && getComputedStyle(shape).stroke.replace(/\s/g, '').match(/^(transparent|rgba\(0,0,0,0\))$/);
+      root.querySelectorAll('path, ellipse').forEach(shape => assert(shape.hasAttribute('data-loop') || shape.hasAttribute('data-work-loop') || band(shape) || bent(shape), 'curved edge is not a loop'));
+      root.querySelectorAll('[data-edge]').forEach(edge => assert(edge.tagName.toLowerCase() === 'line' || bent(edge), 'ordinary edge is not straight'));
     }
     function assertLoopCorridors(root, data = loopFixture()) {
       const visibleLoops = data.graph.loops.filter(loop => root.querySelector('[data-agent="' + loop.worker + '"]') && root.querySelector('[data-agent="' + loop.evaluator + '"]'));
@@ -166,6 +215,8 @@
     async function test(name, run) {
       checks.declared.push(name);
       if (testIndex++ % SHARDS !== SHARD) return;
+      // While working on a few checks: AGENTGRAPH_VIEW_ONLY=<words> runs only those (run.mjs then reports a split).
+      if (shardOf.get('only') && !name.includes(shardOf.get('only'))) return;
       checks.ran.push(name);
       try { await run(); results.push('PASS ' + name); } catch (error) { results.push('FAIL ' + name + ': ' + error.message); }
     }
@@ -1442,8 +1493,9 @@
         const route = routeOf(root, 'f1');
         assert(route, 'a drawn flow is not shown');
         const steps = route.querySelectorAll('.ag-route-step');
-        assert(steps.length === 2 && steps[0].dataset.step === 'forward' && steps[1].dataset.step === 'return', 'the steps are not a forward step and a return');
-        assert(/ L /.test(steps[0].getAttribute('d')) && / Q /.test(steps[1].getAttribute('d')), 'a forward step is not straight or a return is not an arc');
+        // A, B, A ends where it began: a loop, both steps curved and dotted (rule A; it was a straight step and an arc).
+        assert(steps.length === 2 && steps[0].dataset.step === 'loop' && steps[1].dataset.step === 'loop', 'the steps of a loop are not both loop steps');
+        assert([...steps].every(path => / C /.test(path.getAttribute('d')) && !/ L /.test(path.getAttribute('d')) && getComputedStyle(path).strokeDasharray !== 'none'), 'a step of the loop is straight or not dotted');
         assert([...steps].every(path => /-route\)$/.test(path.getAttribute('marker-end'))), 'a step has no arrowhead');
         assert([...steps].every(path => getComputedStyle(path).animationName === 'none'), 'a flow moves at rest');
         assert(root.querySelectorAll('[data-route]').length === 1, 'something other than the one drawn flow is drawn as a flow');
@@ -1509,19 +1561,23 @@
         assert(host.calls.length === 1 && !opened.length && root.querySelector('.ag-header')?.textContent === header, 'adding a flow did more than one thing or left the graph');
       }, { actions: { flow: host.flow }, onOpenSession: value => opened.push(value) });
     });
-    await test('clicking an agent already on the path adds a return drawn as an arc, and a click on the newest finishes', async () => {
+    await test('clicking an agent already on the path closes a loop drawn as a dotted ring; going on opens it again, and a click on the newest finishes', async () => {
       const data = flowFixture(), host = flowHost(data);
       await using(data, async root => {
         tap(root, 'impl-openai'); tap(root, 'reviewer'); tap(root, 'impl-openai'); await settle();
         const steps = [...root.querySelectorAll('.ag-trail-step')];
         assert(root.dataset.agTrail === 'impl-openai reviewer impl-openai' && !host.calls.length, 'a return was not added: ' + root.dataset.agTrail);
-        assert(steps.map(path => path.dataset.step).join() === 'forward,return' && / Q /.test(steps[1].getAttribute('d')), 'the return is not an arc');
+        assert(steps.map(path => path.dataset.step).join() === 'loop,loop' && steps.every(path => / C /.test(path.getAttribute('d'))), 'the closed path is not drawn as a ring');
         tap(root, 'impl-claude'); await settle();
         assert(root.dataset.agTrail === 'impl-openai reviewer impl-openai impl-claude', 'the path does not continue after a return');
         tap(root, 'impl-claude'); await settled();
         assert(calls(host) === JSON.stringify([{ op: 'add', path: ['impl-openai', 'reviewer', 'impl-openai', 'impl-claude'] }]), 'a click on the newest did not finish: ' + calls(host));
         const route = root.querySelector('[data-route]');
         assert([...route.querySelectorAll('.ag-route-step')].map(path => path.dataset.step).join() === 'forward,return,forward', 'the drawn flow does not show the return');
+        // It does not end where it began, so it is an open path: solid and straight, the return included.
+        await sleep(450); // after it has drawn in
+        const walked = ['impl-openai', 'reviewer', 'impl-openai', 'impl-claude'];
+        assert([...route.querySelectorAll('.ag-route-step')].every((path, i) => !/ C /.test(path.getAttribute('d')) && (/ L /.test(path.getAttribute('d')) || chordBlocked(root, walked[i], walked[i + 1])) && getComputedStyle(path).strokeDasharray === 'none'), 'an open path is curved or dotted');
       }, { actions: { flow: host.flow } });
     });
     await test('a double-click on the last agent finishes; a path of one agent finishes to nothing', async () => {
@@ -1739,7 +1795,8 @@
         assert(detailOpen(root) && root.querySelector('.ag-detail-title').textContent === 'impl-claude → reviewer → impl-hard' && root.querySelector('.ag-eyebrow').textContent === 'Flow', 'its details did not open');
         const box = root.querySelector('[data-route-text]'), state = () => root.querySelector('[data-route-state]').textContent;
         box.focus(); box.value = 'Typed'; box.dispatchEvent(new Event('input', { bubbles: true }));
-        assert(state() === 'Not saved', 'the unsaved state is not shown: ' + state());
+        // Rule D3: typing saves by itself after a pause, so the state no longer says "Not saved".
+        assert(state() === 'Saving', 'the pending state is not shown: ' + state());
         // A changed snapshot (here: the flow's text changed elsewhere) makes the refresh want to rebuild the details.
         data.structure.flows[0].text = 'Changed elsewhere.'; data.totals = { ...data.totals, cost: data.totals.cost + 1 };
         await app.refresh();
@@ -1814,17 +1871,24 @@
       });
       function clickable(root, id) { const p = stepPoint(root, id, 0); return document.elementFromPoint(p.x, p.y)?.closest('[data-route]')?.dataset.route === id; }
     });
-    await test('a refused flow removes the pending path, shakes the first agent once and puts the message in its tooltip only', async () => {
+    // Rule D1 changed this check: the reason was only the first agent's tooltip; it is now a line in the details of the
+    // agent where the path ended (where the user is looking), announced in the live region, and the red ring goes.
+    await test('a refused flow removes the pending path, shakes the newest agent once and shows the reason in its details and the live region', async () => {
       const data = flowFixture(), host = flowHost(data, { fail: 'reviewer cannot get the work back straight after it returned to impl-claude' });
       await using(data, async root => {
         const textBefore = root.querySelectorAll('text').length;
         tap(root, 'impl-claude'); tap(root, 'reviewer'); press(root.querySelector('.ag-viewport'), 'Enter'); await settled();
-        const node = nodeOf(root, 'impl-claude');
+        const node = nodeOf(root, 'reviewer'), said = 'reviewer cannot get the work back straight after it returned to impl-claude';
         assert(!root.dataset.agTrail && !root.querySelector('.ag-trail-step') && !root.querySelector('[data-route]'), 'the refused path stays');
-        assert(node.dataset.shake === 'true' && getComputedStyle(node.querySelector('.ag-core')).animationName === 'ag-shake', 'the first agent does not shake');
-        assert(node.querySelector('title').textContent === 'reviewer cannot get the work back straight after it returned to impl-claude', 'the message is not the tooltip');
-        assert(root.querySelectorAll('text').length === textBefore && root.querySelector('.ag-notice').hidden && !detailOpen(root), 'the message was added to the graph');
-        await sleep(450); assert(!node.dataset.shake, 'the shake repeats');
+        assert(node.dataset.shake === 'true' && getComputedStyle(node.querySelector('.ag-core')).animationName === 'ag-shake', 'the newest agent does not shake');
+        assert(node.querySelector('title').textContent === said, 'the message is not the tooltip');
+        const line = root.querySelector('.ag-detail .ag-agent-note[data-kind="error"]');
+        assert(detailOpen(root) && root.querySelector('.ag-detail-title')?.textContent.includes('reviewer') && line?.textContent === said && line.getAttribute('role') === 'alert', 'the reason is not a line in the details: ' + (line?.textContent || 'none'));
+        assert(root.querySelectorAll('text').length === textBefore && root.querySelector('.ag-notice').hidden, 'the message was added to the graph');
+        await sleep(60); assert(root.querySelector('.ag-sr-only[aria-live]').textContent.includes(said), 'the reason is not announced');
+        await sleep(400); assert(!node.dataset.shake, 'the shake repeats');
+        const danger = getComputedStyle(root).getPropertyValue('--ag-danger').trim(), probe = document.createElement('i'); probe.style.color = danger; root.append(probe); const red = getComputedStyle(probe).color; probe.remove();
+        assert([...root.querySelectorAll('.ag-halo')].every(halo => getComputedStyle(halo).stroke !== red), 'a red ring stays');
       }, { actions: { flow: host.flow } });
     });
     await test('a path no task graph could follow (a second return to work done after the check) shows the back end\'s reason when finished and saves nothing', async () => {
@@ -1836,7 +1900,7 @@
         press(root.querySelector('.ag-viewport'), 'Enter'); await settled();
         assert(host.calls.length === 1 && host.calls[0].op === 'add' && host.calls[0].path.join(' ') === 'impl-claude reviewer impl-hard reviewer impl-hard', 'not one add: ' + calls(host));
         assert(!data.structure.flows.length && !root.querySelector('[data-route]') && !root.dataset.agTrail, 'the refused path was saved or stays');
-        assert(nodeOf(root, 'impl-claude').querySelector('title').textContent === reason, 'the reason is not shown');
+        assert(nodeOf(root, 'impl-hard').querySelector('title').textContent === reason && root.querySelector('.ag-detail .ag-agent-note[data-kind="error"]')?.textContent === reason, 'the reason is not shown');
       }, { actions: { flow: host.flow } });
     });
     await test('the keyboard starts a path with c, moves with the arrows, adds with Enter, finishes with Enter on the newest and cancels with Escape', async () => {
@@ -2076,6 +2140,9 @@
     const skillButton = (root, key) => [...root.querySelectorAll('[data-skill-key]')].find(button => button.dataset.skillKey === key);
     const skillLines = root => [...root.querySelectorAll('.ag-skill-note')].map(line => line.dataset.kind + ':' + line.textContent);
     const foldOf = (root, id) => [...root.querySelectorAll('[data-run-fold]')].find(item => item.dataset.runFold === id);
+    // Rule D5 changed the success line: it says where the change went (every preset that lists the agent).
+    // The double's own message ('restart') follows: when it applies is the back end's to say.
+    const SKILL_DONE = 'Changed in every preset that lists impl-openai and in SKILLS.md. restart', SKILL_DONE_CLAUDE = SKILL_DONE.replace('impl-openai', 'impl-claude');
     await test('skills: remove from a list, add from the closed fold, give every skill; each pending on its row until the host answers', async () => {
       const data = skillFixture(), gates = [], host = skillHost(data, { gate: () => new Promise(resolve => gates.push(resolve)) });
       await using(data, async root => {
@@ -2093,10 +2160,11 @@
         assert(row.dataset.pending === 'true' && skillButton(root, 'add:gamma').disabled, 'the change is not pending on its row');
         gates.shift()(); await settled();
         assert(skillSectionOf(root).querySelector('h3').textContent === 'Skills · 1' && !skillButton(root, 'remove:alpha') && skillButton(root, 'add:alpha'), 'the list did not update');
-        assert(JSON.stringify(skillLines(root)) === JSON.stringify(['done:Applies after OpenCode restarts.']), 'no single restart line: ' + skillLines(root));
+        assert(JSON.stringify(skillLines(root)) === JSON.stringify(['done:' + SKILL_DONE]), 'no single restart line: ' + skillLines(root));
         assert(foldOf(root, 'agent-skills-add').open, 'the fold closed');
         skillButton(root, 'add:gamma').click(); gates.shift()(); await settled();
-        assert(JSON.stringify(skillRows(root).filter(item => !item.closest('details')).map(item => item.dataset.skill)) === JSON.stringify(['beta', 'gamma']), 'add did not update the list');
+        // Rule D4: the removed alpha keeps its (struck) row for a moment; the live list is the rows not marked removed.
+        assert(JSON.stringify(skillRows(root).filter(item => !item.closest('details') && !item.dataset.removed).map(item => item.dataset.skill)) === JSON.stringify(['beta', 'gamma']), 'add did not update the list');
         skillButton(root, 'all').click(); await sleep(20);
         assert(skillButton(root, 'all').closest('.ag-skill-all').dataset.pending === 'true', 'every skill is not pending');
         gates.shift()(); await settled();
@@ -2115,7 +2183,7 @@
         skillButton(root, 'remove:beta').click(); await settled();
         assert(JSON.stringify(host.calls) === JSON.stringify([{ agent: 'impl-claude', skill: 'beta', on: false }]), 'remove under all asked something else');
         assert(skillSectionOf(root).querySelector('h3').textContent === 'Skills · 3' && JSON.stringify(skillRows(root).filter(item => !item.closest('details')).map(item => item.dataset.skill)) === JSON.stringify(['alpha', 'gamma', 'delta']), 'all did not become the list without it');
-        assert(JSON.stringify(skillLines(root)) === JSON.stringify(['done:Applies after OpenCode restarts.', 'warning:task-profiles.md: the impl-claude profile still names beta.']), 'the warning is not a line: ' + skillLines(root));
+        assert(JSON.stringify(skillLines(root)) === JSON.stringify(['done:' + SKILL_DONE_CLAUDE, 'warning:task-profiles.md: the impl-claude profile still names beta.']), 'the warning is not a line: ' + skillLines(root));
       }, { actions: { skills: host.skills } });
       const failing = skillFixture(), refused = skillHost(failing, { fail: 'skill \'alpha\' is locked' });
       await using(failing, async root => {
@@ -2776,6 +2844,795 @@
         window.uiReport = report;
         assert(!outside.length, 'a line ends outside the canvas: ' + outside.join(', '));
       });
+    });
+    // A roster the size of the real one (the trial's): fourteen agents, a council with three seats, one at work.
+    function trialRoster() {
+      const data = fixture();
+      data.totals = { sessions: 3, running: 1, cost: 12.34, tokens_in: 123456, tokens_out: 7890, context: 64000 };
+      data.agents = [agent('orchestrator', 'hub'), agent('impl-openai', 'build', { busy: 1, sessions: [{ id: 's1', title: 'Work', busy: true, model: 'Test model', cost: 0 }] }), agent('impl-claude', 'build'), agent('impl-hard', 'build'), agent('designer', 'build'),
+        agent('reviewer', 'verify'), agent('verifier', 'verify'), agent('explorer', 'understand'), agent('researcher', 'understand'), agent('oracle', 'decide'), agent('oracle-lite', 'decide'),
+        agent('council', 'council'), agent('fable', 'council', { parent: 'council' }), agent('astra', 'council', { parent: 'council' }), agent('carbon', 'council', { parent: 'council' })];
+      return data;
+    }
+    // Every box of the graph (circle, name, count) as the user sees it, clipped to the canvas.
+    function graphBoxes(root) {
+      const view = root.querySelector('.ag-viewport').getBoundingClientRect(), boxes = [];
+      root.querySelectorAll('.ag-drawing [data-agent]').forEach(node => node.querySelectorAll('.ag-halo, .ag-agent-name, .ag-count, .ag-badge').forEach(part => {
+        if (!part.getClientRects().length || getComputedStyle(part).display === 'none' || getComputedStyle(part).visibility === 'hidden') return;
+        const b = part.getBoundingClientRect(), left = Math.max(b.left, view.left), right = Math.min(b.right, view.right), top = Math.max(b.top, view.top), bottom = Math.min(b.bottom, view.bottom);
+        if (right - left > .5 && bottom - top > .5) boxes.push({ what: node.dataset.agent + ' ' + part.getAttribute('class'), left, right, top, bottom });
+      }));
+      return boxes;
+    }
+    const overlapOf = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left) > .5 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > .5;
+    // Rule D8: at 530x670 (the sheet) and 900x600 (the side panel), with details open and at rest, nothing of the graph
+    // is under the cost/context figures, the status line or the sheet.
+    await test('rule D8: nothing in the graph sits under the cost and context figures, the status line or the details sheet', async () => {
+      const found = [];
+      for (const [width, height] of [[530, 670], [900, 600], [1400, 900]]) for (const details of [false, true]) {
+        const data = trialRoster();
+        await using(data, async root => {
+          await resizeTo(root, width, height);
+          if (details) { open(root, 'impl-hard'); await sleep(30); await resizeTo(root, width, height); }
+          const covers = [...root.querySelectorAll('.ag-usage, .ag-network > .ag-status, .ag-detail, .ag-controls')].filter(item => !item.hidden && item.getClientRects().length).map(item => { const b = item.getBoundingClientRect(); return { what: item.className, left: b.left, right: b.right, top: b.top, bottom: b.bottom }; });
+          const under = [];
+          graphBoxes(root).forEach(box => covers.forEach(cover => { if (overlapOf(box, cover)) under.push(box.what + ' under ' + cover.what); }));
+          if (under.length) found.push(width + 'x' + height + (details ? ' with details: ' : ': ') + under.join('; '));
+        });
+      }
+      // An agent the user moved into the top-right corner, then Fit: the camera still keeps it clear of the figures.
+      for (const [width, height] of [[530, 670], [900, 600], [1400, 900]]) {
+        const data = trialRoster();
+        await using(data, async root => {
+          await resizeTo(root, width, height);
+          const view = root.querySelector('.ag-viewport').getBoundingClientRect();
+          dragTo(root, 'impl-hard', { x: view.right - 30, y: view.top + 30 }, 8); await settled();
+          root.querySelector('.ag-fit').click(); await settle();
+          const covers = [...root.querySelectorAll('.ag-usage, .ag-network > .ag-status, .ag-controls')].filter(item => !item.hidden && item.getClientRects().length).map(item => { const b = item.getBoundingClientRect(); return { what: item.className, left: b.left, right: b.right, top: b.top, bottom: b.bottom }; });
+          const under = [];
+          graphBoxes(root).forEach(box => covers.forEach(cover => { if (overlapOf(box, cover)) under.push(box.what + ' under ' + cover.what); }));
+          if (under.length) found.push(width + 'x' + height + ' after a move to the corner and Fit: ' + under.join('; '));
+        });
+      }
+      // A short narrow canvas where the graph pans: scrolled to its top, its top stops below the figures and the status
+      // line; scrolled to its bottom, its bottom stops above the controls (in between, agents pass under them).
+      {
+        const data = trialRoster();
+        await using(data, async root => {
+          await resizeTo(root, 530, 400);
+          const viewport = root.querySelector('.ag-viewport'), middle = viewport.getBoundingClientRect();
+          for (const delta of [-240, 240]) {
+            for (let i = 0; i < 12; i++) viewport.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: delta, clientX: middle.x + middle.width / 2, clientY: middle.y + middle.height / 2 }));
+            await settle();
+            const covers = [...root.querySelectorAll(delta < 0 ? '.ag-usage, .ag-network > .ag-status' : '.ag-controls')].filter(item => !item.hidden && item.getClientRects().length).map(item => { const b = item.getBoundingClientRect(); return { what: item.className, left: b.left, right: b.right, top: b.top, bottom: b.bottom }; });
+            const under = [];
+            graphBoxes(root).forEach(box => covers.forEach(cover => { if (overlapOf(box, cover)) under.push(box.what + ' under ' + cover.what); }));
+            if (under.length) found.push('530x400 scrolled ' + (delta < 0 ? 'to the top' : 'to the bottom') + ': ' + under.join('; '));
+          }
+        });
+      }
+      assert(!found.length, found.join(' | '));
+    });
+    // ---- Builds 1–5 and rules A–D: agents, skill text and groups through actions.roster, .skillfile and .team ----
+    // One double for the three back ends, working on the snapshot the view reads (contract n84 r1 and its additions).
+    const LIVE = 'Live at once: OpenCode watches its agents folder.', RESTART = 'OpenCode reads this file when it starts; the change applies after a restart.';
+    function worldFixture(flows = []) {
+      const data = flowFixture(flows);
+      data.agents = data.agents.filter(a => a.team === 'main');
+      data.agents.push(agent('verifier', 'verify'), agent('oracle', 'decide'), agent('researcher', 'understand'));
+      data.agents.forEach(a => { a.removable = !['orchestrator', 'council', 'councillor-claude'].includes(a.name); a.added = false; a.skills = a.skills || []; a.skills_editable = true; });
+      data.roster = { editable: true, models: ['test/model-a', 'test/model-b'] };
+      data.skills = CATALOGUE.map(skill => ({ ...skill, editable: true }));
+      data.skills.find(skill => skill.name === 'delta').editable = false; data.skills.find(skill => skill.name === 'delta').why = 'delta comes from a plugin; its file is not ours to change.';
+      data.agents.find(a => a.name === 'impl-openai').skills = ['alpha', 'beta'];
+      data.structure.teams = [];
+      return data;
+    }
+    function worldHost(data, options = {}) {
+      const calls = [], texts = { alpha: 'Alpha text.', beta: 'Beta text.', gamma: 'Gamma text.', delta: 'Delta text.' };
+      let made = 0, teamsMade = 0;
+      const log = (kind, request) => calls.push(kind + ' ' + JSON.stringify(request));
+      const roster = async request => {
+        log('roster', request);
+        if (options.gate) await options.gate();
+        if (options.fail) throw new Error(options.fail);
+        if (request.op === 'add') {
+          if (data.agents.some(a => a.name === request.name)) throw new Error(request.name + ' already exists');
+          const source = request.copy_of && data.agents.find(a => a.name === request.copy_of);
+          if (request.copy_of && !source) throw new Error('there is no agent ' + request.copy_of);
+          data.agents.push(agent(request.name, request.template === 'verifier' ? 'verify' : source ? source.group : 'build', { added: true, removable: true, model: source ? source.model : request.model || 'Verifier model', skills: [], skills_editable: true }));
+          return { agent: { name: request.name }, message: LIVE };
+        }
+        if (request.op === 'remove') {
+          const index = data.agents.findIndex(a => a.name === request.name);
+          if (index < 0) throw new Error('there is no agent ' + request.name);
+          const [gone] = data.agents.splice(index, 1), flows = data.structure.flows.filter(f => f.path.includes(gone.name));
+          data.structure.flows = data.structure.flows.filter(f => !flows.includes(f));
+          return { record: { agent: gone, index, flows }, message: gone.added ? LIVE : RESTART };
+        }
+        if (request.op === 'restore') {
+          const record = request.record; data.agents.splice(record.index, 0, record.agent); data.structure.flows.push(...record.flows);
+          return { message: record.agent.added ? LIVE : RESTART };
+        }
+        throw new Error('unknown roster op ' + request.op);
+      };
+      const skillfile = async request => {
+        log('skillfile', request);
+        if (options.gate) await options.gate();
+        if (options.skillFail) throw new Error(options.skillFail);
+        const info = data.skills.find(skill => skill.name === request.id);
+        if (request.op === 'read') return { id: request.id, description: info?.description || '', text: texts[request.id] };
+        if (request.op === 'write') {
+          if (options.changed) throw new Error(request.id + ' changed on disk since it was read; your text is kept');
+          const before = texts[request.id]; texts[request.id] = request.text; return { record: { id: request.id, text: before } };
+        }
+        if (request.op === 'create') {
+          data.skills.push({ name: request.id, description: request.description, editable: true }); texts[request.id] = request.text;
+          if (request.assign) data.agents.find(a => a.name === request.assign).skills.push(request.id);
+          return { assigned: request.assign, message: RESTART };
+        }
+        if (request.op === 'delete') {
+          const holder = data.agents.find(a => (a.skills || []).includes(request.id));
+          if (holder) throw new Error(holder.name + ' still has ' + request.id);
+          const index = data.skills.indexOf(info); data.skills.splice(index, 1);
+          return { record: { skill: info, index, text: texts[request.id] } };
+        }
+        if (request.op === 'restore') {
+          if (request.record.skill) { data.skills.splice(request.record.index, 0, request.record.skill); texts[request.record.skill.name] = request.record.text; }
+          else texts[request.record.id] = request.record.text;
+          return {};
+        }
+        throw new Error('unknown skillfile op ' + request.op);
+      };
+      const team = async request => {
+        log('team', request);
+        if (options.gate) await options.gate();
+        const teams = data.structure.teams;
+        if (request.op === 'add') { const item = { id: 'team-' + (++teamsMade), lead: request.lead, members: request.members.slice(), text: request.text || 'Members report to ' + request.lead + '.' }; teams.push(item); return { team: { ...item } }; }
+        const item = teams.find(t => t.id === request.id);
+        if (!item) throw new Error('there is no group ' + request.id);
+        if (request.op === 'members') item.members = request.members.slice();
+        else if (request.op === 'text') item.text = request.text || 'Members report to ' + item.lead + '.';
+        else if (request.op === 'remove') teams.splice(teams.indexOf(item), 1);
+        return { team: { ...item } };
+      };
+      const skillDouble = skillHost(data), flowDouble = flowHost(data, options.flow || {});
+      const skills = async request => { log('skills', request); return skillDouble.skills(request); };
+      const flow = async request => { log('flow', request); return flowDouble.flow(request); };
+      return { calls, roster, skillfile, team, skills, flow, texts, actions: { roster, skillfile, team, skills, flow } };
+    }
+    const viewportOf = root => root.querySelector('.ag-viewport');
+    const undoKey = target => press(target, 'z', { ctrlKey: true });
+    const noteLines = root => [...root.querySelectorAll('.ag-detail .ag-agent-note')].map(line => line.dataset.kind + ':' + line.textContent);
+    function menuItem(root, label) { return [...root.querySelectorAll('.ag-add-menu [role="menuitem"]')].find(item => item.textContent === label); }
+    function pointerAt(target, type, p, extra = {}) { target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: type === 'pointerup' ? 0 : 1, clientX: p.x, clientY: p.y, ...extra })); }
+    const middleOf = element => { const b = element.getBoundingClientRect(); return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; };
+    function overlapping(root, name) {
+      const a = root.querySelector('[data-agent="' + name + '"] .ag-core').getBoundingClientRect();
+      return [...root.querySelectorAll('[data-agent]')].filter(node => node.dataset.agent !== name).filter(node => {
+        const b = node.querySelector('.ag-core').getBoundingClientRect();
+        return Math.hypot(a.x + a.width / 2 - b.x - b.width / 2, a.y + a.height / 2 - b.y - b.height / 2) < (a.width + b.width) / 2 + 4;
+      }).map(node => node.dataset.agent);
+    }
+
+    await test('build 1 / rule C: the + is a glyph with a name and a key, its menu offers a blank agent, the verifier and a copy of any agent, and the orchestrator has no add form', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      await using(data, async root => {
+        const plus = root.querySelector('.ag-add');
+        assert(plus && !plus.hidden && plus.textContent.trim() === '+' && /\w/.test(plus.getAttribute('aria-label') || '') && /N/.test(plus.getAttribute('aria-keyshortcuts') || ''), 'the + is not a named glyph with a key');
+        assert(!root.querySelector('.ag-drawing').textContent.includes('Add'), 'the + put words in the graph');
+        press(viewportOf(root), 'n'); await settle();
+        const items = [...root.querySelectorAll('.ag-add-menu [role="menuitem"]')].map(item => item.textContent);
+        assert(!root.querySelector('.ag-add-menu').hidden && plus.getAttribute('aria-expanded') === 'true', 'n does not open the menu');
+        assert(items[0] === 'Blank agent' && items[1] === 'Verifier' && ['impl-claude', 'impl-openai', 'reviewer', 'oracle'].every(name => items.includes(name)) && !items.includes('orchestrator'), 'the menu does not offer blank, verifier and copies: ' + items.join());
+        assert(document.activeElement === menuItem(root, 'Blank agent'), 'the keyboard menu does not focus its first item');
+        press(menuItem(root, 'Blank agent'), 'Escape'); await settle();
+        assert(root.querySelector('.ag-add-menu').hidden && document.activeElement === plus, 'Escape does not close the menu back to the +');
+        open(root, 'orchestrator'); await settle();
+        assert(!root.querySelector('[data-form="new-agent:"]') && ![...root.querySelectorAll('.ag-detail button')].some(button => /add agent/i.test(button.textContent)), 'the orchestrator still has an add form');
+      }, { actions: host.actions });
+      const closed = worldFixture(); closed.roster = { editable: false, why: 'The roster file is read-only here.', models: [] };
+      await using(closed, async root => {
+        assert(root.querySelector('.ag-add').hidden, 'the + shows where the roster cannot be written');
+        open(root, 'orchestrator'); await settle();
+        assert(root.querySelector('.ag-detail').textContent.includes('The roster file is read-only here.'), 'the orchestrator does not say why agents cannot be added');
+      }, { actions: worldHost(closed).actions });
+    });
+    await test('rule C: a verifier dragged out of the menu follows the pointer, is dropped on release beside the agent it would cover, is added, and opens with its name selected; its place is kept', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      data.agents.push(agent('verifier-2', 'verify', { removable: true, added: true }));
+      await using(data, async (root, app) => {
+        root.querySelector('.ag-add').click(); await settle();
+        const item = menuItem(root, 'Verifier'), from = middleOf(item), target = centre(root, 'impl-claude');
+        pointerAt(item, 'pointerdown', from); await settle();
+        const ghost = () => root.querySelector('[data-draft]');
+        pointerAt(document, 'pointermove', { x: (from.x + target.x) / 2, y: (from.y + target.y) / 2 }); const halfway = ghost()?.getAttribute('transform');
+        pointerAt(document, 'pointermove', target);
+        assert(ghost() && halfway && ghost().getAttribute('transform') !== halfway, 'the new circle does not follow the pointer');
+        assert(!host.calls.length, 'something was added before the drop');
+        const under = at(root, 'impl-claude');
+        pointerAt(document, 'pointerup', target); await settled();
+        // It settles beside where impl-claude stood when it was dropped, not on that spot.
+        assert(Math.hypot(at(root, 'verifier-3')[0] - under[0], at(root, 'verifier-3')[1] - under[1]) > 46, 'the new agent was left on the spot of the agent it was dropped on');
+        assert(host.calls[0] === 'roster ' + JSON.stringify({ op: 'add', name: 'verifier-3', template: 'verifier' }), 'the drop did not add a verifier under the first free name: ' + host.calls.join(' | '));
+        assert(nodeOf(root, 'verifier-3') && !ghost(), 'the new agent is not drawn');
+        assert(!overlapping(root, 'verifier-3').length, 'the new agent was left on top of ' + overlapping(root, 'verifier-3').join());
+        // Beside the agent it was dropped on (the camera may refit to the new graph, so this is measured between them).
+        const c = centre(root, 'verifier-3'), other = centre(root, 'impl-claude'), scale = root.querySelector('.ag-drawing > g').getCTM().a;
+        assert(Math.hypot(c.x - other.x, c.y - other.y) < 130 * scale, 'the new agent did not settle beside the agent it was dropped on: ' + Math.round(Math.hypot(c.x - other.x, c.y - other.y) / scale));
+        const box = root.querySelector('.ag-detail [data-rename]');
+        assert(detailOpen(root) && titleOf(root) === 'verifier-3' && box && document.activeElement === box && box.selectionStart === 0 && box.selectionEnd === 'verifier-3'.length, 'the details did not open with the name selected');
+        assert(noteLines(root).some(line => line.includes(LIVE)) && !/restart/i.test(noteLines(root).join()), 'the success line is not the back end\'s message: ' + noteLines(root));
+        const place = at(root, 'verifier-3');
+        data.totals = { ...data.totals, cost: 1 }; await app.refresh(); await settle();
+        assert(near(at(root, 'verifier-3'), place), 'the dropped place was not kept');
+        assert(root.querySelector('.ag-detail [data-rename]') === box && document.activeElement === box, 'a refresh rebuilt the name box under the user');
+        // Typing a name and Enter renames it (a copy under the new name, then the old one deleted); its place goes too.
+        const name = root.querySelector('.ag-detail [data-rename]'); name.value = 'checker'; press(name, 'Enter'); await settled();
+        assert(host.calls.slice(1).join(' | ') === 'roster ' + JSON.stringify({ op: 'add', name: 'checker', copy_of: 'verifier-3' }) + ' | roster ' + JSON.stringify({ op: 'remove', name: 'verifier-3' }), 'renaming did not copy then delete: ' + host.calls.join(' | '));
+        assert(nodeOf(root, 'checker') && !nodeOf(root, 'verifier-3') && near(at(root, 'checker'), place), 'the renamed agent did not keep the place');
+        // Undo deletes it (adding and naming were one step).
+        undoKey(viewportOf(root)); await settled();
+        assert(!nodeOf(root, 'checker') && host.calls.at(-1) === 'roster ' + JSON.stringify({ op: 'remove', name: 'checker' }), 'undo did not take the new agent away');
+      }, { actions: host.actions });
+    });
+    await test('rule C: Escape cancels the following circle; a click on the canvas drops it; by keyboard it is placed at a free spot and Alt+arrows move it; default names take the first free number', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      await using(data, async root => {
+        root.querySelector('.ag-add').click(); await settle();
+        let item = menuItem(root, 'Blank agent'), p = middleOf(item);
+        pointerAt(item, 'pointerdown', p); pointerAt(document, 'pointerup', p); await settle();
+        pointerAt(document, 'pointermove', centre(root, 'oracle'));
+        assert(root.querySelector('[data-draft]'), 'a click on a starting point does not give a circle to place');
+        press(root, 'Escape'); await settle();
+        assert(!root.querySelector('[data-draft]') && !host.calls.length, 'Escape did not cancel the new circle');
+        root.querySelector('.ag-add').click(); await settle();
+        item = menuItem(root, 'impl-claude'); p = middleOf(item);
+        pointerAt(item, 'pointerdown', p); pointerAt(document, 'pointerup', p); await settle();
+        const spot = emptyPoint(root), drop = { x: spot.x + 80, y: spot.y - 80 };
+        pointerAt(document, 'pointermove', drop); pointerAt(viewportOf(root), 'pointerdown', drop); pointerAt(viewportOf(root), 'pointerup', drop); await settled();
+        assert(host.calls[0] === 'roster ' + JSON.stringify({ op: 'add', name: 'impl-claude-2', copy_of: 'impl-claude' }), 'a click on the canvas did not add a copy: ' + host.calls.join(' | '));
+        assert(!root.dataset.agTrail && !picked(root, 'x'), 'the drop click also did something else');
+        root.querySelector('.ag-close').click(); await settle();
+        // By keyboard: n, the first item (blank) with Enter; placed at once at a free spot; Alt+arrows move it.
+        viewportOf(root).focus(); press(viewportOf(root), 'n'); await settle();
+        document.activeElement.click(); await settled();
+        assert(host.calls[1] === 'roster ' + JSON.stringify({ op: 'add', name: 'agent-1', model: 'test/model-a' }), 'the keyboard did not add a blank agent with the first model: ' + host.calls.join(' | '));
+        assert(nodeOf(root, 'agent-1') && !overlapping(root, 'agent-1').length, 'the keyboard did not place it at a free spot');
+        const box = root.querySelector('.ag-detail [data-rename]'), before = at(root, 'agent-1');
+        assert(document.activeElement === box, 'the name is not focused after a keyboard add');
+        press(box, 'ArrowRight', { altKey: true }); press(box, 'ArrowRight', { altKey: true }); await settle();
+        assert(Math.abs(at(root, 'agent-1')[0] - before[0] - 24) < .5 && Math.abs(at(root, 'agent-1')[1] - before[1]) < .5, 'Alt+arrows did not move the new agent: ' + before + ' → ' + at(root, 'agent-1'));
+      }, { actions: host.actions });
+    });
+    await test('rule C: an added agent has no lines at all, not even to the orchestrator, until it is on a flow or in a group, or works', async () => {
+      const data = worldFixture(); data.agents.push(agent('scout', 'build', { added: true, removable: true }));
+      const lines = root => [...root.querySelectorAll('.ag-drawing [data-edge], .ag-drawing [data-team-edge]')].filter(line => /(^|->)scout($|->)/.test(line.dataset.edge || line.dataset.teamEdge || '')).length;
+      await using(data, async (root, app) => {
+        assert(nodeOf(root, 'scout') && lines(root) === 0, 'an added agent on nothing has a line');
+        data.structure.flows.push({ id: 'fs', path: ['scout', 'reviewer'], text: 'Look.', source: 'drawn' }); await app.refresh();
+        assert(lines(root) > 0, 'an added agent on a flow has no spoke');
+        data.structure.flows = []; data.structure.teams = [{ id: 't1', lead: 'impl-claude', members: ['scout'], text: '' }]; await app.refresh();
+        assert(lines(root) > 0, 'an added agent in a group has no line');
+        data.structure.teams = []; data.agents.find(a => a.name === 'scout').busy = 1; await app.refresh();
+        assert(lines(root) > 0, 'an added agent at work has no spoke');
+        data.agents.find(a => a.name === 'scout').busy = 0; await app.refresh();
+        assert(lines(root) === 0, 'the lines stayed after it left everything');
+      });
+    });
+    await test('builds 1–2 / rule C: Delete removes an added agent at once in the back end\'s words, and Ctrl/Cmd+Z restores it, its flows and its place', async () => {
+      const data = worldFixture([{ id: 'fs', path: ['scout', 'reviewer'], text: 'Look.', source: 'drawn' }]), host = worldHost(data);
+      data.agents.push(agent('scout', 'build', { added: true, removable: true }));
+      await using(data, async root => {
+        dragTo(root, 'scout', outward(root, 'scout', 50)); await settled();
+        const place = at(root, 'scout');
+        open(root, 'scout'); await settle();
+        press(viewportOf(root), 'Delete'); await settled();
+        assert(host.calls.join() === 'roster ' + JSON.stringify({ op: 'remove', name: 'scout' }), 'Delete did not remove the open agent: ' + host.calls.join(' | '));
+        assert(!nodeOf(root, 'scout') && !routeOf(root, 'fs'), 'the agent or its flow is still drawn');
+        assert(noteLines(root).some(line => line.includes(LIVE)) && !noteLines(root).some(line => line.includes('restart')), 'the deletion line is not the back end\'s message: ' + noteLines(root));
+        undoKey(document.activeElement && root.contains(document.activeElement) ? document.activeElement : document.body); await settled();
+        assert(host.calls.at(-1).startsWith('roster {"op":"restore"'), 'undo did not restore from the record');
+        assert(nodeOf(root, 'scout') && routeOf(root, 'fs') && near(at(root, 'scout'), place), 'undo did not bring back the agent, its flow and its place');
+      }, { actions: host.actions });
+    });
+    await test('build 2 / rule D2: a mouse Delete of a default agent says when it applies, and Ctrl/Cmd+Z works straight after with focus kept in the view; the orchestrator, the council and a seat say why they stay', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      await using(data, async root => {
+        open(root, 'impl-hard'); await settle();
+        const button = [...root.querySelectorAll('.ag-detail button')].find(item => item.textContent === 'Delete agent');
+        assert(button && button.getAttribute('aria-keyshortcuts') === 'Delete', 'the details have no Delete agent button with its key');
+        button.focus(); button.click(); await settled();
+        assert(!nodeOf(root, 'impl-hard') && noteLines(root).some(line => line.includes(RESTART)), 'a default agent\'s deletion does not say it applies after a restart (the back end\'s words): ' + noteLines(root));
+        assert(root.contains(document.activeElement) && document.activeElement !== document.body, 'focus fell out of the view: ' + document.activeElement?.className);
+        undoKey(document.activeElement); await settled();
+        assert(nodeOf(root, 'impl-hard'), 'undo straight after a mouse delete did nothing');
+        for (const [name, why] of [['orchestrator', 'The orchestrator cannot be deleted.'], ['council', 'The council cannot be deleted.'], ['councillor-claude', 'A council seat cannot be deleted.']]) {
+          open(root, name); await settle();
+          assert(root.querySelector('.ag-detail').textContent.includes(why) && ![...root.querySelectorAll('.ag-detail button')].some(item => item.textContent === 'Delete agent'), name + ' does not say why it stays');
+          press(viewportOf(root), 'Delete'); await settle();
+          assert(nodeOf(root, name) && !host.calls.slice(2).length, 'Delete removed ' + name);
+        }
+      }, { actions: host.actions });
+    });
+    const skillOpener = (root, id) => [...root.querySelectorAll('.ag-detail [data-skill-open]')].find(button => button.dataset.skillOpen === id);
+    await test('build 3: a skill\'s text opens from the agent, saves, is refused when the file changed (the text kept), is deleted (refused while an agent has it) and every change undoes; a read-only skill says why', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      data.agents.find(a => a.name === 'reviewer').skills = ['gamma', 'delta'];
+      await using(data, async root => {
+        open(root, 'reviewer'); await settle();
+        skillOpener(root, 'gamma').click(); await settled();
+        let box = root.querySelector('[data-skill-text]');
+        assert(host.calls[0] === 'skillfile ' + JSON.stringify({ op: 'read', id: 'gamma' }) && box && box.value === 'Gamma text.' && !box.readOnly && titleOf(root) === 'gamma', 'the skill text did not open for editing');
+        box.value = 'Gamma, better.'; box.dispatchEvent(new Event('input', { bubbles: true }));
+        root.querySelector('[data-skill-save]').click(); await settled();
+        assert(host.calls[1] === 'skillfile ' + JSON.stringify({ op: 'write', id: 'gamma', text: 'Gamma, better.' }) && host.texts.gamma === 'Gamma, better.', 'Save did not write: ' + host.calls.join(' | '));
+        undoKey(viewportOf(root)); await settled();
+        assert(host.calls.at(-1) === 'skillfile ' + JSON.stringify({ op: 'restore', record: { id: 'gamma', text: 'Gamma text.' } }) && host.texts.gamma === 'Gamma text.', 'undo did not put the old text back: ' + host.calls.at(-1));
+        // A refused write keeps the user's words in the box and says why.
+        open(root, 'reviewer'); await settle(); skillOpener(root, 'gamma').click(); await settled();
+        box = root.querySelector('[data-skill-text]'); box.value = 'Mine.'; box.dispatchEvent(new Event('input', { bubbles: true }));
+        root.querySelector('[data-skill-delete]').click(); await settled();
+        assert(root.querySelector('.ag-form-error')?.textContent === 'reviewer still has gamma' && nodeOf(root, 'reviewer'), 'deleting a skill an agent has was not refused in the back end\'s words: ' + root.querySelector('.ag-form-error')?.textContent);
+        // The read-only skill: its text is shown read-only with the reason.
+        open(root, 'reviewer'); await settle(); skillOpener(root, 'delta').click(); await settled();
+        box = root.querySelector('[data-skill-text]');
+        assert(box && box.readOnly && !root.querySelector('[data-skill-save]') && root.querySelector('.ag-skill-readonly')?.textContent === 'delta comes from a plugin; its file is not ours to change.', 'a read-only skill does not say why');
+      }, { actions: host.actions });
+      // The refusal when the file changed underneath: the user's text stays.
+      const second = worldFixture(), refusing = worldHost(second, { changed: true });
+      second.agents.find(a => a.name === 'reviewer').skills = ['gamma'];
+      await using(second, async root => {
+        open(root, 'reviewer'); await settle(); skillOpener(root, 'gamma').click(); await settled();
+        const box = root.querySelector('[data-skill-text]'); box.value = 'Mine.'; box.dispatchEvent(new Event('input', { bubbles: true }));
+        root.querySelector('[data-skill-save]').click(); await settled();
+        assert(root.querySelector('[data-skill-text]').value === 'Mine.' && /changed on disk/.test(root.querySelector('.ag-form-error')?.textContent || ''), 'a refused write lost the text or the reason');
+      }, { actions: refusing.actions });
+      // Delete when no agent has it, then undo.
+      const third = worldFixture(), deleting = worldHost(third);
+      await using(third, async root => {
+        open(root, 'impl-openai'); await settle(); skillOpener(root, 'alpha').click(); await settled();
+        third.agents.find(a => a.name === 'impl-openai').skills = ['beta'];
+        root.querySelector('[data-skill-delete]').click(); await settled();
+        assert(!third.skills.some(skill => skill.name === 'alpha'), 'the skill was not deleted: ' + deleting.calls.join(' | '));
+        undoKey(viewportOf(root)); await settled();
+        assert(third.skills[0]?.name === 'alpha' && deleting.calls.at(-1).startsWith('skillfile {"op":"restore"'), 'undo did not restore the deleted skill');
+      }, { actions: deleting.actions });
+    });
+    await test('build 3: a new skill is made and given to the agent in one request, says where it went, and undo takes it away', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      await using(data, async root => {
+        open(root, 'reviewer'); await settle();
+        const fresh = root.querySelector('.ag-detail [data-skill-new]');
+        assert(fresh, 'there is no New skill control');
+        fresh.click(); await settle();
+        const form = root.querySelector('[data-form="new-skill:reviewer"]');
+        form.querySelector('[data-new="id"]').value = 'epsilon'; form.querySelector('[data-new="description"]').value = 'Fifth'; form.querySelector('[data-new="text"]').value = 'Epsilon text.';
+        form.querySelector('[type="submit"]').click(); await settled();
+        assert(host.calls[0] === 'skillfile ' + JSON.stringify({ op: 'create', id: 'epsilon', description: 'Fifth', text: 'Epsilon text.', assign: 'reviewer' }), 'create was not one request with assign: ' + host.calls.join(' | '));
+        assert(titleOf(root) === 'reviewer' && skillRows(root).some(row => row.dataset.skill === 'epsilon'), 'the new skill is not on the agent');
+        assert(skillLines(root).some(line => line.includes('epsilon') && line.includes(RESTART)), 'the line does not say where it went and when, in the back end\'s words: ' + skillLines(root));
+        undoKey(viewportOf(root)); await settled();
+        assert(host.calls.some(call => call === 'skillfile ' + JSON.stringify({ op: 'delete', id: 'epsilon' })) && !data.skills.some(skill => skill.name === 'epsilon'), 'undo did not take the new skill away: ' + host.calls.join(' | '));
+      }, { actions: host.actions });
+    });
+    await test('build 4: group members sit on one circle round the lead with a line style of their own and no text, move with the lead, Delete on a picked group line takes that member out, and a new group opens with its instruction focused and selected', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      data.structure.teams = [{ id: 't1', lead: 'impl-claude', members: ['oracle', 'researcher', 'verifier'], text: 'Report to impl-claude.' }];
+      await using(data, async root => {
+        const lead = centre(root, 'impl-claude'), distances = ['oracle', 'researcher', 'verifier'].map(name => { const c = centre(root, name); return Math.hypot(c.x - lead.x, c.y - lead.y); });
+        assert(Math.max(...distances) - Math.min(...distances) < 2, 'members are not on one circle round the lead: ' + distances.map(Math.round));
+        const lines = [...root.querySelectorAll('[data-team-line]')];
+        assert(lines.length === 3 && lines.every(line => !line.querySelector('text')), 'each member does not have one group line, or a line has text');
+        const style = getComputedStyle(lines[0].querySelector('.ag-team-edge')), spoke = getComputedStyle(root.querySelector('line.ag-edge'));
+        assert(style.strokeDasharray === 'none' && (style.strokeWidth !== spoke.strokeWidth || style.stroke !== spoke.stroke), 'the group line is dotted (dotted means loop) or looks like a spoke');
+        assert(!root.querySelector('[data-edge="orchestrator->oracle"]'), 'a member still has a spoke to the orchestrator');
+        const before = ['oracle', 'researcher', 'verifier'].map(name => at(root, name)), leadAt = at(root, 'impl-claude');
+        dragTo(root, 'impl-claude', outward(root, 'impl-claude', 40)); await settled();
+        const shift = [at(root, 'impl-claude')[0] - leadAt[0], at(root, 'impl-claude')[1] - leadAt[1]];
+        ['oracle', 'researcher', 'verifier'].forEach((name, i) => assert(Math.abs(at(root, name)[0] - before[i][0] - shift[0]) < 1 && Math.abs(at(root, name)[1] - before[i][1] - shift[1]) < 1, name + ' did not move with its lead'));
+        // Click a group line, Delete: that member leaves the group.
+        const line = [...root.querySelectorAll('[data-team-line]')].find(item => item.dataset.teamLine === 't1\nresearcher'), hit = line.querySelector('.ag-team-hit'), m = hit.getScreenCTM();
+        const [x1, y1, x2, y2] = hit.tagName === 'line' ? ['x1', 'y1', 'x2', 'y2'].map(k => +hit.getAttribute(k)) : (() => { const l = hit.getTotalLength(), a = hit.getPointAtLength(l * .45), b = hit.getPointAtLength(l * .55); return [a.x, a.y, b.x, b.y]; })();
+        const mid = { x: ((x1 + x2) / 2) * m.a + m.e, y: ((y1 + y2) / 2) * m.d + m.f };
+        clickAt(root, mid); await settle();
+        assert(line.dataset.selected === 'true' || line.getAttribute('aria-pressed') === 'true', 'a click did not pick the group line');
+        press(viewportOf(root), 'Delete'); await settled();
+        assert(host.calls.at(-1) === 'team ' + JSON.stringify({ op: 'members', id: 't1', members: ['oracle', 'verifier'] }), 'Delete on the group line did not take that member out: ' + host.calls.join(' | '));
+        undoKey(viewportOf(root)); await settled();
+        assert(host.calls.at(-1) === 'team ' + JSON.stringify({ op: 'members', id: 't1', members: ['oracle', 'researcher', 'verifier'] }), 'undo did not put the member back');
+        // A new group: reviewer leads impl-hard; its details open with the instruction focused and selected.
+        open(root, 'reviewer'); await settle();
+        root.querySelector('[data-team-start="reviewer"]').click(); await settle();
+        [...root.querySelectorAll('[data-team-pick]')].find(box => box.value === 'impl-hard').checked = true;
+        root.querySelector('[data-team-create="reviewer"]').click(); await settled();
+        const box = root.querySelector('[data-team-text]');
+        assert(host.calls.at(-1) === 'team ' + JSON.stringify({ op: 'add', lead: 'reviewer', members: ['impl-hard'] }), 'the new group was not asked for');
+        assert(box && document.activeElement === box && box.selectionStart === 0 && box.selectionEnd === box.value.length && box.value.length > 0, 'the new group did not open with its instruction focused and selected');
+      }, { actions: host.actions });
+    });
+    // Rule 5: a line bends only when its straight line would cross a third agent (circle or name), and then clears it.
+    function assertRouted(root, label) {
+      const view = root.querySelector('.ag-viewport').getBoundingClientRect(), problems = [];
+      const agents = [...root.querySelectorAll('.ag-drawing [data-agent]')].map(node => { const core = node.querySelector('.ag-core').getBoundingClientRect(); return { name: node.dataset.agent, x: core.x + core.width / 2, y: core.y + core.height / 2, r: core.width / 2, parent: node.dataset.parent || '' }; });
+      const ends = shape => {
+        const group = shape.closest('[data-route], [data-team-line]');
+        if (shape.dataset.edge) return shape.dataset.edge.split('->');
+        if (shape.dataset.teamEdge) return shape.dataset.teamEdge.split('->');
+        return null;
+      };
+      root.querySelectorAll('.ag-drawing line.ag-edge[data-edge], .ag-drawing path.ag-edge[data-edge], .ag-drawing [data-team-edge]').forEach(shape => {
+        if (getComputedStyle(shape).display === 'none' || getComputedStyle(shape).visibility === 'hidden' || Number(getComputedStyle(shape).opacity) === 0) return;
+        const [a, b] = ends(shape) || [];
+        if (!a) return;
+        const m = shape.getScreenCTM(), length = shape.getTotalLength(), points = [];
+        for (let i = 2; i <= 38; i++) { const q = shape.getPointAtLength(length * i / 40); points.push({ x: q.x * m.a + q.y * m.c + m.e, y: q.x * m.b + q.y * m.d + m.f }); }
+        const others = agents.filter(agent => agent.name !== a && agent.name !== b && agent.parent !== a && agent.parent !== b);
+        others.forEach(agent => { const least = Math.min(...points.map(p => Math.hypot(p.x - agent.x, p.y - agent.y))); if (least < agent.r - .5) problems.push(a + '→' + b + ' crosses ' + agent.name + ' (' + least.toFixed(1) + ' < ' + agent.r.toFixed(1) + ')'); });
+        if (shape.tagName === 'path') {
+          // Bent only when needed: its straight chord would cross a third agent.
+          const p0 = points[0], p1 = points.at(-1), blocked = others.some(agent => { const dx = p1.x - p0.x, dy = p1.y - p0.y, t = clamp01(((agent.x - p0.x) * dx + (agent.y - p0.y) * dy) / (dx * dx + dy * dy || 1)); return Math.hypot(p0.x + dx * t - agent.x, p0.y + dy * t - agent.y) < agent.r + 2; });
+          if (!blocked && !others.some(agent => { const name = root.querySelector('[data-agent="' + agent.name + '"] .ag-agent-name')?.getBoundingClientRect(); return name && points.some(p => p.x >= name.left - 2 && p.x <= name.right + 2 && p.y >= name.top - 2 && p.y <= name.bottom + 2) || (name && (() => { const dx = p1.x - p0.x, dy = p1.y - p0.y; for (let i = 0; i <= 20; i++) { const x = p0.x + dx * i / 20, y = p0.y + dy * i / 20; if (x >= name.left && x <= name.right && y >= name.top && y <= name.bottom) return true; } return false; })()); })) problems.push(a + '→' + b + ' bends with nothing in the way');
+        }
+      });
+      assert(!problems.length, label + ': ' + problems.slice(0, 4).join('; '));
+    }
+    await test('build 5: lines bend round third agents only when needed, at 530x670, 900x600 and 1400x900, at rest and busy, and after an agent is dragged onto a line', async () => {
+      for (const busy of [false, true]) for (const [width, height] of [[530, 670], [900, 600], [1400, 900]]) {
+        const data = trialRoster(); data.structure = { source: 'folder', flows: [{ id: 'f1', path: ['researcher', 'oracle', 'designer'], text: 'x', source: 'drawn' }, { id: 'f2', path: ['impl-hard', 'designer'], text: 'y', source: 'drawn' }], teams: [] };
+        if (!busy) data.agents.forEach(a => { a.busy = 0; a.sessions = []; });
+        await using(data, async root => {
+          await resizeTo(root, width, height);
+          assertRouted(root, width + 'x' + height + (busy ? ' busy' : ' at rest'));
+        });
+      }
+      // Drag an agent onto the middle of the orchestrator's spoke to impl-hard: the spoke bends round it; drag it away and it is straight again.
+      const data = worldFixture();
+      await using(data, async root => {
+        const spoke = () => root.querySelector('[data-edge="orchestrator->impl-hard"]');
+        assert(spoke().tagName === 'line', 'the spoke is bent at rest');
+        const a = centre(root, 'orchestrator'), b = centre(root, 'impl-hard'), onto = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        const from = centre(root, 'researcher');
+        dragTo(root, 'researcher', onto, 8); await settled();
+        assertRouted(root, 'after a drag onto a spoke');
+        dragTo(root, 'researcher', from, 8); await settled();
+        assertRouted(root, 'after dragging back');
+      });
+    });
+    // Rule A: the loop as built. loopStart(path) in app.js is the one definition; WEB_API.md says the same.
+    const flowSteps = (root, id) => [...routeOf(root, id).querySelectorAll('.ag-route-step')];
+    await test('rule A: a path ending at its first agent is one closed, fully curved, dotted ring; in A, B, C, B only B, C, B is dotted and A → B is straight and solid; A, A is unchanged', async () => {
+      const data = worldFixture([
+        { id: 'ring', path: ['impl-claude', 'reviewer', 'verifier', 'impl-claude'], text: 'r', source: 'drawn' },
+        { id: 'tail', path: ['oracle', 'impl-hard', 'researcher', 'impl-hard'], text: 't', source: 'drawn' },
+        { id: 'self', path: ['impl-openai', 'impl-openai'], text: 's', source: 'drawn' },
+        { id: 'open', path: ['researcher', 'oracle'], text: 'o', source: 'drawn' }]);
+      await using(data, async root => {
+        const dotted = path => getComputedStyle(path).strokeDasharray !== 'none';
+        const ring = flowSteps(root, 'ring');
+        assert(routeOf(root, 'ring').dataset.loop === 'full' && ring.length === 3 && ring.every(step => step.dataset.step === 'loop' && dotted(step) && / C /.test(step.getAttribute('d')) && !/ L /.test(step.getAttribute('d'))), 'a full loop is not one curved dotted ring');
+        // The steps meet end to end: one closed ring.
+        // Each step runs from one agent of the ring to the next: the ring closes on the first agent.
+        const path = ['impl-claude', 'reviewer', 'verifier', 'impl-claude'];
+        ring.forEach((step, i) => {
+          const l = step.getTotalLength(), a = step.getPointAtLength(0), b = step.getPointAtLength(l), from = at(root, path[i]), to = at(root, path[i + 1]);
+          assert(Math.hypot(a.x - from[0], a.y - from[1]) < 45 && Math.hypot(b.x - to[0], b.y - to[1]) < 45, 'step ' + i + ' of the ring does not run from ' + path[i] + ' to ' + path[i + 1]);
+        });
+        const tail = flowSteps(root, 'tail');
+        assert(routeOf(root, 'tail').dataset.loop === 'part' && tail[0].dataset.step !== 'loop' && !dotted(tail[0]) && tail.slice(1).every(step => step.dataset.step === 'loop' && dotted(step)), 'A, B, C, B is not a solid A → B and a dotted B, C, B');
+        // Straight, unless a third agent stands in its way (build 5).
+        assert(!/ C | Q /.test(tail[0].getAttribute('d') || '') || chordBlocked(root, 'oracle', 'impl-hard'), 'A → B of A, B, C, B is curved with nothing in its way');
+        assert(routeOf(root, 'self').dataset.loop === 'self' && flowSteps(root, 'self').every(step => step.dataset.step !== 'loop'), 'A, A changed');
+        assert(routeOf(root, 'open').dataset.loop === 'none' && flowSteps(root, 'open').every(step => !dotted(step)), 'an open path is dotted');
+        // Dotted means loop only: nothing else in the graph is dashed.
+        // No other drawn flow is dotted: of the drawn flows' steps, exactly the loop steps are.
+        const steps = [...root.querySelectorAll('.ag-route-step')];
+        assert(steps.every(step => (getComputedStyle(step).strokeDasharray !== 'none') === (step.dataset.step === 'loop')), 'a drawn step is dotted without being a loop step, or the other way round');
+      });
+    });
+    await test('rule A: a full loop\'s agents move onto an even circle in path order, drag together, and go back exactly when the loop is removed or undone; the orchestrator never moves and an agent on another ring stays', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      await using(data, async (root, app) => {
+        const names = ['impl-hard', 'reviewer', 'verifier', 'oracle'], all = [...root.querySelectorAll('[data-agent]')].map(node => node.dataset.agent);
+        const before = Object.fromEntries(all.map(name => [name, at(root, name)]));
+        data.structure.flows.push({ id: 'ring', path: [...names, 'impl-hard'], text: 'r', source: 'drawn' }); await app.refresh(); await settled();
+        const points = names.map(name => at(root, name)), cx = points.reduce((s, p) => s + p[0], 0) / 4, cy = points.reduce((s, p) => s + p[1], 0) / 4;
+        const radii = points.map(p => Math.hypot(p[0] - cx, p[1] - cy)), angles = points.map(p => Math.atan2(p[1] - cy, p[0] - cx));
+        assert(Math.max(...radii) - Math.min(...radii) < 1, 'the ring is not a circle: ' + radii.map(Math.round));
+        const gaps = angles.map((angle, i) => { let d = angles[(i + 1) % 4] - angle; while (d <= 0) d += Math.PI * 2; return d; });
+        const order = gaps.every(gap => Math.abs(gap - Math.PI / 2) < .05) || gaps.map(g => Math.PI * 2 - g).every(gap => Math.abs(gap - Math.PI / 2) < .05);
+        assert(order, 'the agents are not evenly spaced in path order: ' + gaps.map(g => (g * 180 / Math.PI).toFixed(0)));
+        assert(near(at(root, 'orchestrator'), before.orchestrator), 'the orchestrator moved');
+        // A second loop sharing an agent: the shared agent stays on the first ring.
+        const placed = at(root, 'oracle');
+        data.structure.flows.push({ id: 'ring2', path: ['oracle', 'researcher', 'impl-openai', 'oracle'], text: 'q', source: 'drawn' }); await app.refresh(); await settled();
+        assert(near(at(root, 'oracle'), placed), 'an agent already on a ring moved for another');
+        data.structure.flows = data.structure.flows.filter(f => f.id !== 'ring2'); await app.refresh(); await settled();
+        // Dragging one moves the whole ring.
+        const ringBefore = names.map(name => at(root, name));
+        // In the first of eight directions with room (the canvas edge and the other agents stop a move).
+        for (let k = 0; k < 8 && near(at(root, 'reviewer'), ringBefore[1]); k++) {
+          const from = centre(root, 'reviewer'), angle = k * Math.PI / 4;
+          dragTo(root, 'reviewer', { x: from.x + 25 * Math.cos(angle), y: from.y + 25 * Math.sin(angle) }); await settled();
+        }
+        const dx = at(root, 'reviewer')[0] - ringBefore[1][0], dy = at(root, 'reviewer')[1] - ringBefore[1][1];
+        assert(Math.hypot(dx, dy) > 5 && names.every((name, i) => Math.abs(at(root, name)[0] - ringBefore[i][0] - dx) < 1 && Math.abs(at(root, name)[1] - ringBefore[i][1] - dy) < 1), 'dragging one agent did not move the whole ring');
+        // Removing the loop puts every agent back exactly.
+        data.structure.flows = data.structure.flows.filter(f => f.id !== 'ring'); await app.refresh(); await settled();
+        all.forEach(name => assert(near(at(root, name), before[name]), name + ' is not back where it was: ' + before[name] + ' → ' + at(root, name)));
+      }, { actions: host.actions });
+      // Undo of the flow that made the ring does the same.
+      const second = worldFixture(), drawing = worldHost(second);
+      await using(second, async root => {
+        const all = [...root.querySelectorAll('[data-agent]')].map(node => node.dataset.agent), before = Object.fromEntries(all.map(name => [name, at(root, name)]));
+        ['impl-hard', 'reviewer', 'verifier'].forEach(name => tap(root, name)); tap(root, 'impl-hard'); press(viewportOf(root), 'Enter'); await settled(); await settle();
+        assert(second.structure.flows.length === 1 && second.structure.flows[0].path.join() === 'impl-hard,reviewer,verifier,impl-hard', 'the loop was not drawn: ' + drawing.calls.join(' | '));
+        assert(!near(at(root, 'verifier'), before.verifier) || !near(at(root, 'reviewer'), before.reviewer), 'the loop did not move its agents');
+        root.querySelector('.ag-close').click(); viewportOf(root).focus(); undoKey(viewportOf(root)); await settled(); await settle();
+        assert(!second.structure.flows.length, 'undo did not remove the loop');
+        all.forEach(name => assert(near(at(root, name), before[name]), name + ' is not back after undo: ' + before[name] + ' → ' + at(root, name)));
+      }, { actions: drawing.actions });
+    });
+    await test('rule A: moving onto the ring is one transition under 300 ms, and none with reduced motion', async () => {
+      for (const motion of ['full', 'none']) {
+        const data = worldFixture();
+        await using(data, async (root, app) => {
+          const start = at(root, 'verifier'), samples = [];
+          data.structure.flows.push({ id: 'ring', path: ['impl-hard', 'reviewer', 'verifier', 'impl-hard'], text: 'r', source: 'drawn' });
+          const begun = performance.now(); await app.refresh();
+          await new Promise(resolve => { const tick = () => { samples.push([performance.now() - begun, at(root, 'verifier')]); if (performance.now() - begun < 600) requestAnimationFrame(tick); else resolve(); }; tick(); });
+          const end = samples.at(-1)[1], moving = samples.filter(([, p]) => !near(p, end));
+          assert(!near(start, end), motion + ': the agent did not move onto the ring');
+          if (motion === 'none') assert(!moving.length, 'with reduced motion the move is not instant: ' + moving.length + ' frames');
+          else {
+            assert(moving.length >= 2, 'with motion the move is not a transition');
+            assert(moving.at(-1)[0] < 300, 'the transition takes ' + Math.round(moving.at(-1)[0]) + ' ms');
+            // One transition: the distance to the end only shrinks.
+            const left = moving.map(([, p]) => Math.hypot(p[0] - end[0], p[1] - end[1]));
+            assert(left.every((d, i) => i === 0 || d <= left[i - 1] + .5), 'the move is not one transition: ' + moving.map(([t, p]) => Math.round(t) + ':' + Math.hypot(p[0] - end[0], p[1] - end[1]).toFixed(1)).join(' '));
+          }
+        }, { motion });
+      }
+    });
+    // Rule B: a point on a line (screen px) and the unit normal there, for a hit band or a drawn line.
+    function onLine(shape, fraction) {
+      const m = shape.getScreenCTM(), P = q => ({ x: q.x * m.a + q.y * m.c + m.e, y: q.x * m.b + q.y * m.d + m.f });
+      if (shape.tagName === 'line') {
+        const a = P({ x: +shape.getAttribute('x1'), y: +shape.getAttribute('y1') }), b = P({ x: +shape.getAttribute('x2'), y: +shape.getAttribute('y2') });
+        const p = { x: a.x + (b.x - a.x) * fraction, y: a.y + (b.y - a.y) * fraction }, d = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+        return { p, n: { x: -(b.y - a.y) / d, y: (b.x - a.x) / d } };
+      }
+      const l = shape.getTotalLength(), p = P(shape.getPointAtLength(l * fraction)), q = P(shape.getPointAtLength(Math.min(l, l * fraction + 1))), d = Math.hypot(q.x - p.x, q.y - p.y) || 1;
+      return { p, n: { x: -(q.y - p.y) / d, y: (q.x - p.x) / d } };
+    }
+    const ownerAt = (root, p) => document.elementFromPoint(p.x, p.y)?.closest('[data-route], [data-team-line], [data-loop-id], [data-work-loop-id], [data-agent]');
+    // Where the band of `owner` takes points 7 px either side of its line (a 14 px band) at some point along it.
+    function bandHolds(root, owner, shape) {
+      for (const fraction of [.5, .4, .6, .3, .7, .25, .75, .2, .8]) {
+        const { p, n } = onLine(shape, fraction), sides = [7, -7].map(off => ({ x: p.x + n.x * off, y: p.y + n.y * off }));
+        // An agent drawn over the band (a work loop hugs its agent) is not another line taking the click.
+        if (ownerAt(root, p) === owner && sides.every(q => ownerAt(root, q) === owner || ownerAt(root, q)?.matches('[data-agent]'))) return true;
+      }
+      return false;
+    }
+    await test('rule B: every flow, loop and group line has a click band at least 14 screen px wide at any zoom, and where bands overlap the nearer line wins', async () => {
+      const data = loopFixture(worldFixture([{ id: 'f1', path: ['impl-hard', 'reviewer', 'verifier'], text: 'a', source: 'drawn' }, { id: 'ring', path: ['oracle', 'researcher', 'oracle'], text: 'b', source: 'drawn' }]));
+      data.structure.teams = [{ id: 't1', lead: 'impl-claude', members: ['impl-openai'], text: '' }];
+      data.graph.work_loops = [{ agent: 'impl-hard', nodes: [], rounds: 2, state: 'working', active: true }];
+      const host = worldHost(data);
+      await using(data, async root => {
+        for (const zoom of ['', '+', '+', '-', '-', '-', '-']) {
+          if (zoom) { viewportOf(root).focus(); press(viewportOf(root), zoom); await settle(); }
+          const scale = root.querySelector('.ag-drawing > g').getCTM().a;
+          const lines = [[routeOf(root, 'f1'), routeOf(root, 'f1').querySelector('.ag-route-step')], [routeOf(root, 'ring'), routeOf(root, 'ring').querySelector('.ag-route-step')],
+            [root.querySelector('[data-team-line]'), root.querySelector('[data-team-line] .ag-team-edge')], [root.querySelector('[data-loop-id]'), root.querySelector('[data-loop-id] .ag-loop-half')],
+            [root.querySelector('[data-work-loop-id]'), root.querySelector('[data-work-loop-id] .ag-work-loop-edge')]];
+          lines.forEach(([owner, shape], i) => assert(owner && shape && bandHolds(root, owner, shape), 'line ' + i + ' (' + (owner?.getAttribute('class') || 'missing') + ') has no 14 px band at scale ' + scale.toFixed(2)));
+        }
+      }, { actions: host.actions });
+      // Two flows on one pair, drawn side by side: their bands overlap, and a click goes to the nearer one.
+      const pair = worldFixture([{ id: 'there', path: ['impl-hard', 'reviewer'], text: 'a', source: 'drawn' }, { id: 'back', path: ['reviewer', 'impl-hard'], text: 'b', source: 'drawn' }]), drawing = worldHost(pair);
+      await using(pair, async root => {
+        const a = routeOf(root, 'there').querySelector('.ag-route-step'), b = routeOf(root, 'back').querySelector('.ag-route-step');
+        const { p } = onLine(a, .5), { p: q } = onLine(b, .5), gap = Math.hypot(q.x - p.x, q.y - p.y);
+        assert(gap > 3 && gap < 14, 'the test needs two lines closer than a band: ' + gap.toFixed(1));
+        const towards = (from, to, by) => ({ x: from.x + (to.x - from.x) / gap * by, y: from.y + (to.y - from.y) / gap * by });
+        clickAt(root, towards(p, q, 1)); await settle();
+        assert(picked(root, 'there') && !picked(root, 'back'), 'a click 1 px from one line picked the other');
+        clickAt(root, towards(q, p, 1)); await settle();
+        assert(picked(root, 'back') && !picked(root, 'there'), 'a click 1 px from the other line picked the first');
+      }, { actions: drawing.actions });
+    });
+    await test('rule B: a click anywhere on a flow or a loop picks all of it and Delete removes it; hover marks the whole of it and fades the others; a hand on what can be picked, a grab hand on what can be moved', async () => {
+      const data = worldFixture([{ id: 'f1', path: ['impl-hard', 'reviewer', 'verifier'], text: 'a', source: 'drawn' }, { id: 'ring', path: ['oracle', 'researcher', 'oracle'], text: 'b', source: 'drawn' }]), host = worldHost(data);
+      await using(data, async root => {
+        clickStep(root, 'f1', 1); await settle();
+        assert(picked(root, 'f1') && flowSteps(root, 'f1').every(step => Number(getComputedStyle(step).strokeWidth.replace('px', '')) > 2.1), 'a click on the second step did not pick the whole flow');
+        press(viewportOf(root), 'Delete'); await settled();
+        assert(host.calls.at(-1) === 'flow ' + JSON.stringify({ op: 'remove', id: 'f1' }), 'Delete did not remove the picked flow: ' + host.calls.join(' | '));
+        assert(!routeOf(root, 'f1'), 'the picked flow was not removed');
+        clickStep(root, 'ring', 0); await settle();
+        assert(picked(root, 'ring'), 'a click on a loop did not pick it');
+        press(viewportOf(root), 'Delete'); await settled();
+        assert(!routeOf(root, 'ring'), 'Delete did not remove the picked loop');
+      }, { actions: host.actions });
+      const second = worldFixture([{ id: 'f1', path: ['impl-hard', 'reviewer', 'verifier'], text: 'a', source: 'drawn' }, { id: 'f2', path: ['oracle', 'researcher'], text: 'b', source: 'drawn' }]);
+      await using(second, async root => {
+        const p = stepPoint(root, 'f1', 0);
+        pointerOn(viewportOf(root), 'pointermove', 1, p); await settle();
+        const steps = flowSteps(root, 'f1'), widths = steps.map(step => getComputedStyle(step).strokeWidth);
+        assert(routeOf(root, 'f1').dataset.hover === 'true' && Number(getComputedStyle(routeOf(root, 'f2')).opacity) < .5 && Number(getComputedStyle(routeOf(root, 'f1')).opacity) === 1, 'hovering one step did not mark the flow and fade the others');
+        assert(widths.every(width => width === widths[0]) && Number(widths[1].replace('px', '')) > 2.1, 'hover did not mark every step of the flow');
+        assert(Number(getComputedStyle(nodeOf(root, 'oracle')).opacity) === 1, 'hover faded an agent');
+        viewportOf(root).dispatchEvent(new PointerEvent('pointerleave', { pointerId: 1, pointerType: 'mouse' })); await settle();
+        assert(!routeOf(root, 'f1').dataset.hover && Number(getComputedStyle(routeOf(root, 'f2')).opacity) === 1, 'the hover stayed after the pointer left');
+        const cursor = selector => getComputedStyle(root.querySelector(selector)).cursor;
+        assert(cursor('.ag-route-hit') === 'pointer' && cursor('[data-agent="impl-hard"]') === 'grab' && cursor('.ag-viewport') === 'grab' && cursor('.ag-add') === 'pointer', 'cursors: ' + ['.ag-route-hit', '[data-agent="impl-hard"]', '.ag-viewport', '.ag-add'].map(cursor).join());
+      }, { actions: worldHost(second).actions });
+    });
+    await test('rule D2: undo works straight after a line is deleted with its own focus and after a skill is removed with the mouse; focus stays in the view', async () => {
+      const data = worldFixture([{ id: 'f1', path: ['impl-hard', 'reviewer'], text: 'a', source: 'drawn' }]), host = worldHost(data);
+      await using(data, async root => {
+        const route = routeOf(root, 'f1');
+        pointerOn(route, 'pointerdown', 1, stepPoint(root, 'f1', 0)); route.focus(); press(route, 'Delete'); await settled();
+        assert(!routeOf(root, 'f1'), 'Delete on the focused line did not remove it');
+        assert(root.contains(document.activeElement), 'focus fell out of the view after the line went: ' + document.activeElement?.tagName);
+        undoKey(document.activeElement === document.body ? document.body : document.activeElement); await settled();
+        assert(data.structure.flows.length === 1 && data.structure.flows[0].path.join() === 'impl-hard,reviewer', 'undo straight after deleting the line did nothing');
+        open(root, 'impl-openai'); await settle();
+        const remove = skillButton(root, 'remove:alpha');
+        pointerOn(remove, 'pointerdown', 1, middleOf(remove)); remove.focus(); remove.click(); await settled();
+        assert(!data.agents.find(a => a.name === 'impl-openai').skills.includes('alpha'), 'the skill was not removed');
+        assert(root.contains(document.activeElement), 'focus fell out of the view after the skill row changed');
+        // Even with focus on the page itself, Ctrl/Cmd+Z reaches the view (the last thing touched was in it).
+        document.activeElement.blur(); undoKey(document.body); await settled();
+        assert(data.agents.find(a => a.name === 'impl-openai').skills.includes('alpha'), 'undo from the page did not reach the view');
+      }, { actions: host.actions });
+    });
+    await test('rule D3: a flow\'s and a group\'s instruction save by themselves after a short pause in typing and when the page is hidden, and the state never asks the user to save', async () => {
+      const data = worldFixture([{ id: 'f1', path: ['impl-hard', 'reviewer'], text: 'Old.', source: 'drawn' }]), host = worldHost(data);
+      data.structure.teams = [{ id: 't1', lead: 'impl-claude', members: ['oracle'], text: 'Group words.' }];
+      await using(data, async root => {
+        openStep(root, 'f1'); await settle();
+        const box = root.querySelector('[data-route-text]'), state = () => root.querySelector('.ag-route-state')?.textContent || '';
+        box.focus(); box.value = 'New words.'; box.dispatchEvent(new Event('input', { bubbles: true })); await sleep(100);
+        assert(!host.calls.length && !/not saved/i.test(state()) && state() === 'Saving', 'the pending state asks for something: ' + state());
+        await sleep(900);
+        assert(host.calls.at(-1) === 'flow ' + JSON.stringify({ op: 'text', id: 'f1', text: 'New words.' }), 'the pause did not save: ' + host.calls.join(' | '));
+        box.value = 'Newer words.'; box.dispatchEvent(new Event('input', { bubbles: true }));
+        window.dispatchEvent(new PageTransitionEvent('pagehide')); await settle();
+        assert(host.calls.at(-1) === 'flow ' + JSON.stringify({ op: 'text', id: 'f1', text: 'Newer words.' }), 'pagehide did not save what was typed');
+        open(root, 'impl-claude'); await settle();
+        const team = root.querySelector('[data-team-text]');
+        team.focus(); team.value = 'Report daily.'; team.dispatchEvent(new Event('input', { bubbles: true })); await sleep(1000);
+        assert(host.calls.at(-1) === 'team ' + JSON.stringify({ op: 'text', id: 't1', text: 'Report daily.' }), 'the group instruction did not save after a pause: ' + host.calls.at(-1));
+      }, { actions: host.actions });
+    });
+    await test('rule D4: a removed skill keeps its row in place until the pointer leaves the list or a second passes, so a second click lands on nothing', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      data.agents.find(a => a.name === 'impl-openai').skills = ['alpha', 'beta', 'gamma'];
+      await using(data, async root => {
+        open(root, 'impl-openai'); await settle();
+        const listed = () => skillRows(root).filter(row => !row.closest('details')).map(row => row.dataset.skill + (row.dataset.removed ? '-' : ''));
+        const remove = skillButton(root, 'remove:alpha'), spot = middleOf(remove);
+        remove.click(); await settled();
+        assert(listed().join() === 'alpha-,beta,gamma', 'the removed row did not keep its place: ' + listed());
+        const under = document.elementFromPoint(spot.x, spot.y), count = host.calls.length;
+        under?.click(); await settled();
+        assert(host.calls.length === count && data.agents.find(a => a.name === 'impl-openai').skills.join() === 'beta,gamma', 'a second click on the same spot removed another skill');
+        skillSectionOf(root).dispatchEvent(new PointerEvent('pointerleave')); await settle();
+        assert(listed().join() === 'beta,gamma', 'the row stayed after the pointer left the list: ' + listed());
+        skillButton(root, 'remove:beta').click(); await settled();
+        assert(listed().join() === 'beta-,gamma', 'the second removal did not keep its row');
+        await sleep(1100);
+        assert(listed().join() === 'gamma', 'the row stayed after a second: ' + listed());
+      }, { actions: host.actions });
+    });
+    await test('rule D5: a skill change says it goes to every preset; a refusal is never clipped; undo puts the skill back where it was in the list', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      await using(data, async root => {
+        open(root, 'impl-openai'); await settle();
+        skillButton(root, 'remove:alpha').click(); await settled();
+        assert(skillLines(root).some(line => /every preset/.test(line)), 'the line does not say the change goes to every preset: ' + skillLines(root));
+        undoKey(viewportOf(root)); await settled(); await sleep(1100);
+        const listed = skillRows(root).filter(row => !row.closest('details')).map(row => row.dataset.skill);
+        assert(data.agents.find(a => a.name === 'impl-openai').skills.join() === 'beta,alpha' && listed.join() === 'alpha,beta', 'undo did not put alpha back first: ' + listed);
+      }, { actions: host.actions });
+      const refused = worldFixture();
+      refused.agents.find(a => a.name === 'impl-openai').about = 'Long. '.repeat(260);
+      await using(refused, async root => {
+        await resizeTo(root, 900, 600);
+        open(root, 'impl-openai'); await settle();
+        skillButton(root, 'remove:alpha').click(); await settled(); await settle();
+        const line = root.querySelector('.ag-skill-note[data-kind="error"]'), panel = root.querySelector('.ag-detail-scroll').getBoundingClientRect(), b = line?.getBoundingClientRect();
+        assert(line && b.top >= panel.top - .5 && b.bottom <= panel.bottom + .5 && line.scrollWidth <= line.clientWidth + 1, 'the refusal is clipped or off screen: ' + JSON.stringify([b, panel]));
+      }, { actions: { ...worldHost(refused).actions, skills: skillHost(refused, { fail: 'SKILLS.md does not match the config; nothing was changed. ' + 'Fix the map first, then try again. '.repeat(3) }).skills } });
+    });
+    await test('rule D6: nothing in the graph can be selected as text; the details can', async () => {
+      const data = worldFixture();
+      await using(data, async root => {
+        const none = element => { const style = getComputedStyle(element); return (style.userSelect || style.webkitUserSelect) === 'none'; };
+        assert(none(viewportOf(root)) && [...root.querySelectorAll('.ag-drawing text')].every(none), 'graph text can be selected');
+        open(root, 'impl-hard'); await settle();
+        assert(!none(root.querySelector('.ag-detail-title')), 'the details cannot be selected');
+      });
+    });
+    const luminance = color => { const [r, g, b] = color.match(/[\d.]+/g).slice(0, 3).map(Number).map(v => v / 255).map(v => v <= .03928 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4); return .2126 * r + .7152 * g + .0722 * b; };
+    const contrast = (a, b) => { const x = luminance(a), y = luminance(b); return (Math.max(x, y) + .05) / (Math.min(x, y) + .05); };
+    await test('rule D9: wheel zoom stops before names go under 8 px; a selected busy agent shows its ring; the "! N" marker is named and explained; every Tab stop has a name', async () => {
+      const data = worldFixture([{ id: 'f1', path: ['impl-hard', 'reviewer'], text: 'a', source: 'drawn' }]), host = worldHost(data);
+      data.structure.teams = [{ id: 't1', lead: 'impl-claude', members: ['oracle'], text: '' }];
+      data.graph.nodes.push(step('bad-1', 'reviewer', { status: 'failed' }), step('bad-2', 'verifier', { status: 'blocked' }), step('bad-3', 'researcher', { status: 'failed' }));
+      data.totals = { ...data.totals, cost: 3.21, tokens_in: 12345, tokens_out: 678 }; data.root = { agent: 'orchestrator', context: 64000 };
+      await using(data, async root => {
+        const scale = () => root.querySelector('.ag-drawing > g').getCTM().a, centre0 = middleOf(viewportOf(root));
+        for (let i = 0; i < 40; i++) viewportOf(root).dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 160, clientX: centre0.x, clientY: centre0.y }));
+        const name = parseFloat(getComputedStyle(root.querySelector('[data-agent="impl-hard"] .ag-agent-name')).fontSize) * scale();
+        assert(name >= 8 - .01, 'wheel zoom took names to ' + name.toFixed(2) + ' px');
+        root.querySelector('.ag-fit').click(); await settle();
+        // The selected busy agent's ring.
+        open(root, 'impl-openai'); await settle();
+        const halo = getComputedStyle(nodeOf(root, 'impl-openai').querySelector('.ag-halo')), work = (() => { const i = document.createElement('i'); i.style.color = getComputedStyle(root).getPropertyValue('--ag-work').trim(); root.append(i); const c = getComputedStyle(i).color; i.remove(); return c; })();
+        assert(halo.stroke === work && parseFloat(halo.strokeWidth) >= 2, 'the selected busy agent shows no ring: ' + halo.stroke + ' ' + halo.strokeWidth);
+        // The marker.
+        const marker = root.querySelector('.ag-attention');
+        assert(!marker.hidden && marker.textContent === '! 3' && /3 agents need attention/.test(marker.getAttribute('aria-label')) && /3 agents need attention/.test(marker.title), 'the marker has no name that says what it counts');
+        marker.click(); await settle();
+        assert(root.querySelector('.ag-attention-key')?.textContent.includes('! 3'), 'the run details do not explain the marker');
+        open(root, 'reviewer'); await settle();
+        assert(root.querySelector('.ag-attention-note')?.textContent.startsWith('Needs attention: Failed'), 'the agent does not explain its mark');
+        // Every Tab stop has a name.
+        const tabbable = [...root.querySelectorAll('a[href], button, input, select, textarea, summary, [tabindex]')].filter(element => element.tabIndex >= 0 && !element.disabled && element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden' && !element.closest('[hidden]'));
+        const nameOf = element => (element.getAttribute('aria-label') || (element.getAttribute('aria-labelledby') && document.getElementById(element.getAttribute('aria-labelledby'))?.textContent) || element.closest('label')?.textContent || element.getAttribute('title') || element.querySelector(':scope > title')?.textContent || (element.matches('button, a, summary, [role="button"], [role="menuitem"], [role="option"], [role="tab"]') ? element.textContent : '') || '').trim();
+        const unnamed = tabbable.filter(element => !nameOf(element)).map(element => element.tagName + '.' + element.getAttribute('class'));
+        assert(tabbable.length > 10 && !unnamed.length, 'Tab stops without a name: ' + unnamed.join(', '));
+      }, { actions: host.actions });
+    });
+    await test('rule D9: every piece of small text reaches 4.5:1 on what it sits on, in light and in dark', async () => {
+      for (const scheme of ['light', 'dark']) {
+        const data = worldFixture([{ id: 'f1', path: ['impl-hard', 'reviewer'], text: 'a', source: 'drawn' }]);
+        data.graph.nodes.push(step('bad-1', 'reviewer', { status: 'failed' }));
+        data.totals = { ...data.totals, cost: 3.21, tokens_in: 12345, tokens_out: 678 }; data.root = { agent: 'orchestrator', context: 64000 };
+        await using(data, async root => {
+          // Contrast: every visible piece of HTML text of 12 px or less, over the background it sits on
+          // (the nearest ancestor with an opaque background, else the canvas), reaches 4.5:1. Checked with the run
+          // details and with an agent's details open.
+          const opaque = color => { const m = color.match(/[\d.]+/g); return m && (m.length < 4 || Number(m[3]) > .9); };
+          const backOf = element => { for (let e = element; e && e !== document.documentElement; e = e.parentElement) { const bg = getComputedStyle(e).backgroundColor; if (opaque(bg)) return bg; } const probe = document.createElement('i'); probe.style.color = getComputedStyle(root).getPropertyValue('--ag-canvas-bg').trim(); root.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; };
+          const lowText = () => [...root.querySelectorAll('*')].filter(element => !(element instanceof SVGElement) && [...element.childNodes].some(n => n.nodeType === 3 && n.textContent.trim()) && element.getClientRects().length && parseFloat(getComputedStyle(element).fontSize) <= 12 && getComputedStyle(element).visibility !== 'hidden' && !element.closest('[hidden], .ag-sr-only, [disabled], [data-removed]')).map(element => [element, contrast(getComputedStyle(element).color, backOf(element))]).filter(([, ratio]) => ratio < 4.5).map(([element, ratio]) => element.tagName + '.' + element.className + ' ' + ratio.toFixed(2));
+          const low = [...lowText()];
+          root.querySelector('.ag-run-button').click(); await settle(); low.push(...lowText());
+          open(root, 'impl-hard'); await settle(); low.push(...lowText());
+          assert(!low.length, scheme + ': small text under 4.5:1: ' + [...new Set(low)].slice(0, 6).join(', '));
+        }, { actions: worldHost(data).actions, scheme });
+      }
+    });
+    await test('rule D9: a double-click on an agent draws its loop with the ring kept on in between (no flicker)', async () => {
+      const data = worldFixture(), host = flowHost(data, { gate: () => sleep(80) });
+      await using(data, async root => {
+        const frames = [], node = nodeOf(root, 'impl-hard');
+        let done = false;
+        // The ring as drawn: the armed (and pending) ring is a 2.4 px halo.
+        const watch = () => { frames.push({ ring: parseFloat(getComputedStyle(node.querySelector('.ag-halo')).strokeWidth) >= 2.3, loop: !!root.querySelector('[data-route][data-loop="self"]') }); if (!done) requestAnimationFrame(watch); };
+        realPress(root, 'impl-hard'); requestAnimationFrame(watch);
+        await sleep(30); realPress(root, 'impl-hard', { detail: 2 });
+        await sleep(300); done = true; await settle();
+        const first = frames.findIndex(frame => frame.loop);
+        assert(first > 0, 'the loop was not drawn: ' + host.calls.length);
+        assert(frames.slice(0, first).every(frame => frame.ring), 'the ring went off before the loop was drawn: ' + frames.map(frame => (frame.ring ? 'R' : '.') + (frame.loop ? 'L' : '')).join(''));
+      }, { actions: { flow: host.flow } });
+    });
+    await test('rule D1: the demo\'s "cannot change" is shown like any refusal: in the details error line and the live region, and the red ring clears', async () => {
+      const data = worldFixture(), host = flowHost(data, { fail: 'the demo cannot change the structure' });
+      await using(data, async root => {
+        tap(root, 'impl-hard'); tap(root, 'reviewer'); press(viewportOf(root), 'Enter'); await settled();
+        const line = root.querySelector('.ag-detail .ag-agent-note[data-kind="error"]');
+        assert(detailOpen(root) && line?.textContent === 'the demo cannot change the structure' && line.getAttribute('role') === 'alert', 'the refusal is not in the details');
+        assert(root.querySelector('.ag-sr-only[aria-live]').textContent.includes('the demo cannot change the structure'), 'the refusal is not announced');
+        await sleep(450);
+        const danger = (() => { const i = document.createElement('i'); i.style.color = getComputedStyle(root).getPropertyValue('--ag-danger').trim(); root.append(i); const c = getComputedStyle(i).color; i.remove(); return c; })();
+        assert([...root.querySelectorAll('.ag-halo')].every(halo => getComputedStyle(halo).stroke !== danger), 'a red ring stays');
+      }, { actions: { flow: host.flow } });
     });
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
   })().catch(error => { document.getElementById('results').textContent = 'RESULT: FAIL ' + error.stack; });

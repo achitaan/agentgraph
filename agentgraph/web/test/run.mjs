@@ -44,7 +44,7 @@ async function runPage(shard) {
     const loaded = new Promise(resolve => socket.addEventListener('message', function onLoad(event) {
       if (JSON.parse(event.data).method === 'Page.loadEventFired') { socket.removeEventListener('message', onLoad); resolve(); }
     }));
-    await call('Page.navigate', { url: pathToFileURL(work + '/view-test.html').href + '?shard=' + shard + '&shards=' + SHARDS });
+    await call('Page.navigate', { url: pathToFileURL(work + '/view-test.html').href + '?shard=' + shard + '&shards=' + SHARDS + (process.env.AGENTGRAPH_VIEW_ONLY ? '&only=' + encodeURIComponent(process.env.AGENTGRAPH_VIEW_ONLY) : '') });
     await loaded;
     const result = await call('Runtime.evaluate', {
       expression: `new Promise(resolve => { const timer = setInterval(() => { const value = document.getElementById('results')?.textContent; if (value && !value.includes('RESULT: RUNNING')) { clearInterval(timer); resolve(value); } }, 30); })`,

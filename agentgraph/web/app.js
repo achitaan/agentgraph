@@ -2,7 +2,9 @@
   'use strict';
   const NS = 'http://www.w3.org/2000/svg';
   const LIST_LIMIT = 200;
-  const EDGE = 12, SLOT = 104, GROUP_GAP = 34, SEAT_DISTANCE = 68;
+  const EDGE = 12, SLOT = 104, GROUP_GAP = 34, SEAT_DISTANCE = 68, MEMBER_DISTANCE = 96, MEMBER_REACH = 40;
+  // A full loop's agents sit on a circle of their own: neighbours RING_GAP apart, the circle never under RING_MIN.
+  const RING_GAP = 124, RING_MIN = 82, RING_MS = 240;
   const DETAIL_WIDTH = 340; // the details panel beside a wide graph (style.css: .ag-details-open .ag-network margin)
   const READABLE = 11 / 12; // agent names are 12 px: the automatic view never shows them under 11 px; it pans instead
   let instance = 0;
@@ -71,6 +73,14 @@
     // Skill changes asked of the host: the one pending per agent ("add:NAME", "remove:NAME" or "all"), the host's
     // answer until a snapshot shows it, and the lines said under the agent's skills after an answer.
     const skillPending = new Map(), skillOverride = new Map(), skillNotes = new Map();
+    // The three back ends the details panel writes through (WEB_API.md): agents (add, remove, restore), skill text
+    // (read, write, create, delete, restore) and groups ("teams" in code and files: add, members, text, remove).
+    const action = name => options.actions && typeof options.actions[name] === 'function' ? options.actions[name] : null;
+    const rosterAction = action('roster'), skillfileAction = action('skillfile'), teamAction = action('team');
+    // Lines said in an agent's details after a change to it (added, a refused delete); the open skill's text; the
+    // form a new group is being chosen in; the group line a left click picked (the target of Delete).
+    const agentNotes = new Map();
+    let skillView = null, teamDraft = null, pickedMember = '', formBusy = false;
     if (flowAction) root.dataset.agFlows = 'draw';
     const MOVE_PX = 5, NUDGE_PX = 12, LONG_PRESS_MS = 500, DOUBLE_MS = 500, UNDO_STEPS = 10, FLOW_TEXT_CHARS = 2000;
     // A touch press that may become a long press (details), and whether the browser's contextmenu event that a
@@ -144,7 +154,8 @@
     const viewport = el('div', 'ag-viewport');
     viewport.tabIndex = 0;
     viewport.setAttribute('role', 'group');
-    viewport.setAttribute('aria-keyshortcuts', 'F R + - ArrowUp ArrowDown ArrowLeft ArrowRight Shift+Enter');
+    viewport.setAttribute('aria-label', 'Agent network');
+    viewport.setAttribute('aria-keyshortcuts', 'F R N + - ArrowUp ArrowDown ArrowLeft ArrowRight Shift+Enter');
     const drawing = svg('svg', { class: 'ag-drawing', width: '100%', height: '100%', 'aria-label': 'Agents' });
     const defs = svg('defs');
     ['data', 'feedback', 'loop', 'work', 'work-stuck', 'work-closed', 'data-live', 'feedback-live', 'loop-live', 'work-live', 'route'].forEach(kind => {
@@ -159,10 +170,15 @@
     const nodeLayer = svg('g', { class: 'ag-nodes' });
     const loopLayer = svg('g', { class: 'ag-loops' });
     const routeLayer = svg('g', { class: 'ag-routes' });
+    // A group's lead joined to each member (WEB_API.md): drawn under the flows, picked by a left click like a flow.
+    const teamLayer = svg('g', { class: 'ag-teams' });
     const trailLayer = svg('g', { class: 'ag-trail', 'aria-hidden': 'true' });
     const wire = svg('line', { class: 'ag-wire', 'aria-hidden': 'true' });
     wire.style.display = 'none';
-    stage.append(edgeLayer, loopLayer, routeLayer, trailLayer, wire, nodeLayer); drawing.append(defs, stage);
+    // The agent being added: a circle under the pointer until it is dropped, then the details name it.
+    const draftLayer = svg('g', { class: 'ag-drafts', 'aria-hidden': 'true' });
+    stage.append(edgeLayer, teamLayer, loopLayer, routeLayer, trailLayer, wire, nodeLayer, draftLayer); drawing.append(defs, stage);
+    const teamLines = new Map(); // "id\nmember" -> { group, hit, line, team, member }
     const empty = el('div', 'ag-empty', 'Loading');
     viewport.append(drawing, empty);
     const panCue = el('button', 'ag-pan-cue');
@@ -174,7 +190,13 @@
     [[fit, 'Fit'], [runDetails, 'Run details']].forEach(([button, label]) => {
       button.type = 'button'; button.setAttribute('aria-label', label); button.title = label;
     });
-    controls.append(fit, runDetails);
+    // The + adds an agent: a glyph (no words) that opens a small menu of starting points anchored to it.
+    const plus = el('button', 'ag-control ag-add', '+');
+    plus.type = 'button'; plus.hidden = true; plus.setAttribute('aria-label', 'Add an agent'); plus.title = 'Add an agent';
+    plus.setAttribute('aria-haspopup', 'menu'); plus.setAttribute('aria-expanded', 'false'); plus.setAttribute('aria-keyshortcuts', 'N');
+    const addMenu = el('div', 'ag-add-menu');
+    addMenu.hidden = true; addMenu.setAttribute('role', 'menu'); addMenu.setAttribute('aria-label', 'Add an agent');
+    controls.append(plus, fit, runDetails);
     const status = el('div', 'ag-status');
     const attention = el('button', 'ag-attention');
     attention.type = 'button'; attention.hidden = true; attention.setAttribute('aria-label', 'Needs attention');
@@ -198,7 +220,7 @@
     // The pending path, for assistive technology only: nothing is written in the graph area.
     const trailStatus = el('div', 'ag-sr-only');
     trailStatus.setAttribute('role', 'status'); trailStatus.setAttribute('aria-live', 'polite');
-    network.append(status, usage, viewport, controls, trailStatus);
+    network.append(status, usage, viewport, controls, addMenu, trailStatus);
     const detail = el('aside', 'ag-detail');
     detail.hidden = true; detail.setAttribute('aria-label', 'Details');
     const detailHeader = el('div', 'ag-detail-header');
@@ -216,6 +238,9 @@
       activity.dataset.active = String(working > 0);
       const alerts = snapshot ? attentionAgents().size : 0;
       attention.hidden = !alerts; attention.textContent = alerts ? '! ' + alerts : '';
+      // The marker says what it counts; its details list them.
+      const said = alerts === 1 ? '1 agent needs attention' : alerts + ' agents need attention';
+      attention.setAttribute('aria-label', alerts ? said + ': open the run details' : 'Needs attention'); attention.title = alerts ? said : '';
       usage.hidden = !snapshot;
       if (!snapshot) return;
       usageCost.textContent = cost(snapshot.totals?.cost);
@@ -283,6 +308,46 @@
       panCue.textContent = below ? '↓' : '↑';
       panCue.setAttribute('aria-label', below ? 'More below' : 'More above');
     }
+    // The cost and context figures and the status line float over the top of the canvas, the controls over its
+    // lower corner (canvas coordinates, with a 2 px margin). The graph is placed clear of them wherever panning can.
+    function coverRects() {
+      const view = viewport.getBoundingClientRect();
+      return [usage, status, controls].filter(item => !item.hidden && item.getClientRects().length).map(item => {
+        const b = item.getBoundingClientRect();
+        return { left: b.left - view.left - 2, right: b.right - view.left + 2, top: b.top - view.top - 2, bottom: b.bottom - view.top + 2 };
+      }).filter(b => b.right - b.left > 6 && b.bottom - b.top > 6 && b.bottom > 0 && b.top < view.height);
+    }
+    // How far down the top band (the figures and the status line) reaches.
+    function topInset() { return Math.max(8, ...coverRects().filter(b => b.top < 24).map(b => b.bottom)); }
+    // After the camera is placed automatically: when a circle, name or count would sit under one of the covers,
+    // the smallest vertical (else horizontal) shift that clears every cover, within the pan limits (and keeping
+    // `keep`, the agent just brought into view, inside the canvas).
+    function clearOfCovers(keep) {
+      const covers = coverRects(), width = viewport.clientWidth, height = viewport.clientHeight, s = camera.scale;
+      if (!covers.length || !width || !height) return;
+      const boxes = visibleAgents.map(a => positions.get(a.name)).filter(Boolean).map(p => { const e = extentOf(p); return { left: (p.x + e.left) * s + camera.x, right: (p.x + e.right) * s + camera.x, top: (p.y + e.top) * s + camera.y, bottom: (p.y + e.bottom) * s + camera.y }; });
+      const hits = (dx, dy) => boxes.some(b => {
+        const l = Math.max(b.left + dx, 0), r = Math.min(b.right + dx, width), t = Math.max(b.top + dy, 0), d = Math.min(b.bottom + dy, height);
+        return r - l > .5 && d - t > .5 && covers.some(c => Math.min(r, c.right) - Math.max(l, c.left) > .5 && Math.min(d, c.bottom) - Math.max(t, c.top) > .5);
+      });
+      if (!hits(0, 0)) return;
+      const bounds = graphBounds(), limits = axis => {
+        if (arrangement !== 'compact' || !bounds) return axis === 'y' ? [-height * .3, height * .3] : [-width * .3, width * .3];
+        if (axis === 'y') return [height - 8 - bounds.bottom * s - camera.y, topInset() - bounds.top * s - camera.y].sort((a, b) => a - b);
+        return [width - 2 - bounds.right * s - camera.x, 2 - bounds.left * s - camera.x].sort((a, b) => a - b);
+      };
+      const shifts = axis => {
+        const [low, high] = limits(axis), out = new Set();
+        boxes.forEach(b => covers.forEach(c => { if (axis === 'y') { out.add(c.bottom - b.top + 1); out.add(c.top - b.bottom - 1); } else { out.add(c.right - b.left + 1); out.add(c.left - b.right - 1); } }));
+        return [...out].filter(d => d >= low - .01 && d <= high + .01).sort((a, b) => Math.abs(a) - Math.abs(b));
+      };
+      const kept = keep && (() => { const e = extentOf(keep); return { left: (keep.x + e.left) * s + camera.x, right: (keep.x + e.right) * s + camera.x, top: (keep.y + e.top) * s + camera.y, bottom: (keep.y + e.bottom) * s + camera.y }; })();
+      const inside = (dx, dy) => !kept || (kept.left + dx >= 0 && kept.right + dx <= width && kept.top + dy >= 0 && kept.bottom + dy <= height);
+      const dy = shifts('y').find(d => inside(0, d) && !hits(0, d));
+      if (dy !== undefined) { camera.y += dy; return; }
+      const dx = shifts('x').find(d => inside(d, 0) && !hits(d, 0));
+      if (dx !== undefined) camera.x += dx;
+    }
     // The sidebar keeps a readable scale: what does not fit is reached by
     // panning, and the picture stays centred on the orchestrator.
     function clampPan() {
@@ -290,15 +355,19 @@
       const bounds = graphBounds();
       if (!bounds) return;
       const width = viewport.clientWidth, height = viewport.clientHeight;
-      const top = 8 - bounds.top * camera.scale, bottom = height - 8 - bounds.bottom * camera.scale;
+      // Panned to the top, the topmost agent sits below the figures.
+      const top = topInset() - bounds.top * camera.scale, bottom = height - 8 - bounds.bottom * camera.scale;
       camera.y = bottom >= top ? (top + bottom) / 2 : clamp(camera.y, bottom, top);
       const left = 2 - bounds.left * camera.scale, right = width - 2 - bounds.right * camera.scale;
       camera.x = right >= left ? clamp(width / 2, left, right) : clamp(camera.x, right, left);
     }
+    // Zooming out stops before names go under 8 px (agent names are 12 px in the drawing); a view already smaller
+    // (Fit on a large graph) is never zoomed out further.
+    const NAME_FLOOR = 8 / 12;
     function zoomAt(next, x, y) {
       const rect = viewport.getBoundingClientRect();
       x = x === undefined ? rect.width / 2 : x; y = y === undefined ? rect.height / 2 : y;
-      next = clamp(next, .2, 3);
+      next = clamp(next, Math.min(NAME_FLOOR, camera.scale), 3);
       camera.x = x - (x - camera.x) * next / camera.scale;
       camera.y = y - (y - camera.y) * next / camera.scale;
       camera.scale = next; camera.touched = true; transform();
@@ -312,11 +381,12 @@
       const e = extentOf(point), s = camera.scale;
       const top = (point.y + e.top) * s + camera.y, bottom = (point.y + e.bottom) * s + camera.y;
       const left = (point.x + e.left) * s + camera.x, right = (point.x + e.right) * s + camera.x;
-      const outside = top < EDGE || bottom > height - EDGE || left < EDGE || right > width - EDGE;
+      const inset = Math.max(EDGE, topInset());
+      const outside = top < inset || bottom > height - EDGE || left < EDGE || right > width - EDGE;
       if (!outside) return;
-      if (top < EDGE || bottom > height - EDGE) camera.y += height / 2 - (top + bottom) / 2;
+      if (top < inset || bottom > height - EDGE) camera.y += (height + inset - EDGE) / 2 - (top + bottom) / 2;
       if (left < EDGE || right > width - EDGE) camera.x += width / 2 - (left + right) / 2;
-      clampPan(); transform();
+      clampPan(); clearOfCovers(point); transform();
     }
     function fitView(userAction) {
       if (!positions.size) return;
@@ -338,6 +408,7 @@
         camera.x = rect.width / 2 - (bounds.left + bounds.right) / 2 * camera.scale;
         camera.y = rect.height / 2 - (bounds.top + bounds.bottom) / 2 * camera.scale;
       }
+      clearOfCovers();
       camera.width = rect.width; camera.height = rect.height;
       camera.initialized = true;
       camera.touched = !!userAction;
@@ -459,6 +530,46 @@
       return flows().filter(f => f.from !== hubName && f.to !== hubName && allowedConnection(f.from, f.to) && !(['data', 'feedback'].includes(f.kind) && loopPairs.has(connectionKey(f.from, f.to))));
     }
     function displayName(agent) { return agent.parent ? agent.name.replace(/^councillor-/, '') : agent.name; }
+    // Groups from the structure folder (structure.teams): a lead and the agents that report to it.
+    function structureTeams() {
+      return (snapshot?.structure?.teams || []).filter(team => team && typeof team.id === 'string' && typeof team.lead === 'string' && Array.isArray(team.members))
+        .map(team => ({ id: team.id, lead: team.lead, members: team.members.filter(name => typeof name === 'string'), text: typeof team.text === 'string' ? team.text : '' }));
+    }
+    function teamById(id) { return structureTeams().find(team => team.id === id) || null; }
+    function teamLedBy(name) { return structureTeams().find(team => team.lead === name) || null; }
+    // An agent that can lead a group or sit in one: not the hub, not the council or one of its seats.
+    function ordinaryAgent(name) {
+      const agent = shownAgents.get(name);
+      return !!agent && name !== hubName && agent.group !== 'hub' && !isSeatAgent(agent) && !visibleAgents.some(other => other.parent === name);
+    }
+    // Members drawn round their lead (member -> lead): ordinary agents that lead no group, each in the first group
+    // that has it. Any other member keeps its place and is still joined to its lead.
+    function satellites(byAgent) {
+      const found = new Map(), leads = new Set(structureTeams().map(team => team.lead));
+      structureTeams().forEach(team => {
+        if (!byAgent.has(team.lead) || !ordinaryAgent(team.lead)) return;
+        team.members.forEach(name => { if (name !== team.lead && byAgent.has(name) && ordinaryAgent(name) && !leads.has(name) && !found.has(name)) found.set(name, team.lead); });
+      });
+      return found;
+    }
+    // The circles of full loops (see loopStart): for each drawn flow that closes, in the order the flows are listed,
+    // the agents on its ring and those of them that move onto it. The hub, the council and its seats, a group's
+    // members (drawn round their lead) and an agent already on an earlier loop's circle stay where they are and the
+    // ring is drawn through them. Keyed by its agents, so undoing a removal finds the same circle.
+    function loopRings(byAgent, orbit) {
+      const claimed = new Set(), rings = [];
+      routes().forEach(flow => {
+        const start = loopStart(flow.path);
+        if (start < 0) return;
+        const names = Array.from(new Set(flow.path.slice(start, -1)));
+        if (names.length < 2 || names.some(name => !byAgent.has(name))) return;
+        const movable = names.filter(name => ordinaryAgent(name) && !orbit.has(name) && !claimed.has(name));
+        if (!movable.length) return;
+        movable.forEach(name => claimed.add(name));
+        rings.push({ key: 'ring:' + names.slice().sort().join('|'), names, movable });
+      });
+      return rings;
+    }
     function positionStore() { try { return typeof localStorage === 'undefined' ? null : localStorage; } catch (_) { return null; } }
     function loadMoves() {
       const kept = {};
@@ -468,7 +579,8 @@
           if (!agents || typeof agents !== 'object') return;
           Object.entries(agents).forEach(([name, value]) => {
             const body = value && Number.isFinite(value.x) && Number.isFinite(value.y), seat = value && Number.isFinite(value.dx) && Number.isFinite(value.dy);
-            if (body || seat) (kept[layout] ||= {})[name] = body ? { x: value.x, y: value.y } : { dx: value.dx, dy: value.dy };
+            // A group's member keeps both: its place round its lead, and the place it had before it joined.
+            if (body || seat) (kept[layout] ||= {})[name] = { ...(body ? { x: value.x, y: value.y } : {}), ...(seat ? { dx: value.dx, dy: value.dy } : {}) };
           });
         });
       } catch (_) { /* no storage, or nothing usable in it: the automatic layout */ }
@@ -488,6 +600,8 @@
     function stopLayout() {
       if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
       layoutFrame = null;
+      // A glide cut short ends where it was going.
+      if (glideState) { glideState.items.forEach(item => { const point = positions.get(item.name); if (point) { point.x = item.tx; point.y = item.ty; positionNode(item.name); } }); glideState = null; }
     }
     function cancelInteraction() {
       if (drag || pinch || pointers.size) suppressClick = true;
@@ -522,8 +636,10 @@
     }
     // Seats sit evenly on a circle round their lead; no seat lands on the
     // lead's own label, which is straight below it.
-    function seatOffsets(count) {
-      const distance = count > 1 ? Math.max(SEAT_DISTANCE, 31 / Math.sin(Math.PI / count)) : SEAT_DISTANCE;
+    // A group's members (full-size agents with names) sit further out, on the same kind of circle.
+    function seatOffsets(count, members = false) {
+      const distance = members ? (count > 1 ? Math.max(MEMBER_DISTANCE, 46 / Math.sin(Math.PI / count)) : MEMBER_DISTANCE)
+        : count > 1 ? Math.max(SEAT_DISTANCE, 31 / Math.sin(Math.PI / count)) : SEAT_DISTANCE;
       const start = -Math.PI / 2 + (count % 2 ? 0 : Math.PI / count);
       return Array.from({ length: count }, (_, i) => ({ dx: Math.cos(start + i * Math.PI * 2 / count) * distance, dy: Math.sin(start + i * Math.PI * 2 / count) * distance, distance }));
     }
@@ -546,15 +662,20 @@
       // Wide: the oval is shaped for the canvas the details panel (DETAIL_WIDTH) leaves, open or not, so opening it
       // never re-lays out the agents and they still fit at a readable size beside it.
       const aspect = Math.round(clamp((rect.width - DETAIL_WIDTH) / rect.height, 1, 1.3) * 20) / 20;
-      const signature = JSON.stringify([arrangement, compact ? [Math.round(rect.width), canvasHeight] : aspect, hubName, snapshot?.structure?.source === 'folder' ? (snapshot.groups || []).map(group => group.id) : null, agents.map(a => [a.name, a.group, a.parent]).sort()]);
+      const byAgent = new Map(agents.map(a => [a.name, a])), orbit = satellites(byAgent), rings = loopRings(byAgent, orbit);
+      const base = JSON.stringify([arrangement, compact ? [Math.round(rect.width), canvasHeight] : aspect, hubName, snapshot?.structure?.source === 'folder' ? (snapshot.groups || []).map(group => group.id) : null, agents.map(a => [a.name, a.group, a.parent]).sort(), [...orbit].sort()]);
+      const signature = JSON.stringify([base, rings.map(ring => [ring.key, ring.names, ring.movable])]);
       if (signature === layoutSignature) return;
+      // Only the loops changed: the agents that move glide to their places (once, briefly).
+      const glide = !!layoutSignature && JSON.parse(layoutSignature)[0] === base && !reducedMotion();
       layoutSignature = signature;
       stopLayout();
-      const byAgent = new Map(agents.map(a => [a.name, a]));
       const isSeat = a => { const lead = a.parent && a.parent !== a.name && a.parent !== hubName && byAgent.get(a.parent); return !!lead && !(lead.parent && byAgent.has(lead.parent)); };
       const seatsOf = new Map();
       agents.filter(isSeat).sort((a, b) => a.name.localeCompare(b.name)).forEach(a => { if (!seatsOf.has(a.parent)) seatsOf.set(a.parent, []); seatsOf.get(a.parent).push(a); });
-      const ring = agents.filter(a => a.name !== hubName && !isSeat(a));
+      // A group's members sit round their lead as seats sit round the council (and leave the ring).
+      agents.filter(a => orbit.has(a.name)).sort((a, b) => a.name.localeCompare(b.name)).forEach(a => { const lead = orbit.get(a.name); if (!seatsOf.has(lead)) seatsOf.set(lead, []); seatsOf.get(lead).push(a); });
+      const ring = agents.filter(a => a.name !== hubName && !isSeat(a) && !orbit.has(a.name));
       const keys = Array.from(new Set(ring.map(a => a.group)));
       // With a structure folder the ring follows the folder order, first group at the top; otherwise the built-in order.
       const listed = snapshot?.structure?.source === 'folder' ? (snapshot.groups || []).map(group => group.id).filter(id => keys.includes(id)) : null;
@@ -563,15 +684,16 @@
       const slot = compact ? 100 : SLOT;
       const groups = [...lead, ...order.filter(key => keys.includes(key)), ...(listed ? keys.filter(key => !listed.includes(key)).sort() : [])].map(key => {
         const units = ring.filter(a => a.group === key).sort((a, b) => a.name.localeCompare(b.name)).map(agent => {
-          const seats = seatsOf.get(agent.name) || [], offsets = seatOffsets(seats.length);
-          return { agent, seats, offsets, width: seats.length ? Math.max(slot, 2 * (offsets[0].distance + 19) + 34) : slot };
+          const seats = seatsOf.get(agent.name) || [], members = seats.some(seat => orbit.has(seat.name)), offsets = seatOffsets(seats.length, members);
+          const reach = seats.length ? offsets[0].distance + (members ? MEMBER_REACH : 19) : 23;
+          return { agent, seats, members, offsets, reach, width: seats.length ? Math.max(slot, 2 * reach + 34) : slot };
         });
         return { key, units, width: units.reduce((sum, unit) => sum + unit.width, 0) };
       });
       // With nothing to sit between them at the top, keep a gap there so the
       // first and last groups do not close up.
       if (!lead.length && groups.length > 2) groups.unshift({ key: '', units: [], width: slot });
-      const depth = Math.max(0, ...groups.flatMap(group => group.units.map(unit => unit.seats.length ? unit.offsets[0].distance + 19 : 0)));
+      const depth = Math.max(0, ...groups.flatMap(group => group.units.map(unit => unit.seats.length ? unit.reach : 0)));
       const filled = groups.reduce((sum, group) => sum + group.width, 0), needed = filled + groups.length * GROUP_GAP;
       const least = 38 + (depth ? depth + 64 : 104);
       const grow = fits => { let low = least, high = least + needed; for (let i = 0; i < 32; i++) { const middle = (low + high) / 2; if (fits(middle)) high = middle; else low = middle; } return high; };
@@ -595,8 +717,8 @@
         group.units.forEach(unit => {
           const point = path.at(cursor + unit.width / 2);
           cursor += unit.width;
-          seeds.set(unit.agent.name, { x: point.x, y: point.y, r: unit.seats.length ? 29 : 23, reach: unit.seats.length ? unit.offsets[0].distance + 19 : 23, group: unit.agent.group, parent: '', dx: 0, dy: 0 });
-          unit.seats.forEach((seat, i) => seeds.set(seat.name, { x: 0, y: 0, r: 19, reach: 19, group: seat.group, parent: unit.agent.name, dx: unit.offsets[i].dx, dy: unit.offsets[i].dy }));
+          seeds.set(unit.agent.name, { x: point.x, y: point.y, r: unit.seats.length ? 29 : 23, reach: unit.reach, group: unit.agent.group, parent: '', dx: 0, dy: 0 });
+          unit.seats.forEach((seat, i) => seeds.set(seat.name, { x: 0, y: 0, r: unit.members ? 23 : 19, reach: unit.members ? 23 : 19, group: seat.group, parent: unit.agent.name, dx: unit.offsets[i].dx, dy: unit.offsets[i].dy }));
         });
         cursor += gap;
       });
@@ -609,28 +731,89 @@
         return { name, ...seed, ...seat, ...(pinned ? { x: saved.x, y: saved.y } : {}), pinned, still: pinned || name === hubName };
       });
       const bodies = targets.filter(target => !target.parent), limit = body => Math.max(0, rect.width / 2 - body.reach - EDGE);
-      for (let iteration = 0; iteration < 80; iteration++) {
-        let moved = false;
-        for (let i = 0; i < bodies.length; i++) for (let j = i + 1; j < bodies.length; j++) {
-          const a = bodies[i], b = bodies[j], room = a.reach + b.reach + 18;
-          if (a.still && b.still) continue;
-          let dx = b.x - a.x, dy = b.y - a.y, distance = Math.hypot(dx, dy);
-          if (distance >= room) continue;
-          if (distance < .001) { dx = 0; dy = 1; distance = 1; }
-          const push = (room - distance + .1) * (!a.still && !b.still ? .5 : 1);
-          if (!a.still) { a.x -= dx / distance * push; a.y -= dy / distance * push; }
-          if (!b.still) { b.x += dx / distance * push; b.y += dy / distance * push; }
-          moved = true;
+      const settle = () => {
+        for (let iteration = 0; iteration < 80; iteration++) {
+          let moved = false;
+          for (let i = 0; i < bodies.length; i++) for (let j = i + 1; j < bodies.length; j++) {
+            const a = bodies[i], b = bodies[j], room = a.reach + b.reach + 18;
+            if (a.still && b.still) continue;
+            let dx = b.x - a.x, dy = b.y - a.y, distance = Math.hypot(dx, dy);
+            if (distance >= room) continue;
+            if (distance < .001) { dx = 0; dy = 1; distance = 1; }
+            const push = (room - distance + .1) * (!a.still && !b.still ? .5 : 1);
+            if (!a.still) { a.x -= dx / distance * push; a.y -= dy / distance * push; }
+            if (!b.still) { b.x += dx / distance * push; b.y += dy / distance * push; }
+            moved = true;
+          }
+          if (compact) bodies.forEach(body => { if (!body.still) body.x = clamp(body.x, -limit(body), limit(body)); });
+          if (!moved) break;
         }
-        if (compact) bodies.forEach(body => { if (!body.still) body.x = clamp(body.x, -limit(body), limit(body)); });
-        if (!moved) break;
-      }
+      };
+      settle();
       const placed = new Map(bodies.map(body => [body.name, body]));
+      // Full loops: their moving agents go onto an even circle, in path order; the rest make room round them.
+      if (rings.length) {
+        const where = name => { const body = placed.get(name); if (body) return body; const seat = targets.find(target => target.name === name), owner = seat && placed.get(seat.parent); return owner ? { x: owner.x + seat.dx, y: owner.y + seat.dy } : null; };
+        rings.forEach(ring => {
+          const count = ring.names.length, radius = Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / count))), step = Math.PI * 2 / count;
+          const spots = ring.names.map(where);
+          if (spots.some(spot => !spot)) return;
+          const fixed = ring.names.map((name, i) => [name, i]).filter(([name]) => !ring.movable.includes(name));
+          let cx = spots.reduce((sum, spot) => sum + spot.x, 0) / count, cy = spots.reduce((sum, spot) => sum + spot.y, 0) / count, start = 0;
+          if (fixed.length === 1) {
+            // One agent stays (the hub, say): the circle passes through it.
+            const [, i] = fixed[0], f = spots[i], others = spots.filter((_, j) => j !== i);
+            const gx = others.reduce((sum, spot) => sum + spot.x, 0) / others.length, gy = others.reduce((sum, spot) => sum + spot.y, 0) / others.length;
+            let dx = gx - f.x, dy = gy - f.y, d = Math.hypot(dx, dy);
+            if (d < 1) { dx = f.x || 1; dy = f.y; d = Math.hypot(dx, dy) || 1; }
+            cx = f.x + dx / d * radius; cy = f.y + dy / d * radius;
+            start = Math.atan2(f.y - cy, f.x - cx) - i * step;
+          } else {
+            // Turned so the agents move as little as they can.
+            let least = Infinity;
+            for (let k = 0; k < 72; k++) {
+              const angle = k * Math.PI / 36;
+              const cost = ring.names.reduce((sum, name, i) => ring.movable.includes(name) ? sum + (cx + radius * Math.cos(angle + i * step) - spots[i].x) ** 2 + (cy + radius * Math.sin(angle + i * step) - spots[i].y) ** 2 : sum, 0);
+              if (cost < least) { least = cost; start = angle; }
+            }
+          }
+          const shift = placedByUser[ring.key];
+          if (shift && Number.isFinite(shift.dx)) { cx += shift.dx; cy += shift.dy; }
+          ring.names.forEach((name, i) => {
+            const body = placed.get(name);
+            if (!body || !ring.movable.includes(name)) return;
+            Object.assign(body, { x: cx + radius * Math.cos(start + i * step), y: cy + radius * Math.sin(start + i * step), still: true, ring: ring.key });
+          });
+        });
+        settle();
+      }
+      const before = new Map(Array.from(positions, ([name, point]) => [name, { x: point.x, y: point.y }]));
       targets.forEach(target => {
         if (target.parent) { const owner = placed.get(target.parent); target.x = owner.x + target.dx; target.y = owner.y + target.dy; }
         const point = positions.get(target.name) || {};
-        positions.set(target.name, Object.assign(point, { x: target.x, y: target.y, r: target.r, group: target.group, parent: target.parent, dx: target.dx, dy: target.dy, fixed: target.pinned }));
+        positions.set(target.name, Object.assign(point, { x: target.x, y: target.y, r: target.r, group: target.group, parent: target.parent, dx: target.dx, dy: target.dy, fixed: target.pinned, ring: target.ring || '' }));
       });
+      if (glide) glideFrom(before);
+    }
+    function reducedMotion() { return root.dataset.agMotion === 'none' || !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches; }
+    // One short glide from where the agents were to where the layout put them (a loop formed or went), then still.
+    let glideState = null;
+    function glideFrom(before) {
+      const items = [];
+      positions.forEach((point, name) => { const from = before.get(name); if (from && Number.isFinite(from.x) && Math.hypot(from.x - point.x, from.y - point.y) > .5) items.push({ name, fx: from.x, fy: from.y, tx: point.x, ty: point.y }); });
+      if (!items.length) return;
+      const started = performance.now();
+      glideState = { items };
+      const frame = now => {
+        if (!alive || !glideState || glideState.items !== items) return;
+        // A frame's time can be a little before the glide began: never step backwards.
+        const t = clamp((now - started) / RING_MS, 0, 1), ease = 1 - (1 - t) ** 3;
+        items.forEach(item => { const point = positions.get(item.name); if (point) { point.x = item.fx + (item.tx - item.fx) * ease; point.y = item.fy + (item.ty - item.fy) * ease; positionNode(item.name); } });
+        updateEdges();
+        if (t < 1) layoutFrame = requestAnimationFrame(frame); else { layoutFrame = null; glideState = null; }
+      };
+      items.forEach(item => { const point = positions.get(item.name); point.x = item.fx; point.y = item.fy; });
+      layoutFrame = requestAnimationFrame(frame);
     }
     function indexSteps() {
       agentsByName = new Map(snapshot.agents.map(a => [a.name, a]));
@@ -680,9 +863,11 @@
       if (!point) return;
       const lead = point.parent && positions.get(point.parent);
       let dx = x - point.x, dy = y - point.y;
-      // A lead carries its seats, so the council stays a circle while it moves.
-      const moving = new Set([name]);
-      if (!lead) positions.forEach((child, childName) => { if (child.parent === name) moving.add(childName); });
+      // A lead carries its seats, so the council stays a circle while it moves; an agent on a loop's circle carries
+      // the whole circle (and their seats), so the ring stays round.
+      const ring = !lead && point.ring ? point.ring : '';
+      const moving = new Set(ring ? Array.from(positions).filter(([, other]) => other.ring === ring).map(([key]) => key) : [name]);
+      if (!lead) positions.forEach((child, childName) => { if (moving.has(child.parent)) moving.add(childName); });
       // Nothing is moved out of the canvas: each agent, its name and its count stay inside, EDGE px in. One already
       // outside (the space shrank) can still move, only not further out.
       const width = viewport.clientWidth, height = viewport.clientHeight;
@@ -722,8 +907,12 @@
         member.x += dx; member.y += dy; positionNode(key); measureLabels(nodes.get(key), member);
       });
       const here = moves[layoutKey()] ||= {};
-      if (lead) { point.dx = point.x - lead.x; point.dy = point.y - lead.y; here[name] = { dx: point.dx, dy: point.dy }; }
-      else { point.fixed = true; here[name] = { x: point.x, y: point.y }; }
+      // A member keeps the place it had before it joined its group (where removing the group puts it back), and the
+      // other way round.
+      const kept = here[name] || {};
+      if (ring) { const shift = here[ring] || { dx: 0, dy: 0 }; here[ring] = { dx: shift.dx + dx, dy: shift.dy + dy }; }
+      else if (lead) { point.dx = point.x - lead.x; point.dy = point.y - lead.y; here[name] = { ...(Number.isFinite(kept.x) ? { x: kept.x, y: kept.y } : {}), dx: point.dx, dy: point.dy }; }
+      else { point.fixed = true; here[name] = { x: point.x, y: point.y, ...(Number.isFinite(kept.dx) ? { dx: kept.dx, dy: kept.dy } : {}) }; }
       updateEdges();
     }
     // A move is over: keep it (storage and undo) when it changed anything; the camera stays where it is.
@@ -773,6 +962,8 @@
         }
         label.setAttribute('x', shift);
         low = Math.min(low, shift - measured / 2 - 2); high = Math.max(high, shift + measured / 2 + 2);
+        // The name's height, for lines that keep clear of it.
+        const box = label.getBBox(); Object.assign(point, { labelLeft: box.x, labelRight: box.x + box.width, labelTop: box.y, labelBottom: box.y + box.height });
       });
       const changed = Math.abs((point.labelMin ?? 0) - low) > .1 || Math.abs((point.labelMax ?? 0) - high) > .1;
       point.labelMin = low; point.labelMax = high; point.labelWidth = Math.max(-low, high);
@@ -837,12 +1028,17 @@
         badge.setAttribute('x', corner); badge.setAttribute('y', -corner);
         badge.textContent = busy >= 2 ? '×' + busy : ''; badge.dataset.shown = String(busy >= 2);
         node.classList.toggle('ag-hub', isHub);
-        node.classList.toggle('ag-council-lead', visibleAgents.some(a => a.parent === agent.name));
+        const council = visibleAgents.some(a => a.parent === agent.name);
+        node.classList.toggle('ag-council-lead', council);
+        // A group's lead with its members round it is drawn as the council is.
+        node.classList.toggle('ag-team-lead', !council && Array.from(positions.values()).some(point => point.parent === agent.name));
         node.querySelector('.ag-agent-name').textContent = displayName(agent);
         node.querySelector('title').textContent = flowErrors.get(agent.name) || agent.name;
         node.dataset.armed = String(!trailPending && trail.at(-1) === agent.name);
         node.dataset.trail = String(trail.includes(agent.name));
-        if (flowAction) node.setAttribute('aria-keyshortcuts', 'Enter Shift+Enter I Shift+F10 ContextMenu C L R Alt+ArrowUp Alt+ArrowDown Alt+ArrowLeft Alt+ArrowRight Backspace Escape'); else node.removeAttribute('aria-keyshortcuts');
+        const writes = (rosterAction ? (canAddAgent() ? ' N' : '') + (removableOf(agent.name).ok ? ' Delete' : '') : '');
+        if (flowAction) node.setAttribute('aria-keyshortcuts', 'Enter Shift+Enter I Shift+F10 ContextMenu C L R Alt+ArrowUp Alt+ArrowDown Alt+ArrowLeft Alt+ArrowRight Backspace Escape' + writes);
+        else if (writes) node.setAttribute('aria-keyshortcuts', writes.trim()); else node.removeAttribute('aria-keyshortcuts');
         node.setAttribute('aria-label', agent.name + (busy ? ', working' + (work ? ', ' + work : '') : ', idle') + (alerts.has(agent.name) ? ', ' + alerts.get(agent.name) : ''));
         positionNode(agent.name);
         labelsChanged = measureLabels(node, p) || labelsChanged;
@@ -856,7 +1052,13 @@
       const explained = new Set([...workFlows.filter(f => f.active).flatMap(f => [f.from, f.to]), ...canvasLoops().filter(loop => loop.active).flatMap(loop => [loop.worker, loop.evaluator])]);
       // Work that passes through the orchestrator travels along its spoke.
       const viaHub = new Set(flows().filter(f => f.active && (f.from === hubName || f.to === hubName)).map(f => f.from === hubName ? f.to : f.from));
-      const edges = visibleAgents.filter(a => a.name !== hubName && (a.parent || hubName)).map(a => ({ from: a.parent || hubName, to: a.name, kind: 'handoff', relation: a.parent ? 'membership' : 'supervision', active: (a.busy > 0 && !explained.has(a.name)) || (!a.parent && viaHub.has(a.name)) }));
+      // A group's member reports to its lead (its group line), not to the hub.
+      const reporting = new Set(structureTeams().filter(team => shownAgents.has(team.lead)).flatMap(team => team.members.filter(name => name !== team.lead)));
+      const queue = [];
+      // An agent the user added is connected to nothing until it is on a flow or in a group, or works in this task.
+      const placed = new Set([...routes().flatMap(flow => flow.path), ...structureTeams().flatMap(team => [team.lead, ...team.members])]);
+      const loose = a => a.added === true && !placed.has(a.name) && !(a.busy > 0) && !stepsFor(a).length;
+      const edges = visibleAgents.filter(a => a.name !== hubName && (a.parent || hubName) && (a.parent || !reporting.has(a.name)) && !loose(a)).map(a => ({ from: a.parent || hubName, to: a.name, kind: 'handoff', relation: a.parent ? 'membership' : 'supervision', active: (a.busy > 0 && !explained.has(a.name)) || (!a.parent && viaHub.has(a.name)) }));
       // Settings alone draw nothing: an escalation route is drawn only once a task graph has used it.
       edges.push(...snapshot.escalation.filter(e => allowedConnection(e.from, e.to) && e.used).map(e => ({ ...e, kind: 'escalation', active: false })), ...workFlows);
       const directions = new Set(workFlows.map(f => JSON.stringify([f.from, f.to])));
@@ -869,7 +1071,7 @@
         let pair = lines.get(key);
         if (!pair) {
           const line = svg('line', { class: 'ag-edge', 'data-edge': edge.from + '->' + edge.to, 'data-kind': edge.kind });
-          const flow = svg('line', { class: 'ag-flow', 'data-flow-kind': edge.kind });
+          const flow = svg('line', { class: 'ag-flow', 'data-flow-kind': edge.kind, 'data-overlay-of': edge.from + '->' + edge.to });
           // Pulse overlays have no semantic edge hook; each flow is one edge.
           if (edge.kind === 'data' || edge.kind === 'feedback') line.setAttribute('marker-end', 'url(#' + uid + '-' + edge.kind + ')');
           const layer = edge.kind === 'handoff' ? spokeLayer : edge.kind === 'escalation' ? escalationLayer : flowLayer;
@@ -885,15 +1087,126 @@
         const reverse = directions.has(JSON.stringify([edge.to, edge.from]));
         const shift = work && (reverse || edge.from === hubName || edge.to === hubName) ? 5 : 0;
         const coordinates = { x1: a.x + ux * (a.r + 5) - uy * shift, y1: a.y + uy * (a.r + 5) + ux * shift, x2: b.x - ux * (b.r + 6) - uy * shift, y2: b.y - uy * (b.r + 6) + ux * shift };
-        [pair.line, pair.flow].forEach(line => Object.entries(coordinates).forEach(([key, value]) => line.setAttribute(key, value)));
         pair.line.dataset.active = String(!!edge.active);
         // A line moves only while work is travelling along it to an agent that is working.
         const moving = edge.active && edge.kind !== 'escalation' && (edge.kind !== 'feedback' || shownAgents.get(edge.to)?.busy > 0);
         pair.flow.style.display = moving ? '' : 'none';
+        queue.push({ from: edge.from, to: edge.to, offset: edge.from < edge.to ? shift : -shift, gaps: [a.r + 5, b.r + 6], segment: [coordinates.x1, coordinates.y1, coordinates.x2, coordinates.y2],
+          straight: () => { pair.line = shapeAs(pair.line, 'line'); pair.flow = shapeAs(pair.flow, 'line'); [pair.line, pair.flow].forEach(line => Object.entries(coordinates).forEach(([key, value]) => line.setAttribute(key, value))); },
+          curve: d => { pair.line = shapeAs(pair.line, 'path'); pair.flow = shapeAs(pair.flow, 'path'); [pair.line, pair.flow].forEach(line => line.setAttribute('d', d)); } });
       });
       lines.forEach((pair, key) => { if (!keys.has(key)) { pair.line.remove(); pair.flow.remove(); lines.delete(key); } });
+      bendQueue = queue;
+      updateTeamLines();
       updateLoops();
       highlight();
+    }
+    // A line is the one element it always was: a straight <line>, or a <path> while it bends round an agent.
+    function shapeAs(element, tag) {
+      if (element.tagName.toLowerCase() === tag) return element;
+      const next = svg(tag, {});
+      Array.from(element.attributes).forEach(item => { if (!['x1', 'y1', 'x2', 'y2', 'd'].includes(item.name)) next.setAttribute(item.name, item.value); });
+      element.replaceWith(next); return next;
+    }
+    // Lines round agents. A handoff, flow, escalation or group line between two agents stays straight unless it
+    // passes through, or within CLEAR px of, a third agent's circle (NAME_CLEAR px of its name's box); then every line
+    // on that pair bends together, as one smooth curve (a quadratic through the pair's middle), just far enough to
+    // clear it. The seats round an end (its council or group members) are part of that end: a line bends for them
+    // only when it would cross one.
+    const CLEAR = 2, NAME_CLEAR = 1, BEND_STEP = 3;
+    let bendQueue = [];
+    function obstaclesFor(ends, box) {
+      const list = [];
+      positions.forEach((p, name) => {
+        if (ends.includes(name) || !nodes.has(name) || !shownAgents.has(name)) return;
+        const own = ends.includes(p.parent), r = p.r + (own ? 0 : CLEAR), pad = own ? 0 : NAME_CLEAR, label = Number.isFinite(p.labelTop) && Number.isFinite(p.labelLeft);
+        const title = label ? { left: p.x + p.labelLeft - pad, right: p.x + p.labelRight + pad, top: p.y + p.labelTop - pad, bottom: p.y + p.labelBottom + pad } : null;
+        const left = Math.min(p.x - r, title ? title.left : Infinity), right = Math.max(p.x + r, title ? title.right : -Infinity);
+        const top = Math.min(p.y - r, title ? title.top : Infinity), bottom = Math.max(p.y + r, title ? title.bottom : -Infinity);
+        if (box && (right < box.left || left > box.right || bottom < box.top || top > box.bottom)) return;
+        list.push({ x: p.x, y: p.y, r });
+        if (title) list.push(title);
+      });
+      return list;
+    }
+    function blockedAt(points, obstacles) {
+      let penalty = 0;
+      for (const [x, y] of points) for (const o of obstacles) {
+        if (o.r !== undefined) { const d = Math.hypot(x - o.x, y - o.y); if (d < o.r) penalty += (o.r - d + 1) ** 2; }
+        else if (x > o.left && x < o.right && y > o.top && y < o.bottom) penalty += (Math.min(x - o.left, o.right - x, y - o.top, o.bottom - y) + 1) ** 2;
+      }
+      return penalty;
+    }
+    function segmentPoints(sx, sy, ex, ey) {
+      const count = Math.max(2, Math.ceil(Math.hypot(ex - sx, ey - sy) / 4));
+      return Array.from({ length: count + 1 }, (_, i) => [sx + (ex - sx) * i / count, sy + (ey - sy) * i / count]);
+    }
+    function quadPoints(sx, sy, cx, cy, ex, ey) {
+      const count = Math.max(4, Math.ceil((Math.hypot(cx - sx, cy - sy) + Math.hypot(ex - cx, ey - cy)) / 4));
+      return Array.from({ length: count + 1 }, (_, i) => { const t = i / count, u = 1 - t; return [u * u * sx + 2 * u * t * cx + t * t * ex, u * u * sy + 2 * u * t * cy + t * t * ey]; });
+    }
+    // The curve of one line when its pair bends by `bend` (sideways, in the pair's own frame, at the middle).
+    function curveOf(entry, bend, p, q) {
+      const a = positions.get(entry.from), b = positions.get(entry.to);
+      const distance = Math.hypot(q.x - p.x, q.y - p.y) || 1, nx = -(q.y - p.y) / distance, ny = (q.x - p.x) / distance;
+      const apex = bend + entry.offset, cx = (p.x + q.x) / 2 + nx * 2 * apex, cy = (p.y + q.y) / 2 + ny * 2 * apex;
+      const out = Math.hypot(cx - a.x, cy - a.y) || 1, back = Math.hypot(cx - b.x, cy - b.y) || 1;
+      const sx = a.x + (cx - a.x) / out * entry.gaps[0], sy = a.y + (cy - a.y) / out * entry.gaps[0], ex = b.x + (cx - b.x) / back * entry.gaps[1], ey = b.y + (cy - b.y) / back * entry.gaps[1];
+      return { d: 'M ' + sx + ' ' + sy + ' Q ' + cx + ' ' + cy + ' ' + ex + ' ' + ey, points: quadPoints(sx, sy, cx, cy, ex, ey) };
+    }
+    function bendLines(entries) {
+      const pairs = new Map();
+      entries.forEach(entry => { if (entry.from === entry.to) { entry.straight(); return; } const key = pairKey(entry.from, entry.to); if (!pairs.has(key)) pairs.set(key, []); pairs.get(key).push(entry); });
+      pairs.forEach((list, key) => {
+        const [first, second] = key.split('\n'), p = positions.get(first), q = positions.get(second);
+        if (!p || !q) { list.forEach(entry => entry.straight()); return; }
+        const distance = Math.hypot(q.x - p.x, q.y - p.y), limit = Math.max(60, distance * .9), reach = limit * 1.2 + 40;
+        const obstacles = obstaclesFor([first, second], { left: Math.min(p.x, q.x) - reach, right: Math.max(p.x, q.x) + reach, top: Math.min(p.y, q.y) - reach, bottom: Math.max(p.y, q.y) + reach });
+        if (list.every(entry => !blockedAt(segmentPoints(...entry.segment), obstacles))) { list.forEach(entry => entry.straight()); return; }
+        const cost = bend => list.reduce((sum, entry) => sum + blockedAt(curveOf(entry, bend, p, q).points, obstacles), 0);
+        let found = null, fallback = 0, least = Infinity;
+        for (let size = BEND_STEP; size <= limit && found === null; size += BEND_STEP) for (const sign of [1, -1]) {
+          const penalty = cost(sign * size);
+          if (!penalty) { if (found === null) found = sign * size; }
+          else if (penalty < least) { least = penalty; fallback = sign * size; }
+        }
+        // Just far enough: the smallest bend between the last step that did not clear and the first that did.
+        if (found !== null) {
+          const sign = Math.sign(found); let low = Math.abs(found) - BEND_STEP, high = Math.abs(found);
+          for (let i = 0; i < 5; i++) { const middle = (low + high) / 2; if (cost(sign * middle)) low = middle; else high = middle; }
+          found = sign * high;
+        }
+        list.forEach(entry => entry.curve(curveOf(entry, found ?? fallback, p, q).d));
+      });
+    }
+    // Each group's lead joined to each member by a straight line (dotted, no arrow, no text). A left click picks one
+    // (Delete then takes that member out of the group); a right-click, `i` or Enter opens the lead's details.
+    function updateTeamLines() {
+      const shown = new Set();
+      structureTeams().forEach(team => team.members.forEach(member => {
+        const a = positions.get(team.lead), b = positions.get(member);
+        if (!a || !b || member === team.lead || !nodes.has(team.lead) || !nodes.has(member)) return;
+        const key = team.id + '\n' + member;
+        shown.add(key);
+        let view = teamLines.get(key);
+        if (!view) {
+          const group = svg('g', { class: 'ag-team-line', 'data-team-line': key, role: 'button', tabindex: 0 });
+          const hit = svg('line', { class: 'ag-team-hit' }), line = svg('line', { class: 'ag-team-edge', 'data-team-edge': team.lead + '->' + member });
+          group.append(hit, line); teamLayer.append(group);
+          view = { group, hit, line }; teamLines.set(key, view);
+        }
+        Object.assign(view, { team, member });
+        view.group.dataset.teamId = team.id; view.group.dataset.member = member; view.group.dataset.lead = team.lead;
+        view.group.setAttribute('aria-label', member + ' reports to ' + team.lead + ', group');
+        if (teamAction) view.group.setAttribute('aria-keyshortcuts', 'Enter I Shift+F10 ContextMenu Delete'); else view.group.removeAttribute('aria-keyshortcuts');
+        const distance = Math.hypot(b.x - a.x, b.y - a.y) || 1, ux = (b.x - a.x) / distance, uy = (b.y - a.y) / distance;
+        const coordinates = { x1: a.x + ux * (a.r + 5), y1: a.y + uy * (a.r + 5), x2: b.x - ux * (b.r + 5), y2: b.y - uy * (b.r + 5) };
+        bendQueue.push({ from: team.lead, to: member, offset: 0, gaps: [a.r + 5, b.r + 5], segment: [coordinates.x1, coordinates.y1, coordinates.x2, coordinates.y2],
+          straight: () => { view.hit = shapeAs(view.hit, 'line'); view.line = shapeAs(view.line, 'line'); [view.hit, view.line].forEach(line => Object.entries(coordinates).forEach(([k, value]) => line.setAttribute(k, value))); },
+          curve: d => { view.hit = shapeAs(view.hit, 'path'); view.line = shapeAs(view.line, 'path'); [view.hit, view.line].forEach(line => line.setAttribute('d', d)); } });
+      }));
+      teamLines.forEach((view, key) => { if (!shown.has(key)) { view.group.remove(); teamLines.delete(key); } });
+      if (pickedMember && !teamLines.has(pickedMember)) pickedMember = '';
     }
     function updateLoops() {
       const shown = new Set(), counted = new Map(canvasWorkLoops().filter(loop => loop.rounds >= 2).map(loop => [loop.agent, loop.rounds]));
@@ -906,8 +1219,9 @@
           const group = svg('g', { class: 'ag-loop', 'data-loop-id': loop.id, role: 'button', tabindex: 0 });
           const forward = svg('path', { class: 'ag-loop-half', 'data-loop': loop.id, 'data-loop-half': 'forward', 'marker-end': 'url(#' + uid + '-loop)' });
           const back = svg('path', { class: 'ag-loop-half', 'data-loop': loop.id, 'data-loop-half': 'return', 'marker-end': 'url(#' + uid + '-loop)' });
-          const title = svg('title'); group.append(forward, back, title); loopLayer.append(group);
-          view = { group, forward, back, title, count: null, loop }; loopViews.set(loop.id, view);
+          const hits = [svg('path', { class: 'ag-line-hit' }), svg('path', { class: 'ag-line-hit' })];
+          const title = svg('title'); group.append(...hits, forward, back, title); loopLayer.append(group);
+          view = { group, forward, back, hits, title, count: null, loop }; loopViews.set(loop.id, view);
         }
         view.loop = loop;
         view.group.dataset.state = loop.state; view.group.dataset.active = String(!!loop.active);
@@ -917,6 +1231,7 @@
         const geometry = reviewGeometry(a, b);
         view.geometry = geometry;
         view.forward.setAttribute('d', geometry.forward); view.back.setAttribute('d', geometry.back);
+        view.hits[0].setAttribute('d', geometry.forward); view.hits[1].setAttribute('d', geometry.back);
         const liveHalf = loop.state === 'checking' ? 'forward' : ['working', 'sent_back'].includes(loop.state) ? 'return' : '';
         [view.forward, view.back].forEach(path => {
           path.dataset.live = String(path.dataset.loopHalf === liveHalf);
@@ -933,9 +1248,9 @@
       updateRoutes();
       updateWorkLoops();
     }
-    // Flows drawn in the structure: a forward step is a straight line with an arrowhead, a step back to an
-    // agent already on the path is a curved arc. Steps of different flows on one pair are offset so none
-    // hides another. A flow at rest is still; a new one draws in once. The pending path is drawn dimmed.
+    // Flows drawn in the structure: an open step is a straight line with an arrowhead (bent only round a third
+    // agent); the closed part of a loop (loopStart) is a dotted ring. Steps of different flows on one pair are offset
+    // so none hides another. A flow at rest is still; a new one draws in once. The pending path is drawn dimmed.
     function routes() { return (snapshot?.structure?.flows || []).filter(flow => flow && typeof flow.id === 'string' && Array.isArray(flow.path) && flow.path.length >= 2 && flow.path.every(name => typeof name === 'string')); }
     function routeById(id) { return routes().find(flow => flow.id === id) || null; }
     // Step `index` (path[index] -> path[index + 1]) goes back to an agent already on the path; the hub ending a path adds no return.
@@ -945,6 +1260,49 @@
     }
     function pairKey(a, b) { return a < b ? a + '\n' + b : b + '\n' + a; }
     function isSelfLoop(path) { return path.length === 2 && path[0] === path[1]; }
+    // THE definition of a loop in this view: a path that ends at an agent it already passed through. It returns where
+    // the closed part starts (0 for A, B, ..., A; 1 for A, B, C, B, whose lead-in A -> B stays an open step), or -1
+    // for a path that does not close. A loop on one agent (A, A) is drawn on its own (selfLoopPath). Every step of
+    // the closed part is drawn as one closed, dotted ring through its agents in order; every other step is a
+    // straight solid line that bends only to clear a third agent. The agents of a full loop move onto a circle of
+    // their own (loopRings).
+    function loopStart(path) {
+      if (isSelfLoop(path)) return -1;
+      const start = path.indexOf(path.at(-1));
+      return start < path.length - 2 ? start : -1;
+    }
+    function lerpPoint(a, b, t) { return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }; }
+    function cubicAt(c, t) { const u = 1 - t; return { x: u * u * u * c[0].x + 3 * u * u * t * c[1].x + 3 * u * t * t * c[2].x + t * t * t * c[3].x, y: u * u * u * c[0].y + 3 * u * u * t * c[1].y + 3 * u * t * t * c[2].y + t * t * t * c[3].y }; }
+    function splitCubic(c, t) { const a = lerpPoint(c[0], c[1], t), b = lerpPoint(c[1], c[2], t), d = lerpPoint(c[2], c[3], t), e = lerpPoint(a, b, t), f = lerpPoint(b, d, t), g = lerpPoint(e, f, t); return [[c[0], a, e, g], [g, f, d, c[3]]]; }
+    // Step i of a ring through `points` (agents in path order, closing back to the first): a cubic whose handles
+    // follow the ring's tangents and are sized so that agents on an even circle give a round circle. Two agents make
+    // a circle on their distance; the step stops short of both rims, as a straight step does.
+    function ringCurve(points, i, scale = 1) {
+      const m = points.length, a = points[i], b = points[(i + 1) % m], chord = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+      let ta, tb;
+      if (m === 2) { ta = { x: -(b.y - a.y) / chord, y: (b.x - a.x) / chord }; tb = { x: -ta.x, y: -ta.y }; }
+      else {
+        const tangent = j => { const before = points[(j - 1 + m) % m], after = points[(j + 1) % m], d = Math.hypot(after.x - before.x, after.y - before.y) || 1; return { x: (after.x - before.x) / d, y: (after.y - before.y) / d }; };
+        ta = tangent(i); tb = tangent((i + 1) % m);
+      }
+      const h = chord * scale / (3 * Math.cos(Math.PI / (2 * m)) ** 2);
+      const curve = [{ x: a.x, y: a.y }, { x: a.x + ta.x * h, y: a.y + ta.y * h }, { x: b.x - tb.x * h, y: b.y - tb.y * h }, { x: b.x, y: b.y }];
+      const away = (t, p, r) => Math.hypot(cubicAt(curve, t).x - p.x, cubicAt(curve, t).y - p.y) >= r;
+      let low = 0, high = .5;
+      for (let k = 0; k < 18; k++) { const middle = (low + high) / 2; if (away(middle, a, a.r + 6)) high = middle; else low = middle; }
+      const t0 = high; low = .5; high = 1;
+      for (let k = 0; k < 18; k++) { const middle = (low + high) / 2; if (away(middle, b, b.r + 9)) low = middle; else high = middle; }
+      const t1 = low, tail = splitCubic(curve, t0)[1], part = splitCubic(tail, (t1 - t0) / (1 - t0 || 1))[0];
+      const f = v => Math.round(v * 100) / 100;
+      return { d: 'M ' + f(part[0].x) + ' ' + f(part[0].y) + ' C ' + part.slice(1).map(q => f(q.x) + ' ' + f(q.y)).join(' '), points: Array.from({ length: 41 }, (_, k) => { const q = cubicAt(part, k / 40); return [q.x, q.y]; }) };
+    }
+    // A ring step keeps clear of third agents by bowing further out (or less) when it has to.
+    function ringStep(names, points, i) {
+      const ends = [names[i], names[(i + 1) % names.length]], first = ringCurve(points, i), obstacles = obstaclesFor(ends);
+      if (!obstacles.length || !blockedAt(first.points, obstacles)) return first.d;
+      for (const scale of [1.3, 1.6, 2, 2.5, .75, .5]) { const shape = ringCurve(points, i, scale); if (!blockedAt(shape.points, obstacles)) return shape.d; }
+      return first.d;
+    }
     // An agent's loop on itself: a small drop on its outer side (away from the hub), never over its name below it.
     function selfLoopPath(p, name) {
       const hub = positions.get(hubName);
@@ -979,19 +1337,13 @@
       const side = band.hi + 6 <= -(band.lo - 6) ? 1 : -1;
       return { offset: side > 0 ? band.hi + 6 + index * 8 : band.lo - 6 - index * 8, side };
     }
-    function stepPath(a, b, from, to, back, lane) {
-      // One frame per pair, whichever way it is walked, so lanes on a pair never cross.
+    // A forward step: straight, offset sideways in the pair's own frame (bendLines may bend it round an agent).
+    function straightStep(a, b, from, to, lane) {
       const p = from < to ? a : b, q = from < to ? b : a;
       const distance = Math.hypot(q.x - p.x, q.y - p.y) || 1, nx = -(q.y - p.y) / distance, ny = (q.x - p.x) / distance;
-      const offset = lane.offset;
-      if (!back) {
-        const ux = (b.x - a.x) / distance, uy = (b.y - a.y) / distance;
-        return 'M ' + (a.x + ux * (a.r + 6) + nx * offset) + ' ' + (a.y + uy * (a.r + 6) + ny * offset) + ' L ' + (b.x - ux * (b.r + 9) + nx * offset) + ' ' + (b.y - uy * (b.r + 9) + ny * offset);
-      }
-      const side = lane.side, bow = 2 * (offset + side * clamp(distance * .14, 14, 30));
-      const cx = (a.x + b.x) / 2 + nx * bow, cy = (a.y + b.y) / 2 + ny * bow;
-      const out = Math.hypot(cx - a.x, cy - a.y) || 1, back2 = Math.hypot(cx - b.x, cy - b.y) || 1;
-      return 'M ' + (a.x + (cx - a.x) / out * (a.r + 6)) + ' ' + (a.y + (cy - a.y) / out * (a.r + 6)) + ' Q ' + cx + ' ' + cy + ' ' + (b.x + (cx - b.x) / back2 * (b.r + 9)) + ' ' + (b.y + (cy - b.y) / back2 * (b.r + 9));
+      const offset = lane.offset, ux = (b.x - a.x) / distance, uy = (b.y - a.y) / distance;
+      const segment = [a.x + ux * (a.r + 6) + nx * offset, a.y + uy * (a.r + 6) + ny * offset, b.x - ux * (b.r + 9) + nx * offset, b.y - uy * (b.r + 9) + ny * offset];
+      return { d: 'M ' + segment[0] + ' ' + segment[1] + ' L ' + segment[2] + ' ' + segment[3], segment };
     }
     function updateRoutes() {
       const list = routes(), lanes = new Map(), shown = new Set(), taken = takenBands();
@@ -1017,12 +1369,18 @@
           const hit = svg('path', { class: 'ag-route-hit' }), line = svg('path', { class: 'ag-route-step', pathLength: 1, 'marker-end': 'url(#' + uid + '-route)' });
           view.group.insertBefore(hit, view.title); view.group.insertBefore(line, view.title); view.steps.push({ hit, line });
         }
+        const start = loopStart(flow.path), ringNames = start >= 0 ? flow.path.slice(start, -1) : null, ringPoints = ringNames && ringNames.map(name => positions.get(name));
+        view.group.dataset.loop = start === 0 ? 'full' : start > 0 ? 'part' : isSelfLoop(flow.path) ? 'self' : 'none';
         view.steps.forEach((step, i) => {
           const key = pairKey(flow.path[i], flow.path[i + 1]), sharing = lanes.get(key), lane = laneOf(taken.get(key), sharing.indexOf(flow.id + '#' + i), sharing.length);
-          const self = isSelfLoop(flow.path), back = !self && returnsAt(flow.path, i);
-          const d = self ? selfLoopPath(points[0], flow.path[0]) : stepPath(points[i], points[i + 1], flow.path[i], flow.path[i + 1], back, lane);
-          step.line.setAttribute('d', d); step.hit.setAttribute('d', d);
-          step.line.dataset.step = self ? 'self' : back ? 'return' : 'forward'; step.line.dataset.index = String(i);
+          const self = isSelfLoop(flow.path), ring = start >= 0 && i >= start, back = !self && !ring && returnsAt(flow.path, i), set = d => { step.line.setAttribute('d', d); step.hit.setAttribute('d', d); };
+          step.line.dataset.step = self ? 'self' : ring ? 'loop' : back ? 'return' : 'forward'; step.line.dataset.index = String(i);
+          // A ring's dots are measured in drawing units, the same all round; the other steps draw in by length.
+          if (ring) step.line.removeAttribute('pathLength'); else step.line.setAttribute('pathLength', 1);
+          if (self) { set(selfLoopPath(points[0], flow.path[0])); return; }
+          if (ring) { set(ringStep(ringNames, ringPoints, i - start)); return; }
+          const line = straightStep(points[i], points[i + 1], flow.path[i], flow.path[i + 1], lane);
+          bendQueue.push({ from: flow.path[i], to: flow.path[i + 1], offset: lane.offset, gaps: [points[i].r + 6, points[i + 1].r + 9], segment: line.segment, straight: () => set(line.d), curve: set });
         });
         view.group.setAttribute('aria-label', 'Flow ' + flow.path.join(' → ')); view.title.textContent = flow.path.join(' → ');
         if (freshRoutes.has(flow.id)) {
@@ -1031,19 +1389,32 @@
         }
       });
       routeViews.forEach((view, id) => { if (!shown.has(id)) { view.group.remove(); routeViews.delete(id); } });
+      const queue = bendQueue; bendQueue = [];
+      bendLines(queue);
       updateTrail();
     }
     function updateTrail() {
+      const queue = [];
       trailLayer.replaceChildren();
       trailLayer.dataset.pending = String(trailPending);
+      const start = loopStart(trail), ringNames = start >= 0 ? trail.slice(start, -1) : null, ringPoints = ringNames && ringNames.map(name => positions.get(name));
+      if (ringPoints?.some(point => !point)) return;
       trail.slice(1).forEach((to, i) => {
         const a = positions.get(trail[i]), b = positions.get(to);
         if (!a || !b) return;
         if (trail[i] === to) { trailLayer.append(svg('path', { class: 'ag-trail-step', 'data-step': 'self', d: selfLoopPath(a, to), 'marker-end': 'url(#' + uid + '-route)' })); return; }
+        if (start >= 0 && i >= start) {
+          trailLayer.append(svg('path', { class: 'ag-trail-step', 'data-step': 'loop', d: ringStep(ringNames, ringPoints, i - start), 'marker-end': 'url(#' + uid + '-route)' }));
+          return;
+        }
         const back = returnsAt(trail, i);
         const lane = laneOf(takenBands().get(pairKey(trail[i], to)), 0, 1);
-        trailLayer.append(svg('path', { class: 'ag-trail-step', 'data-step': back ? 'return' : 'forward', d: stepPath(a, b, trail[i], to, back, lane), 'marker-end': 'url(#' + uid + '-route)' }));
+        const line = straightStep(a, b, trail[i], to, lane);
+        const step = svg('path', { class: 'ag-trail-step', 'data-step': back ? 'return' : 'forward', d: line.d, 'marker-end': 'url(#' + uid + '-route)' });
+        trailLayer.append(step);
+        queue.push({ from: trail[i], to, offset: lane.offset, gaps: [a.r + 6, b.r + 9], segment: line.segment, straight: () => step.setAttribute('d', line.d), curve: d => step.setAttribute('d', d) });
       });
+      bendLines(queue);
     }
     function updateWorkLoops() {
       const shown = new Set();
@@ -1054,9 +1425,9 @@
         let view = workLoopViews.get(loop.agent);
         if (!view) {
           const group = svg('g', { class: 'ag-work-loop', 'data-work-loop-id': loop.agent, role: 'button', tabindex: 0 });
-          const ring = svg('path', { class: 'ag-work-loop-edge', 'data-work-loop': loop.agent });
-          const title = svg('title'); group.append(ring, title); loopLayer.append(group);
-          view = { group, ring, title, loop }; workLoopViews.set(loop.agent, view);
+          const ring = svg('path', { class: 'ag-work-loop-edge', 'data-work-loop': loop.agent }), hit = svg('path', { class: 'ag-line-hit' });
+          const title = svg('title'); group.append(hit, ring, title); loopLayer.append(group);
+          view = { group, ring, hit, title, loop }; workLoopViews.set(loop.agent, view);
         }
         view.loop = loop;
         view.group.dataset.loopState = loop.state; view.group.dataset.active = String(!!loop.active);
@@ -1065,6 +1436,7 @@
         view.ring.dataset.loopState = loop.state; view.ring.dataset.active = String(!!loop.active);
         const radius = p.r + 9, open = (Number(shownAgents.get(loop.agent)?.busy) || 0) >= 2 ? .46 : .17, start = -Math.PI / 4 + open, end = -Math.PI / 4 - open;
         view.ring.setAttribute('d', 'M ' + (p.x + radius * Math.cos(start)) + ' ' + (p.y + radius * Math.sin(start)) + ' A ' + radius + ' ' + radius + ' 0 1 1 ' + (p.x + radius * Math.cos(end)) + ' ' + (p.y + radius * Math.sin(end)));
+        view.hit.setAttribute('d', view.ring.getAttribute('d'));
         view.ring.setAttribute('marker-end', 'url(#' + uid + (loop.state === 'stuck' ? '-work-stuck' : loop.state === 'closed' ? '-work-closed' : loop.state === 'working' && loop.active ? '-work-live' : '-work') + ')');
         view.group.setAttribute('aria-label', loop.agent + ', work loop, ' + loop.rounds + (loop.rounds === 1 ? ' round, ' : ' rounds, ') + named(WORK_LOOP_STATES, loop.state));
         view.title.textContent = loop.agent;
@@ -1094,6 +1466,12 @@
         view.group.dataset.related = String(!!related);
         view.group.setAttribute('aria-pressed', String(selected?.type === 'loop' && selected.key === id));
       });
+      teamLayer.dataset.selecting = String(selecting);
+      teamLines.forEach((view, key) => {
+        const marked = pickedMember === key;
+        view.group.dataset.selected = String(marked); view.group.setAttribute('aria-pressed', String(marked));
+        view.group.dataset.related = String(selecting && [view.team.lead, view.member].includes(selected.key));
+      });
       workLoopViews.forEach((view, agent) => {
         const review = selected?.type === 'loop' ? loopViews.get(selected.key)?.loop : null;
         const related = selecting ? selected.key === agent : !!review && [review.worker, review.evaluator].includes(agent);
@@ -1104,6 +1482,9 @@
     function select(type, key, origin, step) {
       const agent = type === 'agent' && agentsByName.get(key);
       if (type === 'agent' && !agent) return;
+      if (type !== 'new-agent' && draft) { draft = null; drawDraft(); }
+      if (type !== 'skill') skillView = null;
+      if (!(type === 'agent' && teamDraft?.lead === key)) teamDraft = null;
       if (agent && agent.team !== activeTeam) switchTeam(agent.team);
       selected = { type, key }; selectedOrigin = origin || selectedOrigin; highlightedStep = step || '';
       if (step) openSteps.add(step);
@@ -1113,6 +1494,7 @@
       if (step) Array.from(detailScroll.querySelectorAll('[data-step]')).find(row => row.dataset.step === step)?.scrollIntoView({ block: 'nearest' });
     }
     function closeDetails() {
+      if (draft) { draft = null; drawDraft(); }
       selected = null; highlightedStep = ''; detail.hidden = true; root.classList.remove('ag-details-open'); detailSignature = ''; updateEdges(); scheduleResize();
       if (selectedOrigin && selectedOrigin.isConnected) selectedOrigin.focus({ preventScroll: true });
       else viewport.focus({ preventScroll: true });
@@ -1130,7 +1512,23 @@
       else if (value !== undefined) { const p = el('p'); p.append(el(code ? 'code' : 'span', '', text(value) || '—')); item.append(p); }
       parent.append(item); return item;
     }
-    function skillsOf(agent) { return skillOverride.get(agent.name) || agent.skills || []; }
+    // An agent's skills as shown: undo puts a skill back where it was in the list (skillOrder), whatever order the
+    // file keeps.
+    const skillOrder = new Map(), skillGhosts = new Map();
+    function skillsOf(agent) {
+      const list = skillOverride.get(agent.name) || agent.skills || [], order = skillOrder.get(agent.name);
+      if (!order) return list;
+      const rank = name => { const i = order.indexOf(name); return i < 0 ? order.length : i; };
+      return list.map((name, i) => [name, i]).sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]).map(([name]) => name);
+    }
+    // A skill just removed keeps its row (struck, its control off) until the pointer leaves the list or a second
+    // passes, so the next row never slides under a second click.
+    function ghostSkill(agentName, name, index) {
+      const list = skillGhosts.get(agentName) || [];
+      list.push({ name, index }); skillGhosts.set(agentName, list);
+      later(() => clearGhosts(agentName), 1000);
+    }
+    function clearGhosts(agentName) { if (skillGhosts.delete(agentName)) redrawDetail(); }
     // An agent's skills. Read-only without actions.skills (or for an agent whose skills cannot be set here: a council
     // seat, a hub outside the roster, which then shows why); otherwise each skill row has a remove control, a closed
     // fold offers the installed skills it lacks, and one control gives it every skill.
@@ -1146,7 +1544,9 @@
       };
       const row = (parent, name, on) => {
         const item = el('div', 'ag-skill-row'); item.dataset.skill = text(name);
-        item.append(el('span', 'ag-skill-name', text(name)));
+        // With actions.skillfile a skill's name opens its text.
+        if (skillfileAction) { const open = el('button', 'ag-skill-name ag-skill-open', text(name)); open.type = 'button'; open.dataset.skillOpen = text(name); open.setAttribute('aria-label', 'Open the text of ' + text(name)); item.append(open); }
+        else item.append(el('span', 'ag-skill-name', text(name)));
         if (about.get(name)) item.append(el('span', 'ag-skill-about', text(about.get(name))));
         item.title = text(about.get(name) || name);
         if (editable && on !== undefined) {
@@ -1177,12 +1577,22 @@
         if (everything.length) fold(holder, 'agent-skills', 'Installed skills', everything.map(skill => skill.name), editable ? false : undefined);
       } else if (list.length || editable) {
         holder = section(detailScroll, 'Skills · ' + list.length);
-        appendList(holder, list, name => row(holder, name, editable ? false : undefined));
+        const shown = list.slice(), ghosts = (skillGhosts.get(agent.name) || []).filter(ghost => !list.includes(ghost.name));
+        ghosts.forEach(ghost => shown.splice(Math.min(ghost.index, shown.length), 0, ghost.name));
+        appendList(holder, shown, name => {
+          row(holder, name, editable ? false : undefined);
+          if (list.includes(name)) return;
+          const gone = holder.lastElementChild; gone.dataset.removed = 'true'; gone.setAttribute('aria-disabled', 'true');
+          // Its control is spent: it stays in place, says so and does nothing.
+          gone.querySelectorAll('[data-skill-request]').forEach(button => { const spent = el('button', 'ag-text-button ag-skill-control', 'removed'); spent.type = 'button'; spent.disabled = true; spent.setAttribute('aria-label', name + ' removed'); button.replaceWith(spent); });
+        });
+        if (ghosts.length) holder.addEventListener('pointerleave', () => clearGhosts(agent.name), { once: true });
         if (editable) {
           const missing = everything.map(skill => skill.name).filter(name => !list.includes(name));
           if (missing.length) fold(holder, 'agent-skills-add', 'Add skills', missing, true);
           const every = control('Give it every skill', 'Give ' + agent.name + ' every installed skill', { agent: agent.name, all: true }, 'all');
           const line = el('div', 'ag-skill-all'); line.append(every);
+          if (skillfileAction) { const fresh = el('button', 'ag-text-button ag-skill-new', 'New skill'); fresh.type = 'button'; fresh.dataset.skillNew = agent.name; line.append(fresh); }
           if (busy === 'all') { line.dataset.pending = 'true'; line.setAttribute('aria-busy', 'true'); }
           holder.append(line);
         }
@@ -1190,7 +1600,12 @@
       if (!skillAction) return;
       if (!editable && agent.skills_reason) (holder || section(detailScroll, 'Skills')).append(el('p', 'ag-skill-reason', text(agent.skills_reason)));
       const notes = skillNotes.get(agent.name);
-      if (notes?.length && holder) notes.forEach(note => { const line = el('p', 'ag-skill-note', note.text); line.dataset.kind = note.kind; holder.append(line); });
+      // A refusal is brought into view, never left clipped below the panel's edge.
+      if (notes?.length && holder) {
+        notes.forEach(note => { const line = el('p', 'ag-skill-note', note.text); line.dataset.kind = note.kind; line.setAttribute('role', note.kind === 'error' ? 'alert' : 'status'); holder.append(line); });
+        const error = holder.querySelector('.ag-skill-note[data-kind="error"]');
+        if (error) later(() => error.isConnected && error.scrollIntoView({ block: 'nearest' }), 0);
+      }
     }
     function redrawDetail() {
       if (!selected || selected.type !== 'agent') return;
@@ -1213,10 +1628,11 @@
         skillPending.delete(agent.name);
         const after = Array.isArray(reply.skills) ? reply.skills.filter(name => typeof name === 'string') : null;
         if (after) skillOverride.set(agent.name, after);
-        const notes = reply.changed === false ? [{ kind: 'done', text: 'No change needed.' }] : [{ kind: 'done', text: 'Applies after OpenCode restarts.' }];
+        // Where it went and when it applies: the back end's own message, else what the command does.
+        const notes = reply.changed === false ? [{ kind: 'done', text: 'No change needed.' }] : [{ kind: 'done', text: (agent.added === true ? 'Changed in ' + agent.name + '\'s agent file. ' : 'Changed in every preset that lists ' + agent.name + ' and in SKILLS.md. ') + (text(reply.message || '') || 'Applies after OpenCode restarts; running sessions keep their skills.') }];
         (Array.isArray(reply.warnings) ? reply.warnings : []).forEach(warning => notes.push({ kind: 'warning', text: text(warning) }));
         skillNotes.set(agent.name, notes);
-        if (record && reply.changed !== false) remember({ op: 'skill', agent: agent.name, request, before, after: after || before });
+        if (record && reply.changed !== false) { remember({ op: 'skill', agent: agent.name, request, before, after: after || before }); skillOrder.delete(agent.name); }
         redrawDetail();
         if (pending) await pending; // a snapshot asked for before the change may not show it
         await refresh();
@@ -1236,7 +1652,233 @@
       const requests = request.all ? (before.includes('*') ? [] : installed.filter(name => !before.includes(name)).map(skill => ({ agent, skill, on: false })))
         : request.on ? [{ agent, skill: request.skill, on: false }]
         : before.includes('*') ? [{ agent, all: true }] : [{ agent, skill: request.skill, on: true }];
-      requests.reduce((chain, next) => chain.then(() => askSkill(next, false)), Promise.resolve()).catch(() => { if (alive) flowHistory.push(last); });
+      requests.reduce((chain, next) => chain.then(() => askSkill(next, false)), Promise.resolve()).then(() => { if (alive && !before.includes('*')) { skillOrder.set(agent, before.slice()); redrawDetail(); } }, () => { if (alive) flowHistory.push(last); });
+    }
+    // ---- Agents, skill text and groups, written through actions.roster, actions.skillfile and actions.team ----
+    // Every change is one request; its answer is followed by a fresh snapshot, and undo (Ctrl/Cmd+Z) sends the
+    // opposite request. Refusals are shown beside what was asked, in the user's words kept where they typed them.
+    function ask(fn, request) {
+      let answer;
+      try { answer = Promise.resolve(fn(JSON.parse(JSON.stringify(request)))); } catch (error) { answer = Promise.reject(error); }
+      return answer.then(result => result && typeof result === 'object' ? result : {});
+    }
+    async function afterChange() { if (!alive) return; if (pending) await pending; await refresh(); }
+    function rosterInfo() {
+      const value = snapshot?.roster && typeof snapshot.roster === 'object' ? snapshot.roster : {};
+      return { editable: value.editable === true, why: text(value.why || ''), models: Array.isArray(value.models) ? value.models.filter(model => typeof model === 'string' && model) : [] };
+    }
+    function canAddAgent() { return !!rosterAction && rosterInfo().editable; }
+    // Whether Delete can turn an agent off, and why not. The orchestrator, the council and its seats never go.
+    function removableOf(name) {
+      const agent = agentsByName.get(name);
+      if (!rosterAction || !agent || !shownAgents.has(name)) return { ok: false, why: '' };
+      const fixed = name === hubName || agent.group === 'hub' ? 'The orchestrator cannot be deleted.' : isSeatAgent(agent) ? 'A council seat cannot be deleted.' : visibleAgents.some(other => other.parent === name) ? 'The council cannot be deleted.' : '';
+      const value = agent.removable, own = value && typeof value === 'object' ? value : null;
+      const said = text((own && (own.why || own.reason)) || agent.removable_reason || agent.removable_why || '');
+      const ok = !fixed && rosterInfo().editable && (own ? own.ok === true || own.removable === true || own.value === true : value === true);
+      return { ok, why: ok ? '' : said || fixed || (!rosterInfo().editable ? rosterInfo().why : '') || 'This agent cannot be deleted here.' };
+    }
+    function installedSkill(id) { return (snapshot?.skills || []).find(skill => skill && skill.name === id) || null; }
+    function forceDetail() { detailSignature = ''; renderDetail(true); }
+    function setNotes(name, kind, said) { agentNotes.set(name, [{ kind, text: said }]); }
+    function undoFailed(last, error, name = hubName) { if (!alive) return; flowHistory.push(last); refuseFlow(name, error); }
+    // Delete an agent: one request also takes its flows and groups; undo puts all of it back from the record.
+    function removeAgent(name) {
+      if (formBusy || !removableOf(name).ok) return;
+      formBusy = true; agentNotes.delete(name);
+      const added = agentsByName.get(name)?.added === true, open = selected?.type === 'agent' && selected.key === name;
+      ask(rosterAction, { op: 'remove', name }).then(async reply => {
+        formBusy = false;
+        if (!alive) return;
+        remember({ op: 'agent-remove', name, record: reply.record });
+        if (trail.includes(name) && !trailPending) dropTrail();
+        // When it applies, as the back end says: at once for an added agent, after a restart for a default one.
+        const when = text(reply.message || '') || (added ? '' : 'Applies after OpenCode restarts.');
+        announceLine(name + ' deleted. ' + when);
+        if (open) {
+          if (hubName && agentsByName.has(hubName)) { setNotes(hubName, 'done', name + ' deleted.' + (when ? ' ' + when : '') + ' Ctrl+Z puts it back.'); select('agent', hubName, nodes.get(hubName)); }
+          else closeDetails();
+        }
+        keepFocus();
+        await afterChange();
+      }, error => {
+        formBusy = false;
+        if (!alive) return;
+        // The agent stays; its details say why.
+        setNotes(name, 'error', message(error, 'The agent could not be deleted'));
+        if (selected?.type === 'agent' && selected.key === name) forceDetail(); else select('agent', name, nodes.get(name));
+      });
+    }
+    function eligibleMembers(lead, taken = []) { return visibleAgents.map(agent => agent.name).filter(name => name !== lead && ordinaryAgent(name) && !taken.includes(name)).sort(); }
+    function formError(form, said) {
+      const line = form.querySelector('[data-form-error]');
+      if (line) { line.textContent = said; line.hidden = !said; }
+    }
+    // Skill text: read when opened; Save writes it (refused when the file changed underneath, the user's text kept).
+    function openSkill(id, from, origin) {
+      if (!skillfileAction) return;
+      const view = { id, from, state: 'loading', text: '', description: '', draft: null, error: '', note: '' };
+      skillView = view;
+      select('skill', id, origin);
+      ask(skillfileAction, { op: 'read', id }).then(reply => {
+        if (!alive || skillView !== view) return;
+        Object.assign(view, { state: 'ready', text: text(reply.text), description: text(reply.description ?? installedSkill(id)?.description ?? '') });
+        if (selected?.type === 'skill') forceDetail();
+      }, error => {
+        if (!alive || skillView !== view) return;
+        Object.assign(view, { state: 'error', error: message(error, 'The skill could not be read') });
+        if (selected?.type === 'skill') forceDetail();
+      });
+    }
+    function skillEditable(id) { return !!skillfileAction && installedSkill(id)?.editable === true; }
+    function saveSkill() {
+      const view = skillView, box = detailScroll.querySelector('[data-skill-text]');
+      if (!view || !box || formBusy || !skillEditable(view.id)) return;
+      const value = box.value, before = view.text;
+      if (value === before) return;
+      formBusy = true; view.error = ''; view.note = 'Saving'; forceDetail();
+      ask(skillfileAction, { op: 'write', id: view.id, text: value }).then(async reply => {
+        formBusy = false;
+        if (!alive) return;
+        remember({ op: 'skillfile', id: view.id, undo: reply.record ? { op: 'restore', record: reply.record } : { op: 'write', id: view.id, text: before } });
+        Object.assign(view, { text: value, draft: null, note: 'Saved' });
+        if (skillView === view) forceDetail();
+        await afterChange();
+      }, error => {
+        formBusy = false;
+        if (!alive) return;
+        // Refused (the file changed underneath, or read-only): the message, and the user's text still in the box.
+        Object.assign(view, { draft: value, note: '', error: message(error, 'Not saved') });
+        if (skillView === view) forceDetail();
+      });
+    }
+    function deleteSkill() {
+      const view = skillView;
+      if (!view || formBusy || !skillEditable(view.id)) return;
+      formBusy = true; view.error = ''; forceDetail();
+      ask(skillfileAction, { op: 'delete', id: view.id }).then(async reply => {
+        formBusy = false;
+        if (!alive) return;
+        remember({ op: 'skillfile', id: view.id, undo: { op: 'restore', record: reply.record } });
+        if (skillView === view) { skillView = null; if (view.from && agentsByName.has(view.from)) select('agent', view.from, nodes.get(view.from)); else closeDetails(); }
+        await afterChange();
+      }, error => {
+        formBusy = false;
+        if (!alive) return;
+        view.error = message(error, 'The skill could not be deleted');
+        if (skillView === view) forceDetail();
+      });
+    }
+    // A new skill, made and given to this agent in one request.
+    function submitSkill(form, agentName) {
+      if (formBusy || !skillfileAction) return;
+      const id = form.querySelector('[data-new="id"]').value.trim(), description = form.querySelector('[data-new="description"]').value.trim(), body = form.querySelector('[data-new="text"]').value;
+      if (!id) { formError(form, 'An id is needed.'); return; }
+      formBusy = true; formError(form, ''); form.dataset.pending = 'true';
+      ask(skillfileAction, { op: 'create', id, description, text: body, assign: agentName }).then(async reply => {
+        formBusy = false; delete form.dataset.pending;
+        if (!alive) return;
+        remember({ op: 'skillfile-create', id, agent: agentName });
+        // Where it went is the view's to say, when it applies the back end's.
+        skillNotes.set(agentName, [{ kind: 'done', text: 'Made ' + id + ' and gave it to ' + agentName + '. ' + (text(reply.message || '') || 'Applies after OpenCode restarts.') }]);
+        await afterChange();
+        if (agentsByName.has(agentName)) select('agent', agentName, nodes.get(agentName));
+      }, error => {
+        formBusy = false; delete form.dataset.pending;
+        if (alive) formError(form, message(error, 'The skill could not be made'));
+      });
+    }
+    // Groups: one request per change, followed by a fresh snapshot; the lead's details show what went wrong.
+    function askTeam(request, lead, done) {
+      if (!teamAction || formBusy) return Promise.resolve(null);
+      formBusy = true; agentNotes.delete(lead);
+      return ask(teamAction, request).then(async reply => {
+        formBusy = false;
+        if (!alive) return reply;
+        done(reply);
+        await afterChange();
+        return reply;
+      }, error => {
+        formBusy = false;
+        if (!alive) return null;
+        setNotes(lead, 'error', message(error, 'The group could not be changed'));
+        if (selected?.type === 'agent' && selected.key === lead) forceDetail(); else if (agentsByName.has(lead)) select('agent', lead, nodes.get(lead));
+        return null;
+      });
+    }
+    function createTeam(lead, members) {
+      askTeam({ op: 'add', lead, members }, lead, reply => { teamDraft = null; if (reply.team?.id) remember({ op: 'team-add', id: reply.team.id }); }).then(reply => {
+        if (!alive || !reply?.team?.id || !agentsByName.has(lead)) return;
+        // A group just made opens its lead's details with the instruction focused and its made-up text selected.
+        select('agent', lead, nodes.get(lead));
+        const box = detailScroll.querySelector('[data-team-text]');
+        if (box && !box.readOnly) { box.focus({ preventScroll: true }); box.select(); box.scrollIntoView({ block: 'nearest' }); }
+      });
+    }
+    function setMembers(team, members) {
+      const before = team.members.slice();
+      if (!members.length) { removeTeam(team); return; }
+      askTeam({ op: 'members', id: team.id, members }, team.lead, () => remember({ op: 'team-members', id: team.id, before, after: members.slice() }));
+    }
+    function removeMember(key) { const view = teamLines.get(key), team = view && teamById(view.team.id); if (team) setMembers(team, team.members.filter(name => name !== view.member)); }
+    function removeTeam(team) {
+      const box = detailScroll.querySelector('[data-team-text]'), words = box && box.dataset.teamText === team.id && !box.readOnly ? box.dataset.saved : team.text;
+      askTeam({ op: 'remove', id: team.id }, team.lead, () => remember({ op: 'team-remove', id: team.id, lead: team.lead, members: team.members.slice(), text: words }));
+    }
+    function setTeamState(kind, said) {
+      const state = detailScroll.querySelector('[data-team-state]');
+      if (!state) return;
+      state.dataset.teamState = kind; state.textContent = said || { saved: 'Saved', unsaved: 'Saving', saving: 'Saving' }[kind]; state.title = state.textContent;
+    }
+    // The instruction is saved when focus leaves it or on Ctrl/Cmd+Enter, as a flow's is; blank makes it again.
+    function saveTeamText(box) {
+      if (!teamAction || box.readOnly || box.dataset.saving === 'true') return;
+      const id = box.dataset.teamText, before = box.dataset.saved, value = box.value, team = teamById(id);
+      if (value === before || !team) return;
+      const long = overLimit(value);
+      if (long) { setTeamState('error', long); return; }
+      box.dataset.saving = 'true'; setTeamState('saving');
+      ask(teamAction, { op: 'text', id, text: value }).then(async reply => {
+        box.dataset.saving = 'false';
+        if (!alive) return;
+        box.dataset.saved = typeof reply.team?.text === 'string' ? reply.team.text : value;
+        if (box.value === value) box.value = box.dataset.saved;
+        remember({ op: 'team-text', id, before, after: box.dataset.saved });
+        setTeamState(box.value === box.dataset.saved ? 'saved' : 'unsaved');
+        await afterChange();
+      }, error => { box.dataset.saving = 'false'; if (alive) setTeamState('error', message(error, 'Not saved')); });
+    }
+    // Undo for the three back ends: the opposite request.
+    function undoOther(last) {
+      const done = () => afterChange();
+      switch (last.op) {
+        case 'agent-remove': ask(rosterAction, { op: 'restore', record: last.record }).then(done, error => undoFailed(last, error)); return true;
+        case 'agent-add': ask(rosterAction, { op: 'remove', name: last.name }).then(() => {
+          if (last.layout) { const now = copyMoves(last.layout); if (now[last.name] && !last.before[last.name]) { delete now[last.name]; if (Object.keys(now).length) moves[last.layout] = now; else delete moves[last.layout]; saveMoves(); } }
+          if (selected?.type === 'agent' && selected.key === last.name) closeDetails();
+          return done();
+        }, error => undoFailed(last, error, last.name)); return true;
+        case 'agent-rename': ask(rosterAction, { op: 'add', name: last.from, copy_of: last.to }).then(() => ask(rosterAction, { op: 'remove', name: last.to })).then(() => {
+          Object.keys(moves).forEach(layout => { const here = moves[layout]; if (here[last.to]) { here[last.from] = here[last.to]; delete here[last.to]; } }); saveMoves();
+          return done();
+        }, error => undoFailed(last, error, last.to)); return true;
+        case 'skillfile': ask(skillfileAction, last.undo).then(() => { if (skillView?.id === last.id) { skillView = null; if (selected?.type === 'skill') closeDetails(); } return done(); }, error => undoFailed(last, error)); return true;
+        case 'skillfile-create':
+          (skillAction ? askSkill({ agent: last.agent, skill: last.id, on: false }, false) : Promise.resolve())
+            .then(() => ask(skillfileAction, { op: 'delete', id: last.id })).then(done, error => undoFailed(last, error, last.agent));
+          return true;
+        case 'team-add': ask(teamAction, { op: 'remove', id: last.id }).then(done, error => undoFailed(last, error)); return true;
+        case 'team-members': ask(teamAction, { op: 'members', id: last.id, members: last.before }).then(done, error => undoFailed(last, error)); return true;
+        case 'team-text': ask(teamAction, { op: 'text', id: last.id, text: last.before }).then(done, error => undoFailed(last, error)); return true;
+        case 'team-remove':
+          ask(teamAction, { op: 'add', lead: last.lead, members: last.members, text: last.text }).then(reply => {
+            // A group put back may get a new id: later steps that name it follow it.
+            if (reply.team?.id) flowHistory.forEach(entry => { if (entry.op?.startsWith('team-') && entry.id === last.id) entry.id = reply.team.id; });
+            return done();
+          }, error => undoFailed(last, error, last.lead));
+          return true;
+        default: return false;
+      }
     }
     function flowSection(agent, incoming, relevant) {
       const list = relevant.filter(f => (incoming ? f.to : f.from) === agent.name);
@@ -1383,6 +2025,7 @@
         canvasLoops().filter(loop => loop.state === 'sent_back' && !loop.pairs.some(pair => troubleIDs.has(pair[1]))).forEach(loop => issues.push({ title: loop.worker, detail: loop.evaluator, meta: 'Sent back · ' + loop.rounds, review: loop.id }));
         canvasWorkLoops().filter(loop => loop.state === 'stuck' && !loop.nodes.some(id => troubleIDs.has(id))).forEach(loop => issues.push({ title: loop.agent, detail: 'Work loop', meta: 'Stuck · ' + loop.rounds, work: loop.agent }));
         if (!issues.length) attention.append(el('p', 'ag-run-empty', 'None'));
+        else attention.append(el('p', 'ag-run-empty ag-attention-key', 'The red “! ' + attentionAgents().size + '” above the graph counts the agents here (a step failed, is blocked or stuck, or work was sent back); each has a red dot on its circle.'));
         appendList(attention, issues, item => runRow(attention, item));
 
         const spend = runSection('Spend', 'spend');
@@ -1439,7 +2082,267 @@
         section(body, 'Usage', snapshot.totals.sessions + ' sessions · ' + cost(snapshot.totals.cost) + '\n' + snapshot.totals.tokens_in.toLocaleString() + ' input tokens · ' + snapshot.totals.tokens_out.toLocaleString() + ' output tokens');
       });
     }
-    function renderDetail() {
+    // Lines under an agent's name after a change to it, then its own controls: Add agent on the orchestrator (or why
+    // the roster cannot be written), Delete agent (or why it cannot go).
+    function agentActions(agent) {
+      (agentNotes.get(agent.name) || []).forEach(note => { const line = el('p', 'ag-agent-note', note.text); line.dataset.kind = note.kind; line.setAttribute('role', note.kind === 'error' ? 'alert' : 'status'); detailScroll.append(line); });
+      if (!rosterAction) return;
+      if (renamable(agent)) {
+        const box = input('rename', agent.name); box.dataset.rename = agent.name; box.setAttribute('aria-label', 'Name');
+        box.setAttribute('aria-keyshortcuts', 'Enter Escape Alt+ArrowUp Alt+ArrowDown Alt+ArrowLeft Alt+ArrowRight');
+        const label = el('label', 'ag-field ag-rename'); label.append(el('span', 'ag-form-label', 'Name'), box); detailScroll.append(label);
+      }
+      const row = el('div', 'ag-agent-actions'), button = (label, data, keys) => { const item = el('button', 'ag-text-button', label); item.type = 'button'; item.setAttribute(data, agent.name); if (keys) item.setAttribute('aria-keyshortcuts', keys); return item; };
+      // Agents are added with the + on the canvas; when the roster cannot be written, the orchestrator says why.
+      if (agent.name === hubName && !canAddAgent() && rosterInfo().why) row.append(el('p', 'ag-form-reason ag-roster-reason', rosterInfo().why));
+      const removable = removableOf(agent.name);
+      if (removable.ok) row.append(button('Delete agent', 'data-agent-remove', 'Delete'));
+      else if (removable.why && !(agent.name === hubName && !rosterInfo().editable && removable.why === rosterInfo().why)) row.append(el('p', 'ag-form-reason ag-remove-reason', removable.why));
+      if (row.childNodes.length) detailScroll.append(row);
+    }
+    // An agent's group: whom it reports to; for a lead, its members (each with remove), an add-member control, the
+    // instruction (edited as a flow's is) and Remove group; otherwise a way to make it a lead and choose members.
+    function teamSection(agent) {
+      const led = teamLedBy(agent.name), above = structureTeams().filter(team => team.members.includes(agent.name) && team.lead !== agent.name && shownAgents.has(team.lead));
+      if (above.length) {
+        const holder = section(detailScroll, 'Reports to'); holder.dataset.reportsTo = '';
+        above.forEach(team => { const link = el('button', 'ag-family-link', team.lead); link.type = 'button'; link.dataset.flowPeer = team.lead; holder.append(link); });
+      }
+      if (led) {
+        const holder = section(detailScroll, 'Group · ' + led.members.length); holder.dataset.teamSection = led.id;
+        led.members.forEach(name => {
+          const row = el('div', 'ag-team-member'), link = el('button', 'ag-family-link', name); link.type = 'button'; link.dataset.flowPeer = name; row.append(link);
+          if (teamAction) { const drop = el('button', 'ag-text-button', 'remove'); drop.type = 'button'; drop.dataset.teamDrop = name; drop.setAttribute('aria-label', 'Take ' + name + ' out of the group'); row.append(drop); }
+          holder.append(row);
+        });
+        if (teamAction) {
+          const others = eligibleMembers(agent.name, led.members);
+          if (others.length) {
+            const line = el('div', 'ag-team-add'), choice = el('select', 'ag-input'), add = el('button', 'ag-text-button', 'Add member');
+            choice.dataset.teamAdd = led.id; choice.setAttribute('aria-label', 'Agent to add to the group');
+            others.forEach(name => { const option = el('option', '', name); option.value = name; choice.append(option); });
+            add.type = 'button'; add.dataset.teamAddButton = led.id; line.append(choice, add); holder.append(line);
+          }
+        }
+        const box = el('textarea', 'ag-route-text ag-team-text');
+        box.value = led.text; box.dataset.teamText = led.id; box.dataset.saved = led.text; box.rows = 5; box.spellcheck = false; box.setAttribute('aria-label', 'Group instruction');
+        holder.append(el('h4', 'ag-form-label', 'Instruction'), box);
+        if (teamAction) {
+          const actions = el('div', 'ag-route-actions'), state = el('p', 'ag-route-state', 'Saved'), remove = el('button', 'ag-text-button', 'Remove group');
+          state.dataset.teamState = 'saved'; state.setAttribute('aria-live', 'polite'); remove.type = 'button'; remove.dataset.teamRemove = led.id;
+          actions.append(state, remove); holder.append(actions);
+        } else box.readOnly = true;
+      } else if (teamAction && ordinaryAgent(agent.name)) {
+        const holder = section(detailScroll, 'Group');
+        if (teamDraft?.lead === agent.name) {
+          const list = el('div', 'ag-team-pick'), others = eligibleMembers(agent.name);
+          others.forEach(name => { const label = el('label', 'ag-check'), box = el('input'); box.type = 'checkbox'; box.value = name; box.dataset.teamPick = ''; box.checked = teamDraft.members.includes(name); label.append(box, el('span', '', name)); list.append(label); });
+          if (!others.length) list.append(el('p', 'ag-form-reason', 'No agent can join it.'));
+          const actions = el('div', 'ag-route-actions'), create = el('button', 'ag-text-button', 'Create group'), cancel = el('button', 'ag-text-button', 'Cancel');
+          create.type = 'button'; create.dataset.teamCreate = agent.name; cancel.type = 'button'; cancel.dataset.teamCancel = '';
+          actions.append(create, cancel); holder.append(el('p', 'ag-form-reason', 'Members report to ' + agent.name + '.'), list, actions);
+        } else { const start = el('button', 'ag-text-button', 'Make it a group lead'); start.type = 'button'; start.dataset.teamStart = agent.name; holder.append(start); }
+      }
+    }
+    function field(form, label, control) { const item = el('label', 'ag-field'); item.append(el('span', 'ag-form-label', label), control); form.append(item); return control; }
+    function input(key, value = '') { const item = el('input', 'ag-input'); item.type = 'text'; item.dataset.new = key; item.value = value; item.spellcheck = false; item.autocomplete = 'off'; return item; }
+    function formEnd(form, label) {
+      const actions = el('div', 'ag-form-actions'), submit = el('button', 'ag-form-submit', label), error = el('p', 'ag-form-error');
+      submit.type = 'submit'; error.dataset.formError = ''; error.setAttribute('role', 'alert'); error.hidden = true;
+      actions.append(submit); form.append(actions, error);
+    }
+    // ---- The +: a new agent from a blank, a copy or the verifier, dropped where the user wants it ----
+    let draft = null;
+    function freeName(base, from) { for (let i = from; ; i++) { const name = base + '-' + i; if (!agentsByName.has(name)) return name; } }
+    function updatePlus() {
+      const can = canAddAgent();
+      plus.hidden = !can;
+      if (!can) { closeAddMenu(false); if (draft) dropDraft(); }
+    }
+    function openAddMenu(fromKey) {
+      if (!canAddAgent()) return;
+      const item = (label, kind, source) => { const button = el('button', 'ag-add-item', label); button.type = 'button'; button.setAttribute('role', 'menuitem'); button.tabIndex = -1; button.dataset.addKind = kind; if (source) button.dataset.addSource = source; return button; };
+      const copies = visibleAgents.filter(agent => ordinaryAgent(agent.name)).map(agent => agent.name).sort();
+      const parts = [item('Blank agent', 'blank'), item('Verifier', 'verifier')];
+      if (copies.length) { const head = el('div', 'ag-add-head', 'Copy of'); head.setAttribute('role', 'presentation'); parts.push(head, ...copies.map(name => item(name, 'copy', name))); }
+      addMenu.replaceChildren(...parts);
+      addMenu.hidden = false; plus.setAttribute('aria-expanded', 'true');
+      if (fromKey) addMenu.querySelector('[role="menuitem"]')?.focus({ preventScroll: true });
+    }
+    function closeAddMenu(refocus) {
+      if (addMenu.hidden) return;
+      addMenu.hidden = true; plus.setAttribute('aria-expanded', 'false');
+      if (refocus) plus.focus({ preventScroll: true });
+    }
+    // A spot where a new circle (and its name) sits clear of every agent: the one asked for, or the nearest free.
+    function freeSpot(x, y) {
+      const clear = (px, py) => Array.from(positions.values()).every(p => Math.hypot(p.x - px, p.y - py) >= p.r + 23 + 30);
+      if (clear(x, y)) return { x, y };
+      for (let ring = 1; ring <= 40; ring++) {
+        const distance = ring * 12, count = Math.max(8, Math.round(ring * 6));
+        for (let i = 0; i < count; i++) { const angle = i * Math.PI * 2 / count, px = x + distance * Math.cos(angle), py = y + distance * Math.sin(angle); if (clear(px, py)) return { x: px, y: py }; }
+      }
+      return { x, y };
+    }
+    function drawDraft() {
+      if (!draft) { draftLayer.replaceChildren(); return; }
+      if (!draftLayer.firstChild) {
+        const node = svg('g', { class: 'ag-agent ag-draft', 'data-draft': '' });
+        node.append(svg('circle', { class: 'ag-core', r: 23 }), svg('text', { class: 'ag-agent-name', 'text-anchor': 'middle', y: 43 }));
+        draftLayer.append(node);
+      }
+      const node = draftLayer.firstChild;
+      node.setAttribute('transform', 'translate(' + draft.x + ' ' + draft.y + ')');
+      node.dataset.following = String(draft.following);
+      node.querySelector('text').textContent = draft.name;
+    }
+    // Choosing a starting point: by pointer the circle follows it until a click or a release drops it; by keyboard
+    // it is placed at once at a free spot near the middle (Alt+arrows move it while it is being named).
+    function startDraft(kind, source, event) {
+      closeAddMenu(false);
+      if (draft) dropDraft();
+      const name = kind === 'verifier' ? freeName('verifier', 2) : kind === 'copy' ? freeName(source, 2) : freeName('agent', 1);
+      draft = { kind, source: source || '', name, x: 0, y: 0, following: !!event, held: !!event && event.type === 'pointerdown', startX: event?.clientX ?? 0, startY: event?.clientY ?? 0 };
+      if (event) { const point = stagePoint(event.clientX, event.clientY); draft.x = point.x; draft.y = point.y; drawDraft(); }
+      else {
+        const rect = viewport.getBoundingClientRect(), middle = stagePoint(rect.left + rect.width / 2, rect.top + rect.height / 2), hub = positions.get(hubName) || middle;
+        const spot = freeSpot(hub.x + 140, hub.y - 40); Object.assign(draft, spot); placeDraft();
+      }
+    }
+    function followDraft(event) {
+      if (!draft?.following) return;
+      const point = stagePoint(event.clientX, event.clientY); draft.x = point.x; draft.y = point.y; drawDraft();
+    }
+    // Dropped: it settles beside any agent it would cover and is added at once (`roster add`) under its default
+    // name; its details then open with the name selected, to be typed over.
+    function placeDraft() {
+      if (!draft || draft.pending) return;
+      Object.assign(draft, freeSpot(draft.x, draft.y), { following: false, held: false, placed: true, pending: true, error: '' });
+      drawDraft(); createDraft();
+    }
+    function createDraft() {
+      const made = draft, request = { op: 'add', name: made.name };
+      if (made.kind === 'verifier') request.template = 'verifier';
+      else if (made.kind === 'copy') request.copy_of = made.source;
+      else if (rosterInfo().models[0]) request.model = rosterInfo().models[0];
+      formBusy = true;
+      ask(rosterAction, request).then(async reply => {
+        formBusy = false;
+        if (!alive) return;
+        const name = text(reply.agent?.name || reply.name || '') || made.name;
+        // Its place is kept: where it was dropped.
+        const layout = layoutKey(), before = copyMoves(layout);
+        (moves[layout] ||= {})[name] = { x: made.x, y: made.y }; saveMoves();
+        remember({ op: 'agent-add', name, layout, before });
+        // When it applies is the back end's to say (an added agent is live at once).
+        const said = text(reply.message || '');
+        setNotes(name, 'done', name + ' added.' + (said ? ' ' + said : ''));
+        announceLine(name + ' added.' + (said ? ' ' + said : ''));
+        await afterChange();
+        if (draft === made) { draft = null; drawDraft(); }
+        if (agentsByName.has(name)) { select('agent', name, nodes.get(name)); focusRename(); }
+        else if (selected?.type === 'new-agent') closeDetails();
+      }, error => {
+        formBusy = false;
+        if (!alive || draft !== made) return;
+        Object.assign(made, { pending: false, error: message(error, 'The agent could not be added') });
+        drawDraft(); announceLine(made.error); select('new-agent', '', plus);
+      });
+    }
+    function focusRename() {
+      const box = detailScroll.querySelector('[data-rename]');
+      if (box) { box.focus({ preventScroll: true }); box.select(); }
+    }
+    function dropDraft() {
+      if (draft?.pending) return;
+      draft = null; drawDraft();
+      if (selected?.type === 'new-agent') closeDetails();
+    }
+    // Only when adding failed: the reason, and the choice to try again or let it go.
+    function renderNewAgent() {
+      eyebrow.textContent = 'New agent';
+      if (!draft) { detailScroll.append(el('p', 'ag-form-reason', 'Choose a starting point with the + button.')); return; }
+      detailScroll.append(el('h2', 'ag-detail-title', draft.name));
+      if (draft.error) { const line = el('p', 'ag-form-error', draft.error); line.setAttribute('role', 'alert'); detailScroll.append(line); }
+      const row = el('div', 'ag-agent-actions');
+      const again = el('button', 'ag-text-button', 'Try again'); again.type = 'button'; again.dataset.draftRetry = '';
+      const cancel = el('button', 'ag-text-button', 'Cancel'); cancel.type = 'button'; cancel.dataset.draftCancel = '';
+      row.append(again, cancel); detailScroll.append(row);
+    }
+    // An agent the user added, while it is on no flow or group, can be renamed in its details: the contract has no
+    // rename, so the view adds a copy under the new name and deletes the old one (its place goes with it).
+    function renamable(agent) { return !!agent && agent.added === true && canAddAgent() && !routes().some(flow => flow.path.includes(agent.name)) && !structureTeams().some(team => team.lead === agent.name || team.members.includes(agent.name)); }
+    function renameAgent(from, to, box) {
+      if (formBusy || !to || to === from) return;
+      if (agentsByName.has(to)) { setNotes(from, 'error', to + ' is already an agent.'); forceDetail(); focusRename(); return; }
+      formBusy = true; if (box) box.dataset.saving = 'true';
+      ask(rosterAction, { op: 'add', name: to, copy_of: from }).then(() => ask(rosterAction, { op: 'remove', name: from })).then(async reply => {
+        formBusy = false;
+        if (!alive) return;
+        Object.keys(moves).forEach(layout => { const here = moves[layout]; if (here[from]) { here[to] = here[from]; delete here[from]; } });
+        saveMoves();
+        const last = flowHistory.at(-1);
+        // Renaming an agent just added is part of adding it: undo deletes it under its new name.
+        if (last?.op === 'agent-add' && last.name === from) { last.name = to; if (last.before) delete last.before[to]; }
+        else remember({ op: 'agent-rename', from, to, record: reply.record });
+        agentNotes.delete(from); setNotes(to, 'done', 'Renamed ' + from + ' to ' + to + '.');
+        announceLine('Renamed ' + from + ' to ' + to + '.');
+        await afterChange();
+        if (agentsByName.has(to)) select('agent', to, nodes.get(to));
+        keepFocus();
+      }, error => {
+        formBusy = false;
+        if (!alive) return;
+        setNotes(from, 'error', message(error, 'The agent could not be renamed'));
+        if (selected?.type === 'agent' && selected.key === from) { forceDetail(); focusRename(); }
+      });
+    }
+    // Undo keeps working after the element that had focus is removed (a deleted line, a removed skill row): while
+    // the last thing the user touched was inside the view, focus that would fall to the page comes back to the
+    // canvas, and Ctrl/Cmd+Z pressed on the page itself still reaches the view.
+    let lastInside = false;
+    function keepFocus() {
+      const settle = () => { if (alive && lastInside && (!document.activeElement || document.activeElement === document.body || !document.activeElement.isConnected)) viewport.focus({ preventScroll: true }); };
+      settle(); later(settle, 0);
+    }
+    function announceLine(said) { trailStatus.textContent = ''; later(() => { if (!trail.length) trailStatus.textContent = said; }, 30); }
+    function renderNewSkill(agentName) {
+      eyebrow.textContent = 'New skill';
+      detailScroll.append(el('h2', 'ag-detail-title', 'New skill for ' + agentName));
+      const form = el('form', 'ag-form'); form.dataset.form = 'new-skill:' + agentName; form.noValidate = true;
+      field(form, 'Id', input('id'));
+      field(form, 'Description', input('description'));
+      const body = el('textarea', 'ag-route-text ag-skill-text'); body.dataset.new = 'text'; body.rows = 10; body.spellcheck = false;
+      field(form, 'Text', body);
+      formEnd(form, 'Create skill');
+      detailScroll.append(form);
+    }
+    function renderSkill(id) {
+      const view = skillView && skillView.id === id ? skillView : null, info = installedSkill(id), editable = skillEditable(id);
+      eyebrow.textContent = 'Skill';
+      detailScroll.append(el('h2', 'ag-detail-title', id));
+      if (view?.from && agentsByName.has(view.from)) { const back = el('button', 'ag-family-link', '← ' + view.from); back.type = 'button'; back.dataset.flowPeer = view.from; detailScroll.append(back); }
+      const about = view?.description || info?.description;
+      if (about) detailScroll.append(el('p', 'ag-detail-about', text(about)));
+      const form = el('div', 'ag-form'); form.dataset.form = 'skill:' + id;
+      if (!view || view.state === 'loading') form.append(el('p', 'ag-form-reason', 'Loading'));
+      else if (view.state === 'ready') {
+        const box = el('textarea', 'ag-route-text ag-skill-text');
+        box.value = view.draft ?? view.text; box.dataset.skillText = id; box.rows = 14; box.spellcheck = false; box.readOnly = !editable; box.setAttribute('aria-label', 'Skill text');
+        form.append(box);
+        if (editable) {
+          const actions = el('div', 'ag-route-actions'), state = el('p', 'ag-route-state', view.note || (view.draft != null && view.draft !== view.text ? 'Changed' : 'Saved'));
+          const save = el('button', 'ag-text-button', 'Save'), cancel = el('button', 'ag-text-button', 'Cancel'), remove = el('button', 'ag-text-button', 'Delete skill');
+          state.dataset.skillState = ''; state.setAttribute('aria-live', 'polite');
+          [[save, 'skillSave'], [cancel, 'skillCancel'], [remove, 'skillDelete']].forEach(([item, key]) => { item.type = 'button'; item.dataset[key] = id; if (formBusy) item.disabled = true; });
+          const buttons = el('span', 'ag-form-buttons'); buttons.append(save, cancel, remove);
+          actions.append(state, buttons); form.append(actions);
+        } else form.append(el('p', 'ag-form-reason ag-skill-readonly', text(info?.why) || (skillfileAction ? 'This skill is read-only here.' : 'Skill text cannot be changed here.')));
+      }
+      if (view?.error) { const error = el('p', 'ag-form-error', view.error); error.setAttribute('role', 'alert'); form.append(error); }
+      detailScroll.append(form);
+    }
+    function renderDetail(force = false) {
       if (!selected || !snapshot) return;
       const graph = snapshot.graph;
       const agent = selected.type === 'agent' ? agentsByName.get(selected.key) : null;
@@ -1454,6 +2357,13 @@
       // An instruction being edited is never rebuilt under the user's hands; it is rebuilt once they leave it.
       const editing = selected.type === 'flow' ? detailScroll.querySelector('[data-route-text]') : null;
       if (editing && editing.dataset.routeText === selected.key && routeById(selected.key) && (document.activeElement === editing || editing.value !== editing.dataset.saved)) return;
+      // Nor is a group's instruction, or a form being filled in (it is rebuilt when its answer comes).
+      const teamBox = selected.type === 'agent' ? detailScroll.querySelector('[data-team-text]') : null;
+      if (teamBox && teamById(teamBox.dataset.teamText) && (document.activeElement === teamBox || teamBox.value !== teamBox.dataset.saved)) return;
+      if (!force && detailScroll.querySelector('[data-form]')?.dataset.form === selected.type + ':' + selected.key) return;
+      // Nor the name of an agent being renamed.
+      const renaming = selected.type === 'agent' ? detailScroll.querySelector('[data-rename]') : null;
+      if (!force && renaming && renaming.dataset.rename === selected.key && agentsByName.has(selected.key) && (document.activeElement === renaming || renaming.value !== selected.key)) return;
       detailSignature = signature;
       const scroll = detailScroll.scrollTop;
       const focused = document.activeElement;
@@ -1493,7 +2403,10 @@
           } else box.readOnly = true;
           detailScroll.append(item);
         }
-      } else if (selected.type === 'work-loop') {
+      } else if (selected.type === 'new-agent') renderNewAgent();
+      else if (selected.type === 'new-skill') renderNewSkill(selected.key);
+      else if (selected.type === 'skill') renderSkill(selected.key);
+      else if (selected.type === 'work-loop') {
         eyebrow.textContent = 'Loop';
         detailScroll.append(el('h2', 'ag-detail-title', workLoop ? workLoop.agent : 'Unavailable'));
         if (workLoop) {
@@ -1528,7 +2441,12 @@
         if (agent.pool) badges.append(el('span', 'ag-badge', 'Pool of ' + agent.pool));
         detailScroll.append(badges);
         stats(detailScroll, usageOf(agent.sessions));
+        // The red dot on its circle (and the "! N" above the graph): what it means for this agent.
+        const trouble = attentionAgents().get(agent.name);
+        if (trouble) { const line = el('p', 'ag-agent-note ag-attention-note', 'Needs attention: ' + trouble + '. This is the red dot on its circle, counted in the “! N” above the graph.'); line.dataset.kind = 'error'; detailScroll.append(line); }
+        agentActions(agent);
         skillSection(agent);
+        teamSection(agent);
         if (sessionToOpen(agent)) { const opener = el('button', 'ag-open-session', 'Open session'); opener.type = 'button'; opener.dataset.openSession = agent.name; detailScroll.append(opener); }
         const record = snapshot.learning?.agents && Object.hasOwn(snapshot.learning.agents, agent.name) ? snapshot.learning.agents[agent.name] : null;
         if (record) {
@@ -1566,6 +2484,7 @@
       }
       detailScroll.scrollTop = scroll;
       if (focusedStep) Array.from(detailScroll.querySelectorAll('[data-step]')).find(row => row.dataset.step === focusedStep)?.querySelector('summary').focus({ preventScroll: true });
+      keepFocus();
     }
 
     function stagePoint(clientX, clientY) {
@@ -1604,7 +2523,7 @@
       if (title) title.textContent = flowErrors.get(name) || name;
     }
     function markArmed() {
-      nodes.forEach((node, key) => { node.dataset.armed = String(!trailPending && trail.at(-1) === key); node.dataset.trail = String(trail.includes(key)); });
+      nodes.forEach((node, key) => { node.dataset.armed = String(!trailPending && trail.at(-1) === key); node.dataset.trail = String(trail.includes(key)); node.dataset.pendingEnd = String(trailPending && trail.at(-1) === key); });
       highlight();
     }
     function announce() {
@@ -1622,7 +2541,7 @@
       const step = standIn(name);
       if (!step || trailPending) return;
       loneCancel = '';
-      trail = [step]; flowErrors.delete(step); setTitle(step); trailChanged();
+      trail = [step]; flowErrors.delete(step); setTitle(step); if (agentNotes.get(step)?.[0]?.kind === 'error') agentNotes.delete(step); trailChanged();
     }
     function dropTrail() { if (trailPending) return; trail = []; trailChanged(); }
     function backStep() { if (trailPending) return; trail.pop(); trailChanged(); }
@@ -1632,7 +2551,7 @@
       // A second click on a lone armed agent cancels it; a double-click there then makes its loop on itself.
       if (step === trail.at(-1)) { loneCancel = trail.length === 1 ? step : ''; finishTrail(); return; }
       // The hub can only end a path: once it is the newest step, only finishing it, Backspace or Escape is left.
-      if (trail.length > 1 && isHubAgent(trail.at(-1))) { refuseFlow(step, trail.at(-1) + ' ends this flow: press Enter or click it again to add the flow'); return; }
+      if (trail.length > 1 && isHubAgent(trail.at(-1))) { refuseFlow(step, trail.at(-1) + ' ends this flow: press Enter or click it again to add the flow', false); return; }
       trail.push(step); trailChanged();
     }
     // A double-click (or `l`) on an agent with no path pending: its loop on itself, added once; if it has one,
@@ -1669,44 +2588,103 @@
       if (node && nodeLayer.contains(node)) return { type: 'agent', key: node.dataset.agent, origin: node };
       const route = element.closest('[data-route]');
       if (route) return { type: 'flow', key: route.dataset.route, origin: route };
+      const member = element.closest('[data-team-line]');
+      if (member) return { type: 'team-line', key: member.dataset.teamLine, origin: member };
       const work = element.closest('[data-work-loop-id]');
       if (work) return { type: 'work-loop', key: work.dataset.workLoopId, origin: work };
       const loop = element.closest('[data-loop-id]');
       if (loop) return { type: 'loop', key: loop.dataset.loopId, origin: loop };
       return null;
     }
+    // The line under the pointer. Every flow, loop and group line has a band LINE_BAND screen px wide that takes the
+    // click, the right-click and the hover; where bands overlap, the line nearest the pointer wins. Returns the
+    // line's group (a flow, a group line, a review or work loop) or null.
+    const LINE_OWNER = '[data-route], [data-team-line], [data-loop-id], [data-work-loop-id]';
+    function lineAt(clientX, clientY, fallback) {
+      const owners = new Map();
+      (document.elementsFromPoint?.(clientX, clientY) || []).forEach(element => {
+        if (!element.matches?.('.ag-route-hit, .ag-team-hit, .ag-line-hit') || !viewport.contains(element)) return;
+        const owner = element.closest(LINE_OWNER);
+        if (owner) owners.set(element, owner);
+      });
+      if (!owners.size) { const owner = fallback?.closest?.(LINE_OWNER); return owner && !fallback.closest('[data-agent]') ? owner : null; }
+      let best = null, least = Infinity;
+      owners.forEach((owner, element) => {
+        const distance = distanceTo(element, clientX, clientY);
+        if (distance < least) { least = distance; best = owner; }
+      });
+      return best;
+    }
+    function distanceTo(element, clientX, clientY) {
+      const matrix = element.getScreenCTM();
+      if (!matrix) return Infinity;
+      let least = Infinity;
+      if (element.tagName.toLowerCase() === 'line') {
+        const a = new DOMPoint(+element.getAttribute('x1'), +element.getAttribute('y1')).matrixTransform(matrix), b = new DOMPoint(+element.getAttribute('x2'), +element.getAttribute('y2')).matrixTransform(matrix);
+        const dx = b.x - a.x, dy = b.y - a.y, t = clamp(((clientX - a.x) * dx + (clientY - a.y) * dy) / (dx * dx + dy * dy || 1), 0, 1);
+        return Math.hypot(a.x + dx * t - clientX, a.y + dy * t - clientY);
+      }
+      const length = element.getTotalLength?.() || 0, count = Math.max(8, Math.min(120, Math.ceil(length * (matrix.a || 1) / 3)));
+      for (let i = 0; i <= count; i++) { const q = element.getPointAtLength(length * i / count).matrixTransform(matrix); least = Math.min(least, Math.hypot(q.x - clientX, q.y - clientY)); }
+      return least;
+    }
+    // Hovering any part of a line marks the whole of it (a flow's every step) and fades the others; only while the
+    // pointer is there.
+    let hoverLine = null;
+    function hoverOn(owner) {
+      if (owner === hoverLine) return;
+      if (hoverLine) delete hoverLine.dataset.hover;
+      hoverLine = owner && owner.isConnected ? owner : null;
+      if (hoverLine) hoverLine.dataset.hover = 'true';
+      stage.dataset.hovering = String(!!hoverLine);
+    }
     // Opening details touches nothing else: a pending path stays pending.
     function openInfo(target) {
       if (target.type === 'agent') activateAgent(target.key, target.origin);
+      else if (target.type === 'team-line') { const view = teamLines.get(target.key); if (view) select('agent', view.team.lead, target.origin); }
       else select(target.type, target.key, target.origin);
     }
-    function pickFlow(id) { if (pickedFlow === id) return; pickedFlow = id; highlight(); }
-    // What Delete or Backspace is about: the focused node, flow or loop, else the picked flow, else the flow whose
-    // details are open.
+    function pickFlow(id) { if (pickedFlow === id && !pickedMember) return; pickedFlow = id; pickedMember = ''; highlight(); }
+    function pickMember(key) { if (pickedMember === key && !pickedFlow) return; pickedMember = key; pickedFlow = ''; highlight(); }
+    // What Delete is about, one target per press: the focused node, flow, group line or loop; else the picked flow
+    // or group line; else the lone armed agent (a path of exactly one step); else what the open details show (a flow
+    // or an agent). Backspace asks the same question but never deletes an agent (see the keydown handler).
     function deleteTarget(element) {
       const focused = infoTarget(element);
       if (focused) return focused;
       if (pickedFlow && routeById(pickedFlow)) return { type: 'flow', key: pickedFlow };
+      if (pickedMember && teamLines.has(pickedMember)) return { type: 'team-line', key: pickedMember };
+      if (trail.length === 1 && !trailPending) return { type: 'agent', key: trail[0] };
       if (selected?.type === 'flow' && routeById(selected.key)) return { type: 'flow', key: selected.key };
+      if (selected?.type === 'agent' && shownAgents.has(selected.key)) return { type: 'agent', key: selected.key };
       return null;
     }
-    // How each kind of target is deleted, or null when it cannot be. Only the user's own lines go today: a drawn
-    // flow or loop on itself, through actions.flow. The hub's and council's lines and everything drawn from a
-    // live task graph are not the user's data; a node (turning an agent off) is a later addition.
+    // How each kind of target is deleted, or null when it cannot be: a drawn flow or loop on itself (actions.flow),
+    // an agent the roster lets go (actions.roster; never the orchestrator, the council or a seat), a member's line
+    // in a group (actions.team). The hub's and council's lines and everything from a live task graph are not the
+    // user's data.
     function deleter(target) {
       switch (target?.type) {
         case 'flow': return flowAction && routeById(target.key) ? () => removeFlow(target.key) : null;
-        case 'agent': return null;
+        case 'agent': return removableOf(target.key).ok ? () => removeAgent(target.key) : null;
+        case 'team-line': return teamAction && teamLines.has(target.key) ? () => removeMember(target.key) : null;
         default: return null; // a review or work loop, the learning ring
       }
     }
     function infoKey(event) { return (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey) || (event.key.toLowerCase() === 'i' && !event.shiftKey)) && !event.ctrlKey && !event.metaKey && !event.altKey; }
     function message(error, fallback) { return text(error && typeof error === 'object' && 'message' in error ? error.message : error).replace(/\s+/g, ' ').trim() || fallback; }
-    function refuseFlow(name, error) {
+    // A refused change: the agent shakes once (its red ring goes with the shake), and the reason is a line in its
+    // details (opened with `show`), announced in the live region and kept as the agent's tooltip.
+    function refuseFlow(name, error, show = true) {
       if (!name) return;
-      flowErrors.set(name, message(error, 'The flow could not be changed')); setTitle(name);
+      const said = message(error, 'The flow could not be changed');
+      flowErrors.set(name, said); setTitle(name);
       const node = nodes.get(name);
       if (node) { node.dataset.shake = 'true'; later(() => { delete node.dataset.shake; }, 400); }
+      announceLine(said);
+      if (!show || !agentsByName.has(name)) return;
+      setNotes(name, 'error', said);
+      if (selected?.type === 'agent' && selected.key === name) forceDetail(); else select('agent', name, node);
     }
     // Ask the host for a change; `before` runs on its answer, before the next snapshot is drawn.
     function askFlow(request, before) {
@@ -1734,9 +2712,10 @@
       trail = path.slice(); trailPending = true; trailChanged();
       askFlow({ op: 'add', path }, reply => {
         if (reply.flow?.id) freshRoutes.add(reply.flow.id);
-        trailPending = false; trail = []; trailChanged();
       }).then(reply => {
         if (!alive) return;
+        // The pending path gives way to the flow in the same frame the flow is drawn: no gap between them.
+        trailPending = false; trail = []; trailChanged();
         const flow = reply.flow;
         if (flow?.id) {
           remember({ op: 'add', id: flow.id, path: flow.path || path, text: flow.text });
@@ -1751,14 +2730,15 @@
       }, error => {
         if (!alive) return;
         trailPending = false; trail = []; trailChanged();
-        refuseFlow(path[0], error);
+        refuseFlow(path.at(-1), error);
       });
     }
     function setRouteState(kind, said) {
       const state = detailScroll.querySelector('[data-route-state]');
       if (!state) return;
       state.dataset.routeState = kind;
-      state.textContent = said || { saved: 'Saved', unsaved: 'Not saved', saving: 'Saving' }[kind];
+      // Typing saves by itself after a short pause, so the box never asks the user to do anything.
+      state.textContent = said || { saved: 'Saved', unsaved: 'Saving', saving: 'Saving' }[kind];
       state.title = state.textContent;
     }
     // The instruction's limit counts characters (code points), as the command does, not UTF-16 units.
@@ -1805,7 +2785,7 @@
       }, error => {
         if (!alive) return;
         // The flow stays; its details say why, as a line.
-        refuseFlow(flow.path[0], error);
+        refuseFlow(flow.path[0], error, false);
         if (routeById(id) && !(selected?.type === 'flow' && selected.key === id)) select('flow', id, routeViews.get(id)?.group);
         setRouteState('error', message(error, 'Not removed'));
       });
@@ -1815,6 +2795,7 @@
       if (!last) return;
       if (last.op === 'skill') { undoSkill(last); return; }
       if (last.op === 'move') { applyMoves(last.layout, last.before, false); return; }
+      if (undoOther(last)) return;
       const request = last.op === 'add' ? { op: 'remove', id: last.id } : last.op === 'remove' ? { op: 'add', path: last.path, text: last.text } : { op: 'text', id: last.id, text: last.before };
       askFlow(request, reply => {
         // A flow put back gets a new file, so later steps that name it follow it there.
@@ -1851,6 +2832,49 @@
       if (list.length) list[(index + step + list.length) % list.length].focus({ preventScroll: true });
     }
 
+    listen(plus, 'click', event => { if (addMenu.hidden) openAddMenu(event.detail === 0); else closeAddMenu(false); });
+    // A press on a starting point takes the new circle at once: drag it out and release to drop it, or click and
+    // then click where it goes.
+    listen(addMenu, 'pointerdown', event => {
+      const item = event.target.closest('[data-add-kind]');
+      if (!item || event.button !== 0) return;
+      event.preventDefault();
+      startDraft(item.dataset.addKind, item.dataset.addSource, event);
+    });
+    listen(addMenu, 'click', event => {
+      const item = event.target.closest('[data-add-kind]');
+      if (item && event.detail === 0) startDraft(item.dataset.addKind, item.dataset.addSource, null);
+    });
+    listen(addMenu, 'keydown', event => {
+      const items = [...addMenu.querySelectorAll('[role="menuitem"]')], index = items.indexOf(document.activeElement);
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); items[(index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus({ preventScroll: true }); }
+      else if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); items[event.key === 'Home' ? 0 : items.length - 1]?.focus({ preventScroll: true }); }
+      else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeAddMenu(true); }
+      else if (event.key === 'Tab') closeAddMenu(false);
+    });
+    listen(document, 'pointerdown', event => { if (!addMenu.hidden && !addMenu.contains(event.target) && !plus.contains(event.target)) closeAddMenu(false); }, true);
+    listen(document, 'pointermove', followDraft);
+    listen(document, 'pointerup', event => {
+      if (!draft?.held) return;
+      const moved = Math.hypot(event.clientX - draft.startX, event.clientY - draft.startY) > MOVE_PX, rect = viewport.getBoundingClientRect();
+      const inside = event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
+      if (moved && inside) { followDraft(event); placeDraft(); } else draft.held = false;
+    });
+    // While the new circle follows the pointer, a press on the canvas drops it there and does nothing else.
+    listen(viewport, 'pointerdown', event => {
+      if (!draft?.following) return;
+      event.preventDefault(); event.stopImmediatePropagation(); swallowClick = true;
+      followDraft(event); placeDraft();
+    }, true);
+    listen(document, 'pointerdown', event => { lastInside = root.contains(event.target); }, true);
+    listen(document, 'focusin', event => { lastInside = root.contains(event.target); }, true);
+    listen(document, 'keydown', event => {
+      if (!alive || !lastInside || root.contains(event.target)) return;
+      const page = event.target === document.body || event.target === document.documentElement || event.target === document;
+      if (!page || event.defaultPrevented) return;
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'z' && flowHistory.length) { event.preventDefault(); undoFlow(); viewport.focus({ preventScroll: true }); }
+      else if (event.key === 'Escape' && draft) { event.preventDefault(); dropDraft(); }
+    });
     listen(close, 'click', closeDetails);
     listen(runDetails, 'click', () => select('run', '', runDetails));
     listen(usage, 'click', () => select('run', '', usage));
@@ -1868,36 +2892,113 @@
       const opener = event.target.closest('[data-open-session]');
       if (opener) { openSession(opener.dataset.openSession); return; }
       const skillButton = event.target.closest('[data-skill-request]');
-      if (skillButton) { if (!skillButton.disabled) askSkill(JSON.parse(skillButton.dataset.skillRequest)).catch(() => {}); return; }
+      if (skillButton) {
+        if (skillButton.disabled) return;
+        const request = JSON.parse(skillButton.dataset.skillRequest), owner = agentsByName.get(request.agent);
+        if (owner && request.on === false && request.skill && !skillPending.has(owner.name) && skillsOf(owner).includes(request.skill)) ghostSkill(owner.name, request.skill, skillsOf(owner).indexOf(request.skill));
+        askSkill(request).catch(() => { if (alive) clearGhosts(request.agent); });
+        return;
+      }
       const removeRoute = event.target.closest('[data-route-remove]');
       if (removeRoute) { removeFlow(removeRoute.dataset.routeRemove); return; }
+      const control = event.target.closest('button');
+      if (control && !control.disabled) {
+        const data = control.dataset, current = selected?.type === 'agent' ? selected.key : '';
+        if ('draftCancel' in data) { dropDraft(); plus.focus({ preventScroll: true }); return; }
+        if ('draftRetry' in data) { if (draft && !draft.pending) { draft.pending = true; draft.error = ''; drawDraft(); createDraft(); } return; }
+        if ('agentRemove' in data) { removeAgent(data.agentRemove); return; }
+        if ('skillOpen' in data) { openSkill(data.skillOpen, current, control); return; }
+        if ('skillNew' in data) { select('new-skill', data.skillNew, control); return; }
+        if ('skillSave' in data) { saveSkill(); return; }
+        if ('skillCancel' in data) { if (skillView) { Object.assign(skillView, { draft: null, error: '', note: '' }); forceDetail(); } return; }
+        if ('skillDelete' in data) { deleteSkill(); return; }
+        if ('teamStart' in data) { teamDraft = { lead: data.teamStart, members: [] }; forceDetail(); detailScroll.querySelector('[data-team-pick]')?.focus({ preventScroll: true }); return; }
+        if ('teamCancel' in data) { teamDraft = null; forceDetail(); return; }
+        if ('teamCreate' in data) { const members = [...detailScroll.querySelectorAll('[data-team-pick]:checked')].map(box => box.value); if (members.length) createTeam(data.teamCreate, members); return; }
+        const team = teamLedBy(current);
+        if ('teamDrop' in data && team) { setMembers(team, team.members.filter(name => name !== data.teamDrop)); return; }
+        if ('teamAddButton' in data && team) { const choice = detailScroll.querySelector('[data-team-add]'); if (choice?.value) setMembers(team, [...team.members, choice.value]); return; }
+        if ('teamRemove' in data && team) { removeTeam(team); return; }
+      }
       const link = event.target.closest('[data-flow-peer]');
       if (link) { select('agent', link.dataset.flowPeer, nodes.get(link.dataset.flowPeer)); detailScroll.scrollTop = 0; }
     });
     // The instruction is saved when focus leaves it or on Ctrl/Cmd+Enter; its state shows beside it.
+    listen(detailScroll, 'submit', event => {
+      event.preventDefault();
+      const form = event.target.closest('[data-form]');
+      if (form?.dataset.form.startsWith('new-skill:')) submitSkill(form, form.dataset.form.slice(10));
+    });
+    listen(detailScroll, 'change', event => {
+      const basis = event.target.closest('[data-new="basis"]');
+      if (basis) { const model = basis.form?.querySelector('[data-new="model"]'); if (model) { model.closest('label').hidden = basis.value !== 'typed'; if (basis.value === 'typed') model.focus({ preventScroll: true }); } }
+      const pick = event.target.closest('[data-team-pick]');
+      if (pick && teamDraft) teamDraft.members = [...detailScroll.querySelectorAll('[data-team-pick]:checked')].map(box => box.value);
+    });
+    listen(detailScroll, 'input', event => {
+      const skill = event.target.closest('[data-skill-text]');
+      if (skill && skillView?.id === skill.dataset.skillText) { skillView.draft = skill.value; skillView.note = ''; const state = detailScroll.querySelector('[data-skill-state]'); if (state) state.textContent = skill.value === skillView.text ? 'Saved' : 'Changed'; }
+      const team = event.target.closest('[data-team-text]');
+      if (team && team.dataset.saving !== 'true') { const long = overLimit(team.value); setTeamState(long ? 'error' : team.value === team.dataset.saved ? 'saved' : 'unsaved', long); }
+      if (team) savePaused(team, saveTeamText);
+      const route = event.target.closest('[data-route-text]');
+      if (route) savePaused(route, saveRouteText);
+    });
+    // An instruction is saved after a short pause in typing (as well as on leaving the box, Escape and Ctrl/Cmd+Enter),
+    // and whatever is still unsaved goes when the page is hidden or closed.
+    const pauses = new WeakMap(), TYPE_PAUSE_MS = 700;
+    function savePaused(box, save) {
+      clearTimeout(pauses.get(box));
+      const timer = later(() => { if (alive && box.isConnected && box.value !== box.dataset.saved) save(box); }, TYPE_PAUSE_MS);
+      pauses.set(box, timer);
+    }
+    function flushTyping() {
+      detailScroll.querySelectorAll('[data-route-text]').forEach(box => { if (box.value !== box.dataset.saved) saveRouteText(box); });
+      detailScroll.querySelectorAll('[data-team-text]').forEach(box => { if (box.value !== box.dataset.saved) saveTeamText(box); });
+    }
+    listen(window, 'pagehide', flushTyping);
+    listen(document, 'visibilitychange', () => { if (document.hidden) flushTyping(); });
     listen(detailScroll, 'input', event => { const box = event.target.closest('[data-route-text]'); if (box && box.dataset.saving !== 'true') { const long = overLimit(box.value); if (long) setRouteState('error', long); else setRouteState(box.value === box.dataset.saved ? 'saved' : 'unsaved'); } });
-    listen(detailScroll, 'focusout', event => { const box = event.target.closest('[data-route-text]'); if (box) saveRouteText(box); });
+    listen(detailScroll, 'focusout', event => { const box = event.target.closest('[data-route-text]'); if (box) saveRouteText(box); const team = event.target.closest('[data-team-text]'); if (team) saveTeamText(team); });
+    listen(detailScroll, 'change', event => { const rename = event.target.closest?.('[data-rename]'); if (rename && rename.value.trim() && rename.value.trim() !== rename.dataset.rename) renameAgent(rename.dataset.rename, rename.value.trim(), rename); });
     listen(detailScroll, 'keydown', event => {
+      const rename = event.target.closest('[data-rename]');
+      if (rename) {
+        const name = rename.dataset.rename, way = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[event.key];
+        // Alt+arrows move the agent being named (by keyboard it was placed at a free spot).
+        if (way && event.altKey && !event.ctrlKey && !event.metaKey) {
+          event.preventDefault(); const p = positions.get(name); if (!p) return;
+          stopLayout(); const before = copyMoves(); moveNode(name, p.x + way[0] * NUDGE_PX, p.y + way[1] * NUDGE_PX); finishMove(before, { agent: name, by: 'key' }); return;
+        }
+        if (event.key === 'Enter') { event.preventDefault(); renameAgent(name, rename.value.trim(), rename); return; }
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); rename.value = name; rename.blur(); viewport.focus({ preventScroll: true }); return; }
+      }
       const box = event.target.closest('[data-route-text]');
       if (box && event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); saveRouteText(box); }
+      const team = event.target.closest('[data-team-text]');
+      if (team && event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); saveTeamText(team); }
+      if (event.target.closest('[data-skill-text]') && event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); saveSkill(); }
     });
     listen(root, 'keydown', event => {
+      if (event.key === 'Escape' && draft?.following) { event.preventDefault(); dropDraft(); return; }
       if (event.key === 'Escape' && (press?.moved || drag?.moved)) { event.preventDefault(); cancelDrag(); return; }
       const typing = !!event.target.closest('textarea, input, select');
       if (!typing && !event.defaultPrevented && (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'z') {
         if (flowHistory.length) { event.preventDefault(); undoFlow(); }
         return;
       }
-      if ((flowAction || skillAction) && !typing && !event.defaultPrevented) {
+      if ((flowAction || skillAction || rosterAction || teamAction || skillfileAction) && !typing && !event.defaultPrevented) {
         const plain = !event.ctrlKey && !event.metaKey && !event.altKey;
         // Delete and Backspace edit text in a field (excluded above) and do nothing on the details panel's controls.
         const inPanel = !!event.target.closest('.ag-detail');
-        if (event.key === 'Escape' && pickedFlow && !trail.length && !press && !inPanel) { pickFlow(''); }
+        if (event.key === 'Escape' && (pickedFlow || pickedMember) && !trail.length && !press && !inPanel) { pickFlow(''); }
         if (event.key === 'Escape' && (trail.length || press)) { event.preventDefault(); if (press?.moved) finishMove(press.before); cancelPress(); dropTrail(); return; }
+        // Backspace drops the newest step of a pending path; with none it deletes a flow or a group line, never an agent.
         if (event.key === 'Backspace' && plain && trail.length && !inPanel) { event.preventDefault(); backStep(); return; }
         if (event.key === 'Enter' && plain && trail.length && !event.target.closest('.ag-detail, button, [data-agent]')) { event.preventDefault(); finishTrail(); return; }
-        if ((event.key === 'Delete' || event.key === 'Backspace') && plain && !trail.length && !inPanel) {
-          const remove = deleter(deleteTarget(event.target));
+        // Delete with a path of two or more steps pending does nothing (Backspace and Escape edit the path).
+        if ((event.key === 'Delete' && trail.length <= 1 || event.key === 'Backspace' && !trail.length) && plain && !inPanel) {
+          const target = deleteTarget(event.target), remove = event.key === 'Backspace' && target?.type === 'agent' ? null : deleter(target);
           if (remove) { event.preventDefault(); remove(); }
           return;
         }
@@ -1948,7 +3049,8 @@
       if (keyMenu) { keyMenu = false; event.preventDefault(); return; }
       // During a drag a right-click is ignored: the drag goes on and no menu opens.
       if (press?.moved || drag?.moved) { event.preventDefault(); return; }
-      const target = infoTarget(event.target);
+      const line = !event.target.closest?.('[data-agent]') && event.clientX !== undefined ? lineAt(event.clientX, event.clientY, event.target) : null;
+      const target = infoTarget(line || event.target);
       if (!target) return;
       event.preventDefault();
       if (hold && !hold.fired) { clearTimeout(hold.timer); timers.delete(hold.timer); hold.timer = null; hold.fired = true; openInfo(target); return; }
@@ -1968,6 +3070,10 @@
       if (loop && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); select('loop', loop.dataset.loopId, loop); return; }
       const route = event.target.closest('[data-route]');
       if (route && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); select('flow', route.dataset.route, route); return; }
+      const member = event.target.closest('[data-team-line]');
+      if (member && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); openInfo(infoTarget(member)); return; }
+      // `n` opens the +'s menu (where the roster can be written).
+      if ((event.target === viewport || event.target.closest('[data-agent]')) && event.key.toLowerCase() === 'n' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && canAddAgent()) { event.preventDefault(); openAddMenu(true); return; }
       // `i`, the context-menu key and Shift+F10 open the focused node's, flow's or loop's details; nothing else changes.
       if (infoKey(event)) {
         const target = infoTarget(event.target);
@@ -2046,14 +3152,15 @@
         press = { id: event.pointerId, key, startX: event.clientX, startY: event.clientY, x: p ? p.x : 0, y: p ? p.y : 0, moved: false, before: null };
         node.focus({ preventScroll: true });
       } else if (pointers.size === 1) {
-        const loop = event.target.closest('[data-loop-id], [data-work-loop-id], [data-route]');
-        drag = { id: event.pointerId, route: loop?.dataset.route || '', startX: event.clientX, startY: event.clientY, x: camera.x, y: camera.y, moved: false };
+        const loop = lineAt(event.clientX, event.clientY, event.target);
+        drag = { id: event.pointerId, route: loop?.dataset.route || '', member: loop?.dataset.teamLine || '', startX: event.clientX, startY: event.clientY, x: camera.x, y: camera.y, moved: false };
         suppressClick = false;
         if (loop) loop.focus({ preventScroll: true });
       }
       viewport.setPointerCapture(event.pointerId);
     });
     listen(viewport, 'pointermove', event => {
+      if (!pointers.size && event.pointerType !== 'touch') hoverOn(event.target.closest?.('[data-agent]') ? null : lineAt(event.clientX, event.clientY, event.target));
       if (flowAction && trail.length && !trailPending && !press) { const point = stagePoint(event.clientX, event.clientY); showWire(trail.at(-1), point.x, point.y); aim(agentAt(event.clientX, event.clientY)); }
       if (!pointers.has(event.pointerId)) return;
       pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -2109,6 +3216,7 @@
       // on a drawn flow picks it (Delete removes it), and anywhere else lets it go.
       if (event.type === 'pointerup' && drag && !drag.moved && !pinch && !held) {
         if (trail.length) dropTrail();
+        else if (drag.member && teamLines.has(drag.member)) pickMember(drag.member);
         else pickFlow(drag.route && routeById(drag.route) ? drag.route : '');
       }
       if (drag && !drag.moved) suppressClick = true;
@@ -2116,6 +3224,7 @@
       if (viewport.hasPointerCapture(event.pointerId)) viewport.releasePointerCapture(event.pointerId);
     }
     ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(name => listen(viewport, name, pointerUp));
+    listen(viewport, 'pointerleave', () => hoverOn(null));
     // The click a browser fires after a drag (or an Escape-cancelled drag) ends is not a click.
     listen(viewport, 'click', event => { if (swallowClick) { swallowClick = false; event.stopPropagation(); event.preventDefault(); } }, true);
     // A double-click is two clicks first: on an agent with no path the second click has already made its loop on
@@ -2127,7 +3236,7 @@
       if (swallowDouble) { swallowDouble = false; event.preventDefault(); loneCancel = ''; return; }
       if (cleanPresses < 2) { loneCancel = ''; return; }
       const name = event.target.closest?.('[data-agent]')?.dataset.agent || agentAt(event.clientX, event.clientY);
-      if (!name && !event.target.closest?.('[data-route], [data-loop-id], [data-work-loop-id], [data-learning], button')) { event.preventDefault(); resetMoves(); return; }
+      if (!name && !event.target.closest?.('[data-route], [data-team-line], [data-loop-id], [data-work-loop-id], [data-learning], button')) { event.preventDefault(); resetMoves(); return; }
       if (!flowAction || trailPending) return;
       const step = name && standIn(name);
       if (!step) return;
@@ -2138,7 +3247,7 @@
     function render(data) {
       const previousTeam = activeTeam;
       snapshot = { ...data, agents: prepareRoster(data) };
-      const stamp = JSON.stringify([data.agents, data.graph, data.warnings, data.totals, data.escalation, data.root?.wear, data.structure, data.skill_warnings, (data.skills || []).length]);
+      const stamp = JSON.stringify([data.agents, data.graph, data.warnings, data.totals, data.escalation, data.root?.wear, data.structure, data.skill_warnings, data.skills, data.roster]);
       if (stamp !== renderStamp) { renderStamp = stamp; renderRevision++; }
       // The host's answer stands for an agent's skills only until a snapshot shows the same list.
       skillOverride.forEach((list, name) => { const agent = (data.agents || []).find(item => item?.name === name); if (!agent || JSON.stringify(agent.skills) === JSON.stringify(list)) skillOverride.delete(name); });
@@ -2147,7 +3256,7 @@
       if (trail.some(name => !shownAgents.has(name))) dropTrail();
       const graph = data.graph;
       runDetails.dataset.notices = String(data.warnings.length + (graph ? graph.problems.length : 0) > 0 || !!data.learning?.due);
-      renderActivity();
+      renderActivity(); updatePlus();
       const previousLayout = layoutSignature;
       if (root.clientWidth > 0 && viewport.clientWidth > 0) {
         addPositions(visibleAgents);
@@ -2167,6 +3276,7 @@
       if (selected?.type === 'flow' && !routeById(selected.key) && !busyFlows) closeDetails();
       else renderDetail();
       highlight();
+      keepFocus();
     }
     function scheduleResize() {
       if (!alive || resizeFrame !== null) return;
@@ -2228,13 +3338,13 @@
       pointers.clear(); drag = null; pinch = null; suppressClick = false;
       viewport.dataset.dragging = 'false';
       cancelPress(); trail = []; trailPending = false; hovered = ''; wire.style.display = 'none';
-      freshRoutes.clear(); flowErrors.clear(); flowHistory.length = 0; routeViews.clear(); trailStatus.textContent = ''; delete root.dataset.agTrail;
+      freshRoutes.clear(); flowErrors.clear(); flowHistory.length = 0; routeViews.clear(); teamLines.clear(); agentNotes.clear(); skillView = null; teamDraft = null; pickedMember = ''; pickedFlow = ''; formBusy = false; trailStatus.textContent = ''; delete root.dataset.agTrail;
       selected = null; selectedOrigin = null; initialSelection = ''; highlightedStep = ''; detailSignature = '';
       teamChoice = null; activeTeam = 'main'; teamChoices = []; layoutSignature = ''; renderStamp = '';
       arrangement = root.clientWidth > 0 && root.clientWidth <= 650 ? 'compact' : 'wide';
       visibleAgents = []; hubName = ''; openSteps.clear(); openFolds.clear(); teamViews.clear(); positions.clear(); nodes.clear(); lines.clear(); loopViews.clear(); workLoopViews.clear();
       agentsByName.clear(); stepsByAgent.clear(); stepsById.clear(); nodeOwners.clear(); shownAgents.clear();
-      nodeLayer.replaceChildren(); spokeLayer.replaceChildren(); escalationLayer.replaceChildren(); flowLayer.replaceChildren(); loopLayer.replaceChildren(); routeLayer.replaceChildren(); trailLayer.replaceChildren();
+      nodeLayer.replaceChildren(); spokeLayer.replaceChildren(); escalationLayer.replaceChildren(); flowLayer.replaceChildren(); loopLayer.replaceChildren(); routeLayer.replaceChildren(); teamLayer.replaceChildren(); trailLayer.replaceChildren();
       detailScroll.replaceChildren(); detail.hidden = true; root.classList.remove('ag-details-open');
       root.style.removeProperty('--ag-sheet-height');
       delete root.dataset.team; root.dataset.state = 'loading';
