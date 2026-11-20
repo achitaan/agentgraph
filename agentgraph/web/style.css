@@ -163,7 +163,7 @@
 .agentgraph .ag-text-button[aria-disabled="true"] { cursor: progress; opacity: 0.6; }
 .agentgraph .ag-notice { flex: 0 0 auto; padding: 6px 12px; background: var(--ag-notice-bg); color: var(--ag-notice-ink); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agentgraph .ag-network { position: relative; flex: 1; display: flex; min-height: 0; min-width: 0; }
-.agentgraph .ag-activity { position: absolute; top: 10px; left: 12px; z-index: 1; color: var(--ag-work); font-size: 10px; font-variant-numeric: tabular-nums; pointer-events: none; }
+.agentgraph .ag-activity { position: absolute; top: 10px; left: 12px; z-index: 1; color: var(--ag-work); font-size: 11px; font-variant-numeric: tabular-nums; pointer-events: none; }
 .agentgraph .ag-activity::before { content: ''; display: inline-block; width: 5px; height: 5px; margin: 0 6px 1px 0; border-radius: 50%; background: var(--ag-work); box-shadow: 0 0 0 3px var(--ag-activity-glow); }
 .agentgraph .ag-viewport { flex: 1; width: 100%; min-width: 0; min-height: 0; padding: 0; position: relative; overflow: hidden; touch-action: none; cursor: grab; }
 .agentgraph .ag-viewport[data-dragging="true"], .agentgraph .ag-viewport[data-dragging="true"] .ag-agent { cursor: grabbing; }
@@ -259,7 +259,7 @@
 .agentgraph .ag-orbits { pointer-events: none; }
 .agentgraph .ag-orbit-ring { fill: none; stroke: var(--ag-edge); stroke-width: 1; vector-effect: non-scaling-stroke; opacity: .42; }
 .agentgraph .ag-orbit-ring[data-side="far"] { opacity: .17; }
-.agentgraph .ag-orbit-note { color: var(--ag-muted); font-size: 10px; }
+.agentgraph .ag-orbit-note { color: var(--ag-muted); font-size: 11px; }
 /* A line bent round an agent is a <path>: never filled (it showed as a grey wedge in 2D too, and far more in 3D). */
 .agentgraph path.ag-edge, .agentgraph path.ag-flow { fill: none; }
 .agentgraph[data-ag-view="3d"] .ag-viewport, .agentgraph[data-ag-view="3d"] .ag-agent { cursor: grab; }
@@ -287,6 +287,37 @@
 .agentgraph[data-ag-motion="full"] .ag-hub:not([data-busy="0"]) .ag-sun-glow { animation: ag-sun-swell 2.4s ease-in-out infinite alternate; transform-box: fill-box; transform-origin: center; }
 @keyframes ag-sun-swell { from { transform: scale(1); } to { transform: scale(1.22); } }
 @media (prefers-reduced-motion: reduce) { .agentgraph .ag-sun-glow { animation: none !important; } }
+/* The moons' ring round their planet (3D only): thinner and fainter than a group's ring. */
+.agentgraph .ag-moon-ring { fill: none; stroke: var(--ag-edge); stroke-width: .8; vector-effect: non-scaling-stroke; opacity: .34; stroke-dasharray: 1 3; }
+.agentgraph .ag-moon-ring[data-side="far"] { opacity: .14; }
+/* The sun (n119). At rest a ball lit from the upper left, still. Fired up (the hub at work): flame spikes and a glow in
+   the warm end of the palette (the hub's accent, the build orange, a pale yellow core); a spike's base is 2:1 or more
+   against the page in both schemes. Under every line, ring, agent and name; no pointer. Reduced motion: short still
+   spikes. Dying down: a fade of .6 s (FLARE_DYING_MS in app.js ends it). */
+.agentgraph { --ag-ball-light: #fffdf7; --ag-ball-dark: #4a2d1e; --ag-flare-spike: #c0602e; --ag-flare-warm: #d77a3c; --ag-flare-core: #ffe6a1; }
+.agentgraph[data-ag-scheme="dark"] { --ag-ball-light: #fff1dc; --ag-ball-dark: #000000; --ag-flare-spike: #ee9d5a; --ag-flare-warm: #e0874a; --ag-flare-core: #ffe7a6; }
+.agentgraph .ag-sun-ball, .agentgraph .ag-sun-ball * { pointer-events: none; stroke: none; }
+.agentgraph .ag-ball-light { stop-color: var(--ag-ball-light); }
+.agentgraph .ag-ball-dark { stop-color: var(--ag-ball-dark); }
+.agentgraph .ag-ball-fire { stop-color: var(--ag-flare-core); }
+.agentgraph .ag-sun-fire { opacity: 0; }
+.agentgraph .ag-hub:not([data-busy="0"]) .ag-sun-fire { opacity: 1; }
+.agentgraph .ag-hub:not([data-busy="0"]) .ag-sun-light { opacity: 0; }
+.agentgraph .ag-flare-glow circle { fill: var(--ag-flare-warm); opacity: .13; }
+.agentgraph .ag-flare-edge { fill: var(--ag-flare-spike); stroke: none; }
+.agentgraph .ag-flare-heart { fill: var(--ag-flare-core); stroke: none; }
+.agentgraph .ag-flare, .agentgraph .ag-flare * { pointer-events: none; }
+.agentgraph .ag-flare-sun { opacity: 0; visibility: hidden; }
+.agentgraph .ag-flare[data-state="on"] .ag-flare-sun { opacity: 1; visibility: visible; }
+.agentgraph .ag-flare[data-state="dying"] .ag-flare-sun { opacity: 0; visibility: visible; transform: scale(.85); transition: opacity .6s ease-out, transform .6s ease-out; }
+.agentgraph .ag-flare-spike { transform: scale(.9, .55); }
+.agentgraph[data-ag-motion="full"] .ag-flare:is([data-state="on"], [data-state="dying"]) .ag-flare-spike { animation: ag-flare-spike var(--ag-spike-ms, 1s) ease-in-out var(--ag-spike-delay, 0s) infinite; }
+.agentgraph[data-ag-motion="full"] .ag-flare:is([data-state="on"], [data-state="dying"]) .ag-flare-glow { animation: ag-flare-swell 2.2s ease-in-out infinite alternate; }
+/* (In 3D, once the morph is over, the sky's sun glow is the glow: the flare's own is gone and does not swell.) */
+.agentgraph[data-ag-view="3d"][data-ag-blend="1"] .ag-flare-glow { animation: none; opacity: 0; }
+@keyframes ag-flare-spike { 0%, 100% { transform: scale(.8, .35); } 40% { transform: scale(1, 1); } 65% { transform: scale(.92, .7); } }
+@keyframes ag-flare-swell { from { transform: scale(.9); } to { transform: scale(1.03); } }
+@media (prefers-reduced-motion: reduce) { .agentgraph .ag-flare-spike, .agentgraph .ag-flare-glow { animation: none !important; } .agentgraph .ag-flare-sun { transition: none !important; } }
 /* ---- orbit lane (n105) ---- */
 .agentgraph .ag-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--ag-muted); font-size: 11px; pointer-events: none; }
 .agentgraph .ag-detail { position: absolute; inset: 0 0 0 auto; z-index: 5; width: min(340px, 100%); display: flex; flex-direction: column; background: var(--ag-paper); border-left: 1px solid var(--ag-line); box-shadow: -15px 0 50px var(--ag-panel-shadow); }
@@ -436,8 +467,8 @@
 .agentgraph .ag-network > .ag-status { position: absolute; top: 9px; left: 12px; z-index: 3; display: flex; align-items: center; gap: 10px; pointer-events: none; }
 .agentgraph .ag-activity { position: static; }
 .agentgraph .ag-status-note { max-width: min(46ch, 60vw); border-radius: 5px; padding: 2px 7px; background: var(--ag-paper); color: var(--ag-danger); box-shadow: 0 0 0 1px var(--ag-divider); font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; }
-.agentgraph .ag-attention { pointer-events: auto; border: 0; border-radius: 5px; padding: 1px 6px; background: var(--ag-danger); color: var(--ag-paper); font-size: 10px; font-weight: 600; }
-.agentgraph .ag-usage { position: absolute; top: 5px; right: 8px; z-index: 3; display: flex; align-items: baseline; gap: 9px; border: 0; border-radius: 6px; padding: 4px 6px; background: none; color: var(--ag-muted); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.agentgraph .ag-attention { pointer-events: auto; border: 0; border-radius: 5px; padding: 1px 6px; background: var(--ag-danger); color: var(--ag-paper); font-size: 11px; font-weight: 600; }
+.agentgraph .ag-usage { position: absolute; top: 5px; right: 8px; z-index: 3; display: flex; align-items: baseline; gap: 9px; border: 0; border-radius: 6px; padding: 4px 6px; background: none; color: var(--ag-muted); font-size: 11px; line-height: 15px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .agentgraph .ag-usage:hover { background: var(--ag-control-hover); }
 .agentgraph .ag-usage-cost { color: var(--ag-ink); font-weight: 600; }
 .agentgraph .ag-usage-context { display: inline-flex; align-items: center; gap: 6px; }

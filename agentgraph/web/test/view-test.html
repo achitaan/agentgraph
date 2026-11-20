@@ -7646,6 +7646,269 @@
         }
         assert(!problems.length, problems.length + ' too close: ' + problems.slice(0, 6).join('; '));
       });
+      // ---- n119 (rulings n118 sections 1 and 2): moons round their planet in 3D; the hub a ball at rest and a sun at work ----
+      const N119_MOONS = ['fable', 'astra', 'carbon'];
+      const n119Hub = (data, working) => { const hub = data.agents.find(a => a.name === 'orchestrator'); hub.busy = working ? 1 : 0; hub.sessions = working ? [{ id: 's0', title: 'Plan', busy: true, model: 'Test model', cost: 0 }] : []; return data; };
+      const n119Core = (root, name) => { const b = nodeOf(root, name).querySelector('.ag-core').getBoundingClientRect(); return { x: b.x + b.width / 2, y: b.y + b.height / 2, r: b.width / 2 }; };
+      const n119Scale = (root, name) => Number(/scale\(([-\d.]+)/.exec(nodeOf(root, name).getAttribute('transform') || '')?.[1] || 1);
+      const n119Flare = root => root.querySelector('.ag-flare');
+      // The 2D view at rest (the first layout's glide over), then 3D.
+      const n119To3d = async root => { for (let i = 0, was = '', same = 0; i < 80 && same < 3; i++) { await frame(); await settle(); const now = pictureOf(root); same = now === was ? same + 1 : 0; was = now; } viewportOf(root).focus({ preventScroll: true }); press(viewportOf(root), 'd'); await until(() => in3d(root)); await frame(); assert(in3d(root), 'd did not switch to 3D'); };
+      // An ellipse's tilt and its narrow-to-wide ratio, from points round it.
+      const n119Shape = points => {
+        const mx = points.reduce((t, p) => t + p.x, 0) / points.length, my = points.reduce((t, p) => t + p.y, 0) / points.length;
+        let xx = 0, yy = 0, xy = 0; points.forEach(p => { xx += (p.x - mx) ** 2; yy += (p.y - my) ** 2; xy += (p.x - mx) * (p.y - my); });
+        const mean = (xx + yy) / 2, spread = Math.hypot((xx - yy) / 2, xy);
+        return { angle: .5 * Math.atan2(2 * xy, xx - yy), ratio: Math.sqrt(Math.max(0, mean - spread) / (mean + spread)) };
+      };
+      await test('n119 moons 1: in 3D the agents under another (agents[].parent) circle it as moons on one ring of their own: evenly spaced round it, the ring through them and tilted unlike its group\'s ring, wide enough that at rest size no moon\'s circle or name meets another moon\'s or the planet\'s; a moon smaller than its planet, its name never under 11 px (1100 and 420 px, several angles); a nearer one drawn over a farther one', async () => {
+        const problems = [];
+        for (const [width, height] of [[1100, 760], [420, 760]]) {
+          await using(trialRoster(), async root => {
+            if (width !== 1100) await resizeTo(root, width, height);
+            await settled(); await n119To3d(root);
+            const rings = [...root.querySelectorAll('.ag-moon-ring[data-moons="council"]')];
+            if (rings.length !== 2) { problems.push(width + ': no ring of moons round the council'); return; }
+            // At rest size, the ring seen face on, at every phase of its turn: the moons' circles and names (their places in
+            // the node as 3D draws them) clear of each other and of the council's, in their order round it (either way).
+            const local = name => {
+              const node = nodeOf(root, name), core = node.querySelector('.ag-core'), r = Number(core.getAttribute('r')), c = n119Core(root, name), k = c.r / r, b = node.querySelector('.ag-agent-name').getBoundingClientRect();
+              return { r, name: { left: (b.left - c.x) / k, right: (b.right - c.x) / k, top: (b.top - c.y) / k, bottom: (b.bottom - c.y) / k } };
+            };
+            const R = Number(rings[0].dataset.radius), planet = local('council'), own = N119_MOONS.map(local);
+            const boxGap = (a, ax, ay, b, bx, by) => Math.max(a.left + ax - (b.right + bx), b.left + bx - (a.right + ax), a.top + ay - (b.bottom + by), b.top + by - (a.bottom + ay));
+            const circleBox = (r, cx, cy, b, bx, by) => Math.hypot(Math.max(b.left + bx - cx, 0, cx - (b.right + bx)), Math.max(b.top + by - cy, 0, cy - (b.bottom + by))) - r;
+            const gap = (a, ax, ay, b, bx, by) => Math.min(Math.hypot(ax - bx, ay - by) - a.r - b.r, circleBox(a.r, ax, ay, b.name, bx, by), circleBox(b.r, bx, by, a.name, ax, ay), boxGap(a.name, ax, ay, b.name, bx, by));
+            const clearAt = turn => { let least = Infinity; for (let s = 0; s < 360; s++) {
+              const at = own.map((_, j) => { const a = s * Math.PI / 180 + turn * j * 2 * Math.PI / own.length; return [R * Math.cos(a), -R * Math.sin(a)]; });
+              own.forEach((m, j) => { least = Math.min(least, gap(m, at[j][0], at[j][1], planet, 0, 0)); own.forEach((o, i) => { if (i > j) least = Math.min(least, gap(m, at[j][0], at[j][1], o, at[i][0], at[i][1])); }); });
+            } return least; };
+            const least = Math.max(clearAt(1), clearAt(-1));
+            if (!(least >= 1)) problems.push(width + ': at rest size on a ring of ' + R.toFixed(1) + ' a moon comes ' + least.toFixed(1) + ' from another or the council');
+            const group = nodeOf(root, 'council').dataset.group;
+            for (let step = 0; step < 5; step++) {
+              const c = n119Core(root, 'council'), at = N119_MOONS.map(name => n119Core(root, name));
+              const mid = { x: at.reduce((t, p) => t + p.x, 0) / at.length, y: at.reduce((t, p) => t + p.y, 0) / at.length };
+              if (Math.hypot(mid.x - c.x, mid.y - c.y) > 1.5 || at.some(p => Math.hypot(p.x - c.x, p.y - c.y) < 4)) problems.push(width + ' angle ' + step + ': the moons are not evenly round the council (their middle ' + Math.hypot(mid.x - c.x, mid.y - c.y).toFixed(1) + ' px from it)');
+              const ringPoints = rings.filter(ring => (ring.getAttribute('d') || '').length > 3).flatMap(ring => pointsOf(ring, 240));
+              at.forEach((p, i) => { const off = Math.min(...ringPoints.map(q => Math.hypot(q.x - p.x, q.y - p.y))); if (!(off <= 2)) problems.push(width + ' angle ' + step + ': ' + N119_MOONS[i] + ' is ' + off.toFixed(1) + ' px off its ring'); });
+              const groupPoints = [...root.querySelectorAll('.ag-orbit-ring[data-group="' + group + '"]')].filter(ring => (ring.getAttribute('d') || '').length > 3).flatMap(ring => pointsOf(ring, 240));
+              const mine = n119Shape(ringPoints), theirs = n119Shape(groupPoints), turned = Math.abs(((mine.angle - theirs.angle) % Math.PI + 1.5 * Math.PI) % Math.PI - Math.PI / 2);
+              if (!(turned > .17 || Math.abs(mine.ratio - theirs.ratio) > .1)) problems.push(width + ' angle ' + step + ': the moons\' ring lies as the group\'s ring does');
+              N119_MOONS.forEach((name, i) => {
+                const label = nodeOf(root, name).querySelector('.ag-agent-name'), px = parseFloat(getComputedStyle(label).fontSize) * label.getScreenCTM().a;
+                if (px < 11 - .01) problems.push(width + ' angle ' + step + ': ' + name + '\'s name is ' + px.toFixed(2) + ' px');
+                if (!(at[i].r < c.r)) problems.push(width + ' angle ' + step + ': ' + name + ' is not drawn smaller than the council');
+              });
+              const order = [...root.querySelectorAll('.ag-nodes > [data-agent]')].map(node => node.dataset.agent), all = ['council', ...N119_MOONS];
+              all.forEach(a => all.forEach(b => { if (n119Scale(root, a) > n119Scale(root, b) + .002 && order.indexOf(a) < order.indexOf(b)) problems.push(width + ' angle ' + step + ': ' + a + ' is nearer and drawn under ' + b); }));
+              press(viewportOf(root), 'ArrowLeft'); press(viewportOf(root), 'ArrowLeft'); press(viewportOf(root), 'ArrowLeft'); await frame(); await frame();
+            }
+          });
+        }
+        assert(!problems.length, problems.length + ' problems, of these kinds: ' + [...new Set(problems.map(text => text.replace(/^\d+( angle \d+)?: /, '')))].slice(0, 8).join('; '));
+      });
+      await test('n119 moons 2: the moons go round once in 24 s, on the clock the system turns by (5/3 of its turn) and only while it turns; with reduced motion they stand still; in 2D nothing new is drawn or moves', async () => {
+        const wrap = v => ((v % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+        await using(trialRoster(), async root => {
+          await settled();
+          const seats = () => N119_MOONS.map(name => nodeOf(root, name).getAttribute('transform')).join('|'), frames = root.dataset.agFrames, before = seats();
+          for (let i = 0; i < 6; i++) await frame();
+          assert(!root.querySelector('.ag-moon-ring') && seats() === before && root.dataset.agFrames === frames && Number(root.dataset.agMoon || 0) === 0, 'something of the moons is drawn or moves in 2D');
+          await n119To3d(root);
+          await until(() => Number(root.dataset.agMoon) > .01);
+          const m0 = Number(root.dataset.agMoon), t0 = Number(root.dataset.agTurn);
+          await until(() => wrap(Number(root.dataset.agMoon) - m0) > .06, 3000);
+          const dm = wrap(Number(root.dataset.agMoon) - m0), dt = wrap(Number(root.dataset.agTurn) - t0);
+          assert(dm > .06 && Math.abs(dm / dt - 40000 / 24000) < .02, 'the moons went ' + dm.toFixed(4) + ' while the system turned ' + dt.toFixed(4) + ' (not one lap in 24 s)');
+        }, { motion: 'full' });
+        await using(trialRoster(), async root => {
+          await settled(); await n119To3d(root);
+          const at = () => N119_MOONS.map(name => { const c = n119Core(root, name); return c.x.toFixed(2) + ' ' + c.y.toFixed(2); }).join('|'), first = at();
+          for (let i = 0; i < 8; i++) await frame();
+          assert(at() === first && Number(root.dataset.agMoon) === 0, 'with reduced motion the moons moved');
+        });
+      });
+      await test('n119 moons 3: the morph takes each moon from its 2D seat to its 3D place and back to its seat; in 3D a click on a moon picks as in 2D, a moon opens its details by a right-click and by Enter, keeps its spoke to its planet, and a path through it is drawn to where it is', async () => {
+        const data = trialRoster();
+        data.structure = { source: 'folder', flows: [{ id: 'm1', path: ['oracle', 'fable'], text: 'm1', source: 'drawn' }], teams: [] };
+        const host = worldHost(data);
+        await using(data, async root => {
+          await settled();
+          // What a click on a moon picks in 2D (a seat stands in for its planet on a path), to pick the same in 3D.
+          tap(root, 'fable'); await settle(); const pick = root.dataset.agTrail; press(viewportOf(root), 'Escape'); await settled();
+          assert(pick && !root.dataset.agTrail, 'a click on fable picks nothing in 2D');
+          const seat = () => N119_MOONS.map(name => n119Core(root, name)), flat = seat();
+          viewportOf(root).focus({ preventScroll: true }); press(viewportOf(root), 'd');
+          const track = [seat()];
+          for (let i = 0; i < 120 && !in3d(root); i++) { await frame(); track.push(seat()); }
+          assert(in3d(root) && track.length > 4, 'no morph to 3D');
+          const first = track[1].map((p, i) => Math.hypot(p.x - flat[i].x, p.y - flat[i].y)), last = track.at(-1), whole = last.map((p, i) => Math.hypot(p.x - flat[i].x, p.y - flat[i].y));
+          await frame(); const steady = seat(), end = steady.map((p, i) => Math.hypot(p.x - last[i].x, p.y - last[i].y));
+          // Each moon is seen on its way (between a tenth and nine tenths of the way, in some frame), not only at its ends.
+          const between = whole.map((d, i) => track.some(at => { const gone = Math.hypot(at[i].x - flat[i].x, at[i].y - flat[i].y); return gone > d * .1 && gone < d * .9; }));
+          assert(whole.every(d => d > 6) && between.every(Boolean) && end.every((d, i) => d < Math.max(4, whole[i] * .2)), 'the moons did not travel from their seats to their 3D places (seen on the way ' + between + ', first step ' + first.map(d => d.toFixed(1)) + ', whole way ' + whole.map(d => d.toFixed(1)) + ', after the end ' + end.map(d => d.toFixed(1)) + ')');
+          // Its spoke and a path through it, drawn to where it is now.
+          const spoke = edge(root, 'handoff', 'council->fable'), c = n119Core(root, 'council'), f = n119Core(root, 'fable');
+          const ends = spoke ? pointsOf(spoke, 1) : [];
+          const near = (p, q) => Math.hypot(p.x - q.x, p.y - q.y) <= q.r + 4;
+          assert(ends.length === 2 && ((near(ends[0], c) && near(ends[1], f)) || (near(ends[0], f) && near(ends[1], c))), 'fable\'s spoke does not join the council and fable in 3D: ' + (spoke ? JSON.stringify(ends.map(p => [Math.round(p.x), Math.round(p.y)])) + ' council ' + [c.x, c.y, c.r].map(Math.round) + ' fable ' + [f.x, f.y, f.r].map(Math.round) : 'no spoke'));
+          const step = routeOf(root, 'm1')?.querySelector('.ag-route-step'), points = step ? pointsOf(step, 120) : [];
+          assert(points.length && Math.min(...points.map(p => Math.hypot(p.x - f.x, p.y - f.y))) <= f.r + 8, 'the path through fable is not drawn to where it is: ' + (step ? Math.min(...points.map(p => Math.hypot(p.x - f.x, p.y - f.y))).toFixed(1) + ' px from it (r ' + f.r.toFixed(1) + ')' : 'no path drawn (' + root.querySelectorAll('[data-route]').length + ' paths)'));
+          await clearOf(root, ['fable']);
+          tap(root, 'fable'); await settle();
+          assert(root.dataset.agTrail === pick, 'a click on a moon in 3D picks ' + root.dataset.agTrail + ', in 2D ' + pick);
+          press(viewportOf(root), 'Escape'); await settle();
+          context(nodeOf(root, 'fable'), n119Core(root, 'fable')); await settle();
+          assert(detailOpen(root) && root.querySelector('.ag-detail-title').textContent === 'fable', 'a right-click does not open a moon\'s details in 3D');
+          press(viewportOf(root), 'Escape'); await settle();
+          open(root, 'astra'); await settle();
+          assert(detailOpen(root) && root.querySelector('.ag-detail-title').textContent === 'astra', 'Enter does not open a moon\'s details in 3D');
+          press(viewportOf(root), 'Escape'); await settle();
+          viewportOf(root).focus({ preventScroll: true }); press(viewportOf(root), 'd'); await until(() => in2d(root), 2000);
+          const back = seat();
+          assert(in2d(root) && back.every((p, i) => Math.hypot(p.x - flat[i].x, p.y - flat[i].y) < .5), 'the moons are not back on their seats in 2D');
+        }, { actions: host.actions, motion: 'full' });
+      });
+      await test('n119 sun 1: at rest the hub is a ball lit from the upper left (a gradient from light to shade) in 2D and 3D, still: nothing of it or of its flare moves and no spike or glow shows', async () => {
+        const lum = text => (text.match(/[\d.]+/g) || []).slice(0, 3).map(Number).map(v => { v /= 255; return v <= .03928 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }).reduce((t, v, i) => t + v * [.2126, .7152, .0722][i], 0);
+        await using(n119Hub(trialRoster(), false), async root => {
+          await settled();
+          for (const view of ['2d', '3d']) {
+            if (view === '3d') await n119To3d(root);
+            const hub = nodeOf(root, 'orchestrator'), face = hub.querySelector('.ag-sun-ball .ag-sun-light');
+            const id = /url\(["']?#([^"')]+)/.exec(face?.getAttribute('fill') || '')?.[1], shade = id && root.querySelector('[id="' + id + '"]');
+            assert(face && Number(getComputedStyle(face).opacity) > .5 && getComputedStyle(face).display !== 'none', view + ': the resting hub has no lit face');
+            const stops = shade ? [...shade.querySelectorAll('stop')] : [];
+            assert(shade?.tagName === 'radialGradient' && Number(shade.getAttribute('fx')) < .5 && Number(shade.getAttribute('fy')) < .5 && stops.length >= 2 && lum(getComputedStyle(stops[0]).stopColor) > lum(getComputedStyle(stops.at(-1)).stopColor) + .2, view + ': the hub is not shaded from a light at its upper left');
+            const moving = [hub.querySelector('.ag-sun-ball'), n119Flare(root)].flatMap(item => item.getAnimations({ subtree: true })).filter(item => item.playState === 'running');
+            assert(!moving.length, view + ': something of the resting hub moves (' + moving.map(item => (item.animationName || item.transitionProperty) + ' on ' + item.effect?.target?.getAttribute('class')).join(', ') + ')');
+            assert(n119Flare(root).dataset.state === '' && getComputedStyle(n119Flare(root).querySelector('.ag-flare-sun')).visibility === 'hidden', view + ': the resting hub shows its flare');
+          }
+        }, { motion: 'full' });
+      });
+      await test('n119 sun 2: while the hub works it flares in 2D and 3D: 7 to 12 spikes by its size, each on its own seeded time from 0.6 to 1.6 s (the same on another visit), and a swelling glow; all within 0.6 of its radius beyond its rim at 1100, 620 and 420 px; under every line, ring, agent and name, taking no pointer and adding no text; what a click picks, the fit and the camera as when it rests', async () => {
+        const problems = [], seen = {};
+        for (const [width, height] of [[1100, 760], [620, 760], [420, 760]]) for (const working of [false, true]) {
+          await using(n119Hub(trialRoster(), working), async root => {
+            if (width !== 1100) await resizeTo(root, width, height);
+            await settled();
+            for (const view of ['2d', '3d']) {
+              if (view === '3d') await n119To3d(root);
+              const label = width + ' ' + view + (working ? ' working' : ' resting'), hub = nodeOf(root, 'orchestrator'), flare = n119Flare(root), c = n119Core(root, 'orchestrator');
+              // What a click meets round the hub, the camera, the hub's place and the fit (the rings).
+              const spots = Array.from({ length: 24 }, (_, i) => { const a = i * Math.PI / 12, k = i % 2 ? 1.3 : 1.55, p = document.elementFromPoint(c.x + Math.cos(a) * c.r * k, c.y + Math.sin(a) * c.r * k); return p?.closest('[data-agent], [data-route], [data-edge], [data-team-line], [data-loop-id], [data-work-loop-id]')?.outerHTML.slice(0, 60) || (viewportOf(root).contains(p) ? 'canvas' : 'outside'); });
+              const picture = ['camera ' + root.querySelector('.ag-drawing > g').getAttribute('transform'), 'hub ' + hub.getAttribute('transform'), 'rings ' + [...root.querySelectorAll('.ag-orbit-ring, .ag-moon-ring')].map(ring => ring.getAttribute('d')).join('|'), 'click ' + spots.join('|')];
+              const key = width + ' ' + view;
+              if (!working) { seen[key] = picture; continue; }
+              const changed = picture.filter((part, i) => part !== seen[key][i]).map(part => part.slice(0, 400));
+              if (changed.length) problems.push(label + ': the camera, the fit or what a click meets changed with the flare: ' + changed.join(' / ') + ' WAS ' + seen[key].filter((part, i) => part !== picture[i]).map(part => part.slice(0, 400)).join(' / '));
+              const sun = flare.querySelector('.ag-flare-sun'), spikes = [...flare.querySelectorAll('.ag-flare-spike')], r = Number(hub.querySelector('.ag-core').getAttribute('r'));
+              if (flare.dataset.state !== 'on' || getComputedStyle(sun).visibility !== 'visible' || Number(getComputedStyle(sun).opacity) < .99) problems.push(label + ': the working hub does not flare');
+              if (spikes.length < 7 || spikes.length > 12 || spikes.length !== Math.min(12, Math.max(7, Math.round(r / 4)))) problems.push(label + ': ' + spikes.length + ' spikes for a radius of ' + r);
+              // The flare follows the hub; in the hub's own units every point of a spike and the glow is within 1.6 r.
+              if (flare.getAttribute('transform') !== hub.getAttribute('transform')) problems.push(label + ': the flare is not where the hub is');
+              let far = 0;
+              flare.querySelectorAll('polygon').forEach(shape => { const m = shape.parentNode.parentNode.transform.baseVal.consolidate()?.matrix || new DOMMatrix(); [...shape.points].forEach(p => { const q = new DOMPoint(p.x, p.y).matrixTransform(m); far = Math.max(far, Math.hypot(q.x, q.y)); }); });
+              flare.querySelectorAll('.ag-flare-glow circle').forEach(ring => { far = Math.max(far, Number(ring.getAttribute('r')) * 1.03); });
+              if (!(far <= 1.6 * r + .01)) problems.push(label + ': the flare reaches ' + (far / r).toFixed(3) + ' r from the hub\'s middle');
+              // Under everything else, no pointer, no text.
+              const later = [...root.querySelectorAll('.ag-drawing line, .ag-drawing path, .ag-drawing [data-agent], .ag-drawing text, .ag-orbit-ring, .ag-moon-ring')].filter(item => !flare.contains(item) && !item.closest('.ag-sky'));
+              if (later.some(item => !(flare.compareDocumentPosition(item) & Node.DOCUMENT_POSITION_FOLLOWING))) problems.push(label + ': the flare is drawn over a line, ring, agent or name');
+              const parts = [flare, ...flare.querySelectorAll('*'), ...hub.querySelectorAll('.ag-sun-ball, .ag-sun-ball *')];
+              if (parts.some(item => getComputedStyle(item).pointerEvents !== 'none')) problems.push(label + ': the flare or the ball takes a pointer');
+              if (flare.textContent.trim() || flare.querySelector('text, title, desc') || hub.querySelector('.ag-sun-ball text, .ag-sun-ball title') || flare.getAttribute('aria-hidden') !== 'true') problems.push(label + ': the flare adds text');
+            }
+          });
+        }
+        // Moving (full motion): every spike on its own time, the glow swelling, in 2D and 3D; a second visit, the same times.
+        for (const visit of [1, 2]) {
+          await using(n119Hub(trialRoster(), true), async root => {
+            await settled();
+            for (const view of visit === 1 ? ['2d', '3d'] : ['2d']) {
+              if (view === '3d') await n119To3d(root);
+              const label = view + ' visit ' + visit, flare = n119Flare(root), spikes = [...flare.querySelectorAll('.ag-flare-spike')];
+              const times = spikes.map(spike => [parseFloat(getComputedStyle(spike).animationDuration), parseFloat(getComputedStyle(spike).animationDelay)]);
+              if (times.some(([ms]) => !(ms >= .6 && ms <= 1.6)) || new Set(times.map(([ms]) => ms.toFixed(2))).size < 3 || new Set(times.map(([, at]) => at.toFixed(2))).size < spikes.length) problems.push(label + ': spikes not each on its own time from 0.6 to 1.6 s: ' + times.map(t => t.join('/')).join(' '));
+              seen.times = seen.times || times.join(' ');
+              if (seen.times !== times.join(' ')) problems.push(label + ': the spikes\' times are not the same on another visit');
+              const running = spikes.length && spikes.every(spike => spike.getAnimations().some(item => item.playState === 'running')) && (view === '3d' ? root.querySelector('.ag-sun-glow') : flare.querySelector('.ag-flare-glow')).getAnimations().some(item => item.playState === 'running');
+              if (!running) problems.push(label + ': the spikes or the glow do not move');
+              const reach = spikes.flatMap(spike => spike.getAnimations().flatMap(item => item.effect.getKeyframes())).flatMap(frame => (frame.transform || '').match(/[\d.]+/g)?.map(Number) || []);
+              if (!reach.length || reach.some(v => v > 1)) problems.push(label + ': a spike grows past its drawn length');
+            }
+          }, { motion: 'full' });
+        }
+        assert(!problems.length, problems.slice(0, 6).join('; '));
+      });
+      await test('n119 sun 3: the flare is warm (the hub\'s accent and orange to a pale yellow core, no green) with a spike\'s base 2:1 or more against the page, light and dark; it dies down within 1 s of the hub stopping; with reduced motion the working hub shows short still spikes', async () => {
+        const rgb = text => (text.match(/[\d.]+/g) || []).slice(0, 3).map(Number);
+        const lum = c => c.map(v => { v /= 255; return v <= .03928 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }).reduce((t, v, i) => t + v * [.2126, .7152, .0722][i], 0);
+        const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + .05) / (y + .05); };
+        const warm = c => { const [r, g, b] = c.map(v => v / 255), hi = Math.max(r, g, b), lo = Math.min(r, g, b), l = (hi + lo) / 2, d = hi - lo; if (!d || d / (1 - Math.abs(2 * l - 1)) < .15) return true; const hue = hi === r ? 60 * (((g - b) / d + 6) % 6) : hi === g ? 60 * ((b - r) / d + 2) : 60 * ((r - g) / d + 4); return hue <= 62 || hue >= 345; };
+        for (const scheme of ['light', 'dark']) {
+          await using(n119Hub(trialRoster(), true), async root => {
+            await settled();
+            const flare = n119Flare(root), page = rgb(getComputedStyle(root).backgroundColor);
+            const colours = [...flare.querySelectorAll('polygon, circle')].map(item => [item.getAttribute('class') || 'glow', rgb(getComputedStyle(item).fill)]).concat([...root.querySelectorAll('[id$="-ball-rest"] stop, [id$="-ball-fire"] stop')].map(stop => ['ball', rgb(getComputedStyle(stop).stopColor)]));
+            const cold = colours.filter(([, c]) => !warm(c));
+            assert(colours.length > 10 && !cold.length, scheme + ': the sun has a colour outside the warm range: ' + cold.map(([what, c]) => what + ' ' + c).join(', '));
+            const base = rgb(getComputedStyle(flare.querySelector('.ag-flare-edge')).fill);
+            assert(ratio(base, page) >= 2, scheme + ': a spike\'s base is ' + ratio(base, page).toFixed(2) + ':1 against the page');
+          }, { scheme });
+        }
+        const data = n119Hub(trialRoster(), true);
+        await using(data, async (root, app) => {
+          await settled();
+          const flare = n119Flare(root);
+          assert(flare.dataset.state === 'on', 'the working hub does not flare');
+          n119Hub(data, false); await app.refresh();
+          const from = performance.now();
+          assert(flare.dataset.state === 'dying', 'the flare did not start dying down when the hub stopped');
+          await until(() => flare.dataset.state === '', 1500);
+          const took = performance.now() - from;
+          assert(flare.dataset.state === '' && took < 1000 && getComputedStyle(flare.querySelector('.ag-flare-sun')).visibility === 'hidden', 'the flare was still showing ' + Math.round(took) + ' ms after the hub stopped');
+        }, { motion: 'full' });
+        await using(n119Hub(trialRoster(), true), async root => {
+          await settled();
+          for (const view of ['2d', '3d']) {
+            if (view === '3d') await n119To3d(root);
+            const flare = n119Flare(root), spikes = [...flare.querySelectorAll('.ag-flare-spike')];
+            assert(flare.dataset.state === 'on' && getComputedStyle(flare.querySelector('.ag-flare-sun')).visibility === 'visible' && spikes.length >= 7, view + ': with reduced motion the working hub shows no spikes');
+            const moving = flare.getAnimations({ subtree: true }).filter(item => item.playState === 'running');
+            const short = spikes.every(spike => { const m = new DOMMatrix(getComputedStyle(spike).transform); return Math.hypot(m.c, m.d) < .8; });
+            assert(!moving.length && short, view + ': with reduced motion the spikes move (' + moving.length + ') or are not short');
+          }
+        });
+      });
+      await test('n119 labels: with the activity count, the 3D note, the attention badge and the usage readout showing, no text over the canvas is under 11 px (computed) and no agent name is under 11 px on screen; at 1400, 620 and 420 px none of the four covers an agent\'s name and the badge and the readout are inside the canvas', async () => {
+        // (The busy and loop counts drawn on agents, .ag-busy-count and .ag-loop-count, are 10 px in the drawing and are
+        // not among these labels.)
+        const problems = [];
+        for (const [width, height] of [[1400, 900], [620, 800], [420, 760]]) {
+          const data = workLoopFixture(); data.graph.nodes.push(step('blocked-step', 'impl-claude', { status: 'blocked' }));
+          await using(data, async root => {
+            await resizeTo(root, width, height); await settled();
+            await n119To3d(root);
+            undoKey(viewportOf(root)); await settle();
+            const view = viewportOf(root).getBoundingClientRect(), shown = item => item && !item.hidden && item.getClientRects().length && getComputedStyle(item).visibility === 'visible';
+            const labels = { activity: root.querySelector('.ag-activity'), note: root.querySelector('.ag-orbit-note'), attention: root.querySelector('.ag-attention'), usage: root.querySelector('.ag-usage') };
+            Object.entries(labels).forEach(([what, item]) => { if (!shown(item) || !item.textContent.trim()) problems.push(width + ': the ' + what + ' label is not showing'); });
+            // Every element over the canvas with text of its own (outside the details and the drawing).
+            const over = [...root.querySelectorAll('*')].filter(item => !(item instanceof SVGElement) && !item.closest('.ag-detail') && shown(item) && [...item.childNodes].some(node => node.nodeType === 3 && node.textContent.trim())).filter(item => { const b = item.getBoundingClientRect(); return b.right > view.left && b.left < view.right && b.bottom > view.top && b.top < view.bottom; });
+            over.forEach(item => { const px = parseFloat(getComputedStyle(item).fontSize); if (px < 11 - .01) problems.push(width + ': "' + item.textContent.trim().slice(0, 24) + '" (' + item.className + ') is ' + px + ' px'); });
+            const names = [...root.querySelectorAll('.ag-drawing .ag-agent-name')].filter(shown);
+            names.forEach(name => { const px = parseFloat(getComputedStyle(name).fontSize) * name.getScreenCTM().a; if (px < 11 - .01) problems.push(width + ': ' + name.textContent + '\'s name is ' + px.toFixed(2) + ' px'); });
+            Object.entries(labels).forEach(([what, item]) => {
+              if (!shown(item)) return;
+              const b = item.getBoundingClientRect();
+              names.forEach(name => { const n = name.getBoundingClientRect(); if (Math.min(b.right, n.right) - Math.max(b.left, n.left) > .5 && Math.min(b.bottom, n.bottom) - Math.max(b.top, n.top) > .5) problems.push(width + ': the ' + what + ' label covers ' + name.textContent + '\'s name'); });
+              if ((what === 'attention' || what === 'usage') && (b.left < view.left - .5 || b.right > view.right + .5 || b.top < view.top - .5 || b.bottom > view.bottom + .5)) problems.push(width + ': the ' + what + ' label is cut by the edge');
+            });
+          }, { motion: 'none' });
+        }
+        assert(!problems.length, problems.length + ' problems: ' + problems.slice(0, 8).join('; '));
+      });
     }
     // ---- orbit lane (n105) ----
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
