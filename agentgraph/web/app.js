@@ -334,7 +334,7 @@
     // lower corner (canvas coordinates, with a 2 px margin). The graph is placed clear of them wherever panning can.
     function coverRects() {
       const view = viewport.getBoundingClientRect();
-      return [usage, status, controls].filter(item => !item.hidden && item.getClientRects().length).map(item => {
+      return [usage, status, controls, orbitDock].filter(item => !item.hidden && item.getClientRects().length).map(item => {
         const b = item.getBoundingClientRect();
         return { left: b.left - view.left - 2, right: b.right - view.left + 2, top: b.top - view.top - 2, bottom: b.bottom - view.top + 2 };
       }).filter(b => b.right - b.left > 6 && b.bottom - b.top > 6 && b.bottom > 0 && b.top < view.height);
@@ -546,6 +546,7 @@
       return agents;
     }
     function rememberTeam(team) {
+      orbitSuspend();
       if (!camera.initialized) return;
       teamViews.set(team + ':' + arrangement, { positions: Array.from(positions, ([key, point]) => [key, { ...point }]), camera: { ...camera }, signature: layoutSignature });
     }
@@ -821,6 +822,7 @@
       return Array.from({ length: count }, (_, i) => ({ dx: Math.cos(start + i * Math.PI * 2 / count) * distance, dy: Math.sin(start + i * Math.PI * 2 / count) * distance, distance }));
     }
     function reseat() {
+      if (orbitHold(reseat)) return;
       positions.forEach(point => {
         const lead = point.parent && positions.get(point.parent);
         if (lead) { point.x = lead.x + point.dx; point.y = lead.y + point.dy; point.fixed = false; }
@@ -829,6 +831,7 @@
     // Everything surrounds the orchestrator: one ring (a tall oval in a narrow
     // panel) with each group side by side on it. Manual pins still win.
     function addPositions(agents) {
+      if (orbitHold(addPositions, agents)) return;
       const rect = { width: root.clientWidth, height: Math.max(1, root.clientHeight - (notice.hidden ? 0 : notice.offsetHeight)) };
       if (rect.width <= 0 || viewport.clientWidth <= 0 || viewport.clientHeight <= 0) return;
       const compact = arrangement === 'compact';
@@ -1023,11 +1026,12 @@
     function notes(parent, list) { list.forEach(note => { const row = el('p', 'ag-note', text(note.text)); row.title = text(note.text); parent.append(row); }); }
     function positionNode(name) {
       const node = nodes.get(name), p = positions.get(name);
-      if (node && p) node.setAttribute('transform', 'translate(' + p.x + ' ' + p.y + ')');
+      if (node && p) node.setAttribute('transform', 'translate(' + p.x + ' ' + p.y + ')' + orbitNode(node, name));
     }
     // Move one agent to (x, y) on the stage, as far as it goes without landing on another. A lead carries its
     // seats; a seat moves on its own and keeps its new place beside its lead. The place is remembered.
     function moveNode(name, x, y) {
+      if (orbitRefuseMove()) return;
       const point = positions.get(name);
       if (!point) return;
       const lead = point.parent && positions.get(point.parent);
@@ -1285,6 +1289,7 @@
     const CLEAR = 2, NAME_CLEAR = 1, BEND_STEP = 3;
     let bendQueue = [];
     function obstaclesFor(ends, box) {
+      if (orbit.shown) return [];
       const list = [];
       positions.forEach((p, name) => {
         if (ends.includes(name) || !nodes.has(name) || !shownAgents.has(name)) return;
@@ -3431,6 +3436,351 @@
       const list = Array.from(nodes.values()).filter(node => node.isConnected), index = list.indexOf(nodes.get(name));
       if (list.length) list[(index + step + list.length) % list.length].focus({ preventScroll: true });
     }
+
+    // ---- orbit lane (n105): the 3D view, a planetary system that turns ----
+    // The terminal's model (tui-plugin/src/scene.js): the orchestrator is the sun at the centre, each group has its own
+    // ring round it, each ring tilted differently (INCLINATIONS), its agents on it near where the flat view has them;
+    // the system turns once in ORBIT_TURN_MS, seen from ORBIT_ELEVATION above its plane, and the camera moves between
+    // the views in ORBIT_CHANGE_MS. Council seats and a group's members stay round their lead as in 2D.
+    // How it is drawn: while 3D is shown `positions` holds where each agent is on screen (the 2D place blended with
+    // its projection, so every line, loop, pick and badge follows); the 2D places are kept in `orbit.base`, and any 2D
+    // layout code (addPositions, reseat) runs on them through orbitHold. Depth is size and dimming (orbitNode, from
+    // positionNode) and order (nearer agents drawn last). Going back puts the 2D places and camera back exactly.
+    // In 3D lines do not bend round agents (obstaclesFor gives none): a line may pass in front of or behind an agent,
+    // and every line and loop ring turns smoothly with the system. A frame is drawn only when the angle or the data
+    // changed. Moving an agent is 2D only; drawing a path (clicks) works the same in both views.
+    const ORBIT_TURN_MS = 40000, ORBIT_CHANGE_MS = 700, ORBIT_ELEVATION = .5, ORBIT_PERSPECTIVE = 4, ORBIT_RESUME_MS = 3000;
+    const ORBIT_INCLINATIONS = [.9, -1.05, .7, -.8, 1.15, -.6, 1, -.9];
+    const ORBIT_LOW = .06, ORBIT_HIGH = Math.PI / 2, ORBIT_TURN_PX = .008, ORBIT_TILT_PX = .006, ORBIT_KEY_TURN = .2, ORBIT_KEY_TILT = .12;
+    const ORBIT_KEY = POSITIONS_KEY + ':view';
+    const ORBIT_MOVE_SAID = 'Agents move in 2D: press D to go back';
+    const orbit = { want: '2d', shown: false, k: 0, change: null, turn: 0, elevation: ORBIT_ELEVATION, base: null, saved: null, from3d: null, figure: null, depth: new Map(), order: '', raf: 0, last: 0, pausedUntil: 0, resume: null, waiting: false, holding: false, grab: null, frames: 0, frameMs: [] };
+    const orbitLayer = svg('g', { class: 'ag-orbits', 'aria-hidden': 'true' });
+    stage.insertBefore(orbitLayer, edgeLayer);
+    const orbitButton = el('button', 'ag-control ag-orbit-toggle');
+    orbitButton.type = 'button'; orbitButton.setAttribute('aria-label', '3D view'); orbitButton.title = '3D view (D)';
+    orbitButton.setAttribute('aria-pressed', 'false'); orbitButton.setAttribute('aria-keyshortcuts', 'D');
+    const orbitIcon = svg('svg', { viewBox: '0 0 16 16', 'aria-hidden': 'true', focusable: 'false' });
+    orbitIcon.append(svg('circle', { r: 7, transform: 'translate(8 8) rotate(-20) scale(1 .42)', 'vector-effect': 'non-scaling-stroke' }), svg('circle', { cx: 8, cy: 8, r: 2.6 }));
+    orbitButton.append(orbitIcon);
+    // Beside the other controls, in their row (kept just left of them as they change width), and a cover the camera
+    // keeps the graph clear of, as theirs is.
+    const orbitDock = el('div', 'ag-orbit-dock');
+    orbitDock.append(orbitButton); controls.after(orbitDock);
+    const orbitDockPlace = () => { orbitDock.style.right = (8 + controls.offsetWidth + (controls.offsetWidth ? 2 : 0)) + 'px'; };
+    const orbitDockWatch = new ResizeObserver(orbitDockPlace);
+    orbitDockWatch.observe(controls); orbitDockPlace();
+    cleanups.push(() => orbitDockWatch.disconnect());
+    const orbitNote = el('span', 'ag-orbit-note');
+    orbitNote.hidden = true; orbitNote.setAttribute('role', 'status'); orbitNote.setAttribute('aria-live', 'polite');
+    status.append(orbitNote);
+    viewport.setAttribute('aria-keyshortcuts', viewport.getAttribute('aria-keyshortcuts') + ' D');
+    let orbitNoteTimer = null;
+    function orbitSay(said) {
+      orbitNote.textContent = said; orbitNote.hidden = false;
+      if (orbitNoteTimer) { clearTimeout(orbitNoteTimer); timers.delete(orbitNoteTimer); }
+      orbitNoteTimer = later(() => { orbitNoteTimer = null; orbitNote.hidden = true; orbitNote.textContent = ''; }, 3500);
+    }
+    function orbitStore(value) { try { const store = positionStore(); if (store) { if (value === undefined) return store.getItem(ORBIT_KEY); store.setItem(ORBIT_KEY, value); } } catch (_) { /* no storage (the Desktop panel may have none) */ } return null; }
+    function orbitMark() {
+      root.dataset.agView = orbit.want;
+      orbitButton.setAttribute('aria-pressed', String(orbit.want === '3d'));
+      // What the camera is doing, for tests and hosts (no text in the graph area): the blend (0 flat, 1 3D), the angle,
+      // the frames drawn and the mean time of the last ones, in ms.
+      root.dataset.agBlend = orbit.k === 0 || orbit.k === 1 ? String(orbit.k) : orbit.k.toFixed(3); root.dataset.agTurn = orbit.turn.toFixed(4); root.dataset.agElevation = orbit.elevation.toFixed(4);
+      root.dataset.agFrames = String(orbit.frames);
+      root.dataset.agFrameMs = orbit.frameMs.length ? (orbit.frameMs.reduce((t, v) => t + v, 0) / orbit.frameMs.length).toFixed(2) : '';
+    }
+    const orbitSmooth = t => t * t * (3 - 2 * t);
+    // The figure, from the 2D places: one ring per group (its node line through the middle of its agents, as the
+    // terminal draws it) and each ring agent's point on it, in ring radii round the hub (z up).
+    function orbitFigure() {
+      if (orbit.figure) return orbit.figure;
+      const base = orbit.base, hub = base.get(hubName) || { x: 0, y: 0 }, byKey = new Map(), points = new Map();
+      let total = 0, count = 0;
+      positions.forEach((p, name) => {
+        const b = base.get(name);
+        if (!b || name === hubName || (p.parent && base.has(p.parent))) return;
+        const dx = b.x - hub.x, dy = b.y - hub.y, key = p.group || 'build';
+        if (!byKey.has(key)) byKey.set(key, []);
+        byKey.get(key).push({ name, azimuth: Math.atan2(dx, -dy) });
+        total += Math.hypot(dx, dy); count++;
+      });
+      const groups = [...byKey].map(([key, members]) => {
+        const node = Math.atan2(members.reduce((t, m) => t + Math.sin(m.azimuth), 0), members.reduce((t, m) => t + Math.cos(m.azimuth), 0));
+        const along = (node + 2 * Math.PI) % (2 * Math.PI);
+        return { key, members, node, along: along > 2 * Math.PI - .6 ? along - 2 * Math.PI : along };
+      }).sort((a, b) => a.along - b.along);
+      const rings = groups.map((group, gi) => {
+        const inc = ORBIT_INCLINATIONS[gi % ORBIT_INCLINATIONS.length], node = group.node;
+        const n = [Math.sin(node), Math.cos(node), 0], m = [Math.cos(node) * Math.cos(inc), -Math.sin(node) * Math.cos(inc), Math.sin(inc)];
+        const at = u => [Math.cos(u) * n[0] + Math.sin(u) * m[0], Math.cos(u) * n[1] + Math.sin(u) * m[1], Math.sin(u) * m[2]];
+        group.members.forEach(member => { const beta = member.azimuth - node; points.set(member.name, at(Math.atan2(Math.sin(beta), Math.cos(beta) * Math.cos(inc)))); });
+        return { key: group.key, at };
+      });
+      orbit.figure = { rings, points, hub, radius: count ? total / count * 1.08 : 180 };
+      return orbit.figure;
+    }
+    // The camera: the figure turned by `turn` round its upright axis, seen from `elevation` above its plane (PI/2:
+    // straight above, as the 2D view). -> stage point and depth (+1 nearest, -1 farthest).
+    function orbitCamera(figure, turn, elevation) {
+      const ct = Math.cos(turn), st = Math.sin(turn), ce = Math.cos(elevation), se = Math.sin(elevation), R = figure.radius;
+      return p => {
+        const x = p[0] * ct + p[1] * st, y = -p[0] * st + p[1] * ct, up = y * se + p[2] * ce, depth = -y * ce + p[2] * se;
+        const s = ORBIT_PERSPECTIVE / (ORBIT_PERSPECTIVE - depth);
+        return { x: figure.hub.x + x * s * R, y: figure.hub.y - up * s * R, depth };
+      };
+    }
+    // Where everything is now (no drawing): `positions` gets each agent's place on screen, `orbit.depth` its depth.
+    function orbitProject() {
+      const e = orbit.k, figure = orbitFigure(), project = orbitCamera(figure, orbit.turn * e, ORBIT_HIGH + (orbit.elevation - ORBIT_HIGH) * e), full = new Map();
+      orbit.depth.clear();
+      positions.forEach((p, name) => {
+        if (!orbit.base.has(name)) orbit.base.set(name, { x: p.x, y: p.y });
+        const point = figure.points.get(name);
+        if (point) full.set(name, project(point));
+        else if (!(p.parent && orbit.base.has(p.parent))) full.set(name, { ...orbit.base.get(name), depth: 0 });
+      });
+      positions.forEach((p, name) => {
+        if (full.has(name)) return;
+        // A seat or a member: round its lead as in 2D, at its lead's depth and size.
+        const lead = full.get(p.parent) || { ...orbit.base.get(p.parent), depth: 0 }, b = orbit.base.get(name), l = orbit.base.get(p.parent), size = 1 + .3 * (lead.depth + 1) / 2;
+        full.set(name, { x: lead.x + (b.x - l.x) * size, y: lead.y + (b.y - l.y) * size, depth: lead.depth + 1e-4 });
+      });
+      positions.forEach((p, name) => {
+        const b = orbit.base.get(name), q = full.get(name);
+        p.x = b.x + (q.x - b.x) * e; p.y = b.y + (q.y - b.y) * e;
+        orbit.depth.set(name, { z: q.depth, s: 1 + e * .3 * (q.depth + 1) / 2, o: 1 - e * .45 * (1 - q.depth) / 2 });
+      });
+      return project;
+    }
+    // positionNode's part: an agent's size and dimming for its depth ('' and none in 2D).
+    function orbitNode(node, name) {
+      const d = orbit.shown && orbit.depth.get(name);
+      if (!d) { if (node.style.opacity) node.style.opacity = ''; return ''; }
+      node.style.opacity = d.o < .999 ? d.o.toFixed(3) : '';
+      return d.s > 1.0005 ? ' scale(' + d.s.toFixed(4) + ')' : '';
+    }
+    // Nearer agents over farther ones (and their names): the node order follows depth, moved without losing focus.
+    // Without depth (back in 2D) the order is the one 2D had (orbit.dom), any agent added meanwhile after it.
+    function orbitOrder(byDepth) {
+      const list = [...nodes].filter(([, node]) => node.parentNode === nodeLayer), was = new Map((orbit.dom || []).map((node, i) => [node, i]));
+      if (byDepth) list.sort((a, b) => (orbit.depth.get(a[0])?.z ?? 0) - (orbit.depth.get(b[0])?.z ?? 0));
+      else list.sort((a, b) => (was.get(a[1]) ?? Infinity) - (was.get(b[1]) ?? Infinity));
+      const order = list.map(([name]) => name).join('\n');
+      if (order === orbit.order) return;
+      orbit.order = order;
+      const focused = document.activeElement;
+      list.forEach(([, node]) => { if (nodeLayer.moveBefore) nodeLayer.moveBefore(node, null); else nodeLayer.append(node); });
+      if (focused && focused !== document.activeElement && focused.isConnected) focused.focus({ preventScroll: true });
+    }
+    // The rings: each a thin line, its far half fainter; they fade in and out with the camera's move.
+    function orbitRings(project) {
+      const figure = orbitFigure(), shown = new Set();
+      orbitLayer.style.opacity = orbit.k < .999 ? orbit.k.toFixed(3) : '';
+      figure.rings.forEach(ring => {
+        shown.add(ring.key);
+        let view = [...orbitLayer.children].filter(item => item.dataset.group === ring.key);
+        if (view.length !== 2) { view.forEach(item => item.remove()); view = ['near', 'far'].map(side => svg('path', { class: 'ag-orbit-ring', 'data-group': ring.key, 'data-side': side })); orbitLayer.append(...view); }
+        const parts = { near: '', far: '' }, steps = 96;
+        let last = null;
+        for (let i = 0; i <= steps; i++) {
+          const q = project(ring.at(i / steps * 2 * Math.PI)), side = q.depth >= 0 ? 'near' : 'far', xy = q.x.toFixed(1) + ' ' + q.y.toFixed(1);
+          if (last && last.side === side) parts[side] += ' L ' + xy;
+          else { if (last) parts[last.side] += ' L ' + xy; parts[side] += ' M ' + (last ? last.xy : xy) + (last ? ' L ' + xy : ''); }
+          last = { side, xy };
+        }
+        view[0].setAttribute('d', parts.near.trim()); view[1].setAttribute('d', parts.far.trim());
+      });
+      [...orbitLayer.children].forEach(item => { if (!shown.has(item.dataset.group)) item.remove(); });
+    }
+    function orbitDraw() {
+      const started = performance.now();
+      const project = orbitProject();
+      nodes.forEach((_, name) => positionNode(name));
+      orbitOrder(true);
+      orbitRings(project);
+      updateEdges();
+      const wireFrom = flowAction && trail.length && !trailPending && positions.get(trail.at(-1));
+      if (wireFrom && wire.style.display !== 'none') { wire.setAttribute('x1', wireFrom.x); wire.setAttribute('y1', wireFrom.y); }
+      orbit.frames++;
+      orbit.frameMs.push(performance.now() - started); if (orbit.frameMs.length > 240) orbit.frameMs.shift();
+      orbitMark();
+    }
+    function orbitSpins() {
+      return orbit.want === '3d' && !reducedMotion() && !document.hidden && root.clientWidth > 0 && !pointers.size && !draft?.held && performance.now() >= orbit.pausedUntil;
+    }
+    function orbitRequest() { if (alive && orbit.shown && !orbit.raf) orbit.raf = requestAnimationFrame(orbitTick); }
+    function orbitTick(now) {
+      orbit.raf = 0;
+      if (!alive || !orbit.shown) return;
+      const dt = orbit.last ? clamp(now - orbit.last, 0, 100) : 16;
+      orbit.last = now;
+      let again = false;
+      if (orbit.change) {
+        const c = orbit.change, t = clamp((now - c.at) / ORBIT_CHANGE_MS, 0, 1);
+        orbit.k = c.from + (c.to - c.from) * orbitSmooth(t);
+        if (c.to === 0 && orbit.from3d && c.from > 0) {
+          // Going back, the camera returns to where the 2D view had it.
+          const f = orbit.k / c.from, s = orbit.saved, b = orbit.from3d;
+          camera.x = s.x + (b.x - s.x) * f; camera.y = s.y + (b.y - s.y) * f; camera.scale = s.scale + (b.scale - s.scale) * f; transform();
+        }
+        if (t >= 1) { orbit.change = null; if (c.to === 0) { orbitRestore(true); return; } } else again = true;
+      }
+      if (orbitSpins()) { orbit.turn += dt * 2 * Math.PI / ORBIT_TURN_MS; again = true; }
+      // A frame only when the camera or the data changed (orbit.dirty: new places from 2D layout code, or entering).
+      const angle = orbit.k + ' ' + orbit.turn + ' ' + orbit.elevation;
+      if (orbit.dirty || angle !== orbit.drawn) { orbit.dirty = false; orbit.drawn = angle; orbitDraw(); }
+      if (again) orbitRequest(); else orbit.last = 0;
+    }
+    // The 2D places and camera back exactly; `draw` false when 2D code is about to draw (a team or arrangement change).
+    function orbitRestore(draw) {
+      if (!orbit.shown) return;
+      if (orbit.raf) { cancelAnimationFrame(orbit.raf); orbit.raf = 0; }
+      positions.forEach((p, name) => { const b = orbit.base.get(name); if (b) { p.x = b.x; p.y = b.y; } });
+      orbit.shown = false; orbit.k = 0; orbit.change = null; orbit.grab = null; orbit.depth.clear(); orbit.last = 0;
+      const saved = orbit.saved, view = viewport.getBoundingClientRect();
+      const resized = !!saved && (Math.abs(view.width - saved.width) > .5 || Math.abs(view.height - saved.height) > .5);
+      if (saved && camera.initialized) Object.assign(camera, { x: saved.x, y: saved.y, scale: saved.scale, own: saved.own, touched: saved.touched });
+      orbit.base = null; orbit.saved = null; orbit.from3d = null; orbit.figure = null;
+      orbitLayer.replaceChildren(); orbitLayer.style.opacity = '';
+      orbitOrder(false); orbit.dom = null;
+      nodes.forEach(node => { node.style.opacity = ''; });
+      if (draw && snapshot) {
+        renderNodes(visibleAgents); updateEdges();
+        // The space changed while 3D was shown (the details opened, the pane resized): the 2D rules place the camera.
+        if (resized && camera.initialized) { if (saved.own) clampPan(true); else fitView(false); reveal(); }
+        transform();
+      }
+      orbitMark();
+    }
+    // 2D layout code while 3D is shown: it runs on the 2D places, which are then kept, and the projection follows.
+    function orbitHold(fn, ...args) {
+      if (!orbit.shown || orbit.holding) return false;
+      if (!camera.initialized) { orbitSuspend(); return false; }
+      orbit.holding = true;
+      let changed = false;
+      try {
+        positions.forEach((p, name) => { const b = orbit.base.get(name); if (b) { p.x = b.x; p.y = b.y; } });
+        fn(...args);
+        stopLayout();
+        const next = new Map();
+        positions.forEach((p, name) => next.set(name, { x: p.x, y: p.y }));
+        changed = next.size !== orbit.base.size || [...next].some(([name, b]) => { const was = orbit.base.get(name); return !was || Math.abs(was.x - b.x) > .01 || Math.abs(was.y - b.y) > .01; });
+        orbit.base = next;
+      } finally { orbit.holding = false; }
+      if (changed) orbit.figure = null;
+      orbitProject();
+      if (changed) { orbit.dirty = true; orbitRequest(); }
+      return true;
+    }
+    // A team or arrangement change (or a reset) while 3D is shown: 2D for that moment, then 3D again once laid out.
+    function orbitSuspend() { if (!orbit.shown) return; orbitRestore(false); orbitWait(); }
+    function orbitWait() {
+      if (orbit.waiting) return;
+      orbit.waiting = true;
+      later(function check() {
+        if (orbit.want !== '3d' || orbit.shown) { orbit.waiting = false; return; }
+        if (snapshot && camera.initialized && positions.size && !orbit.holding && root.clientWidth > 0) { orbit.waiting = false; orbitEnter(false); return; }
+        later(check, 200);
+      }, 0);
+    }
+    function orbitEnter(animate) {
+      orbit.want = '3d'; orbitStore('3d'); orbitMark();
+      if (!snapshot || !camera.initialized || !positions.size) { orbitWait(); return; }
+      if (!orbit.shown) {
+        stopLayout();
+        orbit.base = new Map(); positions.forEach((p, name) => orbit.base.set(name, { x: p.x, y: p.y }));
+        orbit.saved = { x: camera.x, y: camera.y, scale: camera.scale, own: camera.own, touched: camera.touched, width: camera.width, height: camera.height };
+        orbit.figure = null; orbit.shown = true; orbit.k = 0; orbit.order = ''; orbit.dom = [...nodeLayer.children];
+      }
+      orbit.from3d = null; orbit.dirty = true;
+      if (animate && !reducedMotion()) orbit.change = { from: orbit.k, to: 1, at: performance.now() };
+      else { orbit.change = null; orbit.k = 1; }
+      orbitRequest();
+    }
+    function orbitLeave(animate) {
+      orbit.want = '2d'; orbitStore('2d'); orbitMark();
+      if (!orbit.shown) return;
+      orbit.grab = null;
+      if (animate && !reducedMotion() && orbit.k > 0) {
+        orbit.from3d = { x: camera.x, y: camera.y, scale: camera.scale };
+        orbit.change = { from: orbit.k, to: 0, at: performance.now() };
+        orbitRequest();
+      } else orbitRestore(true);
+    }
+    function orbitToggle() {
+      if (press?.moved || (drag?.moved && !orbit.grab)) return;
+      if (orbit.want === '3d') orbitLeave(true); else orbitEnter(true);
+    }
+    // Turning by hand pauses the self-turn; it starts again ORBIT_RESUME_MS after the last input.
+    function orbitTurned() {
+      orbit.pausedUntil = performance.now() + ORBIT_RESUME_MS;
+      if (orbit.resume) { clearTimeout(orbit.resume); timers.delete(orbit.resume); }
+      orbit.resume = later(() => { orbit.resume = null; orbitRequest(); }, ORBIT_RESUME_MS + 20);
+      orbitRequest();
+    }
+    function orbitReset() { orbit.turn = 0; orbit.elevation = ORBIT_ELEVATION; orbitTurned(); }
+    // moveNode's guard: an agent is moved in 2D only.
+    function orbitRefuseMove() { if (!orbit.shown) return false; orbitSay(ORBIT_MOVE_SAID); return true; }
+    function orbitPlainKey(event) { return !event.ctrlKey && !event.metaKey && !event.altKey; }
+    listen(orbitButton, 'click', orbitToggle);
+    // `d` switches the views wherever the view has the keys (not while typing).
+    listen(root, 'keydown', event => {
+      if (event.defaultPrevented || event.target.closest('textarea, input, select')) return;
+      if (event.key === 'Escape' && orbit.grab && drag?.moved) { orbit.turn = orbit.grab.turn; orbit.elevation = orbit.grab.elevation; orbit.grab = null; orbitRequest(); return; }
+      if ((event.key === 'd' || event.key === 'D') && !event.shiftKey && orbitPlainKey(event) && !event.repeat) { event.preventDefault(); orbitToggle(); }
+    }, true);
+    listen(viewport, 'keydown', event => {
+      if (!orbit.shown || event.defaultPrevented) return;
+      const node = event.target.closest('[data-agent]'), arrow = { ArrowLeft: [1, 0], ArrowRight: [-1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[event.key];
+      // Moving an agent from the keyboard is 2D only: the status line says so.
+      if (node && arrow && (event.altKey || event.shiftKey) && !event.ctrlKey && !event.metaKey) { event.preventDefault(); event.stopImmediatePropagation(); orbitSay(ORBIT_MOVE_SAID); return; }
+      if (event.target !== viewport && !node) return;
+      if ((event.key === 'r' || event.key === 'R') && !event.shiftKey && orbitPlainKey(event)) { event.preventDefault(); event.stopImmediatePropagation(); orbitReset(); return; }
+      if (event.target === viewport && arrow && !event.shiftKey && orbitPlainKey(event)) {
+        event.preventDefault(); event.stopImmediatePropagation();
+        orbit.turn += arrow[0] * ORBIT_KEY_TURN; orbit.elevation = clamp(orbit.elevation + arrow[1] * ORBIT_KEY_TILT, ORBIT_LOW, ORBIT_HIGH);
+        orbitTurned();
+      }
+    }, true);
+    listen(viewport, 'wheel', event => {
+      if (!orbit.shown) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      const rect = viewport.getBoundingClientRect();
+      zoomAt(camera.scale * Math.exp(-clamp(event.deltaY, -160, 160) * .007), event.clientX - rect.left, event.clientY - rect.top);
+    }, { passive: false, capture: true });
+    // A drag in 3D, on empty space or starting on an agent, turns the system (past the same MOVE_PX as every drag);
+    // it never moves an agent or pans. Two pointers still pinch to zoom.
+    listen(viewport, 'pointermove', event => {
+      if (!orbit.shown || pinch || pointers.size > 1 || !pointers.has(event.pointerId)) return;
+      const id = event.pointerId, held = press && press.id === id ? press : drag && drag.id === id ? drag : null;
+      if (!held) return;
+      if (!orbit.grab || orbit.grab.id !== id) {
+        if (Math.hypot(event.clientX - held.startX, event.clientY - held.startY) <= MOVE_PX) return;
+        orbit.grab = { id, x: held.startX, y: held.startY, turn: orbit.turn, elevation: orbit.elevation };
+        if (held === press) { cancelPress(); drag = { id, route: '', member: '', startX: held.startX, startY: held.startY, x: camera.x, y: camera.y, moved: true }; orbitSay(ORBIT_MOVE_SAID); }
+        else drag.moved = true;
+        clearHold(); suppressClick = true; lastClick = null; viewport.dataset.dragging = 'true';
+      }
+      event.stopImmediatePropagation();
+      pointers.set(id, { x: event.clientX, y: event.clientY });
+      orbit.turn = orbit.grab.turn - (event.clientX - orbit.grab.x) * ORBIT_TURN_PX;
+      orbit.elevation = clamp(orbit.grab.elevation + (event.clientY - orbit.grab.y) * ORBIT_TILT_PX, ORBIT_LOW, ORBIT_HIGH);
+      orbitTurned();
+    }, true);
+    // After any press (a click as well as a turn) the self-turn goes on: it stopped while the pointer was down.
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(name => listen(viewport, name, event => { if (orbit.grab?.id === event.pointerId) { orbit.grab = null; orbitTurned(); } else orbitRequest(); }, true));
+    // A double-click on empty space resets the angle in 3D (in 2D it puts the agents back in their places).
+    listen(viewport, 'dblclick', event => {
+      if (!orbit.shown || event.target.closest?.('[data-agent], [data-route], [data-team-line], [data-loop-id], [data-work-loop-id], [data-learning], button') || agentAt(event.clientX, event.clientY)) return;
+      event.preventDefault(); event.stopImmediatePropagation(); orbitReset();
+    }, true);
+    listen(document, 'visibilitychange', () => { if (!document.hidden) { orbit.last = 0; orbitRequest(); } });
+    cleanups.push(() => { if (orbit.raf) cancelAnimationFrame(orbit.raf); orbit.raf = 0; });
+    if (orbitStore() === '3d') { orbit.want = '3d'; orbitWait(); }
+    orbitMark();
+    // ---- orbit lane (n105) ----
 
     listen(plus, 'click', event => { if (addMenu.hidden) openAddMenu(event.detail === 0); else closeAddMenu(false); });
     // A press on a starting point takes the new circle at once: drag it out and release to drop it, or click and
