@@ -60,6 +60,7 @@ The web page is the clean view: one network of your agents that you can pan, zoo
 | `agentgraph agent list` / `agent add NAME [--template blank\|verifier] [--copy-of A] [...]` / `agent show NAME` / `agent text NAME --text-file F\|-` / `agent rename NAME TO` / `agent remove NAME` / `agent restore RECORD` | Add an agent as an OpenCode agent file (`~/.config/opencode/agents/NAME.md`, live at once; marked as added, with narrow permissions that never let it start agents), read or replace its instruction, rename an added agent (its file, its structure file, every flow and group that names it and their path commands, as one undoable step; flows and groups keep their ids), remove an agent with its flows and groups as one undoable step, or restore either from the record. `agent list` shows the preset agents and the agent files, each marked added or hand-written. Hand-written agent files are listed but read-only. |
 | `agentgraph skill show ID` / `skill create ID --description D --text-file F\|- [--assign A]` / `skill write ID --text-file F\|-` / `skill delete ID` / `skill restore RECORD` | Read or edit a skill's text; every write and delete returns an undo record. A delete is refused while an agent still has the skill (a preset entry, an added agent's file, or a hand-written agent file that names it), naming the agents. Skills outside the skills folder, bundled with a plugin, or `shopify-ruby` are read-only. |
 | `agentgraph structure teams [--json]` / `team add LEAD MEMBER...` / `team members ID MEMBER...` / `team text ID --text-file F\|-` / `team remove ID` | List or change the groups (agents that report to one lead) in `structure/teams/`, which git ignores; `check` reports their problems next to the flows'. |
+| `agentgraph output read TASK NODE ARTIFACT` / `output write TASK NODE ARTIFACT --text-file F\|- [--expect REV]` / `output restore RECORD` | Read a step's output (a node's artifact in `.opencode/artifacts/<task>/`, UTF-8 text up to 256 KiB), save a new text as its next revision (every step that read the old one becomes stale; one undoable step, logged without content in `edits.jsonl`), or undo that from its record. `--dir DIR` or `--from DIR` find the graph, `--home DIR` the edit log, `--backups DIR` the undo records; `--json` for JSON. See `GRAPH_FORMAT.md`, "Outputs edited by hand". |
 | `agentgraph cost [--session ID] [--cap N]` | Where one chat's money went: warm and cold turns, why the cold ones happened, cost by context size, and what earlier compaction or a one-hour cache would have cost instead. |
 | `agentgraph cost --trend [--days N] [--json]` | What chats cost per turn over time, split by the cost settings in force (compaction buffer, cache lifetime), so a settings change can be judged. Each run notes the current settings in `cost-settings.jsonl`; `signals` shows the last two periods (`--no-cost` skips them). |
 
@@ -75,10 +76,11 @@ Keys in the live view: `1` agents, `2` tasks, `3` loops, `4` events, `5` issues,
 - `agentgraph/sources.py`: reads the agent config, the graph files and OpenCode's session database.
 - `agentgraph/view.py`, `viewstate.py`, `__main__.py`: the view, its interactive state, and the CLI.
 - `agentgraph/check.py`, `ledger.py`: the `check` command and the ledger commands.
+- `agentgraph/outputs.py`: a step's output read and edited by hand (`agentgraph output`, `/api/output`, the panel's `output` method).
 - `agentgraph/snapshot_json.py`, `server.py`, `web/`: the JSON document, the local web server and the graph page.
 - `desktop-plugin/`: the OpenCode Desktop side panel.
 - `GRAPH_FORMAT.md`: the task-graph file format (`.opencode/graph/<task>.json` in each project). `WEB_API.md`: the contract between the data, the page and the plugin.
-- `memory/`: the run ledger (`runs.jsonl`, `feedback.jsonl`, `improvements.jsonl`).
+- `memory/`: the run ledger (`runs.jsonl`, `feedback.jsonl`, `improvements.jsonl`) and the edit log of outputs edited by hand (`edits.jsonl`).
 - `proposals/`: prompt edits proposed by the `improve-orchestration` skill, approved or rejected.
 - `LESSONS.md`: lessons from finished graphs.
 - `tests/`: `python3 -m unittest discover -s tests -t .`
