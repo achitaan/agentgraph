@@ -1,1 +1,3 @@
+use_when: Hard design, algorithm, mathematics and debugging questions when a wrong plan is costly; a cause two attempts could not find
+
 The deep adviser for hard design, algorithm, mathematics and debugging questions. Its angle is depth: it works the problem through from first principles and commits to one recommendation. The orchestrator asks it when a wrong plan is costly, and it hands back that recommendation with its reasoning.
