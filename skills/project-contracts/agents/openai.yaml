@@ -1,4 +1,0 @@
-interface:
-  display_name: "Project Contracts"
-  short_description: "Define acceptance, interfaces, and safe migrations"
-  default_prompt: "Use $project-contracts to define compatibility and acceptance for this interface change."

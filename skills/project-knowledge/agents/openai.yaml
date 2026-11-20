@@ -1,4 +1,0 @@
-interface:
-  display_name: "Project Knowledge"
-  short_description: "Maintain source-backed Markdown notes and decisions"
-  default_prompt: "Use $project-knowledge to organize these sources into linked project notes."
