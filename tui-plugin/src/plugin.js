@@ -858,8 +858,8 @@ export function createPlugin(host) {
         return null;
       }
     };
-    // The orbit's view chosen with `d`, remembered while the app runs; it opens in 2D. A switch moves the camera
-    // over CHANGE_MS from the old view to the new one.
+    // The orbit's view chosen with `d`, remembered while the app runs; it opens in 2D. A switch morphs the old view
+    // into the new one over CHANGE_MS (each agent travels from its place in one to its place in the other).
     const [dimension, setDimension] = host.createSignal({ view: "2d", change: null });
     const toggleDimension = () => {
       const cur = dimension();

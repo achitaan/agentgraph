@@ -3127,6 +3127,76 @@ test("orbit panel: a click on the orbit switches 2D and 3D, a drag turns the 3D 
   }
 });
 
+test("orbit morph: the switch between 2D and 3D is a morph: each agent travels on screen from its 2D place to its 3D place and back; a mid-switch frame differs from both ends", () => {
+  const doc = idleDemo();
+  const [w, h] = [120, 30];
+  const L = S.orbitLayout(doc, w, h);
+  const orbit = { turn: 1.0, elevation: S.ELEVATION_3D, resume: 1e15 }; // a held camera: the target stands still
+  const { turn, elevation } = S.orbitCamera(orbit, 0);
+  const to3D = S.camera3D(L, turn, elevation);
+  const F1 = S.figure3D(L);
+  const F0 = S.figure3D(L, 0);
+  const at = 50000;
+  const glyphs = new Set(["○", "●", "↩", "!", " "]); // the glyphs of agents at rest
+  const cellAt = (lines, r, c) => (cellsOf(lines[r])[c] || {}).ch;
+  // the agent glyphs of a frame at the cells `where(p)` gives: -> how many agents show their glyph there
+  const onCells = (lines, where) => L.placed.filter((p) => {
+    const q = where(p);
+    const ch = q.row >= 0 && q.row < h ? cellAt(lines, q.row, q.col) : undefined;
+    return glyphs.has(ch) && (ch !== " " || p.state === "stuck"); // a stuck agent's glyph blinks
+  }).length;
+  const n = L.placed.length;
+  assert.ok(n >= 8);
+  // flat: every ring lies on the unit circle and each agent at its own 2D azimuth; the morph's start is the 2D place
+  for (const p of L.placed) {
+    const a = F0.agents.get(p.agent.name);
+    assert.ok(Math.abs(a[2]) < 1e-12 && Math.abs(Math.hypot(a[0], a[1]) - 1) < 1e-9, p.agent.name + " flat on the circle");
+    const q = S.morphCamera(L, turn, elevation, 0)(a);
+    assert.ok(Math.abs(q.col - p.col) <= 1 && Math.abs(q.row - p.row) <= 1, `${p.agent.name}: the morph starts at the 2D place`);
+    const e = S.morphCamera(L, turn, elevation, 1)(F1.agents.get(p.agent.name));
+    const t = to3D(F1.agents.get(p.agent.name));
+    assert.deepEqual([e.col, e.row], [t.col, t.row], "the morph ends at the 3D place");
+  }
+  // half way: each agent between its two places, away from both (those that move at least 6 cells)
+  let between = 0;
+  let movers = 0;
+  for (const p of L.placed) {
+    const end = to3D(F1.agents.get(p.agent.name));
+    const d = (a, b) => Math.hypot(a.col - b.col, 2 * (a.row - b.row));
+    const span = d({ col: p.col, row: p.row }, end);
+    if (span < 6) continue;
+    movers += 1;
+    const mid = S.morphCamera(L, turn, elevation, 0.5)(S.figure3D(L, 0.5).agents.get(p.agent.name));
+    if (d(mid, { col: p.col, row: p.row }) >= 2 && d(mid, end) >= 2 && d(mid, { col: p.col, row: p.row }) < span && d(mid, end) < span) between += 1;
+  }
+  assert.ok(movers >= 6 && between === movers, `${between} of ${movers} agents half way between their places`);
+  const frame = (now, options) => S.orbitLines(doc, w, h, now, Object.assign({ orbit }, options));
+  const text = (lines) => sceneText(lines).join("\n");
+  for (const [from, to] of [["2d", "3d"], ["3d", "2d"]]) {
+    const change = { from, at };
+    const start = frame(at, { view: to, change });
+    const mid = frame(at + S.CHANGE_MS / 2, { view: to, change });
+    const end = frame(at + S.CHANGE_MS - 1, { view: to, change });
+    const flatEnd = from === "2d" ? start : end; // the morph's 2D end, in depth characters
+    const deepEnd = from === "2d" ? end : start;
+    // the 2D end: the agents on their 2D cells; the 3D end: on their 3D cells; half way: on the morph's cells
+    assert.ok(onCells(flatEnd, (p) => p) >= n - 1, `${from}->${to}: the 2D end has the agents on their 2D places`);
+    assert.ok(onCells(deepEnd, (p) => to3D(F1.agents.get(p.agent.name))) >= n - 2, `${from}->${to}: the 3D end on their 3D places`);
+    const halfWay = (p) => S.morphCamera(L, turn, elevation, 0.5)(S.figure3D(L, 0.5).agents.get(p.agent.name));
+    assert.ok(onCells(mid, halfWay) >= n - 2, `${from}->${to}: half way the agents on the morph's cells\n${text(mid)}`);
+    // the mid-switch frame differs from both ends and from both steady views
+    const steady2D = frame(at + S.CHANGE_MS / 2, { view: "2d" });
+    const steady3D = frame(at + S.CHANGE_MS / 2, { view: "3d" });
+    for (const other of [start, end, steady2D, steady3D]) assert.notEqual(text(mid), text(other), from + "->" + to);
+    assert.ok(onCells(mid, (p) => p) <= n / 2, "half way most agents have left their 2D places");
+    assert.ok(onCells(mid, (p) => to3D(F1.agents.get(p.agent.name))) <= n / 2, "and are not yet on their 3D places");
+  }
+  // the 3D view is a side view: the starting elevation is ELEVATION_3D, low above the plane
+  assert.ok(S.ELEVATION_3D > 0 && S.ELEVATION_3D <= Math.PI / 4, "a low elevation");
+  assert.equal(S.orbitReset(0).elevation, S.ELEVATION_3D);
+  assert.equal(S.orbitCamera(null, 0).elevation, S.ELEVATION_3D);
+});
+
 // orbit lane (n104): end of the block.
 
 // ---------------------------------------------------------------------------------------------------------------

@@ -9,7 +9,7 @@
  *   previous  { doc, at }: the document drawn before this one and when this one arrived (the spend bars tween)
  *   view      "2d" (default): the ring seen from above, in braille dots
  *             "3d": the same system as a turning solid figure, drawn with characters chosen by depth
- *   change    { from, at }: the camera moves from view `from` to `view`, starting at `at` (ms), for CHANGE_MS
+ *   change    { from, at }: the morph from view `from` to `view`, starting at `at` (ms), for CHANGE_MS
  *   colors    { dark, muted }: the theme's background is dark (default) or light, and its muted colour "#rrggbb"
  *   orbit     { turn, elevation, resume }: the 3D camera turned by hand (orbitCamera, orbitTurned, orbitReset)
  *   keys      [[key, label], ...]: in 3D, one muted text of the pairs that fit on the canvas's bottom row
@@ -42,8 +42,10 @@ export const MARK_DONE = "●";
 export const MARK_FAILED = "✗";
 export const IDLE_LAP_MS = 20000;
 export const TURN_MS = 40000; // one turn of the 3D figure
-export const CHANGE_MS = 700; // the camera's move between the views
-export const ELEVATION_3D = 0.5; // radians above the figure's equator
+export const CHANGE_MS = 700; // the morph between the views (see morphCamera)
+// The 3D view is a side view: the camera ELEVATION_3D radians above the figure's plane, looking across it. The one
+// place the starting elevation is set (orbitCamera's default, orbitReset, the morph's target).
+export const ELEVATION_3D = 0.5;
 export const DEPTH_CHARS = Object.freeze(["·", ".", ":", "0", "1", "@"]); // far to near
 // Turning the 3D figure by hand (see orbitCamera): the self-turn waits RESUME_MS after the last input, then goes on
 // from where the user left it. The elevation stays between the figure's plane (0) and straight above (PI/2).
@@ -78,7 +80,7 @@ export function sceneFits(width, height) {
   return Number(width) >= SCENE_MIN_WIDTH && Number(height) >= SCENE_MIN_HEIGHT;
 }
 
-// The camera's move between the views at `now`: { from, to, t } with t in [0, 1), or null when there is none.
+// The morph between the views at `now`: { from, to, t } with t in [0, 1), or null when there is none.
 export function changeAt(options, now) {
   const o = isObject(options) ? options : {};
   const to = o.view === "3d" ? "3d" : "2d";
@@ -91,7 +93,7 @@ export function changeAt(options, now) {
   return t >= 0 && t < 1 ? { from, to, t } : null;
 }
 
-// The frame interval: 100 ms while work moves or the camera moves; when idle 250 ms in 2D and 166 ms in 3D.
+// The frame interval: 100 ms while work moves or the views morph; when idle 250 ms in 2D and 166 ms in 3D.
 export function frameInterval(doc, options = {}, now = 0) {
   if (changeAt(options, now)) return FRAME_MS_WORKING;
   if (isAnimated(doc)) return FRAME_MS_WORKING;
@@ -614,8 +616,11 @@ function horizontal(a) {
 }
 
 // -> { rings: [{ key, points }], agents: Map(name -> point), seats: [{ agent, key, lead, point }], arcs, hub }
-export function figure3D(L) {
-  if (L.figure) return L.figure;
+// `rise` (0 to 1) scales every ring's tilt, for the morph: at 0 every ring lies flat on the unit circle and each agent
+// sits at its own 2D azimuth; at 1 (the 3D view, cached) the rings have their full tilt.
+export function figure3D(L, rise = 1) {
+  const k = Number.isFinite(Number(rise)) ? clamp(Number(rise), 0, 1) : 1;
+  if (k === 1 && L.figure) return L.figure;
   const byKey = new Map();
   for (const p of L.placed) {
     if (!byKey.has(p.key)) byKey.set(p.key, []);
@@ -629,7 +634,7 @@ export function figure3D(L) {
     const sx = members.reduce((t, p) => t + Math.sin(p.azimuth), 0);
     const sy = members.reduce((t, p) => t + Math.cos(p.azimuth), 0);
     const node = Math.atan2(sx, sy);
-    const inc = INCLINATIONS[gi % INCLINATIONS.length];
+    const inc = INCLINATIONS[gi % INCLINATIONS.length] * k;
     gi += 1;
     const n = horizontal(node);
     const m = [Math.cos(node) * Math.cos(inc), -Math.sin(node) * Math.cos(inc), Math.sin(inc)];
@@ -677,8 +682,9 @@ export function figure3D(L) {
     const a = (i / 96) * 2 * Math.PI;
     hubRing.push([0.2 * Math.sin(a), 0.2 * Math.cos(a), 0]);
   }
-  L.figure = { rings, agents, seats, arcs, hubRing };
-  return L.figure;
+  const figure = { rings, agents, seats, arcs, hubRing };
+  if (k === 1) L.figure = figure;
+  return figure;
 }
 
 function cross(a, b) {
@@ -693,6 +699,30 @@ function norm(v) {
 // The camera: the figure turned by `turn` round its vertical axis, seen from `elevation` above its equator
 // (PI/2: straight above, as the 2D view). -> project(point) = { col, row, depth } (depth: +1 nearest, -1 farthest)
 export function camera3D(L, turn, elevation) {
+  const dots = cameraDots(L, turn, elevation);
+  return (p) => {
+    const q = dots(p);
+    return { col: Math.floor(q.x / 2), row: Math.floor(q.y / 4), depth: q.depth };
+  };
+}
+
+// The morph between the views, `k` of the way from 2D (0) to 3D (1): a point of the figure (figure3D(L, k)) goes in a
+// straight line on screen from where the 2D view has it, (cx + x rx, cy - y ry) in dots (straight above, unturned,
+// on the 2D ellipse), to where the 3D camera (`turn`, `elevation`) shows it. So each agent travels from its 2D place
+// to its 3D place while its ring tilts up out of the plane. -> project(point) = { col, row, depth }
+export function morphCamera(L, turn, elevation, k) {
+  const dots = cameraDots(L, turn, elevation);
+  const f = clamp(Number(k) || 0, 0, 1);
+  return (p) => {
+    const q = dots(p);
+    const fx = L.cx + p[0] * L.rx;
+    const fy = L.cy - p[1] * L.ry;
+    return { col: Math.floor((fx + (q.x - fx) * f) / 2), row: Math.floor((fy + (q.y - fy) * f) / 4), depth: q.depth };
+  };
+}
+
+// camera3D in dots: project(point) = { x, y, depth }
+function cameraDots(L, turn, elevation) {
   const ce = Math.cos(elevation);
   const se = Math.sin(elevation);
   const scale = (depth) => PERSPECTIVE / (PERSPECTIVE - depth);
@@ -726,7 +756,7 @@ export function camera3D(L, turn, elevation) {
     const up = y * se + p[2] * ce;
     const depth = -y * ce + p[2] * se;
     const s = scale(depth);
-    return { col: Math.floor((L.cx + x * s * hs) / 2), row: Math.floor((L.cy - (up * s - mid) * vs) / 4), depth };
+    return { x: L.cx + x * s * hs, y: L.cy - (up * s - mid) * vs, depth };
   };
 }
 
@@ -1166,10 +1196,12 @@ function digitStream(canvas, cells, now, seed, style, offset = 0) {
   }
 }
 
+// `cam`: { turn, elevation } and, during the morph between the views, `morph` (0: the 2D places, 1: the 3D view).
 function draw3D(doc, L, canvas, S, P, now, frame, cam) {
   const animated = isAnimated(doc);
-  const F = figure3D(L);
-  const project = camera3D(L, cam.turn, cam.elevation);
+  const morphing = Number.isFinite(cam.morph) && cam.morph < 1;
+  const F = morphing ? figure3D(L, cam.morph) : figure3D(L);
+  const project = morphing ? morphCamera(L, cam.turn, cam.elevation, cam.morph) : camera3D(L, cam.turn, cam.elevation);
   const N = Math.max(120, Math.ceil(2 * Math.PI * Math.max(L.rx / 2, L.ry / 2) * 2.5));
   const step = Math.max(1, Math.floor(720 / N));
   // the orbit rings: one per group, near side dense, far side faint
@@ -1305,15 +1337,14 @@ export function orbitReset(now) {
   return { turn: 0, elevation: ELEVATION_3D, resume: (Number(now) || 0) + RESUME_MS };
 }
 
-// The camera for a frame: the target view's steady camera, or one on its way between the views.
+// The camera for a frame on its way between the views (null when there is no change): the 3D camera at `now` (the
+// orbit's, as the steady 3D view would have it) and how far the morph is toward it, eased (smoothstep).
 function cameraAt(options, now) {
   const change = changeAt(options, now);
   if (!change) return null;
   const target = orbitCamera(options.orbit, now);
   const e = change.t * change.t * (3 - 2 * change.t); // smoothstep
-  const k = change.to === "3d" ? e : 1 - e; // 0: straight above, unturned; 1: the 3D camera
-  const wrapped = target.turn > Math.PI ? target.turn - 2 * Math.PI : target.turn;
-  return { turn: wrapped * k, elevation: Math.PI / 2 + (target.elevation - Math.PI / 2) * k };
+  return { turn: target.turn, elevation: target.elevation, morph: change.to === "3d" ? e : 1 - e };
 }
 
 // The keys of the 3D view ([[key, label], ...]) as one muted text on the canvas's bottom row: the pairs that fit.
