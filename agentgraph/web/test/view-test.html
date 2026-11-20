@@ -4896,7 +4896,10 @@
     // ---- geometry lane (n103) ----
     {
       // The real roster's shape (the trial's: fifteen agents, the council with three seats), with drawn paths.
-      const n103Data = (flows = []) => { const data = trialRoster(); data.structure = { source: 'folder', flows: flows.map(flow => ({ ...flow, text: flow.id, source: 'drawn' })) }; return data; };
+      // The real roster as the trial's server sends it: the structure folder's groups in folder order (the council first on
+      // the ring, at the top, its seats round it).
+      const N103_GROUPS = [['hub', ['orchestrator']], ['council', ['council', 'fable', 'astra', 'carbon']], ['decide', ['oracle', 'oracle-lite']], ['build', ['designer', 'impl-openai', 'impl-claude', 'impl-hard']], ['verify', ['reviewer', 'verifier']], ['understand', ['explorer', 'researcher']]];
+      const n103Data = (flows = []) => { const data = trialRoster(); data.groups = N103_GROUPS.map(([id, agents]) => ({ id, title: id, agents })); data.structure = { source: 'folder', flows: flows.map(flow => ({ ...flow, text: flow.id, source: 'drawn' })) }; return data; };
       const ringNames = path => { const start = path.indexOf(path.at(-1)); return start < path.length - 2 ? path.slice(start, -1) : []; };
       const ringSteps = (root, id) => [...(routeOf(root, id)?.querySelectorAll('.ag-route-step[data-step="loop"]') || [])];
       const screenOf = root => Object.fromEntries([...root.querySelectorAll('.ag-drawing [data-agent]')].map(node => [node.dataset.agent, centre(root, node.dataset.agent)]));
