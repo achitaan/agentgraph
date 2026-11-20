@@ -2175,6 +2175,103 @@ await check("panel render: main-process rejection becomes an error document; a t
   r2.dispose();
 });
 
+// ---- MCP servers (n126): read only; names and states are all that leaves the settings ----
+await check("panel render: the host's MCP status (client.mcp.status) puts its state on the servers the snapshot lists and nothing else; the reason is one line cut at 200; no call, a failing call, a slow call and an answer in another shape leave the settings' state; nothing is written", async () => {
+  const definition = windowLoad.gui.defined[0];
+  const row = (name, extra = {}) => ({ name, source: "opencode", kind: "remote", enabled: true, state: "on", reason: "", live: false, agents: [], ...extra });
+  const snapshot = () => JSON.stringify({ version: 1, agents: [{ name: "impl-claude", mcps: ["a", "b"] }], mcp: [row("a"), row("b"), row("c"), row("d", { enabled: false, state: "off" }), row("e"), row("f"), row("bad name")] });
+  const long = "<img src=x onerror=alert(1)>\n<b>two</b>\r\n" + "x".repeat(300);
+  const answer = {
+    a: { status: "connected", url: "https://SECRET.example/key", headers: { Authorization: "SECRET" } },
+    b: { status: "failed", error: long },
+    c: { status: "needs_auth", error: "ignored for sign-in" },
+    d: { status: "disabled", error: "not shown" },
+    e: { status: "needs_client_registration", error: "register <it>" },
+    f: { status: "nonsense", error: "x" },
+    unlisted: { status: "connected" },
+    "bad name": { status: "connected" },
+  };
+  const calls = [], writes = [];
+  const make = (client) => {
+    const session = { key: "srv\nses_a", id: "ses_a", directory: ORCHESTRATION, server: { client } };
+    const w = windowContext(definition, { session });
+    w.ctx.main = () => ({ snapshot: async () => snapshot(), flow: async (input) => { writes.push(input); return "{}"; }, skills: async (input) => { writes.push(input); return "{}"; } });
+    definition.setup(w.ctx);
+    const rendered = windowLoad.solid.runWithOwner(() => value(w.added[1].item).render({ get session() { return session; }, screen: {} }));
+    const ask = mountCalls[mountCalls.length - 1].options.fetchSnapshot;
+    return { fetch: async () => JSON.parse(JSON.stringify(await ask())), rendered };
+  };
+  const rowsOf = (doc) => Object.fromEntries(doc.mcp.map((item) => [item.name, item]));
+  const asked = [];
+  const wrapped = make({ session: {}, mcp: { status(input) { asked.push({ self: this, input }); return Promise.resolve({ data: answer }); } } });
+  const doc = await wrapped.fetch();
+  const rows = rowsOf(doc);
+  assert.equal(asked.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(asked[0].input)), { directory: ORCHESTRATION });
+  assert.deepEqual([rows.a.state, rows.b.state, rows.c.state, rows.d.state, rows.e.state], ["connected", "failed", "needs sign-in", "off", "needs sign-in"]);
+  assert.ok([rows.a, rows.b, rows.c, rows.d, rows.e].every((item) => item.live === true));
+  assert.equal(rows.b.reason.length, 200, "the reason is cut at 200 characters");
+  assert.ok(rows.b.reason.startsWith("<img src=x onerror=alert(1)> <b>two</b> xxx") && !/[\r\n]/.test(rows.b.reason), "one line, as characters");
+  assert.equal(rows.a.reason, "");
+  assert.equal(rows.c.reason, "ignored for sign-in");
+  assert.equal(rows.d.reason, "", "a reason for a state that has none is dropped");
+  assert.equal(rows.e.reason, "register <it>");
+  assert.deepEqual([rows.f.state, rows.f.live], ["on", false], "a state the view does not know leaves the settings' state");
+  assert.equal(rows["bad name"].state, "on", "a name that is not a plain name takes nothing");
+  assert.ok(!("unlisted" in rows), "a server the settings do not list is not added");
+  for (const item of doc.mcp) assert.deepEqual(Object.keys(item).sort(), ["agents", "enabled", "kind", "live", "name", "reason", "source", "state"], item.name + " gained a field");
+  assert.ok(!JSON.stringify(doc).includes("SECRET"), "a field of the host's answer reached the document");
+  // The answer itself, without the wrapper.
+  const bare = make({ mcp: { status: () => answer } });
+  assert.equal(rowsOf(await bare.fetch()).a.state, "connected");
+  // Settings only: no client, no call, a throwing call, a rejecting one, an error answer, a slow one, a wrong shape.
+  const attempts = [undefined, {}, { mcp: {} }, { mcp: { status: "no" } }, { mcp: { status() { throw new Error("SECRET-THROW"); } } },
+    { mcp: { status: () => Promise.reject(new Error("SECRET-REJECT")) } }, { mcp: { status: () => ({ error: { message: "SECRET" } }) } },
+    { mcp: { status: () => ({ data: "text" }) } }, { mcp: { status: () => [answer] } }, { mcp: { status: () => new Promise(() => {}) } }];
+  for (const client of attempts) {
+    const view = make(client);
+    const got = await view.fetch();
+    assert.equal(got.error, undefined, "a host without the call broke the snapshot: " + JSON.stringify(client));
+    assert.deepEqual(got.mcp.map((item) => [item.state, item.live]), [["on", false], ["on", false], ["on", false], ["off", false], ["on", false], ["on", false], ["on", false]]);
+    assert.ok(!JSON.stringify(got).includes("SECRET"));
+    view.rendered.dispose();
+  }
+  assert.deepEqual(writes, [], "the MCP view wrote something");
+  wrapped.rendered.dispose();
+  bare.rendered.dispose();
+});
+
+await check("the planted-secret test through the bridge: a scratch HOME whose settings hold a marker in every field of every MCP entry; the marker is in no snapshot reply, command line, standard input, log or error of main, and a server whose name is not a plain name is not shown", async () => {
+  const MARKER = "PLANTED-SECRET-5d2c81";
+  const home = fs.mkdtempSync(path.join(TMP, "planted-home-"));
+  const configDir = path.join(home, ".config", "opencode");
+  fs.mkdirSync(configDir, { recursive: true });
+  const local = { type: "local", command: ["node", MARKER, "--token=" + MARKER], environment: { [MARKER]: MARKER }, enabled: true, cwd: "/" + MARKER };
+  const remote = { type: "remote", url: "https://" + MARKER + ".example/mcp?key=" + MARKER, headers: { Authorization: "Bearer " + MARKER }, oauth: { clientId: MARKER, clientSecret: MARKER } };
+  fs.writeFileSync(path.join(configDir, "opencode.json"), JSON.stringify({ mcp: { "plain-local": local, "plain.remote": remote, ["has space " + MARKER]: local, ["slash/" + MARKER]: remote, [MARKER + "\n"]: local } }));
+  fs.writeFileSync(path.join(configDir, "oh-my-opencode-slim.json"), JSON.stringify({ preset: "p", disabled_mcps: [MARKER], mcp: { x: local },
+    presets: { p: { orchestrator: { model: "a/b", prompt: MARKER, mcps: ["*", "!context7", "!" + MARKER] }, explorer: { model: "a/b", mcps: [MARKER, "plain-local", "has space " + MARKER], options: { headers: { X: MARKER } } } } } }));
+  const log = [];
+  const loaded = loadMain(CODE, log);
+  const m = mainContext({ home: ORCHESTRATION });
+  resolveDefault(loaded.module.exports).main(m.ctx);
+  const previous = process.env.HOME;
+  process.env.HOME = home;
+  let text;
+  try {
+    text = await m.provided[0].impl.snapshot({ directory: ORCHESTRATION, session: "" }, { window: 1, signal: new AbortController().signal });
+  } finally {
+    process.env.HOME = previous;
+  }
+  const doc = JSON.parse(text);
+  assert.equal(doc.error, undefined, "the snapshot failed: " + text.slice(0, 300));
+  assert.deepEqual(doc.mcp.map((item) => item.name), ["context7", "gh_grep", "plain-local", "plain.remote"]);
+  assert.deepEqual(doc.agents.find((item) => item.name === "explorer").mcps, ["plain-local"]);
+  const everything = text + JSON.stringify(log) + JSON.stringify(m.logs);
+  assert.ok(!everything.includes(MARKER) && !everything.includes("PLANTED"), "the marker got out");
+  assert.ok(!everything.includes("has space"), "a name that is not plain was shown");
+});
+
 await check("placeholder build (no app.js/style.css): builds, loads in both modes, draws names and busy counts as text", async () => {
   const out = path.join(TMP, "placeholder.cjs");
   const stdout = childProcess.execFileSync(
