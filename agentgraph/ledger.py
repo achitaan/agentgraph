@@ -315,13 +315,14 @@ def _session_costs(db_path: Path, graphs: list[TaskGraph]) -> dict[str, float]:
     return costs
 
 
-def _summary(graph: TaskGraph, now: float, costs: dict[str, float], outcome: str) -> dict:
+def _summary(graph: TaskGraph, now: float, costs: dict[str, float], outcome: str, verifier: dict | None = None) -> dict:
     path = Path(os.path.abspath(graph.path))
     delivered, total = objective_coverage(graph)
     session_ids = _session_ids(graph)
     cost_ids = session_ids & costs.keys()
     cost = sum(costs[sid] for sid in sorted(cost_ids)) if cost_ids else None
     return {
+        **({"verifier": verifier} if verifier else {}),
         "path": str(path), "project": str(_project(path)), "task": graph.task,
         "goal": graph.goal, "status": graph.status, "outcome": outcome, "revision": graph.revision,
         "created": graph.created, "updated": graph.updated, "recorded": now,
@@ -466,13 +467,20 @@ def record(
         costs = _session_costs(db_path, selected)
         when = _now(now)
         outcome = "abandoned" if abandoned else "passed"
-        rows, saved, refused = _upsert(rows, [_summary(graph, when, costs, outcome) for graph in selected], notes)
+        rows, saved, refused = _upsert(
+            rows, [_summary(graph, when, costs, outcome, _verifier_summary(home, graph, responses)) for graph in selected], notes)
         runs, responses = _pending(_records(rows), responses, _watermark(improvements), handled)
         due = _due_fields(runs, responses)
         if saved:
             _replace(home / _RUNS, rows)
         added = _capture_cases(home, selected, when, notes)
     return _RecordResult(saved, warnings, notes, 2 if warnings or refused else code, due, added)
+
+
+def _verifier_summary(home: Path, graph: TaskGraph, notes: list[dict]) -> dict | None:
+    """The run's verifier passes and which were overturned (`overturned.summary`); None without a pass."""
+    from . import handedits, overturned
+    return overturned.summary(graph, home, notes, handedits.default_paths(home)[0])
 
 
 def _capture_cases(home: Path, graphs: list[TaskGraph], when: float, notes: list[str]) -> int:
@@ -569,6 +577,24 @@ def _print_hand_edits(report: dict) -> None:
 def _cases(home: Path) -> dict:
     from . import cases
     return cases.signal(home, lock=False)
+
+
+def _overturned(home: Path, now: float | None, runs: list[dict], notes: list[dict], improvements: list[dict],
+                options: dict | None = None) -> dict:
+    """The verifier signal (`overturned.signal`), over the hand-edit window (`--hand-days`, `--backups`)."""
+    from . import overturned
+    options = options or {}
+    extra = {key: options[key] for key in ("days", "backups") if options.get(key) is not None}
+    try:
+        return overturned.signal(home, runs, notes, improvements, _now(now), **extra)
+    except (OSError, ValueError) as exc:
+        return {"due": False, "error": str(exc)}
+
+
+def _print_overturned(report: dict) -> None:
+    from . import overturned
+    for line in overturned.signal_lines(report or {}):
+        print(line)
 
 
 def _print_cases(report: dict) -> None:
@@ -818,6 +844,7 @@ def signals(home: Path, now: float | None, *, all_items: bool = False, cost_db: 
         "bloat": _bloat(home),
         "hand_edits": _hand_edits(home, generated, improvements, hand_edits),
         "cases": case_report,
+        "verifier": _overturned(home, generated, runs, responses, improvements, hand_edits),
     }
     if message_db is not None:
         report.update(_message_report(message_db, generated, messages_since, keep, responses, handled))
@@ -860,6 +887,7 @@ def _print_report(report: dict) -> None:
     _print_bloat(report.get("bloat") or {})
     _print_hand_edits(report.get("hand_edits") or {})
     _print_cases(report.get("cases") or {})
+    _print_overturned(report.get("verifier") or {})
     _print_cost(report)
     for title, field in (("Feedback", "feedback"), ("Lessons", "lessons"), ("Discovered", "discovered")):
         if report[field]:
@@ -1040,6 +1068,9 @@ def main(argv: list[str] | None = None) -> int:
             _print_due(result.due)
             _print_bloat(_bloat(home))
             _print_hand_edits(_hand_edits(home, None, options=_hand_options(args)))
+            with _lock(home, writing=False):
+                rows, responses, improvements = _history(home)
+            _print_overturned(_overturned(home, None, _records(rows), responses, improvements, _hand_options(args)))
             return result.code
         if args.command == "feedback":
             if feedback(home, None, _feedback_text(args), agent=args.agent, task=args.task) is None:
