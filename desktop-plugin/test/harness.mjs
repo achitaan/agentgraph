@@ -356,6 +356,23 @@ function windowContext(definition, overrides = {}) {
           const skills = input.op === "all" ? ["*"] : input.op === "add" ? ["alpha", input.skill] : ["alpha"];
           return JSON.stringify({ agent: input.agent, skills, warnings: input.op === "remove" ? ["task-profiles.md: still named."] : [], changed: true, message: "restart" });
         },
+        roster: async (input, options) => {
+          calls.push({ op: "roster", input: JSON.parse(JSON.stringify(input)), options });
+          if (input.name === "orchestrator") return JSON.stringify({ error: "'orchestrator' is the orchestrator, the council or a council seat and cannot be removed here" });
+          return JSON.stringify({ agent: input.name || "restored-agent", action: input.op, record: input.op === "remove" ? "/tmp/backups/undo.json" : undefined, message: "restart" });
+        },
+        skillfile: async (input, options) => {
+          calls.push({ op: "skillfile", input: JSON.parse(JSON.stringify(input)), options });
+          if (input.id === "shopify-ruby" && input.op !== "read") return JSON.stringify({ error: "shopify-ruby is kept in step with Shopify's own copy; edit it there, not here." });
+          return JSON.stringify({ id: input.id || "restored-skill", description: input.description || "D", text: input.text || "T", changed: true });
+        },
+        team: async (input, options) => {
+          calls.push({ op: "team", input: JSON.parse(JSON.stringify(input)), options });
+          if (input.lead === "orchestrator") return JSON.stringify({ error: "the hub cannot lead a group" });
+          if (input.op === "remove") return JSON.stringify({ teams: [] });
+          const team = { id: input.id || input.lead, lead: input.lead || "reviewer", members: input.members ? input.members.split(" ") : ["a"], text: input.text || "Made." };
+          return JSON.stringify({ team, teams: [team] });
+        },
         snapshot: async (input, options) => {
           calls.push({ op: "snapshot", input: JSON.parse(JSON.stringify(input)), options });
           if (overrides.reject) throw new Error("main is not running");
@@ -437,7 +454,7 @@ function mainContext(options) {
 }
 
 let handler;
-await check("main registers exactly one Ipc (<id>.snapshot) with snapshot, flow and skills methods", async () => {
+await check("main registers exactly one Ipc (<id>.snapshot) with snapshot, flow, skills, roster, skillfile and team methods", async () => {
   const definition = resolveDefault(mainLoad.module.exports);
   const m = mainContext({ home: ORCHESTRATION });
   const cleanup = await definition.main(m.ctx);
@@ -449,7 +466,16 @@ await check("main registers exactly one Ipc (<id>.snapshot) with snapshot, flow 
   assert.equal(token.id, `${PLUGIN_ID}.snapshot`);
   assert.ok(token.id === m.ctx.id || token.id.startsWith(`${m.ctx.id}.`), "Ipc id is under the plugin id");
   // Round 2: the skills method joined snapshot and flow.
-  assert.deepEqual(Object.keys(token.spec.methods), ["snapshot", "flow", "skills"]);
+  assert.deepEqual(Object.keys(token.spec.methods), ["snapshot", "flow", "skills", "roster", "skillfile", "team"]);
+  // Round 3: roster, skillfile and team, each with string fields only.
+  assert.deepEqual(Object.keys(token.spec.methods.roster.input.fields), ["op", "name", "record", "model", "variant", "description", "prompt", "skills", "read_only", "copy_of", "template"]);
+  assert.deepEqual(Object.keys(token.spec.methods.skillfile.input.fields), ["op", "id", "record", "description", "text", "assign"]);
+  assert.deepEqual(Object.keys(token.spec.methods.team.input.fields), ["op", "id", "lead", "members", "text"]);
+  for (const method of ["roster", "skillfile", "team"]) {
+    assert.ok(Object.values(token.spec.methods[method].input.fields).every((field) => field._tag === "String"), method);
+    assert.equal(token.spec.methods[method].output._tag, "String");
+    assert.ok(typeof impl[method] === "function", method);
+  }
   assert.deepEqual(Object.keys(token.spec.methods.skills.input.fields), ["op", "agent", "skill"]);
   assert.ok(Object.values(token.spec.methods.skills.input.fields).every((field) => field._tag === "String"));
   assert.equal(token.spec.methods.skills.output._tag, "String");
@@ -1103,6 +1129,159 @@ printf 'noise\\n{"agent": "%s", "preset": "p", "skills": ["%s"], "warnings": [],
   resolveDefault(loaded.module.exports).main(demo.ctx);
   assert.match(JSON.parse(await demo.provided[0].impl.skills({ op: "all", agent: "impl-openai", skill: "" })).error, /demo/);
   assert.equal(log.length, 0, "invalid requests and the demo spawn nothing");
+});
+
+await check("roster, skillfile and team run `python3 -P -m agentgraph.roster|skillfiles|teams ... --json` in home without a shell, free text on stdin; bad input and the demo spawn nothing", async () => {
+  const python = path.join(TMP, "fake-editors-python");
+  fs.writeFileSync(python, `#!/bin/sh
+module="$3"
+shift 3
+input=$(cat)
+case "$module" in
+  agentgraph.roster) printf 'noise\\n{"agent": "%s", "action": "%s", "message": "%s", "stdin": "%s"}\\n' "$3" "$2" "$*" "$input";;
+  agentgraph.skillfiles) printf '{"id": "%s", "action": "%s", "stdin": "%s"}\\n' "$3" "$2" "$input";;
+  agentgraph.teams) printf '{"teams": [], "args": "%s", "stdin": "%s"}\\n' "$*" "$input";;
+esac
+`, { mode: 0o700 });
+  const log = [];
+  const loaded = loadMain(CODE, log);
+  const m = mainContext({ home: ORCHESTRATION, python });
+  resolveDefault(loaded.module.exports).main(m.ctx);
+  const impl = m.provided[0].impl;
+  const blank = { op: "", name: "", record: "", model: "", variant: "", description: "", prompt: "", skills: "", read_only: "", copy_of: "", template: "" };
+  const roster = async (fields) => JSON.parse(await impl.roster({ ...blank, ...fields }));
+  const base = ["-P", "-m", "agentgraph.roster", "agent"];
+  // add from the verifier template, as a copy, and from the fields given (the instruction on stdin)
+  let doc = await roster({ op: "add", name: "checker", template: "verifier" });
+  assert.equal(doc.agent, "checker");
+  assert.deepEqual(log[0].args, base.concat(["add", "checker", "--template", "verifier", "--json"]));
+  assert.equal(log[0].file, python);
+  assert.equal(log[0].cwd, ORCHESTRATION);
+  await roster({ op: "add", name: "claude-copy", copy_of: "impl-claude", skills: "-" });
+  assert.deepEqual(log[1].args, base.concat(["add", "claude-copy", "--copy-of", "impl-claude", "--skills=", "--json"]));
+  await roster({ op: "add", name: "plain", model: "anthropic/claude-sonnet-5-5", variant: "high", description: "--config x", prompt: "Work.\n", skills: "code-assurance,engineering-delivery", read_only: "true" });
+  assert.deepEqual(log[2].args, base.concat(["add", "plain", "--model", "anthropic/claude-sonnet-5-5", "--variant", "high", "--description=--config x",
+    "--skills", "code-assurance,engineering-delivery", "--read-only", "--prompt-file", "-", "--json"]));
+  assert.equal(log[2].stdin, "Work.\n");
+  doc = await roster({ op: "read", name: "checker" });
+  assert.deepEqual(log[3].args, base.concat(["show", "checker", "--json"]));
+  doc = await roster({ op: "text", name: "checker", prompt: "Check only the tests." });
+  assert.deepEqual(log[4].args, base.concat(["text", "checker", "--text-file", "-", "--json"]));
+  assert.equal(log[4].stdin, "Check only the tests.");
+  await roster({ op: "remove", name: "checker" });
+  assert.deepEqual(log[5].args, base.concat(["remove", "checker", "--json"]));
+  await roster({ op: "restore", record: "/tmp/backups/2026-11-19-agent-files/remove-checker-0123456789ab/record.json" });
+  assert.deepEqual(log[6].args, base.concat(["restore", "/tmp/backups/2026-11-19-agent-files/remove-checker-0123456789ab/record.json", "--json"]));
+  // skill files
+  const skill = async (fields) => JSON.parse(await impl.skillfile({ op: "", id: "", record: "", description: "", text: "", assign: "", ...fields }));
+  const sbase = ["-P", "-m", "agentgraph.skillfiles", "skill"];
+  log.length = 0;
+  assert.equal((await skill({ op: "read", id: "code-assurance" })).id, "code-assurance");
+  assert.deepEqual(log[0].args, sbase.concat(["show", "code-assurance", "--json"]));
+  await skill({ op: "create", id: "new-skill", description: "A skill.", text: "Body", assign: "impl-openai" });
+  assert.deepEqual(log[1].args, sbase.concat(["create", "new-skill", "--text-file", "-", "--assign", "impl-openai", "--description=A skill.", "--json"]));
+  assert.equal(log[1].stdin, "Body");
+  await skill({ op: "write", id: "new-skill", text: "Body 2" });
+  assert.deepEqual(log[2].args, sbase.concat(["write", "new-skill", "--text-file", "-", "--json"]));
+  await skill({ op: "delete", id: "new-skill" });
+  assert.deepEqual(log[3].args, sbase.concat(["delete", "new-skill", "--json"]));
+  await skill({ op: "restore", record: "/tmp/b/r.json" });
+  assert.deepEqual(log[4].args, sbase.concat(["restore", "/tmp/b/r.json", "--json"]));
+  // groups
+  const team = async (fields) => JSON.parse(await impl.team({ op: "", id: "", lead: "", members: "", text: "", ...fields }));
+  const tbase = ["-P", "-m", "agentgraph.teams"];
+  log.length = 0;
+  assert.deepEqual((await team({ op: "add", lead: "reviewer", members: "impl-openai impl-claude", text: "Reconcile." })).teams, []);
+  assert.deepEqual(log[0].args, tbase.concat(["add", "reviewer", "impl-openai", "impl-claude", "--text-file", "-", "--json"]));
+  assert.equal(log[0].stdin, "Reconcile.");
+  await team({ op: "members", id: "reviewer", members: "impl-openai" });
+  assert.deepEqual(log[1].args, tbase.concat(["members", "reviewer", "impl-openai", "--json"]));
+  await team({ op: "text", id: "reviewer", text: "New." });
+  assert.deepEqual(log[2].args, tbase.concat(["text", "reviewer", "--text-file", "-", "--json"]));
+  await team({ op: "remove", id: "reviewer" });
+  assert.deepEqual(log[3].args, tbase.concat(["remove", "reviewer", "--json"]));
+  // refused before anything runs
+  log.length = 0;
+  for (const fields of [{ op: "add", name: "-x", template: "verifier" }, { op: "add", name: "a b", template: "verifier" }, { op: "add", name: "x", template: "nope" },
+    { op: "add", name: "x", template: "verifier", copy_of: "impl-claude" }, { op: "add", name: "x", copy_of: "-impl" }, { op: "add", name: "x", model: "--config" , description: "d", prompt: "p" },
+    { op: "add", name: "x", skills: "a,-b", template: "verifier" }, { op: "add", name: "x" }, { op: "read", name: "x", prompt: "p" }, { op: "text", name: "x", prompt: " " },
+    { op: "text", name: "x", prompt: "p", template: "verifier" }, { op: "remove", name: "x", record: "/r" }, { op: "restore", record: "-r" }, { op: "restore", record: "relative/r.json" },
+    { op: "show", name: "x" }, { op: "add", name: "x", template: "verifier", read_only: "yes" }])
+    assert.equal(typeof (await roster(fields)).error, "string", JSON.stringify(fields));
+  assert.equal(typeof JSON.parse(await impl.roster({ op: "add", name: "x" })).error, "string", "missing fields");
+  for (const fields of [{ op: "read", id: "-x" }, { op: "write", id: "x", text: "t", assign: "a" }, { op: "create", id: "x", text: "t" }, { op: "restore", record: "r" }, { op: "rename", id: "x" }])
+    assert.equal(typeof (await skill(fields)).error, "string", JSON.stringify(fields));
+  for (const fields of [{ op: "add", lead: "-r", members: "a" }, { op: "add", lead: "r", members: "" }, { op: "add", lead: "r", members: "a -b" }, { op: "members", id: "r", members: "a", text: "t" },
+    { op: "remove", id: "r", text: "t" }, { op: "remove", id: "-r" }, { op: "rename", id: "r" }])
+    assert.equal(typeof (await team(fields)).error, "string", JSON.stringify(fields));
+  const demo = mainContext({ home: ORCHESTRATION, python, demo: true });
+  resolveDefault(loaded.module.exports).main(demo.ctx);
+  assert.match(JSON.parse(await demo.provided[0].impl.roster({ ...blank, op: "remove", name: "checker" })).error, /demo/);
+  assert.match(JSON.parse(await demo.provided[0].impl.skillfile({ op: "delete", id: "x", record: "", description: "", text: "", assign: "" })).error, /demo/);
+  assert.match(JSON.parse(await demo.provided[0].impl.team({ op: "remove", id: "x", lead: "", members: "", text: "" })).error, /demo/);
+  assert.equal(log.length, 0, "invalid requests and the demo spawn nothing");
+});
+
+await check("panel render: the view gets actions.roster, actions.skillfile and actions.team, which ask main with string fields and turn an error into a rejection", async () => {
+  const definition = windowLoad.gui.defined[0];
+  const session = { key: "srv\nses_a", id: "ses_a", directory: ORCHESTRATION };
+  const props = { get session() { return session; }, screen: {} };
+  const w = windowContext(definition, { session });
+  definition.setup(w.ctx);
+  const rendered = windowLoad.solid.runWithOwner(() => value(w.added[1].item).render(props));
+  const call = mountCalls[mountCalls.length - 1];
+  const { roster, skillfile, team } = call.options.actions;
+  for (const action of [roster, skillfile, team]) assert.equal(typeof action, "function");
+  const empty = { name: "", record: "", model: "", variant: "", description: "", prompt: "", skills: "", read_only: "", copy_of: "", template: "" };
+  await roster({ op: "add", name: "checker", template: "verifier" });
+  await roster({ op: "add", name: "claude-copy", copy_of: "impl-claude", skills: [], read_only: false });
+  await roster({ op: "read", name: "checker" });
+  await roster({ op: "text", name: "checker", text: "New." });
+  const removed = await roster({ op: "remove", name: "checker" });
+  assert.equal(removed.record, "/tmp/backups/undo.json");
+  await roster({ op: "restore", record: removed.record });
+  assert.deepEqual(w.calls.filter((c) => c.op === "roster").map((c) => c.input), [
+    { ...empty, op: "add", name: "checker", template: "verifier" },
+    { ...empty, op: "add", name: "claude-copy", copy_of: "impl-claude", skills: "-", read_only: "false" },
+    { ...empty, op: "read", name: "checker" },
+    { ...empty, op: "text", name: "checker", prompt: "New." },
+    { ...empty, op: "remove", name: "checker" },
+    { ...empty, op: "restore", record: "/tmp/backups/undo.json" },
+  ]);
+  await skillfile({ op: "create", id: "new-skill", description: "D", text: "T", assign: "impl-openai" });
+  await skillfile({ op: "restore", record: "/tmp/r.json" });
+  assert.deepEqual(w.calls.filter((c) => c.op === "skillfile").map((c) => c.input), [
+    { op: "create", id: "new-skill", record: "", description: "D", text: "T", assign: "impl-openai" },
+    { op: "restore", id: "", record: "/tmp/r.json", description: "", text: "", assign: "" },
+  ]);
+  const made = await team({ op: "add", lead: "reviewer", members: ["impl-openai", "impl-claude"], text: "R." });
+  assert.equal(made.team.id, "reviewer");
+  await team({ op: "remove", id: "reviewer" });
+  assert.deepEqual(w.calls.filter((c) => c.op === "team").map((c) => c.input), [
+    { op: "add", id: "", lead: "reviewer", members: "impl-openai impl-claude", text: "R." },
+    { op: "remove", id: "reviewer", lead: "", members: "", text: "" },
+  ]);
+  const failure = async (action, request) => {
+    try {
+      await action(request);
+    } catch (error) {
+      return error.message;
+    }
+    return "";
+  };
+  assert.match(await failure(roster, { op: "remove", name: "orchestrator" }), /cannot be removed/);
+  assert.match(await failure(skillfile, { op: "delete", id: "shopify-ruby" }), /Shopify's own copy/);
+  assert.match(await failure(team, { op: "add", lead: "orchestrator", members: ["a"] }), /hub/);
+  const count = w.calls.length;
+  for (const bad of [null, { op: "show", name: "x" }, { op: "add", name: "-x" }, { op: "add", name: "x", skills: "a" }, { op: "add", name: "x", read_only: "true" },
+    { op: "text", name: "x" }, { op: "restore", record: "-r" }, { op: "add", name: "x", copy_of: "a b" }])
+    assert.equal(await failure(roster, bad), "Bad roster request.", JSON.stringify(bad));
+  for (const bad of [null, { op: "read", id: "-x" }, { op: "write", id: "x", text: 3 }, { op: "restore" }])
+    assert.equal(await failure(skillfile, bad), "Bad skill request.", JSON.stringify(bad));
+  for (const bad of [null, { op: "add", lead: "r", members: [] }, { op: "members", id: "r", members: ["-a"] }, { op: "text", id: "r", text: 3 }])
+    assert.equal(await failure(team, bad), "Bad group request.", JSON.stringify(bad));
+  assert.equal(w.calls.length, count, "a bad request reached main");
+  rendered.dispose();
 });
 
 await check("flow counts the instruction limit in characters: 2000 emoji (4000 UTF-16 units) go to the command, 2001 do not", async () => {

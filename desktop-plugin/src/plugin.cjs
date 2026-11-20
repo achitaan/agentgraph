@@ -8,7 +8,9 @@
  *   - every window runs `setup`: the panel, the "+" menu item, the command and the styles;
  *   - the Electron main process runs `main`: an Ipc that runs the Python snapshot command, and the structure
  *     command that adds a flow through agents, changes its instruction or removes it (`agentgraph structure flow`),
- *     and the skills command that adds or removes one of an agent's skills or gives it all (`agentgraph skills`).
+ *     the skills command that adds or removes one of an agent's skills or gives it all (`agentgraph skills`),
+ *     the roster command that adds, removes or restores an agent (`agentgraph agent`), the skill-file command
+ *     that reads or edits a skill's text (`agentgraph skill`) and the groups command (`agentgraph team`).
  * The host evaluates the bundle as `Function("require", "module", "exports", code)`, so `__dirname` and
  * `__filename` do not exist, and `require` only knows the modules the app shares. Keep each process's code inside
  * its own setup; module scope must stay safe in both.
@@ -50,6 +52,13 @@ const FLOW_STEPS_LIMIT = 20;
 const FLOW_TEXT_MAX_CHARS = 2000;
 const FLOW_TIMEOUT_MS = 10000;
 const FLOW_MAX_BYTES = 1024 * 1024;
+// The commands' own limits, in characters: an agent's description and prompt, a skill's text, a group's instruction.
+const DESCRIPTION_MAX_CHARS = 300;
+const PROMPT_MAX_CHARS = 8000;
+const SKILL_TEXT_MAX_CHARS = 200000;
+const SKILL_FILE_MAX_BYTES = 4 * 1024 * 1024;
+const MODEL_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.:@+-]{0,127}\/[A-Za-z0-9_][A-Za-z0-9_.:@+\/-]{0,199}$/;
+const RECORD_MAX_CHARS = 4096;
 
 const HOST_CSS = [
   ".agentgraph-desktop-panel,.agentgraph-desktop-view{box-sizing:border-box;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden}",
@@ -142,6 +151,38 @@ function snapshotIpc(pluginId) {
         // or {"error": "..."}.
         skills: {
           input: Schema.Struct({ op: Schema.String, agent: Schema.String, skill: Schema.String }),
+          output: Schema.String,
+        },
+        // Add an agent (an agent file, live at once: from a template, a copy or the fields given), read or replace
+        // an added agent's instruction, remove an agent with its flows and groups, or restore what a removal or an
+        // instruction change took. Input: op ("add", "read", "text", "remove" or "restore"), name, record (restore
+        // only), model, variant, description, prompt (the instruction, on stdin; for "text" the new one), skills
+        // (comma-separated; "" for none given, "-" for an empty list), read_only ("", "true" or "false"), copy_of
+        // and template ("blank" or "verifier"); "" when not given. Output: JSON text, the command's answer
+        // ({"agent", "action", "record"?, "message", ...}) or {"error": "..."}.
+        roster: {
+          input: Schema.Struct({
+            op: Schema.String, name: Schema.String, record: Schema.String, model: Schema.String, variant: Schema.String,
+            description: Schema.String, prompt: Schema.String, skills: Schema.String, read_only: Schema.String,
+            copy_of: Schema.String, template: Schema.String,
+          }),
+          output: Schema.String,
+        },
+        // Read or edit a skill's text. Input: op ("read", "write", "create", "delete" or "restore"), id, record
+        // (restore only), description, text (on stdin) and assign (create only); "" when not given. Output: JSON
+        // text, {"id", "description"?, "text"?, "record"?, ...} or {"error": "..."}.
+        skillfile: {
+          input: Schema.Struct({
+            op: Schema.String, id: Schema.String, record: Schema.String, description: Schema.String, text: Schema.String,
+            assign: Schema.String,
+          }),
+          output: Schema.String,
+        },
+        // Add a group (agents that report to one lead), replace its members or instruction, or remove it. Input:
+        // op ("add", "members", "text" or "remove"), id ("" for add), lead (add only), members (separated by single
+        // spaces) and text (on stdin). Output: JSON text, {"team"?, "teams": [...], "notes"?} or {"error": "..."}.
+        team: {
+          input: Schema.Struct({ op: Schema.String, id: Schema.String, lead: Schema.String, members: Schema.String, text: Schema.String }),
           output: Schema.String,
         },
       },
@@ -426,6 +467,168 @@ function createSkillRunner(deps) {
   };
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Main process: the roster, skill-file and groups commands, without a shell. Every name, id and record is checked
+// here, so nothing that starts with "-" (or holds a space) reaches the command line; free text goes on stdin, or
+// as one `--option=value` argument when it is short (a description).
+
+const chars = (text) => Array.from(text).length;
+const freeText = (value, limit) => typeof value === "string" && !value.includes("\0") && chars(value) <= limit;
+const recordPath = (value) => typeof value === "string" && value.startsWith("/") && value.length <= RECORD_MAX_CHARS
+  && !value.includes("\0") && !/[\r\n]/.test(value);
+
+// One change at a time, in the order asked; the demo changes nothing. Never rejects: failures become { error }.
+function serialRunner(deps, command, label, accept, demoMessage) {
+  let queue = Promise.resolve();
+  return (input) => {
+    const request = command(input);
+    if (request.error) return Promise.resolve(request);
+    if (deps.demo) return Promise.resolve({ error: demoMessage });
+    const next = queue.then(() => runCommand(deps, request, label, accept));
+    queue = next.catch(() => {});
+    return next;
+  };
+}
+
+function createRosterRunner(deps) {
+  const fail = (message) => ({ error: oneLine(message) });
+  const KEYS = ["op", "name", "record", "model", "variant", "description", "prompt", "skills", "read_only", "copy_of", "template"];
+  function command(input) {
+    if (!isPlainObject(input) || !KEYS.every((key) => typeof input[key] === "string")) return fail("Bad roster request.");
+    const { op, name, record, model, variant, description, prompt, skills, read_only: readOnly, copy_of: copyOf, template } = input;
+    const base = ["-P", "-m", "agentgraph.roster", "agent"];
+    const others = [model, variant, description, prompt, skills, readOnly, copyOf, template];
+    if (op === "restore") {
+      if (name || others.some(Boolean) || !recordPath(record)) return fail("The restore needs the undo record a removal returned.");
+      return { args: base.concat(["restore", record, "--json"]), stdin: "" };
+    }
+    if (!AGENT_NAME.test(name)) return fail("The agent needs a valid name.");
+    if (record) return fail("Bad roster request.");
+    if (op === "remove" || op === "read") {
+      if (others.some(Boolean)) return fail("Bad roster request.");
+      return { args: base.concat([op === "read" ? "show" : "remove", name, "--json"]), stdin: "" };
+    }
+    if (op === "text") {
+      if ([model, variant, description, skills, readOnly, copyOf, template].some(Boolean)) return fail("Bad roster request.");
+      if (!freeText(prompt, PROMPT_MAX_CHARS) || !prompt.trim()) return fail("The instruction must be 1 to " + PROMPT_MAX_CHARS + " characters.");
+      return { args: base.concat(["text", name, "--text-file", "-", "--json"]), stdin: prompt };
+    }
+    if (op !== "add") return fail("Bad roster request.");
+    const args = base.concat(["add", name]);
+    if (template) {
+      if (template !== "blank" && template !== "verifier") return fail("The template must be blank or verifier.");
+      if (copyOf) return fail("Give either an agent to copy or a template, not both.");
+      args.push("--template", template);
+    }
+    if (model) {
+      if (!MODEL_NAME.test(model)) return fail("The model must be provider/model.");
+      args.push("--model", model);
+    }
+    if (variant) {
+      if (!SKILL_NAME.test(variant)) return fail("The variant is not a valid name.");
+      args.push("--variant", variant);
+    }
+    if (copyOf) {
+      if (!AGENT_NAME.test(copyOf)) return fail("The agent to copy needs a valid name.");
+      args.push("--copy-of", copyOf);
+    }
+    if (description) {
+      if (!freeText(description, DESCRIPTION_MAX_CHARS) || /[\r\n]/.test(description))
+        return fail("The description must be one line of at most " + DESCRIPTION_MAX_CHARS + " characters.");
+      args.push("--description=" + description);
+    }
+    if (skills === "-") args.push("--skills="); // an empty list given
+    else if (skills) {
+      const names = skills.split(",");
+      if (!names.every((skill) => SKILL_NAME.test(skill))) return fail("The skills must be skill names separated by commas.");
+      args.push("--skills", names.join(","));
+    }
+    if (readOnly === "true") args.push("--read-only");
+    else if (readOnly === "false") args.push("--no-read-only");
+    else if (readOnly) return fail("Bad roster request.");
+    if (!freeText(prompt, PROMPT_MAX_CHARS)) return fail("The prompt is longer than " + PROMPT_MAX_CHARS + " characters.");
+    if (prompt.trim()) args.push("--prompt-file", "-");
+    if (!copyOf && template !== "verifier" && !(model && description && prompt.trim()))
+      return fail("A new agent needs a model, a description and an instruction, or a template or an agent to copy.");
+    args.push("--json");
+    return { args, stdin: prompt.trim() ? prompt : "" };
+  }
+  const accept = (doc) => (typeof doc.agent === "string" && typeof doc.action === "string" ? doc : null);
+  return { roster: serialRunner(deps, command, "The roster command", accept, "The demo cannot change the agents.") };
+}
+
+function createSkillFileRunner(deps) {
+  const fail = (message) => ({ error: oneLine(message) });
+  const KEYS = ["op", "id", "record", "description", "text", "assign"];
+  function command(input) {
+    if (!isPlainObject(input) || !KEYS.every((key) => typeof input[key] === "string")) return fail("Bad skill request.");
+    const { op, id, record, description, text, assign } = input;
+    const base = ["-P", "-m", "agentgraph.skillfiles", "skill"];
+    if (op === "restore") {
+      if (id || description || text || assign || !recordPath(record)) return fail("The restore needs the undo record an edit returned.");
+      return { args: base.concat(["restore", record, "--json"]), stdin: "" };
+    }
+    if (!SKILL_NAME.test(id)) return fail("The skill needs a valid id.");
+    if (record) return fail("Bad skill request.");
+    if (op === "read" || op === "delete") {
+      if (description || text || assign) return fail("Bad skill request.");
+      return { args: base.concat([op === "read" ? "show" : "delete", id, "--json"]), stdin: "" };
+    }
+    if (op !== "write" && op !== "create") return fail("Bad skill request.");
+    if (!freeText(text, SKILL_TEXT_MAX_CHARS)) return fail("The skill's text is longer than " + SKILL_TEXT_MAX_CHARS + " characters.");
+    if (description && (!freeText(description, 1024) || /[\r\n]/.test(description))) return fail("The description must be one line.");
+    const args = base.concat([op, id, "--text-file", "-"]);
+    if (op === "create") {
+      if (!description) return fail("A new skill needs a description.");
+      if (assign) {
+        if (!AGENT_NAME.test(assign)) return fail("The agent to give the skill to needs a valid name.");
+        args.push("--assign", assign);
+      }
+    } else if (assign) return fail("Bad skill request.");
+    if (description) args.push("--description=" + description);
+    args.push("--json");
+    return { args, stdin: text };
+  }
+  const accept = (doc) => (typeof doc.id === "string" ? doc : null);
+  return { skillfile: serialRunner(deps, command, "The skill command", accept, "The demo cannot change skills.") };
+}
+
+function createTeamRunner(deps) {
+  const fail = (message) => ({ error: oneLine(message) });
+  function command(input) {
+    if (!isPlainObject(input)) return fail("Bad group request.");
+    const { op, id, lead, members, text } = input;
+    if (![op, id, lead, members, text].every((value) => typeof value === "string")) return fail("Bad group request.");
+    if (!freeText(text, FLOW_TEXT_MAX_CHARS)) return fail("The instruction is longer than " + FLOW_TEXT_MAX_CHARS + " characters.");
+    const base = ["-P", "-m", "agentgraph.teams"];
+    const names = members ? members.split(" ") : [];
+    const named = names.length <= FLOW_STEPS_LIMIT && names.every((name) => AGENT_NAME.test(name));
+    if (op === "add") {
+      if (id || !AGENT_NAME.test(lead) || !names.length || !named) return fail("A group needs a lead and members.");
+      return text.trim()
+        ? { args: base.concat(["add", lead], names, ["--text-file", "-", "--json"]), stdin: text }
+        : { args: base.concat(["add", lead], names, ["--json"]), stdin: "" };
+    }
+    if (!FLOW_ID.test(id) || lead) return fail("The group needs a valid id.");
+    if (op === "members") {
+      if (!names.length || !named || text) return fail("The group needs its members.");
+      return { args: base.concat(["members", id], names, ["--json"]), stdin: "" };
+    }
+    if (members) return fail("Bad group request.");
+    if (op === "text") return { args: base.concat(["text", id, "--text-file", "-", "--json"]), stdin: text };
+    if (op === "remove" && !text) return { args: base.concat(["remove", id, "--json"]), stdin: "" };
+    return fail("Bad group request.");
+  }
+  const accept = (doc) => {
+    if (!Array.isArray(doc.teams)) return null;
+    const answer = { teams: doc.teams };
+    if (isPlainObject(doc.team)) answer.team = doc.team;
+    if (Array.isArray(doc.notes)) answer.notes = doc.notes;
+    return answer;
+  };
+  return { team: serialRunner(deps, command, "The groups command", accept, "The demo cannot change the structure.") };
+}
+
 function nonEmptyString(value) {
   return typeof value === "string" && value.trim() !== "";
 }
@@ -480,10 +683,28 @@ function main(ctx) {
     maxBytes: FLOW_MAX_BYTES,
   });
 
+  const commandDeps = (maxBytes) => ({
+    execFile: childProcess.execFile,
+    path,
+    env: process.env,
+    home,
+    python,
+    demo: options.demo === true,
+    signal: ctx.signal,
+    timeoutMs: FLOW_TIMEOUT_MS,
+    maxBytes,
+  });
+  const roster = createRosterRunner(commandDeps(FLOW_MAX_BYTES));
+  const skillFiles = createSkillFileRunner(commandDeps(SKILL_FILE_MAX_BYTES));
+  const groups = createTeamRunner(commandDeps(FLOW_MAX_BYTES));
+
   ctx.provide(snapshotIpc(ctx.id), {
     snapshot: (input) => runner.snapshot(input).then((doc) => JSON.stringify(doc)),
     flow: (input) => flows.flow(input).then((doc) => JSON.stringify(doc)),
     skills: (input) => skills.skills(input).then((doc) => JSON.stringify(doc)),
+    roster: (input) => roster.roster(input).then((doc) => JSON.stringify(doc)),
+    skillfile: (input) => skillFiles.skillfile(input).then((doc) => JSON.stringify(doc)),
+    team: (input) => groups.team(input).then((doc) => JSON.stringify(doc)),
   });
 
   if (ctx.log && typeof ctx.log.write === "function") {
@@ -605,7 +826,101 @@ function renderPanel(ctx, solid, props) {
       throw new Error(oneLine(isPlainObject(doc) && doc.error ? doc.error : "The skills could not be changed."));
     return doc;
   };
-  const actions = ctx.options && ctx.options.demo === true ? undefined : { flow, skills };
+  // The roster, skill-file and groups actions take the requests of the loopback endpoints (/api/roster,
+  // /api/skillfile, /api/structure/team) and send them to main as string fields; names holding a space or starting
+  // with "-" are refused here and again in main.
+  const plainName = (value) => typeof value === "string" && value !== "" && !/\s/.test(value) && !value.startsWith("-");
+  const optionalText = (value) => (value === undefined || value === null ? "" : value);
+  const askMain = async (method, input, label, valid) => {
+    if (!alive) throw new Error("The panel is closed.");
+    const text = await ctx.main(snapshotIpc(ctx.id))[method](input, { signal: ctx.signal });
+    let doc;
+    try {
+      doc = JSON.parse(text);
+    } catch (_) {
+      throw new Error("The " + label + " command did not answer with JSON.");
+    }
+    if (!isPlainObject(doc) || doc.error || !valid(doc))
+      throw new Error(oneLine(isPlainObject(doc) && doc.error ? doc.error : "The " + label + " change did not work."));
+    return doc;
+  };
+  const roster = async (request) => {
+    if (!alive) throw new Error("The panel is closed.");
+    if (!isPlainObject(request) || !["add", "read", "text", "remove", "restore"].includes(request.op)) throw new Error("Bad roster request.");
+    const input = { op: request.op, name: "", record: "", model: "", variant: "", description: "", prompt: "", skills: "", read_only: "", copy_of: "", template: "" };
+    if (request.op === "restore") {
+      if (typeof request.record !== "string" || !request.record || request.record.startsWith("-")) throw new Error("Bad roster request.");
+      input.record = request.record;
+    } else {
+      if (!plainName(request.name)) throw new Error("Bad roster request.");
+      input.name = request.name;
+    }
+    if (request.op === "text") {
+      if (typeof request.text !== "string") throw new Error("Bad roster request.");
+      input.prompt = request.text;
+    }
+    if (request.op === "add") {
+      for (const key of ["model", "variant", "description", "prompt", "copy_of", "template"]) {
+        const value = optionalText(request[key]);
+        if (typeof value !== "string") throw new Error("Bad roster request.");
+        input[key] = value;
+      }
+      if (input.copy_of && !plainName(input.copy_of)) throw new Error("Bad roster request.");
+      const skills = optionalText(request.skills);
+      if (skills !== "") {
+        if (!Array.isArray(skills) || !skills.every(plainName) || skills.some((name) => name.includes(","))) throw new Error("Bad roster request.");
+        input.skills = skills.length ? skills.join(",") : "-";
+      }
+      const readOnly = optionalText(request.read_only);
+      if (readOnly !== "" && typeof readOnly !== "boolean") throw new Error("Bad roster request.");
+      input.read_only = readOnly === "" ? "" : String(readOnly);
+    }
+    return askMain("roster", input, "roster", (doc) => typeof doc.agent === "string");
+  };
+  const skillfile = async (request) => {
+    if (!alive) throw new Error("The panel is closed.");
+    if (!isPlainObject(request) || !["read", "write", "create", "delete", "restore"].includes(request.op)) throw new Error("Bad skill request.");
+    const input = { op: request.op, id: "", record: "", description: "", text: "", assign: "" };
+    if (request.op === "restore") {
+      if (typeof request.record !== "string" || !request.record || request.record.startsWith("-")) throw new Error("Bad skill request.");
+      input.record = request.record;
+    } else {
+      if (!plainName(request.id)) throw new Error("Bad skill request.");
+      input.id = request.id;
+    }
+    if (request.op === "write" || request.op === "create") {
+      for (const key of ["description", "text", "assign"]) {
+        const value = optionalText(request[key]);
+        if (typeof value !== "string") throw new Error("Bad skill request.");
+        input[key] = value;
+      }
+      if (input.assign && !plainName(input.assign)) throw new Error("Bad skill request.");
+    }
+    return askMain("skillfile", input, "skill", (doc) => typeof doc.id === "string");
+  };
+  const team = async (request) => {
+    if (!alive) throw new Error("The panel is closed.");
+    if (!isPlainObject(request) || !["add", "members", "text", "remove"].includes(request.op)) throw new Error("Bad group request.");
+    const input = { op: request.op, id: "", lead: "", members: "", text: "" };
+    if (request.op === "add") {
+      if (!plainName(request.lead)) throw new Error("Bad group request.");
+      input.lead = request.lead;
+    } else {
+      if (!plainName(request.id)) throw new Error("Bad group request.");
+      input.id = request.id;
+    }
+    if (request.op === "add" || request.op === "members") {
+      if (!Array.isArray(request.members) || !request.members.length || !request.members.every(plainName)) throw new Error("Bad group request.");
+      input.members = request.members.join(" ");
+    }
+    if (request.op === "add" || request.op === "text") {
+      const text = optionalText(request.text);
+      if (typeof text !== "string") throw new Error("Bad group request.");
+      input.text = text;
+    }
+    return askMain("team", input, "groups", (doc) => Array.isArray(doc.teams));
+  };
+  const actions = ctx.options && ctx.options.demo === true ? undefined : { flow, skills, roster, skillfile, team };
 
   const showSessionToast = (sessionID, copied) => {
     try {
