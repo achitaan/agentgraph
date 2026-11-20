@@ -632,7 +632,9 @@
         const movable = names.filter(name => ordinaryAgent(name) && !orbit.has(name) && !claimed.has(name));
         if (!movable.length) return;
         movable.forEach(name => claimed.add(name));
-        rings.push({ key: 'ring:' + names.slice().sort().join('|'), names, movable });
+        // A, B, C, B: A leads into the circle (it stays near A).
+        const into = start > 0 && byAgent.has(flow.path[start - 1]) && !names.includes(flow.path[start - 1]) ? flow.path[start - 1] : null;
+        rings.push({ key: 'ring:' + names.slice().sort().join('|'), names, movable, into });
       });
       return rings;
     }
@@ -672,7 +674,18 @@
       // The picture as it is without loops; what stays put; and the room the canvas has round the picture's middle (the
       // figures take the top; a wide canvas as the details leave it), so a loop formed there stays in view.
       const area = extent(targets.map(target => shapeOf(target))), shapes = targets.filter(target => !movers.has(target.name)).map(target => shapeOf(target));
-      const half = Math.max(canvas.width / 2 - EDGE, (area.right - area.left) / 2), halfY = Math.max(canvas.height / 2 - EDGE - 44, (area.bottom - area.top) / 2);
+      // A wide canvas shows the picture at up to 1.3 times, with the details open and closed: the room is what both show.
+      const across = area.right - area.left || 1, high = area.bottom - area.top || 1;
+      let half = Infinity, halfY = Infinity;
+      // A narrow one at up to 1 (its fit keeps 2 px each side and 8 px top and bottom), and its panel may be taller than
+      // the canvas laid out for (the sheet closed), so the view can be as large as the width allows.
+      (canvas.wide ? [canvas.width, canvas.width + DETAIL_WIDTH] : [canvas.width]).forEach(w => {
+        const side = canvas.wide ? EDGE : 2, top = canvas.wide ? EDGE + 44 : 8;
+        const s = clamp(Math.min((w - 2 * side) / across, canvas.wide ? (canvas.height - 2 * top) / high : Infinity), READABLE, canvas.wide ? 1.3 : 1);
+        // Less the room the view keeps round each circle and name when it brings one into view (extentOf).
+        half = Math.min(half, (w / 2 - side) / s - 14); halfY = Math.min(halfY, (canvas.height / 2 - top) / s - 22);
+      });
+      half = Math.max(half, across / 2); halfY = Math.max(halfY, high / 2);
       const centre = (area.left + area.right) / 2, middle = (area.top + area.bottom) / 2;
       // The best place for one loop's circle, its `movable` agents moving onto it (null: it cannot be drawn).
       // `ahead`: later loops through one of this loop's moving agents (and otherwise free): each needs room on the far side
@@ -717,12 +730,27 @@
             for (const s of shapes) if (!skip.has(s.name)) bad += insideOf(s, nx, ny, next.radius);
             for (const s of list) if (!next.names.includes(s.name)) bad += insideOf(s, nx, ny, next.radius);
             bands.forEach(band => { if (!band.names.some(name => next.names.includes(name))) bad += Math.max(0, next.radius + band.r + RING_APART - Math.hypot(nx - band.x, ny - band.y)); });
+            bad += Math.max(0, centre - half - (nx - next.radius)) + Math.max(0, nx + next.radius - centre - half) + Math.max(0, middle - halfY - (ny - next.radius)) + Math.max(0, ny + next.radius - middle - halfY);
+            if (best && bad > best.bad + 1e-6) return;
+          }
+          // A, B, C, B: the circle stays near A, so the step into it is short and both come into view together.
+          const from = ring.into && (placed.get(ring.into) || (byName.has(ring.into) && at(byName.get(ring.into)))), entry = made.find(([name]) => name === ring.names[0]) || [null, spots[0].x, spots[0].y];
+          if (from) moved += 3 * Math.hypot(entry[1] - from.x, entry[2] - from.y);
+          // A and the circle must fit in one view at the smallest readable size (the open agent and its
+          // neighbours are shown together); that counts for more than staying inside the canvas.
+          if (from && byName.has(ring.into)) {
+            const both = extent([shapeOf(byName.get(ring.into), from), ...list]);
+            bad += 3 * (Math.max(0, both.right - both.left + 28 - (canvas.width - 4) / READABLE) + Math.max(0, both.bottom - both.top + 44 - (canvas.height - 16) / READABLE));
             if (best && bad > best.bad + 1e-6) return;
           }
           list.push({ x, y, r: radius, box: { left: x, right: x, top: y, bottom: y } });
           const e = extent(list), grown = Math.max(0, area.left - e.left) + Math.max(0, e.right - area.right) + Math.max(0, area.top - e.top) + Math.max(0, e.bottom - area.bottom);
+          // The canvas has no room to spare: a circle out of it would refit the view, which moves everything on
+          // screen, so it counts as running into something.
+          const over = Math.max(0, centre - half - e.left) + Math.max(0, e.right - centre - half) + Math.max(0, middle - halfY - e.top) + Math.max(0, e.bottom - middle - halfY);
+          if (over > 0) { bad += over; if (best && bad > best.bad + 1e-6) return; }
           const cost = moved + 3 * grown + 1000 * (Math.max(0, centre - half - e.left) + Math.max(0, e.right - centre - half) + Math.max(0, middle - halfY - e.top) + Math.max(0, e.bottom - middle - halfY));
-          if (!best || bad < best.bad - 1e-6 || cost < best.cost) best = { bad, cost, x, y, start, dir, made };
+          if (!best || bad < best.bad - 1e-6 || cost < best.cost) best = { bad, cost, x, y, start, dir, made, over };
         };
         if (fixed.length === 1) {
           // One agent stays (the orchestrator, a seat, one on an earlier loop): the circle passes through it.
@@ -746,10 +774,11 @@
         return best;
       };
       // One pass over the loops in order. `looking`: the loops that leave room for a later loop through one of their agents.
-      const pass = looking => {
+      const pass = (looking, order = rings.map((ring, index) => index)) => {
         const results = [];
-        rings.forEach((full, index) => {
-          const ahead = !looking.has(index) ? [] : rings.slice(index + 1).flatMap(next => {
+        order.forEach(index => {
+          const full = rings[index];
+          const ahead = !looking.has(index) ? [] : looking.get(index).map(k => rings[k]).flatMap(next => {
             const common = next.names.filter(name => full.movable.includes(name));
             if (common.length !== 1 || next.names.some(name => name !== common[0] && (!next.movable.includes(name) || byName.get(name)?.pinned))) return [];
             return [{ name: common[0], names: next.names, radius: Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / next.names.length))) }];
@@ -759,7 +788,7 @@
           let ring = { ...full, movable: full.movable.filter(name => !byName.get(name)?.pinned) }, best = search(ring, ahead);
           if (ring.movable.length < full.movable.length && (!best || best.bad > .5)) { const other = search(full, ahead); if (other && (!best || other.bad < best.bad)) { ring = full; best = other; } }
           const count = ring.names.length, radius = Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / count)));
-          results.push(best ? { bad: best.bad, x: best.x, y: best.y, radius, names: ring.names, made: best.made.map(([name]) => name) } : null);
+          results[index] = (best ? { bad: best.bad, x: best.x, y: best.y, radius, names: ring.names, made: best.made.map(([name]) => name), over: best.over } : null);
           if (!best) return;
           const shift = placedByUser[ring.key], sx = shift && Number.isFinite(shift.dx) ? shift.dx : 0, sy = shift && Number.isFinite(shift.dy) ? shift.dy : 0;
           best.made.forEach(([name, x, y]) => {
@@ -779,19 +808,29 @@
       // drawn, so removing one puts every agent back).
       const bodies = [...new Set(rings.flatMap(ring => ring.movable))].map(name => placed.get(name)).filter(Boolean), saved = bodies.map(body => ({ body, x: body.x, y: body.y, still: body.still, ring: body.ring })), shapes0 = shapes.slice();
       // No clear place: its line or a moved agent actually runs into an agent or a name (not only into the margins).
-      const blocked = result => !result || shapes.some(s => !result.names.includes(s.name) && (realOf(s, result.x, result.y, result.radius) > 1 || result.made.some(name => { const m = shapes.find(t => t.name === name); return m && hitOf(m, s) > 1; })));
-      const first = pass(new Set()), looking = new Set();
-      first.forEach((result, k) => {
-        if (!blocked(result)) return;
-        const fixedOn = rings[k].names.filter(name => !rings[k].movable.includes(name));
-        rings.forEach((earlier, j) => { if (j < k && fixedOn.length === 1 && earlier.movable.includes(fixedOn[0]) && !blocked(first[j])) looking.add(j); });
+      const clashes = result => !result || shapes.some(s => !result.names.includes(s.name) && (realOf(s, result.x, result.y, result.radius) > 1 || result.made.some(name => { const m = shapes.find(t => t.name === name); return m && hitOf(m, s) > 1; })));
+      // Out of the canvas counts too when comparing passes, but only a real clash makes an earlier loop make room.
+      const blocked = result => clashes(result) || result.over > 1;
+      // The earlier loop is then placed after every other loop (so it keeps clear of them too) and just before the loops
+      // it makes room for; only when no other loop goes through its agents.
+      const first = pass(new Map()), looking = new Map(), worse = list => rings.filter((ring, index) => blocked(list[index])).length, before = worse(first);
+      rings.forEach((ring, k) => {
+        if (!clashes(first[k])) return;
+        const fixedOn = ring.names.filter(name => !ring.movable.includes(name));
+        rings.forEach((earlier, j) => {
+          if (j >= k || fixedOn.length !== 1 || !earlier.movable.includes(fixedOn[0]) || blocked(first[j])) return;
+          if (rings.some((other, m) => m !== j && m !== k && other.names.some(name => earlier.names.includes(name)))) return;
+          looking.set(j, [...(looking.get(j) || []), k]);
+        });
       });
       if (!looking.size) return;
+      const last = new Set([...looking.keys(), ...[...looking.values()].flat()]), order = rings.map((ring, index) => index).filter(index => !last.has(index));
+      [...looking.keys()].sort((a, b) => a - b).forEach(j => { order.push(j); looking.get(j).forEach(k => { if (!order.includes(k)) order.push(k); }); });
       const keep = { bodies: bodies.map(body => ({ body, x: body.x, y: body.y, still: body.still, ring: body.ring })), shapes: shapes.slice(), bands: bands.slice() };
       saved.forEach(({ body, x, y, still, ring }) => Object.assign(body, { x, y, still, ring }));
       shapes.splice(0, shapes.length, ...shapes0); bands.length = 0;
-      const second = pass(looking), worse = list => list.filter(blocked).length;
-      if (worse(second) < worse(first)) return;
+      const second = pass(looking, order);
+      if (worse(second) < before) return;
       keep.bodies.forEach(({ body, x, y, still, ring }) => Object.assign(body, { x, y, still, ring }));
       shapes.splice(0, shapes.length, ...keep.shapes); bands.splice(0, bands.length, ...keep.bands);
     }
@@ -880,9 +919,11 @@
       const rect = { width: root.clientWidth, height: Math.max(1, root.clientHeight - (notice.hidden ? 0 : notice.offsetHeight)) };
       if (rect.width <= 0 || viewport.clientWidth <= 0 || viewport.clientHeight <= 0) return;
       const compact = arrangement === 'compact';
-      // The canvas as it is: a narrow oval grows into spare height. With the sheet open (n103) it is shaped for what the
-      // sheet leaves, so every circle and name fits above it at a readable size; closing the sheet puts it back.
-      const canvasHeight = Math.max(1, Math.round(viewport.clientHeight));
+      // A narrow canvas is laid out for what the bottom sheet leaves of it (n103), open or not: every circle and name fits
+      // above the sheet at a readable size, and opening or closing it never re-lays out the agents.
+      const sheetOpen = compact && root.classList.contains('ag-details-open'), sheetHigh = Math.max(0, Math.min(root.clientHeight * .4, root.clientHeight - 112));
+      const full = viewport.clientHeight + (sheetOpen ? (parseFloat(getComputedStyle(root).getPropertyValue('--ag-sheet-height')) || 0) + 28 : 0);
+      const canvasHeight = Math.max(1, Math.round(compact ? full - sheetHigh - 28 : viewport.clientHeight));
       // Wide: the oval is shaped for the canvas the details panel (DETAIL_WIDTH) leaves, open or not, so opening it
       // never re-lays out the agents and they still fit at a readable size beside it.
       // A canvas the details leave taller than wide (n103: 760 px) gets a taller oval, chosen below once its size is known.
@@ -924,15 +965,17 @@
       if (!lead.length && groups.length > 2) groups.unshift({ key: '', units: [], width: slot });
       const depth = Math.max(0, ...groups.flatMap(group => group.units.map(unit => unit.seats.length ? unit.reach : 0)));
       const filled = groups.reduce((sum, group) => sum + group.width, 0), needed = filled + groups.length * GROUP_GAP;
-      const least = 38 + (depth ? depth + 64 : 104);
+      // A narrow canvas is short above its sheet: the oval is as flat as the council's seats allow (n103).
+      const least = 38 + (depth ? depth + (compact ? 24 : 64) : (compact ? 64 : 104));
       const grow = fits => { let low = least, high = least + needed; for (let i = 0; i < 32; i++) { const middle = (low + high) / 2; if (fits(middle)) high = middle; else low = middle; } return high; };
       let rx, ry;
       if (compact) {
-        rx = Math.max(60, rect.width / 2 - 23 - EDGE);
-        // Flatter with the sheet open: it leaves a canvas wider than tall.
-        ry = Math.max(least, rx / (root.classList.contains('ag-details-open') ? 1.45 : 1.3));
+        // What the sheet leaves is wider than tall: the oval takes the width the canvas shows at the smallest readable
+        // size (names either side) and is as flat as that allows.
+        rx = Math.max(60, (rect.width - 4) / READABLE / 2 - 50);
+        ry = least;
         if (perimeter(rx, ry) < needed) ry = grow(value => perimeter(rx, value) >= needed);
-        // A tall panel is used, not left empty: the oval grows into spare height.
+        // A tall panel is used, not left empty: the oval grows into spare height above the sheet.
         ry = Math.max(ry, Math.min(rx * 2.2, canvasHeight / 2 - Math.max(depth + 34, 96)));
       } else {
         const oval = a => perimeter(a * least, least) < needed ? grow(value => perimeter(a * value, value) >= needed) : least;
@@ -997,7 +1040,7 @@
       settle();
       const placed = new Map(bodies.map(body => [body.name, body]));
       // Full loops: their moving agents go onto an even circle, in path order, in free space (placeRings); nothing else moves.
-      if (rings.length) placeRings(rings, placed, targets, placedByUser, compact ? { width: rect.width, height: canvasHeight } : { width: rect.width - DETAIL_WIDTH, height: rect.height });
+      if (rings.length) placeRings(rings, placed, targets, placedByUser, compact ? { width: rect.width, height: canvasHeight } : { width: rect.width - DETAIL_WIDTH, height: rect.height, wide: true });
       const before = new Map(Array.from(positions, ([name, point]) => [name, { x: point.x, y: point.y }]));
       // What this layout moved: agents new to the picture, and those going onto, off or along a loop's circle (`steady`
       // when nothing else moved: then the camera stays where it is, see settleCamera).

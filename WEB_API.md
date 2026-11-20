@@ -428,9 +428,10 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   A change of layout (a loop drawn or removed, an agent added or removed, a keyboard nudge) never discards the
 //   user's pan or zoom; an automatic view stays put too when nothing but a loop's agents or a new agent moved (it
 //   pans only to bring them into view), else it is fitted again. A wide canvas the details leave taller than wide
-//   gets a taller oval, and with the compact sheet open the agents are laid out for the canvas above it (closing
-//   it puts them back), so everything fits there at 11 px or more where it can; where it cannot, the opened agent
-//   comes into view with the agents its paths join it to.
+//   gets a taller oval, and a compact canvas is laid out for what its bottom sheet leaves, open or closed (opening
+//   or closing it never moves an agent), so everything fits above the sheet at 11 px or more where it can; where it
+//   cannot, the opened agent comes into view with the agents its paths join it to (a loop entered from A, as in
+//   A, B, C, B, forms near A so they fit in one view).
 // Zoom floor: wheel, Ctrl+wheel, pinch, the - key and Fit all stop where names are 11 px on screen (12 px names
 //   at scale 11/12). The background pans, like an agent drags, only once the pointer has moved more than 5 px.
 // A refused path keeps the reason as the tooltip of its first agent and of the newest agent (which shakes and
