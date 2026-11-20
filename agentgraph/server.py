@@ -13,10 +13,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote
 
-from . import roster, skillfiles, skillset, structure, teams
+from . import flowcommands, flowrun, roster, skillfiles, skillset, structure, teams
 from .demo import demo_snapshot
-from .snapshot_json import learning_document, load_structure, skills_document, snapshot_document
-from .sources import ORCHESTRATION_GRAPH_DIR, build_snapshot
+from .snapshot_json import ledger_home, learning_document, load_structure, skills_document, snapshot_document
+from .sources import DB_PATH, ORCHESTRATION_GRAPH_DIR, build_snapshot
 
 _HOST = "127.0.0.1"
 _FLOW_PATH = "/api/structure/flow"
@@ -30,7 +30,7 @@ _TEAM_PATH = "/api/structure/team"
 _TEAM_BODY_LIMIT = 32768  # as a flow: an instruction of 2000 characters
 _POSTS = (_FLOW_PATH, _SKILLS_PATH, _ROSTER_PATH, _SKILLFILE_PATH, _TEAM_PATH)
 _LOOPBACK = frozenset({"127.0.0.1", "::1"})
-_FLOW_BODY_LIMIT = 32768  # an instruction of 2000 characters, each up to 12 bytes as escaped JSON
+_FLOW_BODY_LIMIT = 32768  # an instruction of 2000 characters, each up to 12 bytes as escaped JSON (and a goal of 4000)
 _TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -63,7 +63,8 @@ def make_server(
     structure_dir: Path | None = None, skills_config: Path | None = None, skills_map: Path | None = None,
     skills_backups: Path | None = None, skills_profiles: Path | None = None,
     skills_dir: Path | None = None, skills_bundled: list[Path] | None = None, agents_dir: Path | None = None,
-    opencode_dir: Path | None = None, ledger_root: Path | None = None,
+    opencode_dir: Path | None = None, ledger_root: Path | None = None, commands_dir: Path | None = None,
+    sessions_db: Path | None = None,
 ) -> ThreadingHTTPServer:
     """Bind a server; the caller is responsible for running and closing it.
     `structure_dir` is the folder `POST /api/structure/flow` edits (default: the
@@ -74,7 +75,9 @@ def make_server(
     read only). `POST /api/skillfile` reads and edits the skill files in `skills_dir` (`skills_bundled`: where
     plugins keep the skills they bundle, read only). `POST /api/structure/team` edits the groups in
     `structure_dir`. A snapshot reads `opencode.json` from `opencode_dir` (and the models catalogue only for the
-    real folder) and the ledger (`memory-<preset>`) from `ledger_root`; each defaults to the real one."""
+    real folder) and the ledger (`memory-<preset>`) from `ledger_root`; each defaults to the real one. A flow's
+    command is written into `commands_dir` (default: OpenCode's commands folder). The sessions come from
+    `sessions_db` (default: OpenCode's database), and so do the costs in each flow's `stats`."""
     paths = {"config": skills_config or skillset.CONFIG, "map_path": skills_map or skillset.MAP,
              "backups": skills_backups or skillset.BACKUPS, "profiles": skills_profiles or skillset.PROFILES}
     directory = (web_dir if web_dir is not None else Path(__file__).with_name("web")).resolve()
@@ -154,26 +157,50 @@ def make_server(
             request = self._json_body("the structure", _FLOW_BODY_LIMIT)
             if request is None:
                 return
-            shapes = {"add": ({"op", "path"}, {"op", "path", "text"}), "text": ({"op", "id", "text"},), "remove": ({"op", "id"},)}
+            optional = {"text", "name", "command"}
+            shapes = {"text": {"op", "id", "text"}, "name": {"op", "id", "name"}, "command": {"op", "id", "on"},
+                      "prompt": {"op", "id", "goal"}, "remove": {"op", "id"}}
             op = request.get("op") if isinstance(request, dict) else None
-            if not isinstance(op, str) or set(request) not in shapes.get(op, ()):
-                self._refuse(400, 'expected {"op": "add", "path": [agents]} (and an optional "text"), '
-                                  '{"op": "text", "id": flow, "text": text} or {"op": "remove", "id": flow}')
+            valid = isinstance(op, str) and (
+                (op == "add" and {"op", "path"} <= set(request) <= {"op", "path"} | optional)
+                or (op in shapes and set(request) == shapes[op]))
+            if valid:
+                kinds = {"id": str, "text": str, "name": str, "goal": str, "path": list, "on": bool, "command": bool}
+                valid = all(isinstance(request[key], kinds[key]) for key in request if key in kinds)
+            if not valid:
+                self._refuse(400, 'expected {"op": "add", "path": [agents]} (and optional "text", "name", "command"), '
+                                  '{"op": "text", "id": flow, "text": text}, {"op": "name", "id": flow, "name": name}, '
+                                  '{"op": "command", "id": flow, "on": true|false}, {"op": "prompt", "id": flow, '
+                                  '"goal": text} or {"op": "remove", "id": flow}')
                 return
-            if demo:
+            if demo and op != "prompt":
                 self._refuse(403, "the demo cannot change the structure")
                 return
             try:
                 answer: dict = {}
-                if request["op"] == "add":
-                    answer["flow"], notes = structure.add_flow(request["path"], request.get("text"), structure_dir)
+                if op == "prompt":
+                    answer["text"] = structure.flow_prompt(request["id"], request["goal"], structure_dir)
+                elif op == "add":
+                    answer["flow"], notes = structure.add_flow(
+                        request["path"], request.get("text"), structure_dir, name=request.get("name") or None,
+                        command=request.get("command", False), commands_dir=commands_dir)
                     if notes:
                         answer["notes"] = notes
-                elif request["op"] == "text":
-                    answer["flow"] = structure.set_flow_text(request["id"], request["text"], structure_dir)
+                elif op == "text":
+                    answer["flow"] = structure.set_flow_text(request["id"], request["text"], structure_dir,
+                                                             commands_dir=commands_dir)
+                elif op == "name":
+                    answer["flow"] = structure.set_flow_name(request["id"], request["name"], structure_dir,
+                                                             commands_dir=commands_dir)
+                elif op == "command":
+                    answer["flow"] = flow = structure.set_flow_command(request["id"], request["on"], structure_dir,
+                                                                       commands_dir=commands_dir)
+                    answer["applies"] = flowcommands.applies(flow["name"], request["on"])
+                    answer["live"] = flowcommands.LIVE
                 else:
-                    structure.remove_flow(request["id"], structure_dir)
-                answer["flows"] = structure.drawn_flows(structure_dir)
+                    structure.remove_flow(request["id"], structure_dir, commands_dir=commands_dir)
+                if op != "prompt":
+                    answer["flows"] = structure.drawn_flows(structure_dir)
             except structure.StructureError as exc:
                 self._refuse(400, str(exc))
                 return
@@ -244,8 +271,9 @@ def make_server(
 
         def _roster(self):
             # Add an agent (an agent file, live at once; from a template, a copy or the fields given), read or
-            # replace an added agent's instruction, remove an agent with its flows and groups, or restore what a
-            # removal (or an instruction change) took.
+            # replace an added agent's instruction, rename an added agent with its flows, groups and path commands,
+            # remove an agent with its flows and groups, or restore what a removal, a rename (or an instruction
+            # change) took.
             names = lambda value: isinstance(value, list) and all(isinstance(item, str) for item in value)
             optional = (str, type(None))
             add_keys = {"op", "name", "model", "variant", "description", "prompt", "skills", "read_only", "copy_of",
@@ -256,10 +284,11 @@ def make_server(
             request = self._request("the agents", _ROSTER_BODY_LIMIT, {
                 "add": ({"op", "name"}, add_keys, types), "remove": ({"op", "name"}, {"op", "name"}, {}),
                 "restore": ({"op", "record"}, {"op", "record"}, {}), "read": ({"op", "name"}, {"op", "name"}, {}),
-                "text": ({"op", "name", "text"}, {"op", "name", "text"}, {})},
+                "text": ({"op", "name", "text"}, {"op", "name", "text"}, {}),
+                "rename": ({"op", "name", "to"}, {"op", "name", "to"}, {})},
                 '{"op": "add", "name", "model", "description", "prompt"} (or "copy_of" or "template"; optional '
-                '"variant", "skills", "read_only"), {"op": "read"|"remove", "name"}, {"op": "text", "name", "text"} '
-                'or {"op": "restore", "record"}')
+                '"variant", "skills", "read_only"), {"op": "read"|"remove", "name"}, {"op": "text", "name", "text"}, '
+                '{"op": "rename", "name", "to"} or {"op": "restore", "record"}')
             if request is None:
                 return
             if request.get("skills") is not None and not names(request["skills"]):
@@ -280,15 +309,17 @@ def make_server(
                         **files)
                 elif op == "remove":
                     result = roster.remove_agent(request["name"], **files)
+                elif op == "rename":
+                    result = roster.rename_agent(request["name"], request["to"], commands_dir=commands_dir, **files)
                 elif op == "restore":
-                    result = roster.restore_agent(request["record"], **files)
+                    result = roster.restore_agent(request["record"], commands_dir=commands_dir, **files)
                 elif op == "read":
                     return roster.read_agent(request["name"], agents_dir=folder)
                 else:
                     result = roster.text_agent(request["name"], request["text"], agents_dir=folder,
                                                backups=paths["backups"])
                 keys = ("agent", "kind", "action", "presets", "changed", "copy_of", "template", "model", "skills",
-                        "permission", "structure_file", "record", "removed", "restored", "name", "description",
+                        "permission", "structure_file", "record", "removed", "restored", "renamed", "name", "description",
                         "text", "warnings", "message")
                 return {key: result[key] for key in keys if key in result}
 
@@ -381,7 +412,8 @@ def make_server(
                     # The roster is read from the same preset file and agents folder the endpoints write.
                     where = {**({"roster_config": skills_config} if skills_config is not None else {}),
                              **({"agents_dir": agents_dir} if agents_dir is not None else {}),
-                             **({"config_dir": opencode_dir} if opencode_dir is not None else {})}
+                             **({"config_dir": opencode_dir} if opencode_dir is not None else {}),
+                             **({"db_path": sessions_db} if sessions_db is not None else {})}
                     snapshot = build_snapshot(graph_dir=graph_dir, root_id=session, cwd=cwd,
                                               session_graph_dir=None if graph_dir else ORCHESTRATION_GRAPH_DIR, **where)
                 document = snapshot_document(snapshot, "demo" if use_demo else "live", task,
@@ -389,6 +421,10 @@ def make_server(
                                              structure=None if use_demo else load_structure(structure_dir))
                 if not use_demo:
                     document["learning"] = learning_document(ledger_root, config_path=paths["config"])
+                    flowrun.annotate(document, structure_dir=structure_dir,
+                                     ledger=ledger_home(ledger_root, config_path=paths["config"]),
+                                     graph_paths=[graph.path for graph in snapshot.graphs],
+                                     db_path=sessions_db if sessions_db is not None else DB_PATH)
                     document["skills"] = skills_document(skills_dir=skills_dir)
                     skillset.annotate(document, config=paths["config"], profiles=paths["profiles"],
                                       agents_dir=agents_dir or roster.AGENTS_DIR, skills_dir=skills_dir)

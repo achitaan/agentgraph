@@ -120,6 +120,22 @@ After the problems, `check` prints lines that start with `advice:`. They never f
 
 `check` also enforces the flows drawn in the structure folder (`structure/flows/`, see `structure/README.md`; `--structure DIR` reads another folder, and exits 2 when that folder does not exist or holds no group folder; a missing default folder just means no flows). A flow applies to every `implement`, `design`, `research` or `decision` node of its first agent (the second when the hub is first) that has not passed, and wants the rest of the path as a chain from that node: a step to a new agent needs a node run by that agent that follows the current one (lists it in `depends_on`, or is a `gate` whose `feedback_to` names it); a step back to an agent already on the path needs the current node to be a `gate` whose `feedback_to` names that agent's node on the chain, and the chain goes on from there. A node run by a council seat counts as the council's (the lead's `seats` prefix). The hub as the last step adds nothing. An agent's loop on itself (a path `A → A`: it checks its own work against the task's evaluation and repeats until it passes) adds no rule either; `check` prints it with the others. A missing step is one problem per starting node, such as `n12 (impl-openai) is not followed by verifier: flow impl-openai → verifier → impl-openai`. After its result lines, `check` prints every flow (path, id and the user's instruction, under `flows:`) so the orchestrator follows them when it shapes a graph; this changes neither the exit code nor the first line.
 
+A flow file may also carry `name: NAME` (2 to 32 lowercase letters, digits and `-`, unique among flows) and `command: on` (the path is also the slash command `/NAME`, see `COMMANDS.md`) after its `path:` line; `check` ignores both. `agentgraph flow prompt ID --goal-file F|-` prints the message that runs a path on a goal: it asks the orchestrator to declare the task graph so that this check passes, with the goal and the flow's instruction fenced as data.
+
+#### What a path costs (`structure flows --stats`, the snapshot's `structure.flows[].stats`)
+
+A **run** of a flow is a task graph that followed it: the test above turned round (`check.flow_chains`), so a node of the flow's first agent (of a start type, whatever its status) has the rest of the path after it as a chain. The graphs come from the run ledger (`runs.jsonl` written by `agentgraph record`, newest row per graph path; `--ledger DIR`, default the active preset's ledger) and from the graph files the caller already reads (the server's graphs; `--graphs DIR` on the command line); each graph counts once. Each is read from its graph file, because a ledger row keeps no edges: a ledger row whose graph file is gone is not counted. `stats` is `null` for a flow that never ran, else:
+
+| Field | Where it comes from |
+|---|---|
+| `runs` | The number of graphs that followed the flow. |
+| `passed` | Of those, the ones whose task passed: the ledger's `outcome` for a recorded graph, the graph's `status` for one not yet recorded. |
+| `rounds.avg`, `rounds.max` | Per run, the most `attempts` of a node on the flow's chain (the ledger's node record, else the graph file's). `null` when any run has a chain node without `attempts`. |
+| `cost.total`, `cost.avg` | Per run, what the chain's nodes cost: the ledger's `worker_cost` when the chain's nodes hold every session the graph names and the ledger knew each one's cost; else the sum of those sessions' costs in OpenCode's database (`--db`). `null` for the whole field when any run has a chain node without a session, a session that also served a node off the chain (its cost cannot be split), or a cost the database does not hold. |
+| `last` | The newest run's `updated` time (seconds); `null` when no run has one. |
+
+Nothing is written; an unknown number is `null`, never an estimate.
+
 ## Recording a finished graph
 
 `agentgraph record` saves graphs whose `status` is `passed`, and which pass `check`, to the run ledger in `~/.config/opencode/orchestration/memory/`. `agentgraph record --task NAME --abandoned` saves one unfinished graph, for a task that was given up. The ledger is what the `improve-orchestration` skill reads.

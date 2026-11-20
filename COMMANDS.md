@@ -16,6 +16,14 @@ Global command files live in `~/.config/opencode/commands/`; the toolkit's copie
 
 `--messages` reads the OpenCode V2 database in read-only mode. It returns up to 150 root-chat user messages, with at most 600 characters per excerpt and 30,000 characters of excerpt text total, plus a count of eligible messages omitted. It prefers original display text when available and excludes identifiable slash commands. A template saved as ordinary user text without presentation metadata cannot reliably be distinguished. A batch checkpoint advances separately from the single-proposal watermark; capped scans keep their backlog.
 
+## Paths as commands
+
+`agentgraph flow command ID --on` (or the graph view) makes a named path the command `/NAME`: it writes `NAME.md` into `~/.config/opencode/commands/` (`--commands DIR` for another folder). The file starts with the marker line `# agentgraph: flow command ...` in its frontmatter, sets only `description`, and its body is the path's run message (`agentgraph flow prompt`) with `$ARGUMENTS` as the goal, so `/NAME add a health endpoint` asks the orchestrator to run the path on that goal in the current session. Renaming the path renames the file, changing its instruction rewrites it, `--off` or removing the path deletes it, and undoing any of these writes the same bytes again. A file without the marker, or one whose bytes were changed by hand, is never replaced or removed.
+
+Refused names: OpenCode's own commands (2.3.2: `init`, `review`, `goal`, the Desktop and terminal slash commands such as `reload`, `undo`, `new`, `compact`), the oh-my-opencode-slim plugin's (`deepwork`, `reflect`, `loop`, `interview`, `implement`), the seven toolkit commands above, and any existing file the toolkit did not write. An instruction holding `$ARGUMENTS`, `$1`…`$9` or a `` !` `` shell block is refused for a command, because OpenCode would replace or run it.
+
+Measured on a scratch OpenCode 2.3.2 server with the plugin loaded (`.opencode/artifacts/agentgraph-desktop/n96/r1/command-proof.md`): a new command file is **not** live at once, despite the documentation quoted below; it appears after the configuration is reloaded (Desktop: `/reload`) or after a restart. The answer to `--on` says so (`applies`, `live: false`). OpenCode 2.3.2's command code (read in the installed server, not run) also runs any `` !`...` `` it finds in the expanded text, including text typed after `/NAME`: a goal given to a command must not contain a shell block.
+
 ## OpenCode V2 command format
 
 [OpenCode Commands](https://opencode.ai/docs/commands), read by the orchestrator on 2026-11-19 via `https://opencode.ai/v2/docs/commands`:

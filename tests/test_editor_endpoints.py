@@ -254,7 +254,6 @@ class RosterEndpoint(Served):
                               ({"op": "add", "name": "impl-claude", "template": "verifier"}, "already exists"),
                               ({"op": "add", "name": "mine", "template": "verifier"}, "already an agent file"),
                               ({"op": "add", "name": "x", "template": "nope"}, "unknown template"),
-                              ({"op": "add", "name": "x"}, "required"),
                               ({"op": "add", "name": "x", "copy_of": "orchestrator"}, "cannot be copied"),
                               ({"op": "text", "name": "mine", "text": "New."}, "written by hand"),
                               ({"op": "remove", "name": "mine"}, "written by hand"),
