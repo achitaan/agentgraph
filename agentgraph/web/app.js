@@ -66,6 +66,10 @@
     const openFolds = new Set();
     const lazySteps = new WeakMap();
     const camera = { x: 0, y: 0, scale: 1, initialized: false, touched: false, width: 0, height: 0 };
+    // Each pan or zoom of the user's sets `own`: counted, so closing the details can tell whether the user moved the view
+    // while they were open (n114).
+    let ownView = false, userMoves = 0;
+    Object.defineProperty(camera, 'own', { enumerable: true, get: () => ownView, set: value => { if (value) userMoves++; ownView = !!value; } });
     const pointers = new Map();
     let drag = null, pinch = null, suppressClick = false;
     // Drawing flows: only when the host can write the structure. A click starts a path at an agent, each
@@ -430,6 +434,12 @@
       const left = 2 - bounds.left * camera.scale, right = width - 2 - bounds.right * camera.scale;
       camera.x = right >= left ? clamp(steady ? camera.x : width / 2, left, right) : clamp(camera.x, right, left);
     }
+    // After the picture changed under a view the user placed: it is not pulled to the picture's new edges (n114), only
+    // back to it when none of it is left in view. (The pan limits apply again as soon as the user pans.)
+    function holdPan() {
+      const b = graphBounds(), s = camera.scale;
+      if (!b || b.right * s + camera.x < 0 || b.left * s + camera.x > viewport.clientWidth || b.bottom * s + camera.y < 0 || b.top * s + camera.y > viewport.clientHeight) clampPan(true);
+    }
     // Zooming out (wheel, pinch, keys) stops before names go under 11 px (agent names are 12 px in the drawing), the
     // floor Fit keeps too: the user's rule is that names are never drawn smaller.
     const NAME_FLOOR = READABLE;
@@ -441,14 +451,23 @@
       camera.y = y - (y - camera.y) * next / camera.scale;
       camera.scale = next; camera.touched = true; camera.own = true; transform();
     }
+    // The narrow canvas moves down under the figures while the details are open (and back up as they close): a view the
+    // user placed keeps the drawing where it was on screen (n114). Before anything measures the view against the canvas.
+    function followCanvas() {
+      const top = viewport.offsetTop, lowered = top - (camera.top ?? top);
+      camera.top = top;
+      if (lowered && camera.own && camera.initialized) camera.y -= lowered;
+    }
     // Bring the selected agent, with its name and its count, fully into the space the details leave uncovered
     // (the graph may be larger than that space: it is never shrunk below a readable size).
     function reveal() {
+      followCanvas();
       const point = selected?.type === 'agent' || selected?.type === 'work-loop' ? positions.get(selected.key) : null;
       const width = viewport.clientWidth, height = viewport.clientHeight;
       if (!point || !width || !height) return;
       // An open agent comes into view with the agents its paths join it to, when they fit together (n103).
-      if (selected.type === 'agent') {
+      // (Not in a view the user placed: only the agent itself comes into view, n114.)
+      if (selected.type === 'agent' && !camera.own) {
         const names = [selected.key, ...new Set(routes().flatMap(flow => (flow.path || []).flatMap((name, i, path) => name !== selected.key ? [] : [path[i - 1], path[i + 1]]).filter(name => name && name !== selected.key && positions.has(name))))];
         if (names.length > 1 && revealNames(names, true)) { clampPan(true); clearOfCovers(point); transform(); return; }
       }
@@ -460,7 +479,7 @@
       if (!outside) return;
       // Only as far as it takes, so a view the user placed moves least (n103).
       revealNames([selected.key]);
-      clampPan(); clearOfCovers(point); transform();
+      clampPan(camera.own); clearOfCovers(point); transform();
     }
     function fitView(userAction) {
       if (!positions.size) return;
@@ -533,7 +552,8 @@
     // as it is. An automatic view stays too when only a loop formed or went or an agent was added (nothing else moved,
     // so nothing else moves on screen); it only pans what moved (and the open agent) into view. Otherwise it is fitted again.
     function settleCamera() {
-      if (camera.own) { clampPan(true); transform(); return; }
+      followCanvas();
+      if (camera.own) { holdPan(); transform(); return; }
       if (!layoutChange.steady) { fitView(false); return; }
       revealNames(layoutChange.changed);
       clampPan(true); transform();
@@ -702,7 +722,8 @@
     // loops meet only at an agent on both, and touch there rather than cross). Its moving agents, circle and name, land
     // clear of everything else. Of the places that do, the one that moves its agents least and grows the picture least.
     // Nothing else moves, so removing the loop puts every agent back.
-    const RING_SPACE = 12, RING_CLEAR = 8, RING_APART = 24;
+    // RING_CLEAR: the floor under that (n114, the user's ruled 8 px), never given up for anything else.
+    const RING_SPACE = 12, RING_CLEAR = RING_SPACE - 4, RING_APART = 24;
     // An agent's name box round its centre: as last drawn, else estimated from its length.
     function labelBox(name, r, labelUp, lead) {
       const p = positions.get(name);
@@ -740,7 +761,9 @@
       const extent = list => ({ left: Math.min(...list.map(s => Math.min(s.x - s.r, s.box.left))), right: Math.max(...list.map(s => Math.max(s.x + s.r, s.box.right))), top: Math.min(...list.map(s => Math.min(s.y - s.r, s.box.top))), bottom: Math.max(...list.map(s => Math.max(s.y + s.r, s.box.bottom))) });
       // The picture as it is without loops; what stays put; and the room the canvas has round the picture's middle (the
       // figures take the top; a wide canvas as the details leave it), so a loop formed there stays in view.
-      const area = extent(targets.map(target => shapeOf(target))), shapes = targets.filter(target => !movers.has(target.name)).map(target => shapeOf(target));
+      // (Agents the user put somewhere are left out of the room's measure: dropping or dragging one moves no loop, n114;
+      // a loop still keeps clear of them.)
+      const own = targets.filter(target => !target.pinned), area = extent((own.length ? own : targets).map(target => shapeOf(target))), shapes = targets.filter(target => !movers.has(target.name)).map(target => shapeOf(target));
       // A wide canvas shows the picture at up to 1.3 times, with the details open and closed: the room is what both show.
       const across = area.right - area.left || 1, high = area.bottom - area.top || 1;
       let half = Infinity, halfY = Infinity;
@@ -770,13 +793,13 @@
         // How far `e` takes the picture out of the room. A wide view stays where it is when a loop forms: the room round the
         // picture's middle. A narrow one is fitted again as the details open, round the whole picture (what stays, the
         // agents earlier loops moved and their circles): the whole may then be no wider or taller than the room (n114).
-        const whole = extent([...shapes, ...bands.map(band => ({ x: band.x, y: band.y, r: band.r, box: { left: band.x, right: band.x, top: band.y, bottom: band.y } }))]);
+        const whole = extent([...shapes.filter(s => !byName.get(s.name)?.pinned), ...bands.map(band => ({ x: band.x, y: band.y, r: band.r, box: { left: band.x, right: band.x, top: band.y, bottom: band.y } }))]);
         const beyond = e => canvas.wide ? Math.max(0, centre - half - e.left) + Math.max(0, e.right - centre - half) + Math.max(0, middle - halfY - e.top) + Math.max(0, e.bottom - middle - halfY)
           : Math.max(0, Math.max(e.right, whole.right) - Math.min(e.left, whole.left) - 2 * half) + Math.max(0, Math.max(e.bottom, whole.bottom) - Math.min(e.top, whole.top) - 2 * halfY);
         let best = null;
         // The ring's line at (x, y): how far it comes into what stays and into the other loops.
         const lineBad = (x, y) => {
-          let bad = hub ? Math.max(0, radius + RING_SPACE - boxNear(hub.box, x, y)) : 0;
+          let bad = hub ? Math.max(0, radius + RING_SPACE - boxNear(hub.box, x, y)) + 1000 * Math.max(0, radius + RING_CLEAR + 2 - boxNear(hub.box, x, y)) : 0;
           for (const s of others) { bad += insideOf(s, x, y, radius) + tightOf(s, x, y, radius); if (best && bad > best.bad) return bad; }
           bands.forEach(band => {
             const d = Math.hypot(x - band.x, y - band.y) || 1e-6, shared = ring.names.find(name => band.names.includes(name));
@@ -5004,9 +5027,7 @@
     });
     listen(viewport, 'wheel', event => {
       event.preventDefault(); const rect = viewport.getBoundingClientRect();
-      if (arrangement === 'compact' && !event.ctrlKey && !event.metaKey) {
-        camera.y -= event.deltaY; camera.touched = true; camera.own = true; clampPan(); transform(); return;
-      }
+      // A plain wheel zooms at every width, as Ctrl+wheel and a pinch do (n114: one gesture, one meaning); a drag pans.
       zoomAt(camera.scale * Math.exp(-clamp(event.deltaY, -160, 160) * .007), event.clientX - rect.left, event.clientY - rect.top);
     }, { passive: false });
     listen(nodeLayer, 'click', event => {
@@ -5306,22 +5327,28 @@
         // (then their view stays). A change of the pane's own size, or of arrangement, refits as before.
         // Closing the details puts an automatic view back where it was before they opened (n103: a loop drawn while
         // they were open moves nothing else on screen); only what moved meanwhile is panned into view.
+        // A view the user placed (n114) stays as it is on screen while the details open (the canvas only moves down under
+        // the figures), and goes back where it was when they close, unless the user panned or zoomed meanwhile.
+        followCanvas();
         const shown = !detail.hidden, before = closedView;
         if (!shown || paneResized || switched) closedView = null;
-        const back = !shown && detailsWere && before && before.pane === root.clientWidth + 'x' + root.clientHeight && before.arrangement === arrangement && resized && !camera.own && !switched && !paneResized;
+        const back = !shown && detailsWere && before && before.pane === root.clientWidth + 'x' + root.clientHeight && before.arrangement === arrangement && resized && (!camera.own || before.moves === userMoves) && !switched && !paneResized;
+        const kept = !back && camera.own && camera.initialized && !switched && !paneResized;
         detailsWere = shown;
-        if (back) {
+        if (kept) { Object.assign(camera, { width: rect.width, height: rect.height }); transform(); }
+        else if (back) {
           Object.assign(camera, { x: before.x, y: before.y, scale: before.scale, width: rect.width, height: rect.height });
           const moved = visibleAgents.map(a => a.name).filter(name => before.at.get(name) !== JSON.stringify(finalOf(name) && [finalOf(name).x, finalOf(name).y]));
           if (moved.length) revealNames(moved);
-          clampPan(true); transform();
+          if (camera.own) holdPan(); else clampPan(true);
+          transform();
         } else if ((resized || !camera.initialized) && !(camera.own && camera.initialized && !switched && !paneResized)) { fitView(false); reveal(); } else { clampPan(); transform(); }
         orbitRefit();
       });
     }
-    // The automatic view as the details open (before anything pans for them), to go back to when they close.
+    // The view as the details open (before anything pans for them), to go back to when they close.
     function rememberClosedView() {
-      closedView = camera.initialized && !camera.own ? { x: camera.x, y: camera.y, scale: camera.scale, pane: root.clientWidth + 'x' + root.clientHeight, arrangement, at: new Map(visibleAgents.map(a => [a.name, JSON.stringify(finalOf(a.name) && [finalOf(a.name).x, finalOf(a.name).y])])) } : null;
+      closedView = camera.initialized ? { x: camera.x, y: camera.y, scale: camera.scale, moves: userMoves, pane: root.clientWidth + 'x' + root.clientHeight, arrangement, at: new Map(visibleAgents.map(a => [a.name, JSON.stringify(finalOf(a.name) && [finalOf(a.name).x, finalOf(a.name).y])])) } : null;
     }
     const resize = new ResizeObserver(scheduleResize);
     root.classList.toggle('ag-compact', root.clientWidth > 0 && root.clientWidth <= 650);
