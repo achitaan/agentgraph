@@ -263,19 +263,37 @@ export function createPlugin(host) {
     return node;
   }
 
-  // `fixed`: an orbit line, never selected with the mouse (a press and a drag there turn the 3D view instead)
-  function lineNode(line, tones, fixed = false) {
-    const selectable = fixed ? false : undefined;
-    if (!line.length) return element("text", { wrapMode: "none", fg: colorProp(tones.muted.fg), selectable }, [" "]);
+  function lineNode(line, tones) {
+    if (!line.length) return element("text", { wrapMode: "none", fg: colorProp(tones.muted.fg) }, [" "]);
     return element(
       "box",
       { flexDirection: "row", width: "100%", flexShrink: 0 },
       line.map((span) => {
         const tone = tones[span.tone] || tones.plain;
         const own = span.color ? colorProp(span.color) : undefined; // the orbit's group colours
-        return element("text", { fg: own || colorProp(tone.fg), attributes: !own && tone.bold ? BOLD : undefined, wrapMode: "none", flexShrink: 0, selectable }, [span.text]);
+        return element("text", { fg: own || colorProp(tone.fg), attributes: !own && tone.bold ? BOLD : undefined, wrapMode: "none", flexShrink: 0 }, [span.text]);
       }),
     );
+  }
+
+  // An orbit line: one `text`, never selected with the mouse (a press and a drag there turn the 3D view instead),
+  // whose spans carry the colours. A span is not a renderable of its own, so the mouse lands on the line's `text`;
+  // the painter keeps that node while the orbit shows and swaps only its spans (sceneSpans, then host.insert with
+  // the old spans as the current children). OpenTUI finds the target of a press in the hit grid of its last paint
+  // and drops the press when that renderable has been destroyed since (hitTest gives 0); a line replaced between
+  // two paints therefore swallowed a click that came in between, as during the 2D/3D morph, which redraws every row.
+  function sceneSpans(line, tones) {
+    const spans = line.length ? line : [{ text: " ", tone: "muted" }];
+    return spans.map((span) => {
+      const tone = tones[span.tone] || tones.plain;
+      const own = span.color ? colorProp(span.color) : undefined; // the orbit's group colours
+      const fg = own || colorProp(tone.fg);
+      // a span takes its colour from `style`; OpenTUI ignores a span's `fg` property, kept for the tests' colour checks
+      return element("span", { fg, style: !own && tone.bold ? { fg, bold: true } : { fg } }, [span.text]);
+    });
+  }
+  function sceneRow(spans) {
+    return element("text", { wrapMode: "none", flexShrink: 0, selectable: false }, spans);
   }
 
   // Last resort when drawing failed: one line of text with no colour or other property that could fail again.
@@ -887,9 +905,9 @@ export function createPlugin(host) {
     // The mouse on the orbit (OpenTUI's onMouseDown, onMouseDrag and onMouseUp on the panel's root box; a press on
     // any line of the scene bubbles up to it): a click switches 2D and 3D, as `d` does; a drag turns the 3D view (a
     // column across 6 degrees round the upright axis, a row 12 degrees of elevation) and switches nothing. The list
-    // ignores the mouse, as before. OpenTUI sends a drag's motion to the line that was pressed, and a turn redraws
-    // (replaces) that line, after which its drags go nowhere; the line under the pointer still gets "over" with the
-    // button held (onMouseOver), which carries the drag on.
+    // ignores the mouse, as before. OpenTUI sends a press to the line under it and a drag's motion to the line that
+    // was pressed; a redraw keeps the lines' nodes (sceneSpans), so neither is lost. Should a line go (a resize), the
+    // line under the pointer still gets "over" with the button held (onMouseOver), which carries the drag on.
     let press = null; // { x, y, lastX, lastY, dragged } from the left button's press on the orbit
     const orbitShown = () => rows.scene && !dialogOpen();
     const cell = (e, key) => Math.floor(Number(e && e[key]));
@@ -1011,7 +1029,15 @@ export function createPlugin(host) {
           else lines = compute(snap, size);
           prepared = null;
           const keys = lines.map(lineKey);
-          const next = lines.map((line, i) => (rows[i] && rows[i].key === keys[i] ? rows[i] : { key: keys[i], node: lineNode(line, tones, true) }));
+          // a changed line keeps its node and gets new spans: the node under the mouse stays (sceneSpans)
+          const next = lines.map((line, i) => {
+            const old = rows[i];
+            if (old && old.key === keys[i]) return old;
+            const spans = sceneSpans(line, tones);
+            if (!old) return { key: keys[i], node: sceneRow(spans), spans };
+            host.insert(old.node, () => spans, undefined, old.spans);
+            return { key: keys[i], node: old.node, spans };
+          });
           rows = next;
           drawn = keys.join("\n");
           return rows.map((r) => r.node);
@@ -1033,6 +1059,7 @@ export function createPlugin(host) {
     // The panel's root box fills the panel; its measured size decides between the orbit and the list.
     function panelRender(panel, watcher, painter, isOurs, keys) {
       try {
+        painter.forget(); // a new root: none of the last panel's rows (the host destroyed them with it)
         const [size, setSize] = host.createSignal(null);
         let root = null;
         const measure = function () {

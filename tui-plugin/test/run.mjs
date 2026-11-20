@@ -3072,9 +3072,11 @@ test("orbit panel: a click on the orbit switches 2D and 3D, a drag turns the 3D 
     assert.ok(listText.every((t) => t.props.selectable === undefined), "list text keeps the host's selection");
     pressG(state);
     assert.ok(isOrbit(screen(view)) && !has3D(screen(view)));
-    // scene text is not selectable: a press and a drag there turn the view instead of selecting
+    // scene text is not selectable: a press and a drag there turn the view instead of selecting (each of the 40
+    // rows one `text`, its colours in spans)
     const sceneTexts = view.children.flatMap((row) => (row.tag === "text" ? [row] : row.children));
-    assert.ok(sceneTexts.length > 40 && sceneTexts.every((t) => t.props.selectable === false));
+    assert.ok(sceneTexts.length >= 40 && sceneTexts.every((t) => t.props.selectable === false));
+    assert.ok(sceneTexts.every((t) => t.children.every((c) => c.tag === "span")));
     // a click: 3D (the camera moves over CHANGE_MS)
     click(60, 18);
     clockRef.t += S.CHANGE_MS + 50;
@@ -3490,6 +3492,77 @@ test("orbit sky panel: no streak on opening or switching to 3D; a run finished w
     await sleep(250);
     assert.equal(streakLines().length, 1, "no streak for a run finished in 2D");
     assert.equal(tails(screen(view)), 0);
+  } finally {
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    stop();
+  }
+});
+
+// OpenTUI's hit test, as the real host does it (OpenCode 2.3.2): a press goes to the renderable at its cell in the
+// last paint (a `box` or a `text`; a `span` is drawn as part of its `text`), and is dropped when that renderable has
+// left the tree since (hitTest gives 0); otherwise it bubbles up to the panel's root box.
+const paintOf = (view) => view.children.map((row) => ({ row, kids: row.tag === "box" ? row.children.slice() : null, text: nodeText(row) }));
+const hitAt = (painted, x, y) => {
+  const p = painted[y];
+  if (!p) return null;
+  if (!p.kids) return p.row;
+  let col = 0;
+  for (const t of p.kids) {
+    col += [...nodeText(t)].length;
+    if (x < col) return t;
+  }
+  return p.row;
+};
+const inTree = (node, target) => node === target || (!!node && typeof node === "object" && node.children.some((c) => inTree(c, target)));
+const hostClick = (view, painted, x, y) => {
+  const target = hitAt(painted, x, y);
+  if (!target || !inTree(view, target)) return false; // dropped, as OpenTUI drops it
+  view.props.onMouseDown({ type: "down", button: 0, x, y });
+  view.props.onMouseUp({ type: "up", button: 0, x, y });
+  return true;
+};
+
+test("orbit panel: a click during or right after the 2D/3D morph is never lost (at 0, 100, 350, 690 and 710 ms after the first), though the rows redraw between the host's paint and the press", async () => {
+  const { plugin, clockRef } = makeScenePlugin();
+  const { ctx, state, panelClaim } = makePanelHost();
+  const stop = plugin.setup(ctx);
+  globalThis.__agentgraphStub.cleanups.length = 0;
+  try {
+    const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
+    await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
+    sizePanel(view, 120, 40);
+    pressG(state);
+    commandOf(state, "agentgraph.graph.dimension").run();
+    clockRef.t += S.CHANGE_MS + 50;
+    await waitFor(() => has3D(screen(view)), 3000, "3D");
+    const [x0, y0] = [60, 18];
+    let raced = 0;
+    for (const d of [0, 100, 350, 690, 710]) {
+      await sleep(250);
+      assert.ok(has3D(screen(view)), `steady 3D before the click at ${d} ms`);
+      // the first click, on the 3D orbit as painted: 2D
+      assert.ok(hostClick(view, paintOf(view), x0, y0), "the first click lands");
+      const t1 = clockRef.t;
+      // the host's last paint before the second click, then a tick redraws the rows, then the press comes
+      let painted = paintOf(view);
+      if (d > 0) {
+        clockRef.t = t1 + Math.max(0, d - 100);
+        await sleep(250);
+        painted = paintOf(view);
+      }
+      clockRef.t = t1 + d;
+      await sleep(250);
+      const now = paintOf(view);
+      const changed = now.findIndex((p, i) => i >= 4 && painted[i] && p.text !== painted[i].text);
+      if (d > 0) assert.ok(changed >= 0, `the rows redrew between the paint and the click at ${d} ms`);
+      const [x, y] = changed >= 0 ? [Math.min(...[...now[changed].text].map((ch, k) => (ch !== [...painted[changed].text][k] ? k : 1e9))), changed] : [x0, y0];
+      if (changed >= 0) raced += 1;
+      const landed = hostClick(view, painted, x, y);
+      clockRef.t += S.CHANGE_MS + 50;
+      await sleep(300); // a frame at the new time drawn (early in the morph the frame still looks 3D)
+      await waitFor(() => has3D(screen(view)), 3000, `the click at ${d} ms switched back to 3D (${landed ? "it landed" : "lost: the line under it was replaced"})`);
+    }
+    assert.ok(raced >= 4, `the race was run ${raced} times`);
   } finally {
     for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
     stop();
