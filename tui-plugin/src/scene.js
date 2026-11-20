@@ -9,8 +9,14 @@
  *   previous  { doc, at }: the document drawn before this one and when this one arrived (the spend bars tween)
  *   view      "2d" (default): the ring seen from above, in braille dots
  *             "3d": the same system as a turning solid figure, drawn with characters chosen by depth
- *   change    { from, at }: the camera moves from view `from` to `view`, starting at `at` (ms), for CHANGE_MS
+ *   change    { from, at }: the morph from view `from` to `view`, starting at `at` (ms), for CHANGE_MS
  *   colors    { dark, muted }: the theme's background is dark (default) or light, and its muted colour "#rrggbb"
+ *   orbit     { turn, elevation, resume }: the 3D camera turned by hand (orbitCamera, orbitTurned, orbitReset)
+ *   keys      [[key, label], ...]: in 3D, one muted text of the pairs that fit on the canvas's bottom row
+ *   streaks   [{ flow, run, at }]: in 3D, a shooting star for that finished run starting at `at` (ms), STREAK_MS long,
+ *             ending where the run's star then stays (the panel adds one per run that finishes while 3D shows)
+ *   motion    "reduced": no streak (the run's star appears at `at`), no fade of the sky (shown only in steady 3D)
+ *   sky       false: no sky (for the tests)
  *
  * From the top: one header row (the list's first line, with dollars), at most three "needs you" lines, the canvas,
  * then the instruments (context chart, steps strip, spend bars).
@@ -18,7 +24,8 @@
  * 2D: braille cells, each 2 dots wide and 4 tall; as a terminal cell is about twice as tall as it is wide, a dot is
  * about square, so geometry is done in dots and comes out round. The hub is a ring outline with open space inside.
  * 3D: every structure group has its own orbit ring round the hub, each tilted differently; the figure turns round its
- * vertical axis once in TURN_MS and is drawn far to near with `·` `.` `:` `0` `1` `@`, far parts dimmed.
+ * vertical axis once in TURN_MS and is drawn far to near with `·` `.` `:` `0` `1` `@`, far parts dimmed. Behind it, in 3D
+ * only, a sky (drawSky): sparse fixed stars, one warmer star per finished run, a streak when a run finishes.
  *
  * Pure: no host imports, no timers, no mutation of the document. The layout of a document at a size is cached.
  */
@@ -26,7 +33,7 @@ import {
   SPINNER, MARK_HUB, MARK_IDLE, SENT_BACK, ATTENTION, LOOP_MARK, BAR_FULL, BAR_EMPTY, ELLIPSIS,
   charWidth, displayWidth, truncate, clean, clipLine, lineWidth, formatDollars, formatTokens, seatName, isAnimated,
   isObject, list, busyCount, finiteNumber, rounds, validAgents, findHub, hubWorking, currentGoal, agentCost,
-  numberSpans, spinnerGlyph, wearParts, needsEntries, needsLine,
+  numberSpans, spinnerGlyph, wearParts, needsEntries, needsLine, flowsOf,
 } from "./render.js";
 
 export const SCENE_MIN_WIDTH = 64;
@@ -40,10 +47,36 @@ export const MARK_DONE = "●";
 export const MARK_FAILED = "✗";
 export const IDLE_LAP_MS = 20000;
 export const TURN_MS = 40000; // one turn of the 3D figure
-export const CHANGE_MS = 700; // the camera's move between the views
-export const ELEVATION_3D = 0.5; // radians above the figure's equator
+export const CHANGE_MS = 700; // the morph between the views (see morphCamera)
+// The 3D view is a side view: the camera ELEVATION_3D radians above the figure's plane, looking across it. The one
+// place the starting elevation is set (orbitCamera's default, orbitReset, the morph's target).
+export const ELEVATION_3D = 0.5;
 export const DEPTH_CHARS = Object.freeze(["·", ".", ":", "0", "1", "@"]); // far to near
+// Turning the 3D figure by hand (see orbitCamera): the self-turn waits RESUME_MS after the last input, then goes on
+// from where the user left it. The elevation stays between the figure's plane (0) and straight above (PI/2).
+export const RESUME_MS = 3000;
+export const TURN_STEP = Math.PI / 12; // one key press: 15 degrees round the upright axis
+export const ELEVATION_STEP = Math.PI / 24; // one key press: 7.5 degrees up or down
+export const ELEVATION_MIN = 0;
+export const ELEVATION_MAX = Math.PI / 2;
+export const DRAG_TURN_PER_CELL = Math.PI / 30; // a drag: 6 degrees per column across
+export const DRAG_ELEVATION_PER_ROW = Math.PI / 15; // and 12 per row up or down (a row is about two columns tall)
 export const CANVAS_MIN_ROWS = 12;
+// The sky behind the 3D view (drawSky). Field stars by size (dim to bright; none of DEPTH_CHARS); a run's star is
+// RUN_STAR_CHAR in a warmer, brighter colour.
+export const STAR_CHARS = Object.freeze(["'", "'", "+"]);
+export const RUN_STAR_CHAR = "*";
+export const STREAK_CHARS = Object.freeze({ head: "*", down: "\\", up: "/" }); // the head; the tail: "\\" or "/" by its slope
+export const STAR_DENSITY = 1 / 70; // field stars per cell of the sky (about 1.4 % of the canvas)
+export const RUN_STARS_MAX = 200;
+export const STREAK_MS = 900; // a shooting star's flight
+export const STREAK_GAP_MS = 700; // streaks that start together are spaced this far apart (the panel)
+export const PARALLAX = 1 / 3; // the sky moves about a third as far as the figure's near side when it turns
+const SKY_SEED = 0x5ca1ab1e;
+const STAR_FADE = [0.55, 0.3, 0]; // small to large: the stars' colour toward the background
+const SKY_DEPTH = -3; // below every part of the figure (the farthest is about -1.01): any figure cell covers a star
+const STREAK_DEPTH = -2;
+const STREAK_LEN = 7; // cells, one row and one column a step
 // The group colours, by the theme's background. No green or teal: every hue is outside 80-190 degrees.
 export const GROUP_COLORS = Object.freeze({
   dark: Object.freeze({ council: "#b39ddb", decide: "#7fb2ff", build: "#e8a07c", verify: "#f28fb5", understand: "#e6c15a" }),
@@ -67,7 +100,7 @@ export function sceneFits(width, height) {
   return Number(width) >= SCENE_MIN_WIDTH && Number(height) >= SCENE_MIN_HEIGHT;
 }
 
-// The camera's move between the views at `now`: { from, to, t } with t in [0, 1), or null when there is none.
+// The morph between the views at `now`: { from, to, t } with t in [0, 1), or null when there is none.
 export function changeAt(options, now) {
   const o = isObject(options) ? options : {};
   const to = o.view === "3d" ? "3d" : "2d";
@@ -80,11 +113,18 @@ export function changeAt(options, now) {
   return t >= 0 && t < 1 ? { from, to, t } : null;
 }
 
-// The frame interval: 100 ms while work moves or the camera moves; when idle 250 ms in 2D and 166 ms in 3D.
+// The frame interval: 100 ms while work moves or the views morph; when idle 250 ms in 2D and 166 ms in 3D.
 export function frameInterval(doc, options = {}, now = 0) {
   if (changeAt(options, now)) return FRAME_MS_WORKING;
+  if (streaking(options, now)) return FRAME_MS_WORKING;
   if (isAnimated(doc)) return FRAME_MS_WORKING;
   return isObject(options) && options.view === "3d" ? FRAME_MS_IDLE_3D : FRAME_MS_IDLE;
+}
+
+// A shooting star flies or waits its turn (3D, not reduced motion).
+function streaking(options, now) {
+  if (!isObject(options) || options.view !== "3d" || options.motion === "reduced" || options.sky === false) return false;
+  return (Array.isArray(options.streaks) ? options.streaks : []).some((st) => isObject(st) && Number(now) < Number(st.at) + STREAK_MS);
 }
 
 function sp(text, tone, color) {
@@ -266,6 +306,18 @@ class Canvas {
     this.figDepth[i] = depth;
     this.fig[i] = ch;
     this.figStyle[i] = style;
+    return true;
+  }
+
+  // The cell and its eight neighbours hold no figure character and no text (a star there reads as sky).
+  open(c, r) {
+    for (let rr = r - 1; rr <= r + 1; rr += 1) {
+      for (let cc = c - 1; cc <= c + 1; cc += 1) {
+        if (cc < 0 || rr < 0 || cc >= this.w || rr >= this.h) continue;
+        const i = rr * this.w + cc;
+        if (this.fig[i] !== null || this.text[i] !== null) return false;
+      }
+    }
     return true;
   }
 
@@ -603,8 +655,11 @@ function horizontal(a) {
 }
 
 // -> { rings: [{ key, points }], agents: Map(name -> point), seats: [{ agent, key, lead, point }], arcs, hub }
-export function figure3D(L) {
-  if (L.figure) return L.figure;
+// `rise` (0 to 1) scales every ring's tilt, for the morph: at 0 every ring lies flat on the unit circle and each agent
+// sits at its own 2D azimuth; at 1 (the 3D view, cached) the rings have their full tilt.
+export function figure3D(L, rise = 1) {
+  const k = Number.isFinite(Number(rise)) ? clamp(Number(rise), 0, 1) : 1;
+  if (k === 1 && L.figure) return L.figure;
   const byKey = new Map();
   for (const p of L.placed) {
     if (!byKey.has(p.key)) byKey.set(p.key, []);
@@ -618,7 +673,7 @@ export function figure3D(L) {
     const sx = members.reduce((t, p) => t + Math.sin(p.azimuth), 0);
     const sy = members.reduce((t, p) => t + Math.cos(p.azimuth), 0);
     const node = Math.atan2(sx, sy);
-    const inc = INCLINATIONS[gi % INCLINATIONS.length];
+    const inc = INCLINATIONS[gi % INCLINATIONS.length] * k;
     gi += 1;
     const n = horizontal(node);
     const m = [Math.cos(node) * Math.cos(inc), -Math.sin(node) * Math.cos(inc), Math.sin(inc)];
@@ -666,8 +721,9 @@ export function figure3D(L) {
     const a = (i / 96) * 2 * Math.PI;
     hubRing.push([0.2 * Math.sin(a), 0.2 * Math.cos(a), 0]);
   }
-  L.figure = { rings, agents, seats, arcs, hubRing };
-  return L.figure;
+  const figure = { rings, agents, seats, arcs, hubRing };
+  if (k === 1) L.figure = figure;
+  return figure;
 }
 
 function cross(a, b) {
@@ -682,6 +738,30 @@ function norm(v) {
 // The camera: the figure turned by `turn` round its vertical axis, seen from `elevation` above its equator
 // (PI/2: straight above, as the 2D view). -> project(point) = { col, row, depth } (depth: +1 nearest, -1 farthest)
 export function camera3D(L, turn, elevation) {
+  const dots = cameraDots(L, turn, elevation);
+  return (p) => {
+    const q = dots(p);
+    return { col: Math.floor(q.x / 2), row: Math.floor(q.y / 4), depth: q.depth };
+  };
+}
+
+// The morph between the views, `k` of the way from 2D (0) to 3D (1): a point of the figure (figure3D(L, k)) goes in a
+// straight line on screen from where the 2D view has it, (cx + x rx, cy - y ry) in dots (straight above, unturned,
+// on the 2D ellipse), to where the 3D camera (`turn`, `elevation`) shows it. So each agent travels from its 2D place
+// to its 3D place while its ring tilts up out of the plane. -> project(point) = { col, row, depth }
+export function morphCamera(L, turn, elevation, k) {
+  const dots = cameraDots(L, turn, elevation);
+  const f = clamp(Number(k) || 0, 0, 1);
+  return (p) => {
+    const q = dots(p);
+    const fx = L.cx + p[0] * L.rx;
+    const fy = L.cy - p[1] * L.ry;
+    return { col: Math.floor((fx + (q.x - fx) * f) / 2), row: Math.floor((fy + (q.y - fy) * f) / 4), depth: q.depth };
+  };
+}
+
+// camera3D in dots: project(point) = { x, y, depth }
+function cameraDots(L, turn, elevation) {
   const ce = Math.cos(elevation);
   const se = Math.sin(elevation);
   const scale = (depth) => PERSPECTIVE / (PERSPECTIVE - depth);
@@ -715,7 +795,7 @@ export function camera3D(L, turn, elevation) {
     const up = y * se + p[2] * ce;
     const depth = -y * ce + p[2] * se;
     const s = scale(depth);
-    return { col: Math.floor((L.cx + x * s * hs) / 2), row: Math.floor((L.cy - (up * s - mid) * vs) / 4), depth };
+    return { x: L.cx + x * s * hs, y: L.cy - (up * s - mid) * vs, depth };
   };
 }
 
@@ -1155,10 +1235,12 @@ function digitStream(canvas, cells, now, seed, style, offset = 0) {
   }
 }
 
+// `cam`: { turn, elevation } and, during the morph between the views, `morph` (0: the 2D places, 1: the 3D view).
 function draw3D(doc, L, canvas, S, P, now, frame, cam) {
   const animated = isAnimated(doc);
-  const F = figure3D(L);
-  const project = camera3D(L, cam.turn, cam.elevation);
+  const morphing = Number.isFinite(cam.morph) && cam.morph < 1;
+  const F = morphing ? figure3D(L, cam.morph) : figure3D(L);
+  const project = morphing ? morphCamera(L, cam.turn, cam.elevation, cam.morph) : camera3D(L, cam.turn, cam.elevation);
   const N = Math.max(120, Math.ceil(2 * Math.PI * Math.max(L.rx / 2, L.ry / 2) * 2.5));
   const step = Math.max(1, Math.floor(720 / N));
   // the orbit rings: one per group, near side dense, far side faint
@@ -1169,11 +1251,12 @@ function draw3D(doc, L, canvas, S, P, now, frame, cam) {
       canvas.plot(q.col, q.row, DEPTH_CHARS[lvl], S.get("plain", P.depth(ring.key, lvl), 2), q.depth);
     });
   }
-  // the hub: a small ring round the centre
+  // the hub: a small ring round the centre, in the accent tone while the orchestrator works (the sun lit)
+  const hubStyle = hubWorking(doc, L.hub) ? S.get("accent", undefined, 4) : S.get("plain", undefined, 3);
   for (const p of F.hubRing) {
     const q = project(p);
     const lvl = depthLevel(q.depth * 4);
-    canvas.plot(q.col, q.row, DEPTH_CHARS[lvl], S.get("plain", undefined, 3), q.depth);
+    canvas.plot(q.col, q.row, DEPTH_CHARS[lvl], hubStyle, q.depth);
   }
   // spokes: dotted, from outside the hub's ring to short of the agent
   const spokes = new Map();
@@ -1217,7 +1300,7 @@ function draw3D(doc, L, canvas, S, P, now, frame, cam) {
   }
   // text: the hub's glyph, then the agents' glyphs and names, nearest first; a label never covers a nearer one
   const hubAt = project([0, 0, 0]);
-  canvas.put(hubAt.col, hubAt.row, MARK_HUB, S.get("plain", undefined, 3));
+  canvas.put(hubAt.col, hubAt.row, MARK_HUB, hubStyle);
   const blinkOn = Math.floor(now / 500) % 2 === 0;
   const items = L.placed.map((p, k) => ({ p, k, q: project(F.agents.get(p.agent.name)) })).sort((a, b) => b.q.depth - a.q.depth);
   for (const { p, k, q } of items) {
@@ -1259,15 +1342,192 @@ function draw3D(doc, L, canvas, S, P, now, frame, cam) {
   }
 }
 
-// The camera for a frame: the target view's steady camera, or one on its way between the views.
+// ---------------------------------------------------------------------------------------------------------------
+// The sky (3D only): drawn into the figure's layer below every figure cell, so a ring, spoke, arc or seat covers it,
+// and under the text layer, so it never covers a name, an agent's glyph, the clear cell beside a name or the keys
+// line. Nothing in it moves by itself: it shifts only as the camera turns, and a streak flies only for a run.
+
+function hash32(a, b) {
+  let x = Math.imul((a | 0) ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul((b | 0) + 0x632be5ab, 0xc2b2ae35);
+  x = Math.imul(x ^ (x >>> 16), 0x7feb352d);
+  x = Math.imul(x ^ (x >>> 15), 0x846ca68b);
+  return (x ^ (x >>> 16)) >>> 0;
+}
+
+const unit = (a, b) => hash32(a, b) / 4294967296;
+
+// The finished runs that passed, per drawn path (structure.flows[].stats.passed; a failed run adds none):
+// [{ flow, passed }] in the snapshot's order.
+export function finishedRuns(doc) {
+  return flowsOf(doc).map((f) => ({ flow: f.id, passed: Math.max(0, Math.floor(finiteNumber(f.stats && f.stats.passed) || 0)) }));
+}
+
+// The run stars: one per finished run, [{ flow, run, u, v }] (u, v in [0, 1): its place on the sky, from the path's
+// id and the run's number), every path's first run, then every path's second, and so on, at most RUN_STARS_MAX.
+// Beyond that a new run adds no star (and no streak).
+export function runStars(doc) {
+  const runs = finishedRuns(doc).filter((r) => r.passed > 0);
+  const out = [];
+  for (let n = 1; out.length < RUN_STARS_MAX && runs.some((r) => r.passed >= n); n += 1) {
+    for (const r of runs) {
+      if (r.passed < n || out.length >= RUN_STARS_MAX) continue;
+      const seed = nameSeed(r.flow + "#" + n);
+      out.push({ flow: r.flow, run: n, u: unit(seed, 1), v: unit(seed, 2), down: (seed & 1) === 1 });
+    }
+  }
+  return out;
+}
+
+// The sky's colours from the theme: field stars by size and the run stars (warmer and brighter than the field;
+// dark theme warm white, light theme brown ink). Hues stay outside green.
+export function skyColors(colors) {
+  const dark = !(isObject(colors) && colors.dark === false);
+  const muted = greyOf(isObject(colors) && parseHex(colors.muted) ? colors.muted : dark ? "#808080" : "#8c8c8c"); // its lightness, no hue
+  const warm = mix(muted, dark ? "#f0dcc0" : "#6e5440", 0.3);
+  const background = dark ? "#000000" : "#ffffff";
+  return { stars: STAR_FADE.map((t) => mix(warm, background, t)), run: mix(muted, dark ? "#ffd9a0" : "#8a4f1c", 0.65) };
+}
+
+// Where the sky stands for the camera (turn, elevation): a sky `V` cells wide (at least the canvas) wrapping round,
+// shifted by V a full turn (so it is the same at turn 0 and 2 PI) and by rows as the elevation changes. -> place(u, v)
+function skyPlace(L, cam) {
+  const w = L.w;
+  const h = L.h;
+  const frontCells = (L.rx * FIGURE_SCALE) / 2; // the near side's movement, cells per radian
+  const V = Math.max(w, Math.round(2 * Math.PI * frontCells * PARALLAX));
+  const turn = wrapTurn(Number(cam.turn) || 0);
+  const dc = Math.round((turn / (2 * Math.PI)) * V); // the far side's way: rightward as the turn grows; whole cells, so the sky moves as one
+  const elevation = Number.isFinite(Number(cam.elevation)) ? Number(cam.elevation) : ELEVATION_3D;
+  const dr = -Math.round((elevation - ELEVATION_3D) * (L.ry / 4) * PARALLAX); // up as the camera rises
+  return {
+    V,
+    place(u, v) {
+      const col = Math.floor((((u * V + dc) % V) + V) % V);
+      const row = Math.floor((((v * h + dr) % h) + h) % h);
+      return col < w ? { col, row } : null;
+    },
+  };
+}
+
+// The sky of a 3D frame, drawn after the figure: a field star only where it and its neighbours are empty, so it
+// never touches a ring, a name or a glyph; a run's star and a streak wherever their own cell is empty. `shown` (0 to 1): how much of the sky is in (the morph fades it in toward 3D, out toward
+// 2D: a star shows once the morph passes its own threshold).
+function drawSky(doc, L, canvas, S, cam, now, shown, options) {
+  if (!(shown > 0)) return;
+  const reduced = options.motion === "reduced";
+  if (reduced && shown < 1) return; // reduced motion: no fade, shown in steady 3D only
+  const C = skyColors(options.colors);
+  const { V, place } = skyPlace(L, cam);
+  const n = Math.max(1, Math.round(V * L.h * STAR_DENSITY));
+  const styles = C.stars.map((c) => S.get("muted", c, 1));
+  for (let i = 0; i < n; i += 1) {
+    if (unit(SKY_SEED + i, 4) >= shown) continue;
+    const at = place(unit(SKY_SEED + i, 1), unit(SKY_SEED + i, 2));
+    if (!at) continue;
+    const k = hash32(SKY_SEED + i, 3) % 10;
+    const size = k < 6 ? 0 : k < 9 ? 1 : 2; // mostly small
+    if (canvas.open(at.col, at.row)) canvas.plot(at.col, at.row, STAR_CHARS[size], styles[size], SKY_DEPTH); // clear of the figure
+  }
+  // the run stars; a run whose streak has not landed yet has no star
+  const flying = new Map();
+  for (const st of Array.isArray(options.streaks) ? options.streaks : []) {
+    if (isObject(st) && typeof st.flow === "string" && Number.isFinite(Number(st.at))) flying.set(st.flow + "#" + Math.floor(Number(st.run)), Number(st.at));
+  }
+  const runStyle = S.get("muted", C.run, 2);
+  for (const star of runStars(doc)) {
+    if (unit(nameSeed(star.flow + "#" + star.run), 4) >= shown) continue;
+    const at = place(star.u, star.v);
+    const start = flying.get(star.flow + "#" + star.run);
+    if (start !== undefined && !reduced && shown >= 1) {
+      const t = (now - start) / STREAK_MS;
+      if (t < 0) continue; // its streak is waiting its turn
+      if (t < 1) {
+        streak(canvas, star, at, t, S, C);
+        continue;
+      }
+    } else if (start !== undefined && now < start) continue;
+    if (at) canvas.plot(at.col, at.row, RUN_STAR_CHAR, runStyle, SKY_DEPTH + 0.5);
+  }
+}
+
+// A shooting star, `t` (0 to 1) of its flight: a head and a short tail along a diagonal ending at the run's star. It
+// comes down from the left or the right (by the run's seed), or up from below when the star is too near the top for
+// the streak to fit, and from the other side when it would start off the canvas.
+function streak(canvas, star, end, t, S, C) {
+  if (!end) return;
+  const dy = end.row - (STREAK_LEN - 1) >= 0 ? 1 : -1; // 1: coming down
+  let dx = star.down ? 1 : -1; // 1: coming from the left
+  const startCol = end.col - dx * (STREAK_LEN - 1);
+  if (startCol < 0 || startCol >= canvas.w) dx = -dx;
+  const tailChar = dx * dy > 0 ? STREAK_CHARS.down : STREAK_CHARS.up;
+  const cells = [];
+  for (let j = STREAK_LEN - 1; j >= 0; j -= 1) cells.push({ col: end.col - dx * j, row: end.row - dy * j });
+  const head = Math.floor(t * (cells.length + 2));
+  const headStyle = S.get("muted", C.run, 2);
+  const tailStyle = S.get("muted", C.stars[1], 1);
+  for (let k = 0; k < 3; k += 1) {
+    const c = cells[head - k];
+    if (!c) continue;
+    canvas.plot(c.col, c.row, k === 0 ? STREAK_CHARS.head : tailChar, k === 0 ? headStyle : tailStyle, STREAK_DEPTH);
+  }
+}
+
+function wrapTurn(a) {
+  const full = 2 * Math.PI;
+  return a >= 0 && a < full ? a : ((a % full) + full) % full;
+}
+
+// The 3D camera at `now` from the orbit `{ turn, elevation, resume }` (each optional): the figure stands at `turn`
+// until `resume` (ms), then turns on from there, once in TURN_MS. No orbit: turn 0 at time 0 and ELEVATION_3D, so
+// the angle is 2 PI (now mod TURN_MS) / TURN_MS. -> { turn (0 to 2 PI), elevation, held (true before `resume`) }
+export function orbitCamera(orbit, now) {
+  const o = isObject(orbit) ? orbit : {};
+  const base = Number.isFinite(Number(o.turn)) ? Number(o.turn) : 0;
+  const resume = o.resume !== undefined && o.resume !== null && Number.isFinite(Number(o.resume)) ? Number(o.resume) : null;
+  const t = Number(now) || 0;
+  const run = resume === null ? t : Math.max(0, t - resume);
+  const turn = wrapTurn(base + 2 * Math.PI * ((((run % TURN_MS) + TURN_MS) % TURN_MS) / TURN_MS));
+  const elevation = Number.isFinite(Number(o.elevation)) ? clamp(Number(o.elevation), ELEVATION_MIN, ELEVATION_MAX) : ELEVATION_3D;
+  return { turn, elevation, held: resume !== null && t < resume };
+}
+
+// The orbit after the user turns it by `dTurn` and `dElevation` (radians) at `now`: from the angle shown at `now`,
+// the elevation clamped, the self-turn held for RESUME_MS.
+export function orbitTurned(orbit, now, dTurn = 0, dElevation = 0) {
+  const cam = orbitCamera(orbit, now);
+  return {
+    turn: wrapTurn(cam.turn + (Number(dTurn) || 0)),
+    elevation: clamp(cam.elevation + (Number(dElevation) || 0), ELEVATION_MIN, ELEVATION_MAX),
+    resume: (Number(now) || 0) + RESUME_MS,
+  };
+}
+
+// The orbit put back to where the 3D view starts (turn 0, ELEVATION_3D), held for RESUME_MS from `now`.
+export function orbitReset(now) {
+  return { turn: 0, elevation: ELEVATION_3D, resume: (Number(now) || 0) + RESUME_MS };
+}
+
+// The camera for a frame on its way between the views (null when there is no change): the 3D camera at `now` (the
+// orbit's, as the steady 3D view would have it) and how far the morph is toward it, eased (smoothstep).
 function cameraAt(options, now) {
-  const turnNow = (2 * Math.PI * ((((now % TURN_MS) + TURN_MS) % TURN_MS) / TURN_MS));
   const change = changeAt(options, now);
   if (!change) return null;
+  const target = orbitCamera(options.orbit, now);
   const e = change.t * change.t * (3 - 2 * change.t); // smoothstep
-  const k = change.to === "3d" ? e : 1 - e; // 0: straight above, unturned; 1: the 3D camera
-  const wrapped = turnNow > Math.PI ? turnNow - 2 * Math.PI : turnNow;
-  return { turn: wrapped * k, elevation: Math.PI / 2 + (ELEVATION_3D - Math.PI / 2) * k };
+  return { turn: target.turn, elevation: target.elevation, morph: change.to === "3d" ? e : 1 - e };
+}
+
+// The keys of the 3D view ([[key, label], ...]) as one muted text on the canvas's bottom row: the pairs that fit.
+function keysText(keys, width) {
+  let text = "";
+  for (const pair of Array.isArray(keys) ? keys : []) {
+    if (!Array.isArray(pair) || pair.length < 2) continue;
+    const piece = `${clean(String(pair[0]))} ${clean(String(pair[1]))}`;
+    const next = text ? text + "  " + piece : piece;
+    if (displayWidth(next) > width) break;
+    text = next;
+  }
+  return text;
 }
 
 function drawCanvas(doc, w, h, now, frame, options) {
@@ -1277,9 +1537,16 @@ function drawCanvas(doc, w, h, now, frame, options) {
   const L = orbitLayout(doc, w, h);
   const P = makePalette(L.keys, options.colors);
   const moving = cameraAt(options, now);
-  if (moving) draw3D(doc, L, canvas, styles, P, now, frame, moving);
-  else if (options.view === "3d") draw3D(doc, L, canvas, styles, P, now, frame, { turn: (2 * Math.PI * (((now % TURN_MS) + TURN_MS) % TURN_MS)) / TURN_MS, elevation: ELEVATION_3D });
-  else draw2D(doc, L, canvas, styles, P, now, frame);
+  if (options.view === "3d" && options.keys) {
+    // the keys of the 3D view, first on the bottom row's text layer, so no name is placed over them
+    const hint = keysText(options.keys, w);
+    if (hint) canvas.put(0, h - 1, hint, styles.get("muted"));
+  }
+  const cam = moving || (options.view === "3d" ? orbitCamera(options.orbit, now) : null);
+  if (cam) {
+    draw3D(doc, L, canvas, styles, P, now, frame, cam);
+    if (options.sky !== false) drawSky(doc, L, canvas, styles, cam, now, moving ? moving.morph : 1, options);
+  } else draw2D(doc, L, canvas, styles, P, now, frame);
   return canvas.lines();
 }
 

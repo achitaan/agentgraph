@@ -73,6 +73,18 @@ The orbit (the full-panel scene):
                     --expect-scene instead of --demo: the depth characters and two captures that differ. Checked
                     only with --demo or --expect-scene.
 
+    --orbit         with --demo --fullscreen --view3d, after the 3D captures: turning the 3D view by hand. The
+                    self-turn's shift of the agent names in 1 s; then six left-arrow presses (90 degrees) and the
+                    names' shift 1 s after the first press, which must be more than twice the self-turn's and at least
+                    6 cells; then 1 s later the names have not moved (the self-turn waits 3 s after a turn); three
+                    up-arrow presses (the elevation, logged); `0` (reset, logged). Then the mouse, as a terminal sends
+                    it (SGR 1006: press, drags, release): a click on the canvas switches to 2D (braille, no `@`) and
+                    a second click back to 3D; a drag of 8 columns turns it (the names shift, the log says `drag`) and
+                    switches nothing. Requires the plugin's debug log to show each step (`action: key left`, `key up`,
+                    `orbit reset`, `mouse: down`, `drag`).
+    --plugin DIR    start the app with a scratch XDG_CONFIG_HOME (SCRATCH/xdg-plugin) whose `cli.json` loads only the
+                    terminal plugin at DIR (for a worktree's `tui-plugin`): no other plugin, no user config.
+
 The `g` key (orbit or list):
     --gcheck        after the view shows (and after the keys of --pre), capture, press `g`, capture, press `g`,
                     capture. Fails unless the second capture shows the other view than the first and the third the
@@ -875,6 +887,134 @@ def drive_live_paths(term, lines, root, session):
     return problems, facts, screens
 
 
+LEFT, UP = b"\x1b[D", b"\x1b[A"
+
+
+def mouse(term, kind, col, row):
+    """A mouse event as a terminal sends it with SGR reporting (1006), 0-based cell -> 1-based: press, drag
+    (button 0 held, motion bit 32) or release."""
+    code, end = {"press": (0, "M"), "drag": (32, "M"), "release": (0, "m")}[kind]
+    term.write(f"\x1b[<{code};{col + 1};{row + 1}{end}".encode())
+
+
+def name_spots(lines, names):
+    """-> {name: (row, col)} of each agent name standing alone (not part of a longer name) in the canvas rows."""
+    found = find_view(lines)
+    rows = canvas_rows(lines, found) if found else None
+    spots = {}
+    if rows is None:
+        return spots
+    for r in range(rows[0], rows[1] + 1):
+        for name in names:
+            m = re.search(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])", lines[r][found[1]:])
+            if m and name not in spots:
+                spots[name] = (r, found[1] + m.start())
+    return spots
+
+
+def spot_shift(a, b):
+    """The names' movement between two captures: the sum over names in both of |columns| + 2 |rows| (a row is
+    about two columns tall), and the count of names in both."""
+    both = [n for n in a if n in b]
+    return sum(abs(a[n][1] - b[n][1]) + 2 * abs(a[n][0] - b[n][0]) for n in both), len(both)
+
+
+def drive_orbit(term):
+    """--orbit: the keys and the mouse on the 3D orbit. -> (problems, facts, screens)."""
+    problems, facts, screens = [], [], []
+    spots = lambda: name_spots(term.lines(), DEMO_NAMES)
+    count = lambda prefix: len(logged(prefix))
+    a = spots()
+    term.pump(1.0)
+    b = spots()
+    self_shift, n_self = spot_shift(a, b)
+    facts.append(f"orbit: the self-turn moved {n_self} names by {self_shift} cells in 1 s")
+    screens.append(("before the turn keys", term.lines()))
+    t0, keys0 = time.time(), count("action: key left")
+    for _ in range(6):
+        term.write(LEFT)
+        term.pump(0.05)
+    term.pump(max(0.0, 1.0 - (time.time() - t0)))
+    c = spots()
+    screens.append(("1 s after six left arrows", term.lines()))
+    key_shift, n_key = spot_shift(b, c)
+    presses = count("action: key left") - keys0
+    facts.append(f"orbit: six left arrows ({presses} logged) moved {n_key} names by {key_shift} cells in 1 s")
+    if presses != 6:
+        problems.append(f"orbit: {presses} of 6 left arrows reached the panel's turn key")
+    if n_key < 4 or key_shift < 6 or key_shift <= 2 * self_shift:
+        problems.append(f"orbit: the turn keys moved the names {key_shift} cells, the self-turn {self_shift}: not more than twice")
+    term.pump(1.0)
+    d = spots()
+    held, n_held = spot_shift(c, d)
+    facts.append(f"orbit: 1 s later (the self-turn held) {n_held} names moved {held} cells")
+    if held > 2:
+        problems.append(f"orbit: the names moved {held} cells while the self-turn should be held")
+    ups0 = count("action: key up")
+    for _ in range(3):
+        term.write(UP)
+        term.pump(0.15)
+    term.pump(0.5)
+    ups = logged("action: key up")[ups0:]
+    facts.append(f"orbit: three up arrows: {len(ups)} logged" + (f", last {ups[-1]}" if ups else ""))
+    if len(ups) != 3:
+        problems.append(f"orbit: {len(ups)} of 3 up arrows reached the panel")
+    screens.append(("after three up arrows", term.lines()))
+    resets0 = count("action: orbit reset")
+    term.write(b"0")
+    term.wait_log(lambda ls: len([l for l in ls if " action: orbit reset" in l]) > resets0, 10)
+    if count("action: orbit reset") <= resets0:
+        problems.append("orbit: `0` did not reset")
+    else:
+        facts.append("orbit: `0` reset the camera (logged)")
+    # the mouse: a click in the canvas (the hub's glyph), 2D, a click again, 3D
+    found = find_view(term.lines())
+    rows = canvas_rows(term.lines(), found) if found else None
+    if rows is None:
+        problems.append("orbit: no canvas to click on")
+        return problems, facts, screens
+    hub = next(((r, term.lines()[r].find("◉", found[1] + 2)) for r in range(rows[0], rows[1] + 1)
+                if term.lines()[r].find("◉", found[1] + 2) >= 0), None)
+    at_row, at_col = hub if hub else ((rows[0] + rows[1]) // 2, found[1] + 30)
+    downs0 = count("mouse: down")
+    mouse(term, "press", at_col, at_row)
+    term.pump(0.1)
+    mouse(term, "release", at_col, at_row)
+    two_d = term.wait_for(lambda ls: orbit_on(ls) and not three_d_on(ls) and any(BRAILLE.match(ch) and ch not in SPIN for ch in "".join(ls)), 10)
+    screens.append(("after a click", term.lines()))
+    clicks = logged("mouse: up")
+    facts.append(f"orbit: a click ({count('mouse: down') - downs0} press logged{', ' + clicks[-1] if clicks else ''}): {'2D' if two_d else 'still 3D'}")
+    if not two_d:
+        problems.append("orbit: a click on the 3D orbit did not switch to 2D")
+    mouse(term, "press", at_col, at_row)
+    term.pump(0.1)
+    mouse(term, "release", at_col, at_row)
+    back = term.wait_for(three_d_on, 10)
+    term.pump(1.0)
+    facts.append(f"orbit: a second click: {'3D' if back else 'not 3D'}")
+    if not back:
+        problems.append("orbit: a second click did not switch back to 3D")
+    # a drag: 8 columns to the right, one column at a time
+    e = spots()
+    drags0 = count("action: drag")
+    mouse(term, "press", at_col, at_row)
+    term.pump(0.05)
+    for k in range(1, 9):
+        mouse(term, "drag", at_col + k, at_row)
+        term.pump(0.05)
+    mouse(term, "release", at_col + 8, at_row)
+    term.pump(0.6)
+    f = spots()
+    drag_shift, n_drag = spot_shift(e, f)
+    drags = count("action: drag") - drags0
+    still3d = three_d_on(term.lines())
+    screens.append(("after a drag of 8 columns", term.lines()))
+    facts.append(f"orbit: a drag of 8 columns: {drags} turns logged, {n_drag} names moved {drag_shift} cells, {'still 3D' if still3d else 'not 3D'}")
+    if drags < 4 or drag_shift < 6 or not still3d:
+        problems.append(f"orbit: the drag did not turn the 3D view ({drags} turns logged, {drag_shift} cells, 3D {still3d})")
+    return problems, facts, screens
+
+
 def drive(term, args):
     started = app_started(term)
     if not args.no_graph:
@@ -912,6 +1052,8 @@ def drive(term, args):
         seen3d = screen_colours(term.screen)
         term.pump(1.0)
         view3d = (first3, term.lines(), seen3d)
+        if args.orbit:
+            args.orbit_result = drive_orbit(term)
     extra = None
     if args.dialog and find_view(lines) is not None:
         extra = ("dialog",) + drive_dialog(term, lines)
@@ -1237,6 +1379,8 @@ def main():
     parser.add_argument("--open", action="store_true", help="without --demo: Enter on the hub row opens its session")
     parser.add_argument("--paths", action="store_true", help="the demo at rest with sample paths: r, the chooser, the goal prompt, Escape; nothing sent")
     parser.add_argument("--live-paths", action="store_true", help="a scratch orchestration folder with two named paths: the live chooser and flow prompt; nothing sent")
+    parser.add_argument("--orbit", action="store_true", help="with --demo --fullscreen --view3d: the arrow keys, 0, a click and a drag on the 3D orbit")
+    parser.add_argument("--plugin", default="", help="load only the terminal plugin at this folder (a scratch XDG_CONFIG_HOME)")
     parser.add_argument("--selftest", action="store_true", help="check list_report on built-in screens and exit")
     args = parser.parse_args()
     if args.selftest:
@@ -1247,6 +1391,10 @@ def main():
         why = "--paths and --live-paths run alone (with --size, --binary, --wait, --settle, --keep-open)"
     if not why and args.live_paths and any(a == "--session" or a.startswith("--session=") for a in sys.argv[1:]):
         why = "--live-paths types a goal: only in this script's throwaway session, not with --session"
+    if not why and args.orbit and not (args.demo and args.fullscreen and args.view3d):
+        why = "--orbit needs --demo --fullscreen --view3d"
+    if not why and args.plugin and not os.path.isfile(os.path.join(args.plugin, "src", "tui.js")):
+        why = "--plugin: no src/tui.js in " + args.plugin
     if why:
         print("real-host.py: " + why, file=sys.stderr)
         return 2
@@ -1259,6 +1407,14 @@ def main():
         DEBUG_LOG = os.path.join(SCRATCH, "gcheck-debug.log")
     if (args.dialog or args.open or args.paths or args.live_paths) and not DEBUG_LOG:
         DEBUG_LOG = os.path.join(SCRATCH, "actions-debug.log")
+    if args.orbit and not DEBUG_LOG:
+        DEBUG_LOG = os.path.join(SCRATCH, "orbit-debug.log")
+    if args.plugin:
+        config = os.path.join(SCRATCH, "xdg-plugin")
+        os.makedirs(os.path.join(config, "opencode"), exist_ok=True)
+        with open(os.path.join(config, "opencode", "cli.json"), "w") as out:
+            json.dump({"plugins": [os.path.abspath(args.plugin)]}, out)
+        EXTRA_ENV["XDG_CONFIG_HOME"] = config
     args.list_mode = args.demo and not args.fullscreen and not args.expect_scene and not args.view3d
     cols, rows = (int(n) for n in args.size.lower().split("x"))
     proj = os.path.join(SCRATCH, "proj")
@@ -1269,11 +1425,12 @@ def main():
         args.live_root = scratch_orchestration()
         EXTRA_ENV.update({"AGENTGRAPH_TUI_HOME": args.live_root, "AGENTGRAPH_TUI_NOSEND": "1"})
 
-    label = f"{cols}x{rows}{'-nograph' if args.no_graph else ''}{'-demo' if args.demo else ''}{'-dialog' if args.dialog else ''}{'-open' if args.open else ''}{'-paths' if args.paths else ''}{'-livepaths' if args.live_paths else ''}{'-full' if args.fullscreen else ''}{'-3d' if args.view3d else ''}{'-g' + args.pre if args.gcheck else ''}"
+    args.orbit_result = None
+    label = f"{cols}x{rows}{'-nograph' if args.no_graph else ''}{'-orbit' if args.orbit else ''}{'-demo' if args.demo else ''}{'-dialog' if args.dialog else ''}{'-open' if args.open else ''}{'-paths' if args.paths else ''}{'-livepaths' if args.live_paths else ''}{'-full' if args.fullscreen else ''}{'-3d' if args.view3d else ''}{'-g' + args.pre if args.gcheck else ''}"
     term = None
     try:
         term = Term([args.binary, "--standalone", "-s", session, proj], proj, cols, rows, os.path.join(SCRATCH, f"raw-{label}.bin"))
-        if DEBUG_LOG and (args.gcheck or args.dialog or args.open or args.paths or args.live_paths):
+        if DEBUG_LOG and (args.gcheck or args.dialog or args.open or args.paths or args.live_paths or args.orbit):
             open(DEBUG_LOG, "w").close()
         term.start()
         if args.gcheck:
@@ -1344,6 +1501,20 @@ def main():
                 for fact in f3:
                     print(f"   scene: {fact}")
                 problems += p3
+        if args.orbit:
+            if args.orbit_result is None:
+                problems.append("orbit: not driven (no 3D view)")
+            else:
+                p_o, f_o, shots = args.orbit_result
+                for name, shot in shots:
+                    print(f"===== {label}: orbit: screen {name}")
+                    for i, line in enumerate(shot):
+                        print(f"{i:2d}|{line}")
+                for fact in f_o:
+                    print(f"   {fact}")
+                problems += p_o
+                if not p_o:
+                    print(f"===== {label}: orbit: PASS")
         if problems:
             print(f"===== {label}: FAIL, scene: " + "; ".join(problems))
             return 1

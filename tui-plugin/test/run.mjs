@@ -2848,6 +2848,657 @@ test("panel scene: frames at 100 ms while work moves; an unchanged frame is not 
 });
 
 // ---------------------------------------------------------------------------------------------------------------
+// orbit lane (n104): turning the 3D orbit by hand (keys and mouse), the 3D keys line. Start of the block.
+
+const idleDemo = () => {
+  const doc = JSON.parse(JSON.stringify(demoWorn));
+  for (const a of doc.agents) a.busy = 0;
+  return doc;
+};
+
+test("orbit: the camera without an orbit is the self-turn; a turn holds it RESUME_MS, then it goes on from the angle left", () => {
+  const full = 2 * Math.PI;
+  for (const now of [0, 166, 9000, 39999, 40000, 123456]) {
+    assert.equal(S.orbitCamera(null, now).turn, (full * (((now % S.TURN_MS) + S.TURN_MS) % S.TURN_MS)) / S.TURN_MS, "no orbit at " + now);
+    assert.equal(S.orbitCamera(null, now).elevation, S.ELEVATION_3D);
+    assert.equal(S.orbitCamera(null, now).held, false);
+  }
+  const t0 = 9000;
+  const o = S.orbitTurned(null, t0, S.TURN_STEP, 0);
+  const shown = S.orbitCamera(null, t0).turn;
+  assert.ok(Math.abs(o.turn - ((shown + S.TURN_STEP) % full)) < 1e-12, "from the angle shown, one step on");
+  assert.equal(o.resume, t0 + S.RESUME_MS);
+  assert.equal(S.RESUME_MS >= 2000 && S.RESUME_MS <= 5000, true, "a few seconds");
+  // held: the same camera until resume
+  for (const dt of [0, 500, S.RESUME_MS - 1]) {
+    assert.equal(S.orbitCamera(o, t0 + dt).turn, o.turn, "held at +" + dt);
+    assert.equal(S.orbitCamera(o, t0 + dt).held, true);
+  }
+  // then on from there at the self-turn's speed: no jump at resume
+  const r = o.resume;
+  assert.equal(S.orbitCamera(o, r).turn, o.turn);
+  const after = S.orbitCamera(o, r + 1000).turn;
+  assert.ok(Math.abs(((after - o.turn + full) % full) - (full * 1000) / S.TURN_MS) < 1e-9, "on at the self-turn's speed");
+  assert.ok(Math.abs(S.orbitCamera(o, r + 1).turn - S.orbitCamera(o, r - 1).turn) < 1e-3, "continuous at resume");
+  // a turn while the self-turn runs again starts from where it is then
+  const later = r + 5000;
+  const o2 = S.orbitTurned(o, later, -S.TURN_STEP, 0);
+  assert.ok(Math.abs(((o2.turn - S.orbitCamera(o, later).turn + full) % full) - (full - S.TURN_STEP)) < 1e-9);
+  // the elevation is clamped: never past looking along the plane or straight down, so it never flips
+  let e = null;
+  for (let i = 0; i < 40; i += 1) e = S.orbitTurned(e, t0, 0, S.ELEVATION_STEP);
+  assert.equal(e.elevation, S.ELEVATION_MAX);
+  assert.equal(S.ELEVATION_MAX, Math.PI / 2);
+  for (let i = 0; i < 80; i += 1) e = S.orbitTurned(e, t0, 0, -S.ELEVATION_STEP);
+  assert.equal(e.elevation, S.ELEVATION_MIN);
+  assert.equal(S.ELEVATION_MIN, 0);
+  assert.equal(S.orbitCamera({ elevation: 9 }, 0).elevation, Math.PI / 2);
+  assert.equal(S.orbitCamera({ elevation: -9 }, 0).elevation, 0);
+  // reset: the starting camera, held
+  assert.deepEqual(S.orbitReset(t0), { turn: 0, elevation: S.ELEVATION_3D, resume: t0 + S.RESUME_MS });
+  // nonsense in, a camera out
+  for (const bad of [{ turn: "x", elevation: null, resume: NaN }, { turn: -7 }, 5, "a"]) {
+    const c = S.orbitCamera(bad, 1000);
+    assert.ok(c.turn >= 0 && c.turn < full && c.elevation >= 0 && c.elevation <= Math.PI / 2, JSON.stringify(bad));
+  }
+});
+
+test("orbit: a turned 3D frame differs from the self-turn's, stands still while held, then turns on; every name once", () => {
+  const doc = idleDemo();
+  const t0 = 20000;
+  const o = S.orbitTurned(null, t0, Math.PI / 2, 0.3);
+  const at = (now, orbit) => sceneText(S.orbitLines(doc, 120, 30, now, Object.assign({ view: "3d" }, orbit ? { orbit } : {}))).join("\n");
+  assert.notEqual(at(t0, o), at(t0, null), "turned by hand: another picture");
+  assert.equal(at(t0 + 1000, o), at(t0, o), "held: the same frame");
+  assert.equal(at(t0 + S.RESUME_MS - 1000, o), at(t0, o)); // a stuck agent blinks twice a second: the same phase
+  assert.notEqual(at(o.resume + 1000, o), at(t0, o), "then it turns on");
+  // the self-turn's frames are unchanged without an orbit
+  assert.equal(at(t0, null), sceneText(S.orbitLines(doc, 120, 30, t0, V3)).join("\n"));
+  // every ring agent's name exactly once, at any turn and elevation, at the smallest size too
+  for (const [w, h] of [[64, 12], [120, 30]]) {
+    for (const elevation of [0, 0.25, S.ELEVATION_3D, 1.2, Math.PI / 2]) {
+      for (const turn of [0, 1.3, 2.9, 4.4]) {
+        const lines = sceneText(S.orbitLines(doc, w, h, 0, { view: "3d", orbit: { turn, elevation, resume: 1e15 }, keys: [["←→↑↓", "turn"], ["0", "reset"]] }));
+        assert.equal(lines.length, h);
+        for (const name of ringNames) assert.equal(countWord(lines, R.truncate(name, 12)), 1, `${name} at ${w}x${h} e=${elevation} t=${turn}\n${lines.join("\n")}`);
+      }
+    }
+  }
+});
+
+test("orbit: the keys line: in 3D only, muted, on the canvas's bottom row, within the width at 64x22; the change starts from the orbit's camera", () => {
+  const keys = [["←→↑↓", "turn"], ["0", "reset"]];
+  const want = "←→↑↓ turn  0 reset";
+  for (const [w, h] of SIZES) {
+    const lines = S.scene(demoWorn, { width: w, height: h, now: 5000, view: "3d", keys });
+    assertExact(lines, w, h, `3D with keys ${w}x${h}`);
+    const text = sceneText(lines);
+    const row = text.findIndex((l) => l.includes(want));
+    assert.ok(row > 0, `the keys at ${w}x${h}\n${text.join("\n")}`);
+    assert.ok(text[row].startsWith(want), "at the left edge");
+    assert.equal(text.filter((l) => l.includes("reset")).length, 1);
+    const span = lines[row].find((s) => s.text.includes("turn"));
+    assert.equal(span.tone, "muted");
+    assert.ok(!span.color, "no group colour");
+    // the canvas's bottom row: the next row is an instrument or the end
+    const plain = sceneText(S.scene(demoWorn, { width: w, height: h, now: 5000, view: "3d" }));
+    assert.deepEqual(text.slice(row + 1), plain.slice(row + 1), "the rows under it are the instruments, unchanged");
+    assert.deepEqual(text.slice(0, 1), plain.slice(0, 1));
+    // 2D: no keys line, the 2D frame unchanged
+    const flat = sceneText(S.scene(demoWorn, { width: w, height: h, now: 5000, view: "2d", keys }));
+    assert.ok(!flat.some((l) => l.includes("reset")), "no keys line in 2D");
+    assert.deepEqual(flat, sceneText(S.scene(demoWorn, { width: w, height: h, now: 5000 })));
+  }
+  // too narrow for a pair: it is left out, never cut
+  const narrow = sceneText(S.orbitLines(demoWorn, 10, 12, 0, { view: "3d", keys: [["abcdefghijk", "x"]] }));
+  assert.ok(!narrow.some((l) => l.includes("abc")));
+  // the change into 3D ends on the turned orbit's steady frame, and the change back starts from it (no jump)
+  const doc = idleDemo();
+  const orbit = { turn: 2.2, elevation: 1.1, resume: 1e15 };
+  const at = 50000;
+  const steady = sceneText(S.orbitLines(doc, 120, 30, at + S.CHANGE_MS, { view: "3d", orbit })).join("\n");
+  const almost = sceneText(S.orbitLines(doc, 120, 30, at + S.CHANGE_MS - 1, { view: "3d", orbit, change: { from: "2d", at } })).join("\n");
+  // where the names stand (the sparse far half of a ring may differ by a dot at a camera a hair away)
+  const spots = (t) => ringNames.map((n) => t.split("\n").map((l, r) => [r, l.search(new RegExp(`(?<![\\w-])${n}(?![\\w-])`))]).find(([, c]) => c >= 0).join(",")).join(" ");
+  assert.equal(spots(almost), spots(steady), "the change into 3D lands on the orbit's camera");
+  const selfTurn = sceneText(S.orbitLines(doc, 120, 30, at + S.CHANGE_MS, V3)).join("\n");
+  assert.notEqual(spots(almost), spots(selfTurn), "not on the self-turn's camera");
+  const leaving = sceneText(S.orbitLines(doc, 120, 30, at + 1, { view: "2d", orbit, change: { from: "3d", at } })).join("\n");
+  assert.equal(spots(leaving), spots(steady), "the change back starts from the orbit's camera");
+});
+
+// The newest panel's command with `id`.
+const commandOf = (state, id) => state.layers.flatMap((l) => l.commands || []).filter((c) => c.id === id).pop();
+
+test("orbit panel: in 3D the arrow keys turn it and 0 resets, only on the 3D orbit; the keys line shows only in 3D; an unchanged frame is not pushed", async () => {
+  const { plugin, clockRef } = makeScenePlugin();
+  const { ctx, state, panelClaim } = makePanelHost();
+  ctx.ui.router = { navigate: () => {} };
+  const stop = plugin.setup(ctx);
+  globalThis.__agentgraphStub.cleanups.length = 0;
+  try {
+    const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
+    await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
+    sizePanel(view, 120, 40);
+    const left = commandOf(state, "agentgraph.graph.turn-left");
+    const right = commandOf(state, "agentgraph.graph.turn-right");
+    const reset = commandOf(state, "agentgraph.graph.turn-reset");
+    const up = commandOf(state, "agentgraph.graph.up");
+    const down = commandOf(state, "agentgraph.graph.down");
+    assert.deepEqual([left.bind, right.bind, reset.bind, up.bind, down.bind], ["left", "right", "0", "up", "down"]);
+    const turnLayer = state.layers.find((l) => (l.commands || []).includes(left));
+    assert.deepEqual(turnLayer.commands.map((c) => c.bind), ["left", "right", "0"]);
+    assert.equal(turnLayer.mode, undefined, "no mode: only while the panel owns input");
+    // the list: the arrows move the cursor, left, right and 0 are off
+    assert.equal(up.enabled(), true);
+    assert.equal([left, right, reset].some((c) => c.enabled()), false, "off on the list");
+    assert.ok(!screen(view).some((l) => l.includes("reset")), "no keys line on the list");
+    // the 2D orbit: every turn key off, no keys line
+    pressG(state);
+    assert.ok(isOrbit(screen(view)));
+    assert.equal([left, right, reset, up, down].some((c) => c.enabled()), false, "off on the 2D orbit");
+    assert.ok(!screen(view).some((l) => l.includes("reset")), "no keys line in 2D");
+    // 3D: on, and named on the keys line, which fits
+    commandOf(state, "agentgraph.graph.dimension").run();
+    clockRef.t += S.CHANGE_MS + 50;
+    await waitFor(() => has3D(screen(view)), 3000, "3D");
+    assert.equal([left, right, reset, up, down].every((c) => c.enabled()), true, "on on the 3D orbit");
+    const keysRow = screen(view).find((l) => l.includes("reset"));
+    assert.ok(keysRow && keysRow.startsWith("←→↑↓ turn  0 reset"), "the keys line\n" + screen(view).join("\n"));
+    // a turn: drawn at once, held (the clock moves, the frame does not), then the self-turn goes on
+    const before = screen(view).join("\n");
+    left.run();
+    const turned = screen(view).join("\n");
+    assert.notEqual(turned, before, "left: drawn at once");
+    clockRef.t += 1000;
+    await sleep(400);
+    const rendersHeld = state.renders;
+    await sleep(400);
+    // the demo works, so its spinners and 0/1 streams move with the clock; the clock stands: nothing is pushed
+    assert.equal(state.renders, rendersHeld, "an unchanged frame is not pushed");
+    const names = (t) => ringNames.map((n) => t.split("\n").findIndex((l) => countWord([l], n) === 1) + ":" + t.split("\n").map((l) => l.search(new RegExp(`(?<![\\w-])${n}(?![\\w-])`))).find((c) => c >= 0)).join(" ");
+    assert.equal(names(screen(view).join("\n")), names(turned), "held: the names stand while the clock moves");
+    clockRef.t += S.RESUME_MS + 3000;
+    await waitFor(() => names(screen(view).join("\n")) !== names(turned), 3000, "the self-turn goes on");
+    // right turns back; up and down change the elevation, and the frame
+    const r1 = screen(view).join("\n");
+    right.run();
+    assert.notEqual(screen(view).join("\n"), r1);
+    const e1 = screen(view).join("\n");
+    up.run();
+    up.run();
+    assert.notEqual(screen(view).join("\n"), e1, "up: another elevation");
+    down.run();
+    down.run();
+    const beforeReset = screen(view).join("\n");
+    reset.run(); // turn 0 at ELEVATION_3D: elsewhere than the turned camera
+    assert.notEqual(names(screen(view).join("\n")), names(beforeReset), "0: back to the start");
+    // a dialog open: off
+    ctx.keymap.mode = { current: () => "modal" };
+    assert.equal([left, right, reset, up, down].some((c) => c.enabled()), false, "off under a host dialog");
+    ctx.keymap.mode = { current: () => "base" };
+    // back to the list: up and down move the cursor again
+    commandOf(state, "agentgraph.graph.view").run();
+    assert.ok(!isOrbit(screen(view)));
+    assert.equal([left, right, reset].some((c) => c.enabled()), false);
+    assert.equal(up.enabled(), true);
+  } finally {
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    stop();
+  }
+});
+
+test("orbit panel: a click on the orbit switches 2D and 3D, a drag turns the 3D view and switches nothing; the list ignores the mouse", async () => {
+  const { plugin, clockRef } = makeScenePlugin();
+  const { ctx, state, panelClaim } = makePanelHost();
+  const stop = plugin.setup(ctx);
+  globalThis.__agentgraphStub.cleanups.length = 0;
+  try {
+    const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
+    await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
+    sizePanel(view, 120, 40);
+    const p = view.props;
+    for (const k of ["onMouseDown", "onMouseDrag", "onMouseUp", "onMouseOver"]) assert.equal(typeof p[k], "function", k);
+    const click = (x, y) => {
+      p.onMouseDown({ type: "down", button: 0, x, y });
+      p.onMouseUp({ type: "up", button: 0, x, y });
+    };
+    // the list: a click does nothing, its text can still be selected
+    const list = screen(view).join("\n");
+    click(10, 2);
+    assert.equal(screen(view).join("\n"), list);
+    assert.ok(!isOrbit(screen(view)));
+    const listText = view.children.flatMap((row) => (row.tag === "text" ? [row] : row.children));
+    assert.ok(listText.every((t) => t.props.selectable === undefined), "list text keeps the host's selection");
+    pressG(state);
+    assert.ok(isOrbit(screen(view)) && !has3D(screen(view)));
+    // scene text is not selectable: a press and a drag there turn the view instead of selecting
+    const sceneTexts = view.children.flatMap((row) => (row.tag === "text" ? [row] : row.children));
+    assert.ok(sceneTexts.length > 40 && sceneTexts.every((t) => t.props.selectable === false));
+    // a click: 3D (the camera moves over CHANGE_MS)
+    click(60, 18);
+    clockRef.t += S.CHANGE_MS + 50;
+    await waitFor(() => has3D(screen(view)), 3000, "a click: 3D");
+    // the right button, or a press that is not on the orbit, does nothing
+    p.onMouseDown({ type: "down", button: 2, x: 60, y: 18 });
+    p.onMouseUp({ type: "up", button: 2, x: 60, y: 18 });
+    assert.ok(has3D(screen(view)));
+    // a drag: turns, held, and no switch on release; the line under the pointer carries it on ("over")
+    const before = screen(view).join("\n");
+    p.onMouseDown({ type: "down", button: 0, x: 60, y: 18 });
+    p.onMouseDrag({ type: "drag", button: 0, x: 61, y: 18 });
+    const one = screen(view).join("\n");
+    assert.notEqual(one, before, "a drag turns at once");
+    p.onMouseDrag({ type: "drag", button: 0, x: 61, y: 18 }); // no motion: nothing
+    assert.equal(screen(view).join("\n"), one);
+    p.onMouseOver({ type: "over", button: 0, x: 64, y: 18 });
+    assert.notEqual(screen(view).join("\n"), one, "over with the button held turns on");
+    p.onMouseOver({ type: "over", button: 0, x: 64, y: 20 }); // down: the elevation
+    p.onMouseUp({ type: "up", button: 0, x: 64, y: 20 });
+    clockRef.t += S.CHANGE_MS + 50;
+    await sleep(300);
+    assert.ok(has3D(screen(view)), "a drag switches nothing");
+    // plain motion (no button) after the release turns nothing
+    const still = screen(view).join("\n");
+    p.onMouseOver({ type: "over", button: 3, x: 80, y: 25 });
+    p.onMouseDrag({ type: "drag", button: 0, x: 90, y: 25 });
+    assert.equal(screen(view).join("\n"), still, "no press, no turn");
+    // a click: back to 2D
+    click(60, 18);
+    clockRef.t += S.CHANGE_MS + 50;
+    await waitFor(() => !has3D(screen(view)) && isOrbit(screen(view)), 3000, "a click: 2D");
+    // a drag on the 2D orbit turns nothing and switches nothing
+    p.onMouseDown({ type: "down", button: 0, x: 60, y: 18 });
+    p.onMouseDrag({ type: "drag", button: 0, x: 70, y: 18 });
+    p.onMouseUp({ type: "up", button: 0, x: 70, y: 18 });
+    clockRef.t += S.CHANGE_MS + 50;
+    await sleep(300);
+    assert.ok(!has3D(screen(view)) && isOrbit(screen(view)));
+    // bad events are ignored
+    assert.doesNotThrow(() => {
+      p.onMouseDown(undefined);
+      p.onMouseDown({ button: 0, x: "a", y: null });
+      p.onMouseDrag(null);
+      p.onMouseUp({});
+    });
+  } finally {
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    stop();
+  }
+});
+
+test("orbit morph: the switch between 2D and 3D is a morph: each agent travels on screen from its 2D place to its 3D place and back; a mid-switch frame differs from both ends", () => {
+  const doc = idleDemo();
+  const [w, h] = [120, 30];
+  const L = S.orbitLayout(doc, w, h);
+  const orbit = { turn: 1.0, elevation: S.ELEVATION_3D, resume: 1e15 }; // a held camera: the target stands still
+  const { turn, elevation } = S.orbitCamera(orbit, 0);
+  const to3D = S.camera3D(L, turn, elevation);
+  const F1 = S.figure3D(L);
+  const F0 = S.figure3D(L, 0);
+  const at = 50000;
+  const glyphs = new Set(["○", "●", "↩", "!", " "]); // the glyphs of agents at rest
+  const cellAt = (lines, r, c) => (cellsOf(lines[r])[c] || {}).ch;
+  // the agent glyphs of a frame at the cells `where(p)` gives: -> how many agents show their glyph there
+  const onCells = (lines, where) => L.placed.filter((p) => {
+    const q = where(p);
+    const ch = q.row >= 0 && q.row < h ? cellAt(lines, q.row, q.col) : undefined;
+    return glyphs.has(ch) && (ch !== " " || p.state === "stuck"); // a stuck agent's glyph blinks
+  }).length;
+  const n = L.placed.length;
+  assert.ok(n >= 8);
+  // flat: every ring lies on the unit circle and each agent at its own 2D azimuth; the morph's start is the 2D place
+  for (const p of L.placed) {
+    const a = F0.agents.get(p.agent.name);
+    assert.ok(Math.abs(a[2]) < 1e-12 && Math.abs(Math.hypot(a[0], a[1]) - 1) < 1e-9, p.agent.name + " flat on the circle");
+    const q = S.morphCamera(L, turn, elevation, 0)(a);
+    assert.ok(Math.abs(q.col - p.col) <= 1 && Math.abs(q.row - p.row) <= 1, `${p.agent.name}: the morph starts at the 2D place`);
+    const e = S.morphCamera(L, turn, elevation, 1)(F1.agents.get(p.agent.name));
+    const t = to3D(F1.agents.get(p.agent.name));
+    assert.deepEqual([e.col, e.row], [t.col, t.row], "the morph ends at the 3D place");
+  }
+  // half way: each agent between its two places, away from both (those that move at least 6 cells)
+  let between = 0;
+  let movers = 0;
+  for (const p of L.placed) {
+    const end = to3D(F1.agents.get(p.agent.name));
+    const d = (a, b) => Math.hypot(a.col - b.col, 2 * (a.row - b.row));
+    const span = d({ col: p.col, row: p.row }, end);
+    if (span < 6) continue;
+    movers += 1;
+    const mid = S.morphCamera(L, turn, elevation, 0.5)(S.figure3D(L, 0.5).agents.get(p.agent.name));
+    if (d(mid, { col: p.col, row: p.row }) >= 2 && d(mid, end) >= 2 && d(mid, { col: p.col, row: p.row }) < span && d(mid, end) < span) between += 1;
+  }
+  assert.ok(movers >= 6 && between === movers, `${between} of ${movers} agents half way between their places`);
+  const frame = (now, options) => S.orbitLines(doc, w, h, now, Object.assign({ orbit }, options));
+  const text = (lines) => sceneText(lines).join("\n");
+  for (const [from, to] of [["2d", "3d"], ["3d", "2d"]]) {
+    const change = { from, at };
+    const start = frame(at, { view: to, change });
+    const mid = frame(at + S.CHANGE_MS / 2, { view: to, change });
+    const end = frame(at + S.CHANGE_MS - 1, { view: to, change });
+    const flatEnd = from === "2d" ? start : end; // the morph's 2D end, in depth characters
+    const deepEnd = from === "2d" ? end : start;
+    // the 2D end: the agents on their 2D cells; the 3D end: on their 3D cells; half way: on the morph's cells
+    assert.ok(onCells(flatEnd, (p) => p) >= n - 1, `${from}->${to}: the 2D end has the agents on their 2D places`);
+    assert.ok(onCells(deepEnd, (p) => to3D(F1.agents.get(p.agent.name))) >= n - 2, `${from}->${to}: the 3D end on their 3D places`);
+    const halfWay = (p) => S.morphCamera(L, turn, elevation, 0.5)(S.figure3D(L, 0.5).agents.get(p.agent.name));
+    assert.ok(onCells(mid, halfWay) >= n - 2, `${from}->${to}: half way the agents on the morph's cells\n${text(mid)}`);
+    // the mid-switch frame differs from both ends and from both steady views
+    const steady2D = frame(at + S.CHANGE_MS / 2, { view: "2d" });
+    const steady3D = frame(at + S.CHANGE_MS / 2, { view: "3d" });
+    for (const other of [start, end, steady2D, steady3D]) assert.notEqual(text(mid), text(other), from + "->" + to);
+    assert.ok(onCells(mid, (p) => p) <= n / 2, "half way most agents have left their 2D places");
+    assert.ok(onCells(mid, (p) => to3D(F1.agents.get(p.agent.name))) <= n / 2, "and are not yet on their 3D places");
+  }
+  // the 3D view is a side view: the starting elevation is ELEVATION_3D, low above the plane
+  assert.ok(S.ELEVATION_3D > 0 && S.ELEVATION_3D <= Math.PI / 4, "a low elevation");
+  assert.equal(S.orbitReset(0).elevation, S.ELEVATION_3D);
+  assert.equal(S.orbitCamera(null, 0).elevation, S.ELEVATION_3D);
+});
+
+// The sky behind the 3D view (sky.md, "Terminal panel").
+const SKY_NOW = 1795075000000;
+const skyDoc = () => DM.pathsDocument(demo, 60000, SKY_NOW); // at rest, three finished runs (2 + 1; one path never ran)
+const HELD = { turn: 1.0, elevation: S.ELEVATION_3D, resume: 1e15 };
+const skyFrame = (doc, w, h, now, options) => S.orbitLines(doc, w, h, now, Object.assign({ view: "3d", orbit: HELD, colors: DARK }, options));
+const cellGrid = (lines) => lines.map((l) => cellsOf(l));
+// The cells the sky adds: those that differ from the same frame drawn without it. -> [{ row, col, ch, tone, color }]
+const skyCells = (doc, w, h, now, options = {}) => {
+  const a = cellGrid(skyFrame(doc, w, h, now, options));
+  const b = cellGrid(skyFrame(doc, w, h, now, Object.assign({}, options, { sky: false })));
+  const out = [];
+  a.forEach((row, r) => row.forEach((c, k) => {
+    // (a blank cell takes the style of the span it is joined to: only its character counts)
+    if (c.ch !== b[r][k].ch || (c.ch !== " " && (c.tone !== b[r][k].tone || c.color !== b[r][k].color))) out.push(Object.assign({ row: r, col: k, under: b[r][k].ch }, c));
+  }));
+  return out;
+};
+const luminance = (hex) => {
+  const n = parseInt(hex.slice(1), 16);
+  return 0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255);
+};
+
+test("orbit sky: only in 3D; sparse dim stars that are not depth characters, the same sky from the same seed, never over a name, an agent or a figure cell", () => {
+  const doc = skyDoc();
+  const noFlows = JSON.parse(JSON.stringify(doc));
+  noFlows.structure.flows = [];
+  const star = S.runStars(doc)[0];
+  const streaks = [{ flow: star.flow, run: star.run, at: 50000 }];
+  // 2D: nothing of the sky, with runs, streaks or not
+  for (const now of [50000, 50450, 52000]) {
+    const flat = sceneText(S.orbitLines(doc, 120, 30, now, { view: "2d", streaks, colors: DARK }));
+    assert.deepEqual(flat, sceneText(S.orbitLines(noFlows, 120, 30, now, { view: "2d", colors: DARK })), "2D: no sky");
+    assert.deepEqual(flat, sceneText(S.orbitLines(doc, 120, 30, now, { view: "2d", sky: false, colors: DARK })));
+  }
+  assert.equal(S.frameInterval(doc, { view: "2d", streaks }, 50450), S.FRAME_MS_IDLE, "no streak frames in 2D");
+  for (const [w, h] of [[64, 12], [120, 30], [200, 50]]) {
+    for (const colors of [DARK, LIGHT]) {
+      const cells = skyCells(doc, w, h, 50000, { colors });
+      const field = cells.filter((c) => c.color !== S.skyColors(colors).run);
+      assert.ok(cells.length >= Math.floor(w * h * 0.004), `${w}x${h}: some stars (${cells.length})`);
+      assert.ok(cells.length <= w * h * 0.03, `${w}x${h}: sparse, at most 3 % of the cells (${cells.length})`);
+      for (const c of cells) {
+        assert.equal(c.under, " ", `${w}x${h}: a star only on an empty cell (${c.row},${c.col} over ${JSON.stringify(c.under)})`);
+        assert.ok(!S.DEPTH_CHARS.includes(c.ch), `not a depth character: ${c.ch}`);
+        assert.ok([...S.STAR_CHARS, S.RUN_STAR_CHAR].includes(c.ch), c.ch);
+        assert.equal(c.tone, "muted");
+        assert.match(c.color, /^#[0-9a-f]{6}$/);
+      }
+      // a field star stands clear: nothing of the figure and no text in the eight cells round it
+      const plain = cellGrid(skyFrame(doc, w, h, 50000, { colors, sky: false }));
+      for (const c of field) {
+        for (let r = c.row - 1; r <= c.row + 1; r += 1) {
+          for (let k = c.col - 1; k <= c.col + 1; k += 1) if (plain[r] && plain[r][k]) assert.equal(plain[r][k].ch, " ", `the star at ${c.row},${c.col} touches ${plain[r][k].ch}`);
+        }
+      }
+    }
+  }
+  // the same seed, the same sky: drawn again, from a fresh copy of the document, at another time while held
+  const once = sceneText(skyFrame(doc, 120, 30, 50000));
+  assert.deepEqual(sceneText(skyFrame(doc, 120, 30, 50000)), once);
+  assert.deepEqual(sceneText(skyFrame(JSON.parse(JSON.stringify(doc)), 120, 30, 50000)), once);
+  assert.deepEqual(skyCells(doc, 120, 30, 51000), skyCells(doc, 120, 30, 50000), "nothing in the sky moves by itself");
+  // colours: no green; the dark theme warm white specks, the light theme ink; a run's star warmer and brighter
+  for (const colors of [DARK, LIGHT, { dark: true, muted: "#5fd7af" }, { dark: false, muted: "#3fa060" }]) {
+    const C = S.skyColors(colors);
+    for (const c of [...C.stars, C.run]) {
+      const hue = S.hueOf(c);
+      assert.ok(hue === null || hue < 80 || hue > 190, `${c}: hue ${hue}`);
+    }
+    const hue = S.hueOf(C.run);
+    assert.ok(hue >= 15 && hue <= 60, "the run's star is warm: " + hue);
+    const bg = colors.dark === false ? 255 : 0;
+    assert.ok(Math.abs(luminance(C.run) - bg) > Math.abs(luminance(C.stars[2]) - bg), "brighter against the background than any field star");
+    assert.ok(Math.abs(luminance(C.stars[0]) - bg) < Math.abs(luminance(C.stars[2]) - bg), "the small stars dimmer");
+  }
+});
+
+test("orbit sky: shifts at a fraction of the figure's turn (the same after a full turn), with the elevation, fades with the morph; reduced motion shows it only in steady 3D", () => {
+  const doc = idleDemo();
+  const [w, h] = [120, 30];
+  const at = (orbit, now = 50000, options = {}) => skyCells(doc, w, h, now, Object.assign({ orbit }, options)).filter((c) => S.STAR_CHARS.includes(c.ch));
+  const key = (c) => c.row + "," + c.col;
+  // the shift that maps most stars of `a` onto stars of `b`
+  const bestShift = (a, b, rows) => {
+    const inB = new Set(b.map(key));
+    let best = { d: 0, n: -1 };
+    for (let d = -30; d <= 30; d += 1) {
+      const n = a.filter((c) => inB.has(rows ? c.row + d + "," + c.col : c.row + "," + (c.col + d))).length;
+      if (n > best.n) best = { d, n };
+    }
+    return best;
+  };
+  const a = at({ turn: 1.0, elevation: S.ELEVATION_3D, resume: 1e15 });
+  const b = at({ turn: 1.3, elevation: S.ELEVATION_3D, resume: 1e15 });
+  const shift = bestShift(a, b, false);
+  // the agents' movement for the same turn: the near side's largest
+  const L = S.orbitLayout(doc, w, h);
+  const F = S.figure3D(L);
+  const p0 = S.camera3D(L, 1.0, S.ELEVATION_3D);
+  const p1 = S.camera3D(L, 1.3, S.ELEVATION_3D);
+  const agentMove = Math.max(...L.placed.map((p) => Math.abs(p1(F.agents.get(p.agent.name)).col - p0(F.agents.get(p.agent.name)).col)));
+  assert.ok(shift.n >= a.length * 0.6, `most stars shift together (${shift.n} of ${a.length})`);
+  assert.ok(shift.d >= 2 && shift.d <= agentMove * 0.7, `the sky moves ${shift.d} cells, the near agents up to ${agentMove}: a fraction`);
+  // a full turn: the same sky (no jump where the turn wraps)
+  const full = at({ turn: 2 * Math.PI - 1e-9, elevation: S.ELEVATION_3D, resume: 1e15 });
+  const zero = at({ turn: 0, elevation: S.ELEVATION_3D, resume: 1e15 });
+  const inZero = new Set(zero.map(key));
+  assert.ok(full.filter((c) => inZero.has(key(c))).length >= full.length * 0.9, "the same at turn 0 and 2 PI");
+  // the elevation: the sky moves up as the camera rises
+  const up = bestShift(a, at({ turn: 1.0, elevation: S.ELEVATION_3D + 0.4, resume: 1e15 }), true);
+  assert.ok(up.d < 0 && up.n >= a.length * 0.5, `up with the elevation: ${up.d} rows (${up.n} of ${a.length})`);
+  // the morph: the sky fades in toward 3D and out toward 2D (and none at the 2D end)
+  const count = (now, change, options = {}) => skyCells(doc, w, h, now, Object.assign({ orbit: HELD, change }, options)).length;
+  const t0 = 60000;
+  const into = { from: "2d", at: t0 };
+  const steady = count(t0 + S.CHANGE_MS, null);
+  const early = count(t0 + 150, into);
+  const late = count(t0 + 550, into);
+  assert.equal(count(t0, into), 0, "none at the 2D end");
+  assert.ok(early < late && late < steady && early > 0, `fades in: ${early} < ${late} < ${steady}`);
+  const back = { from: "3d", at: t0 };
+  const out = (now, options = {}) => count(now, back, Object.assign({ view: "2d" }, options));
+  assert.ok(out(t0 + 150) > out(t0 + 550) && out(t0 + 550) > 0, `fades out toward 2D: ${out(t0 + 150)} > ${out(t0 + 550)}`);
+  assert.equal(out(t0 + S.CHANGE_MS), 0, "none in 2D");
+  // reduced motion: no fade (none during the morph), the same sky in steady 3D
+  assert.equal(count(t0 + 550, into, { motion: "reduced" }), 0);
+  assert.equal(out(t0 + 150, { motion: "reduced" }), 0);
+  assert.equal(count(t0 + S.CHANGE_MS, null, { motion: "reduced" }), steady);
+});
+
+test("orbit sky: one warmer star per finished run (capped at 200); a streak flies to a new run's star, then it stays; reduced motion: it just appears", () => {
+  const doc = skyDoc();
+  assert.equal(S.runStars(doc).length, 3, "2 + 1 passed runs; a failed run and a path never run add none");
+  assert.deepEqual(S.finishedRuns(doc).map((r) => r.passed), [2, 1, 0]);
+  // the cap: the first runs of every path first, then the second, ...; growing past it moves no star already there
+  const many = JSON.parse(JSON.stringify(doc));
+  many.structure.flows = [
+    { id: "a-b", path: ["a", "b"], stats: { runs: 500, passed: 480 } },
+    { id: "c-d", path: ["c", "d"], stats: { runs: 4, passed: 3 } },
+    { id: "e-f", path: ["e", "f"], stats: { runs: 2, passed: 0 } },
+  ];
+  const capped = S.runStars(many);
+  assert.equal(capped.length, S.RUN_STARS_MAX);
+  assert.equal(S.RUN_STARS_MAX, 200);
+  assert.equal(capped.filter((s) => s.flow === "c-d").length, 3, "a path with few runs keeps its stars");
+  assert.equal(capped.filter((s) => s.flow === "e-f").length, 0);
+  many.structure.flows[0].stats.passed = 900;
+  assert.deepEqual(S.runStars(many), capped, "past the cap a new run adds no star and moves none");
+  assert.equal(new Set(capped.map((s) => s.u + "," + s.v)).size, capped.length, "each run its own place");
+  // a run star that shows at the held camera, and its streak
+  const C = S.skyColors(DARK);
+  const steadyCells = skyCells(doc, 120, 30, 50000);
+  const runCells = steadyCells.filter((c) => c.color === C.run);
+  assert.ok(runCells.length >= 1 && runCells.length <= 3 && runCells.every((c) => c.ch === S.RUN_STAR_CHAR), "the run stars show, warm");
+  const target = S.runStars(doc).find((s) => {
+    const cells = skyCells(doc, 120, 30, 50000, { streaks: [{ flow: s.flow, run: s.run, at: 50100 }] }); // waiting: no star yet
+    return cells.filter((c) => c.color === C.run).length < runCells.length;
+  });
+  assert.ok(target, "a run star on screen");
+  const streaks = [{ flow: target.flow, run: target.run, at: 50000 }];
+  const tail = (cells) => cells.filter((c) => c.ch === S.STREAK_CHARS.down || c.ch === S.STREAK_CHARS.up);
+  const runStarsAt = (now, options = {}) => skyCells(doc, 120, 30, now, Object.assign({ streaks }, options)).filter((c) => c.color === C.run && c.ch === S.RUN_STAR_CHAR).length;
+  // waiting its turn: no star, no streak
+  assert.equal(tail(skyCells(doc, 120, 30, 49900, { streaks })).length, 0);
+  assert.equal(runStarsAt(49900), runCells.length - 1);
+  // in flight: a diagonal tail behind the head, on empty cells only, the star not there yet
+  const mid = skyCells(doc, 120, 30, 50000 + S.STREAK_MS / 2, { streaks });
+  const t = tail(mid);
+  assert.ok(t.length >= 1, "a tail");
+  assert.ok(mid.every((c) => c.under === " "), "over nothing of the figure");
+  const heads = mid.filter((c) => c.ch === S.STREAK_CHARS.head && c.color === C.run);
+  assert.ok(heads.length >= 1);
+  const cellsOfStreak = [...t, ...heads].sort((x, y) => x.row - y.row);
+  for (let i = 1; i < cellsOfStreak.length; i += 1) {
+    assert.equal(cellsOfStreak[i].row - cellsOfStreak[i - 1].row, 1, "one row a step");
+    assert.equal(Math.abs(cellsOfStreak[i].col - cellsOfStreak[i - 1].col), 1, "one column a step: a diagonal");
+  }
+  assert.ok(S.STREAK_MS <= 1000, "about a second");
+  assert.equal(S.frameInterval(doc, { view: "3d", streaks }, 50000 + 450), S.FRAME_MS_WORKING, "10 frames a second while it flies");
+  assert.equal(S.frameInterval(doc, { view: "3d", streaks }, 49900), S.FRAME_MS_WORKING, "and while it waits its turn");
+  // landed: no streak, the star stays; the frame is the one without the streak
+  const done = 50000 + S.STREAK_MS;
+  assert.equal(tail(skyCells(doc, 120, 30, done, { streaks })).length, 0);
+  assert.deepEqual(sceneText(skyFrame(doc, 120, 30, done, { streaks })), sceneText(skyFrame(doc, 120, 30, done)));
+  assert.equal(S.frameInterval(doc, { view: "3d", streaks }, done), S.FRAME_MS_IDLE_3D, "back to idle frames");
+  // reduced motion: no streak, the star appears at its time; idle frames
+  assert.equal(tail(skyCells(doc, 120, 30, 50450, { streaks, motion: "reduced" })).length, 0);
+  assert.equal(runStarsAt(50450, { motion: "reduced" }), runCells.length);
+  assert.equal(runStarsAt(49900, { motion: "reduced" }), runCells.length - 1);
+  assert.equal(S.frameInterval(doc, { view: "3d", streaks, motion: "reduced" }, 50450), S.FRAME_MS_IDLE_3D);
+  assert.equal(P.resolveOptions({ reducedMotion: true }, { os, path }).reducedMotion, true);
+  assert.equal(P.resolveOptions({}, { os, path }).reducedMotion, false);
+});
+
+test("orbit sky: the hub drawn brighter (accent) in 3D while the orchestrator works; the 2D hub unchanged", () => {
+  const idle = idleDemo();
+  const working = JSON.parse(JSON.stringify(idle));
+  working.agents.find((a) => a.group === "hub").busy = 1;
+  const hubTone = (doc, view) => {
+    const lines = S.orbitLines(doc, 120, 30, 5000, { view, orbit: HELD, sky: false });
+    for (const l of lines) for (const c of cellsOf(l)) if (c.ch === "◉") return c.tone;
+    return null;
+  };
+  assert.equal(hubTone(working, "3d"), "accent", "lit while it works");
+  assert.equal(hubTone(idle, "3d"), "plain", "still when idle");
+  assert.equal(hubTone(working, "2d"), hubTone(idle, "2d"), "2D unchanged");
+  assert.equal(hubTone(idle, "2d"), "plain");
+  // the hub's ring too: accent cells round it only while it works
+  const accents = (doc) => S.orbitLines(doc, 120, 30, 5000, { view: "3d", orbit: HELD, sky: false }).flat().filter((s) => s.tone === "accent").map((s) => s.text).join("");
+  assert.ok(/[·.:01@]/.test(accents(working)), "the ring lit");
+  assert.equal(accents(idle).replace(/\s/g, ""), "");
+});
+
+test("orbit sky panel: no streak on opening or switching to 3D; a run finished while 3D shows flies exactly one streak and its star stays; one finished in 2D flies none; an unchanged frame is not pushed", async () => {
+  const docFile = path.join(tmp, "sky-doc.json");
+  const debugLog = path.join(tmp, "sky-debug.log");
+  fs.rmSync(debugLog, { force: true });
+  const base = DM.pathsDocument(demo, 0, SKY_NOW);
+  const withRuns = (passed) => {
+    const d = JSON.parse(JSON.stringify(base));
+    d.structure.flows[0].stats.passed = passed;
+    d.structure.flows[0].stats.runs = passed + 1;
+    return d;
+  };
+  fs.writeFileSync(docFile, JSON.stringify(withRuns(2)));
+  const skyPython = fakePython("sky-python", `cat "${docFile}"`);
+  const clockRef = { t: SKY_NOW };
+  const plugin = P.createPlugin({
+    createElement: OT.createElement, insert: OT.insert, setProp: OT.setProp, createSignal: solid.createSignal, onCleanup: solid.onCleanup,
+    spawn, screenSize: () => ({ width: 200, height: 60 }), fs, os, path, env: { AGENTGRAPH_TUI_DEBUG: debugLog }, now: () => clockRef.t,
+    timers: { setInterval: (fn, ms) => globalThis.setInterval(fn, ms), clearInterval: (h) => globalThis.clearInterval(h) },
+  });
+  const { ctx, state, panelClaim } = makePanelHost({ python: skyPython, intervalMs: 1000 });
+  const stop = plugin.setup(ctx);
+  globalThis.__agentgraphStub.cleanups.length = 0;
+  const streakLines = () => (fs.existsSync(debugLog) ? fs.readFileSync(debugLog, "utf8").split("\n").filter((l) => l.includes(" sky: streaks ")) : []);
+  const tails = (lines) => lines.join("\n").split("").filter((ch) => ch === S.STREAK_CHARS.down || ch === S.STREAK_CHARS.up).length;
+  const nextFetch = () => sleep(1250); // the poll: one snapshot a second
+  try {
+    const view = panelClaim().render(makePanel({ sessionID: "ses_sky", width: 120 }));
+    await waitFor(() => screen(view).length > 3, 5000, "the snapshot");
+    sizePanel(view, 120, 40);
+    pressG(state);
+    assert.ok(isOrbit(screen(view)));
+    commandOf(state, "agentgraph.graph.dimension").run();
+    clockRef.t += S.CHANGE_MS + 50;
+    await waitFor(() => has3D(screen(view)), 3000, "3D");
+    // opening and switching: no streak, and none for a snapshot that brings the same runs
+    await nextFetch();
+    clockRef.t += 450;
+    await sleep(250);
+    assert.equal(streakLines().length, 0, "no streak on opening or on switching to 3D");
+    assert.equal(tails(screen(view)), 0);
+    // a run finishes while 3D shows: exactly one streak, then its star stays (the turn held by a turn key, so the
+    // sky stands still while the clock moves on)
+    commandOf(state, "agentgraph.graph.turn-left").run();
+    await sleep(150);
+    const starsBefore = screen(view).join("\n").split(S.RUN_STAR_CHAR).length - 1;
+    fs.writeFileSync(docFile, JSON.stringify(withRuns(3)));
+    await nextFetch();
+    const lines = streakLines();
+    assert.equal(lines.length, 1, "one streak logged");
+    assert.match(lines[0], /streaks impl-openai-verifier-impl-openai#3$/);
+    clockRef.t += S.STREAK_MS / 2;
+    await waitFor(() => tails(screen(view)) > 0, 2000, "the streak in flight");
+    clockRef.t += S.STREAK_MS;
+    await waitFor(() => tails(screen(view)) === 0, 2000, "the streak landed");
+    const starsAfter = screen(view).join("\n").split(S.RUN_STAR_CHAR).length - 1;
+    assert.ok(S.STREAK_MS * 1.5 < S.RESUME_MS, "still held");
+    assert.equal(starsAfter, starsBefore + 1, "its star stays\n" + screen(view).join("\n"));
+    // the same runs again: nothing more
+    await nextFetch();
+    assert.equal(streakLines().length, 1);
+    // the clock stands: an unchanged frame is not pushed (the rows keep their nodes)
+    const nodes = view.children.slice();
+    const renders = state.renders;
+    await sleep(500);
+    assert.deepEqual(view.children, nodes);
+    assert.ok(state.renders - renders <= 1, "at most the poll's own render request");
+    // a run finished while the 2D view shows: no streak, then or after switching back to 3D
+    commandOf(state, "agentgraph.graph.dimension").run();
+    clockRef.t += S.CHANGE_MS + 50;
+    await waitFor(() => !has3D(screen(view)), 3000, "2D");
+    fs.writeFileSync(docFile, JSON.stringify(withRuns(4)));
+    await nextFetch();
+    commandOf(state, "agentgraph.graph.dimension").run();
+    clockRef.t += S.CHANGE_MS + 50;
+    await waitFor(() => has3D(screen(view)), 3000, "3D again");
+    await nextFetch();
+    clockRef.t += 450;
+    await sleep(250);
+    assert.equal(streakLines().length, 1, "no streak for a run finished in 2D");
+    assert.equal(tails(screen(view)), 0);
+  } finally {
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    stop();
+  }
+});
+
+// orbit lane (n104): end of the block.
+
+// ---------------------------------------------------------------------------------------------------------------
 // Paths: `r` runs a drawn path (structure.flows), the paths row at rest
 
 const RUNNER = await import(src("runner.js"));
