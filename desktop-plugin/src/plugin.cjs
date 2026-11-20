@@ -72,6 +72,8 @@ const RECORD_MAX_CHARS = 4096;
 // A step's output (agentgraph/outputs.py): its text is at most TEXT_LIMIT bytes of UTF-8; the task, step and output
 // are named as the graph names them, each one argument, so none may start with "-" or hold a space or a control.
 const OUTPUT_TEXT_MAX_BYTES = 256 * 1024;
+// The back end's own words for a text holding NUL (agentgraph/outputs.py, text_problem), so both refuse it alike.
+const OUTPUT_NUL = "the new text is not text: it holds the control character U+0000; nothing was written";
 const OUTPUT_NAME = /^[^\s\-\u0000-\u001f\u007f][^\s\u0000-\u001f\u007f]{0,199}$/;
 
 const HOST_CSS = [
@@ -210,8 +212,9 @@ function snapshotIpc(pluginId) {
         },
         // Read a step's output, save a new text as its next revision (the steps that read the old one become stale;
         // one undoable step), or undo that. Input: op ("read", "write" or "restore"), directory (the session's: the
-        // task graph is found from it as the snapshot finds it; "" for restore), task, node and artifact (the output;
-        // "" for restore), record (restore only) and text (write only, on stdin); "" when not given. Output: JSON
+        // task graph is found from it as the snapshot finds it, and an undo is taken back only for a graph found so),
+        // task, node and artifact (the output; "" for restore), record (restore only) and text (write only, on
+        // stdin); "" when not given. Output: JSON
         // text, the command's answer ({"task", "node", "artifact", "text"?, "rev", "output"?, "stale"?, "record"?,
         // ...}) or {"error": "...", "rev"?}.
         output: {
@@ -733,21 +736,24 @@ function createOutputRunner(deps) {
     if (!isPlainObject(input) || !KEYS.every((key) => typeof input[key] === "string")) return fail("Bad output request.");
     const { op, directory, task, node, artifact, record, text } = input;
     const base = ["-P", "-m", "agentgraph.outputs", "output"];
-    if (op === "restore") {
-      if (directory || task || node || artifact || text || !recordPath(record)) return fail("The undo needs the record a save returned.");
-      return { args: base.concat(["restore", record, "--json"]), stdin: "" };
-    }
-    if (op !== "read" && op !== "write") return fail("Bad output request.");
-    if (record) return fail("Bad output request.");
+    if (op !== "read" && op !== "write" && op !== "restore") return fail("Bad output request.");
     if (!directory || directory.length > 4096 || directory.includes("\0") || !deps.path.isAbsolute(directory))
       return fail("The session has no usable directory.");
+    const from = ["--from", deps.path.resolve(directory)];
+    if (op === "restore") {
+      // Only a record of a graph found from the session's folder is taken back (the command refuses any other).
+      if (task || node || artifact || text || !recordPath(record)) return fail("The undo needs the record a save returned.");
+      return { args: base.concat(["restore", record], from, ["--json"]), stdin: "" };
+    }
+    if (record) return fail("Bad output request.");
     if (![task, node, artifact].every((name) => OUTPUT_NAME.test(name))) return fail("The output needs its task, step and name.");
-    const where = [task, node, artifact, "--from", deps.path.resolve(directory)];
+    const where = [task, node, artifact].concat(from);
     if (op === "read") {
       if (text) return fail("Bad output request.");
       return { args: base.concat(["read"], where, ["--json"]), stdin: "" };
     }
-    if (text.includes("\0") || new TextEncoder().encode(text).length > OUTPUT_TEXT_MAX_BYTES)
+    if (text.includes("\0")) return fail(OUTPUT_NUL);
+    if (new TextEncoder().encode(text).length > OUTPUT_TEXT_MAX_BYTES)
       return fail("The text is larger than 256 KiB, the most an output may be to be edited here.");
     return { args: base.concat(["write"], where, ["--text-file", "-", "--json"]), stdin: text };
   }
@@ -1130,14 +1136,17 @@ function renderPanel(ctx, solid, props) {
     if (!alive) throw new Error("The panel is closed.");
     if (!isPlainObject(request) || !["read", "write", "restore"].includes(request.op)) throw new Error("Bad output request.");
     const input = { op: request.op, directory: "", task: "", node: "", artifact: "", record: "", text: "" };
+    // The session's folder goes with every op: main finds the task graph from it, and takes an undo back only for a
+    // graph found so.
+    const where = sessionRequest();
+    if (!where || !where.directory) throw new Error("No session is open.");
+    input.directory = where.directory;
     if (request.op === "restore") {
       if (typeof request.record !== "string" || !request.record || request.record.startsWith("-")) throw new Error("Bad output request.");
       input.record = request.record;
     } else {
-      const where = sessionRequest();
-      if (!where || !where.directory) throw new Error("No session is open.");
       if (![request.task, request.node, request.artifact].every(plainName)) throw new Error("Bad output request.");
-      Object.assign(input, { directory: where.directory, task: request.task, node: request.node, artifact: request.artifact });
+      Object.assign(input, { task: request.task, node: request.node, artifact: request.artifact });
     }
     if (request.op === "write") {
       if (typeof request.text !== "string") throw new Error("Bad output request.");

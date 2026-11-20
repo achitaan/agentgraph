@@ -470,11 +470,12 @@ def make_server(
             home = outputs.edit_home(root=ledger_root, config_path=paths["config"])  # the edit log's memory home
 
             def run():
-                if request["op"] == "restore":
-                    return outputs.restore_output(request["record"], backups=paths["backups"], home=home)
+                # The graph folders the server shows; an undo is taken back only for a graph in one of them.
                 dirs = [graph_dir] if graph_dir is not None else [
                     folder for folder in (find_graph_dir(Path(cwd) if cwd else Path.cwd()), ORCHESTRATION_GRAPH_DIR)
                     if folder is not None]
+                if request["op"] == "restore":
+                    return outputs.restore_output(request["record"], backups=paths["backups"], home=home, dirs=dirs)
                 if request["op"] == "read":
                     return outputs.read_output(request["task"], request["node"], request["artifact"], dirs=dirs)
                 return outputs.write_output(request["task"], request["node"], request["artifact"], request["text"],

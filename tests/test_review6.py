@@ -7,6 +7,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agentgraph import flowcommands, flowrun, roster, skillset, snapshot_json, structure
 import tests.test_roster_rename as rename_tests
@@ -504,6 +505,49 @@ class Profiles(unittest.TestCase):
             self.assertEqual(skillset._profile_refs(profiles, installed | {"check"}),
                              [("verifier", "grilling"), ("verifier", "check"), ("verifier", "code-assurance"),
                               ("reviewer", "sympy")])
+
+
+class ClosureEnds(Scratch):
+    """Round 7 rulings, round 6's one open risk: `flowrun._closure` ends only if `flowrun._grow` never reports the same
+    cycle twice. With P = A, B and Q = B, A, and with three paths in a ring, each cycle is reported once (one more
+    growth than there are check nodes), the closure ends and the run message is finite."""
+
+    GROWTHS = 50  # far more than any of these structures needs; past it the closure is taken not to end
+
+    def closure_of(self, flow):
+        shape = snapshot_json.load_structure(self.root)
+        calls = []
+        real = flowrun._grow
+
+        def counted(*args):
+            calls.append(1)
+            if len(calls) > self.GROWTHS:
+                raise AssertionError(f"the closure of {flow['id']} did not end after {self.GROWTHS} growths")
+            return real(*args)
+        with patch.object(flowrun, "_grow", counted):
+            listed, checks, nodes = flowrun._closure(flow, shape["flows"], snapshot_json.hub_names(shape),
+                                                     shape["seats"])
+            growths = len(calls)
+            text = structure.flow_prompt(flow["id"], "write hello.txt", self.root)  # ends too (the same cap)
+        return listed, checks, nodes, text, growths
+
+    def ends(self, paths):
+        flows = [structure.add_flow(path, None, self.root)[0] for path in paths]
+        for flow in flows:
+            listed, checks, nodes, text, growths = self.closure_of(flow)
+            self.assertEqual(growths, len(checks) + 1, f"{flow['id']}: a cycle was reported twice")
+            self.assertEqual(len({(agent, made["id"]) for agent, made, _ in checks}), len(checks))
+            self.assertLessEqual(len(nodes), flowrun.GROWTH_LIMIT)
+            self.assertLess(len(text), 20_000)
+            for agent, made, _ in checks:
+                self.assertIn(f"- {agent}, added for {made['id']}: it would start", text)
+        return flows
+
+    def test_two_paths_back_and_forth_end_and_the_message_is_finite(self):
+        self.ends([["researcher", "impl-openai"], ["impl-openai", "researcher"]])
+
+    def test_three_paths_in_a_ring_end_and_the_message_is_finite(self):
+        self.ends([["researcher", "impl-openai"], ["impl-openai", "designer"], ["designer", "researcher"]])
 
 
 if __name__ == "__main__":

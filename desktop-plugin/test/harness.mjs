@@ -1809,7 +1809,9 @@ esac
   const record = "/tmp/backups/2026-11-20-outputs/edit-0123456789ab/record.json";
   const undone = await output({ op: "restore", record });
   assert.equal(undone.restored, true);
-  assert.deepEqual(log[0].args, base.concat(["restore", record, "--json"]));
+  // Review round 7, minor 1: the session's folder goes with an undo too; the command takes back only a record of a
+  // graph found from it.
+  assert.deepEqual(log[0].args, base.concat(["restore", record, "--from", ORCHESTRATION, "--json"]));
 
   const refusalOf = async (promise) => {
     try {
@@ -1858,6 +1860,8 @@ esac
     { ...blank, op: "write", directory: ORCHESTRATION, task: "t1", node: "n1", artifact: "report", text: "a".repeat(256 * 1024 + 1) },
     { ...blank, op: "restore", record: "-x" },
     { ...blank, op: "restore", record, task: "t1" },
+    { ...blank, op: "restore", record }, // no session folder: nothing to limit the undo to
+    { ...blank, op: "restore", directory: "relative", record },
   ]) assert.match((await call(input)).error || "", /./, JSON.stringify(input).slice(0, 120));
   assert.equal(log.length, 0, "a bad request reached the command line");
 });
@@ -2012,7 +2016,7 @@ await check("real Python on scratch folders: a step's output is read and written
     const after = await call("snapshot", { directory: project, session: "" });
     assert.equal(outputOf(after).rev, saved.rev);
     assert.deepEqual(after.graph.nodes.find((node) => node.id === "n2").inputs.map((input) => input.stale), [true]);
-    const undone = await call("output", { op: "restore", directory: "", task: "", node: "", artifact: "", record: saved.record, text: "" });
+    const undone = await call("output", { op: "restore", directory: project, task: "", node: "", artifact: "", record: saved.record, text: "" });
     assert.equal(undone.restored, true, JSON.stringify(undone));
     assert.deepEqual(listing(project), pristine, "undo put the project back byte for byte");
   } finally {
@@ -2022,6 +2026,96 @@ await check("real Python on scratch folders: a step's output is read and written
     assert.equal(entry.cwd, entry.args.includes("agentgraph.snapshot_json") ? project : orch, entry.args.join(" "));
     assert.equal(entry.args.some((arg) => /^--(dir|home|backups)\b/.test(arg)), false, "the plugin passes no folder: " + entry.args.join(" "));
   }
+});
+
+// Review round 7, minor 1 (security): an undo record is taken back only in the session's own project. The panel of a
+// session in project A is handed the record of an edit made in project B (the backups folder is shared): the real
+// main and real Python refuse it, and B is left as it was. From B's own session the same record is taken back.
+await check("real Python on scratch folders: the panel of one project cannot take back an edit of another project", async () => {
+  const scratch = path.join(fs.realpathSync(TMP), "desktop-outputs-reach");
+  const orch = path.join(scratch, "orchestration");
+  const home = path.join(scratch, "home");
+  fs.cpSync(path.join(ORCHESTRATION, "agentgraph"), path.join(orch, "agentgraph"), {
+    recursive: true,
+    filter: (source) => !/(^|\/)(__pycache__|web)$/.test(source),
+  });
+  fs.cpSync(path.join(ORCHESTRATION, "structure"), path.join(orch, "structure"), { recursive: true });
+  fs.copyFileSync(path.join(ORCHESTRATION, "SKILLS.md"), path.join(orch, "SKILLS.md"));
+  fs.mkdirSync(path.join(home, ".config", "opencode"), { recursive: true });
+  const makeProject = (name) => {
+    const project = path.join(home, name);
+    fs.mkdirSync(path.join(project, ".opencode", "graph"), { recursive: true });
+    fs.mkdirSync(path.join(project, ".opencode", "artifacts", "t1", "n1", "r1"), { recursive: true });
+    fs.writeFileSync(path.join(project, ".opencode", "artifacts", "t1", "n1", "r1", "report.md"), "line one\n");
+    fs.writeFileSync(path.join(project, ".opencode", "graph", "t1.json"), JSON.stringify({
+      task: "t1", goal: "g", status: "running", revision: 1, created: 1, updated: 2,
+      objectives: [{ id: "o1", text: "x", nodes: ["n1"] }],
+      nodes: [{ id: "n1", type: "research", agent: "explorer", goal: "find", depends_on: [], scope: [], done_when: "list",
+        status: "passed", evidence: "e", artifacts: [{ id: "report", path: ".opencode/artifacts/t1/n1/r1/report.md", revision: 1 }] }],
+      events: [],
+    }, null, 1));
+    return project;
+  };
+  const projectA = makeProject("a");
+  const projectB = makeProject("b");
+  const listing = (root) => fs.readdirSync(root, { recursive: true }).sort().map((name) => {
+    const full = path.join(root, name);
+    return [name, fs.statSync(full).isFile() ? fs.readFileSync(full, "utf8") : "dir"];
+  });
+
+  const m = mainContext({ home: orch });
+  await resolveDefault(mainLoad.module.exports).main(m.ctx);
+  const impl = m.provided[0].impl;
+  const definition = windowLoad.gui.defined[0];
+  let session = { key: "srv\nses_a", id: "ses_a", directory: projectA };
+  const props = { get session() { return session; }, screen: {} };
+  const w = windowContext(definition, { session });
+  w.ctx.main = (token) => Object.fromEntries(Object.keys(token.spec.methods).map((method) =>
+    [method, (input) => hostCall(token, method, impl, input)]));
+  definition.setup(w.ctx);
+  const rendered = windowLoad.solid.runWithOwner(() => value(w.added[1].item).render(props));
+  const { output } = mountCalls[mountCalls.length - 1].options.actions;
+  const realHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    session = { key: "srv\nses_b", id: "ses_b", directory: projectB };
+    const saved = await output({ op: "write", task: "t1", node: "n1", artifact: "report", text: "theirs\n" });
+    assert.equal(typeof saved.record, "string", JSON.stringify(saved));
+    const edited = listing(projectB);
+    const untouched = listing(projectA);
+    session = { key: "srv\nses_a", id: "ses_a", directory: projectA };
+    let refused;
+    try {
+      await output({ op: "restore", record: saved.record });
+    } catch (error) {
+      refused = error;
+    }
+    assert.ok(refused, "the panel of project A took back an edit of project B");
+    assert.match(refused.message, /not in this project/);
+    assert.deepEqual([listing(projectB), listing(projectA)], [edited, untouched], "nothing was written");
+    session = { key: "srv\nses_b", id: "ses_b", directory: projectB };
+    const undone = await output({ op: "restore", record: saved.record });
+    assert.equal(undone.restored, true, JSON.stringify(undone));
+  } finally {
+    process.env.HOME = realHome;
+    rendered.dispose();
+  }
+});
+
+// Review round 7, minor 8: a text holding NUL is refused by main and by the back end, in the same words.
+await check("output: a text holding NUL is refused by main in the back end's own words", async () => {
+  const backEnd = childProcess.execFileSync("python3", ["-P", "-c",
+    "from agentgraph import outputs\ntry:\n    outputs._clean_text('a\\x00b')\nexcept outputs.OutputError as exc:\n    print(exc)"],
+  { cwd: ORCHESTRATION, env: { ...process.env, PYTHONPATH: ORCHESTRATION }, encoding: "utf8" }).trim();
+  assert.match(backEnd, /U\+0000/);
+  const log = [];
+  const loaded = loadMain(CODE, log);
+  const m = mainContext({ home: ORCHESTRATION, python: path.join(TMP, "never-run-python") });
+  resolveDefault(loaded.module.exports).main(m.ctx);
+  const answer = JSON.parse(await m.provided[0].impl.output({ op: "write", directory: ORCHESTRATION, task: "t1", node: "n1",
+    artifact: "report", record: "", text: "a\u0000b" }, { window: 1, signal: new AbortController().signal }));
+  assert.equal(answer.error, backEnd);
+  assert.equal(log.length, 0, "the text reached the command line");
 });
 
 await check("the name patterns are agentgraph/names.py's own: AGENT_NAME, FLOW_ID, FLOW_NAME and SKILL_NAME equal them", () => {

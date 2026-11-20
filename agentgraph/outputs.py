@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from collections import Counter, OrderedDict
 import copy
 import ctypes
 import difflib
@@ -60,6 +61,8 @@ TEXT_LIMIT_WORDS = "256 KiB"
 EDIT_LOG = "edits.jsonl"  # in the memory home, beside runs.jsonl and feedback.jsonl
 EDIT_LOG_READ = 8 * 1024 * 1024  # the most of the edit log `check` reads (its newest lines)
 ANNOTATE_LIMIT = 400  # outputs read for one snapshot; the rest are shown without a rev
+SEEN_LIMIT = 2 * ANNOTATE_LIMIT  # outputs whose rev the snapshot remembers (by file identity), newest kept
+DIFF_LINES = 200  # the most lines (each side) counted by a diff; above it the lines are counted as a multiset
 MAX_EVENTS = 2000  # contract.GRAPH_LIMITS["events"]
 RECORD_LIMIT = 8 * 1024 * 1024
 RECORD_PATH = re.compile(r"\d{4}-\d{2}-\d{2}-outputs/edit-[0-9a-f]{12}/record\.json")
@@ -197,19 +200,43 @@ def _folder_of(task_fd: int, dirs: list[str], *, create: bool = False, created: 
         raise
 
 
-def _read_file(folder: int, name: str) -> tuple[bytes | None, int | None]:
-    """(the first TEXT_LIMIT + 1 bytes, the size) of a regular file in `folder`, never through a link; (None, None)
-    when there is none."""
+class HardLinkError(OutputError):
+    """A file with more than one name: another name may be outside the task's artifacts folder."""
+
+
+HARD_LINK = ("the file has another name (a hard link), so it may be a file outside this task's artifacts folder; "
+             "it is not opened here")
+
+
+def _open_file(folder: int, name: str):
+    """(an open binary stream, its stat) of a regular file with one name in `folder`, never through a link; (None,
+    None) when there is none."""
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
     except FileNotFoundError:
         return None, None
     except OSError as exc:
         raise OutputError(f"{name} is {LINKED} ({exc.strerror})") from None
-    with os.fdopen(fd, "rb") as stream:
+    stream = os.fdopen(fd, "rb")
+    try:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode):
             raise OutputError(f"{name} is not a regular file")
+        if info.st_nlink > 1:
+            raise HardLinkError(f"{name}: {HARD_LINK}")
+    except BaseException:
+        stream.close()
+        raise
+    return stream, info
+
+
+def _read_file(folder: int, name: str) -> tuple[bytes | None, int | None]:
+    """(the first TEXT_LIMIT + 1 bytes, the size) of a regular file with one name in `folder`, never through a link;
+    (None, None) when there is none."""
+    stream, info = _open_file(folder, name)
+    if stream is None:
+        return None, None
+    with stream:
         return stream.read(TEXT_LIMIT + 1), info.st_size
 
 
@@ -235,8 +262,31 @@ def _write_new(folder: int, name: str, data: bytes) -> None:
     os.fsync(folder)
 
 
-def _inspect(project: Path | None, task: str, node: dict, artifact: dict) -> dict:
-    """{"rev", "size", "editable", "why", "data", "parts"} of one output, read under the caller's lock."""
+# The snapshot's memory of the outputs it read: (path, revision, device, inode, size, mtime ns, ctime ns) -> (rev,
+# why it is not text or None). A file whose bytes change gets a new ctime (and usually a new mtime, size or inode),
+# so it is read again; nothing but a rev and a reason is kept. Only the snapshot uses it: a read, a write and an
+# undo always read the file.
+_SEEN: OrderedDict = OrderedDict()
+_SEEN_LOCK = threading.Lock()
+
+
+def _seen(key, value=None):
+    with _SEEN_LOCK:
+        if value is None:
+            found = _SEEN.get(key)
+            if found is not None:
+                _SEEN.move_to_end(key)
+            return found
+        _SEEN[key] = value
+        _SEEN.move_to_end(key)
+        while len(_SEEN) > SEEN_LIMIT:
+            _SEEN.popitem(last=False)
+        return value
+
+
+def _inspect(project: Path | None, task: str, node: dict, artifact: dict, *, cache: bool = False) -> dict:
+    """{"rev", "size", "editable", "why", "data", "parts"} of one output, read under the caller's lock. With
+    `cache` (the snapshot), a file read before and not changed since is not read again, and `data` is None."""
     path, revision = artifact.get("path"), artifact.get("revision")
     shown = {"rev": None, "size": None, "editable": False, "why": "", "data": None, "parts": None}
     if not isinstance(path, str) or type(revision) is not int or revision < 1:
@@ -257,18 +307,31 @@ def _inspect(project: Path | None, task: str, node: dict, artifact: dict) -> dic
         except FileNotFoundError:
             return {**shown, "rev": output_rev(path, revision, None), "why": "the file is missing"}
         try:
-            data, size = _read_file(folder, parts[-1])
+            stream, info = _open_file(folder, parts[-1])
         finally:
             os.close(folder)
+    except HardLinkError:
+        return {**shown, "rev": output_rev(path, revision, None), "why": HARD_LINK}
     except OutputError as exc:
         return {**shown, "rev": output_rev(path, revision, None), "why": f"the file is {LINKED}: {exc}"}
     finally:
         os.close(task_fd)
-    if data is None:
+    if stream is None:
         return {**shown, "rev": output_rev(path, revision, None), "why": "the file is missing"}
-    shown.update(rev=output_rev(path, revision, data if size <= TEXT_LIMIT else data + b"+%d" % size), size=size,
-                 data=data)
-    problem = text_problem(data)
+    with stream:
+        size = info.st_size
+        key = (path, revision, info.st_dev, info.st_ino, size, info.st_mtime_ns, info.st_ctime_ns)
+        known = _seen(key) if cache else None
+        if known is not None:
+            rev, problem = known
+        else:
+            data = stream.read(TEXT_LIMIT + 1)
+            rev = output_rev(path, revision, data if size <= TEXT_LIMIT else data + b"+%d" % size)
+            problem = text_problem(data)
+            shown["data"] = data
+            if cache:
+                _seen(key, (rev, problem))
+    shown.update(rev=rev, size=size)
     if problem is not None:
         return {**shown, "why": f"the file is {problem}"}
     if not _component(node.get("id")):
@@ -301,9 +364,9 @@ def _in_scope(path: str, scope: list, project: Path) -> bool:
                for entry in scope)
 
 
-def shown_output(project: Path | None, task: str, node: dict, artifact: dict) -> dict:
+def shown_output(project: Path | None, task: str, node: dict, artifact: dict, *, cache: bool = False) -> dict:
     """What the snapshot and the replies show of an output: {id, path, revision, rev, size, editable, why}."""
-    found = _inspect(project, task, node, artifact)
+    found = _inspect(project, task, node, artifact, cache=cache)
     return {"id": artifact.get("id"), "path": artifact.get("path"), "revision": artifact.get("revision"),
             "rev": found["rev"], "size": found["size"], "editable": found["editable"], "why": found["why"]}
 
@@ -331,7 +394,7 @@ def annotate(document: dict) -> None:
                                 why=f"not read: the graph lists more than {ANNOTATE_LIMIT} outputs")
                 continue
             try:
-                shown = shown_output(project, task, node, artifact)
+                shown = shown_output(project, task, node, artifact, cache=True)
             except (OSError, ValueError, TypeError) as exc:
                 artifact.update(rev=None, size=None, editable=False, why=f"cannot be read: {exc}")
                 continue
@@ -401,7 +464,15 @@ class _GraphFolder:
         except OSError as exc:
             _LOCK.release()
             raise OutputError(f"the graph folder {self.path} cannot be opened ({exc.strerror})") from None
-        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX)
+        except BaseException as exc:
+            os.close(self.fd)
+            _LOCK.release()
+            if isinstance(exc, OSError):
+                raise OutputError(f"the graph folder {self.path} cannot be locked ({exc.strerror}); nothing was "
+                                  "changed") from None
+            raise
         return self.fd
 
     def __exit__(self, *exc) -> None:
@@ -587,8 +658,14 @@ class _Ledger:
 
 
 def _line_counts(before: str, after: str) -> tuple[int, int]:
-    """(lines added, lines removed) from the earlier text to the new one."""
+    """(lines added, lines removed) from the earlier text to the new one. Up to DIFF_LINES lines on each side, by a
+    diff; above it, as multisets (a line moved is not counted), which takes linear time: a diff of text made of one
+    repeated line takes time cubic in its lines. Called with no lock held."""
     old, new = before.splitlines(), after.splitlines()
+    if len(old) > DIFF_LINES or len(new) > DIFF_LINES:
+        change = Counter(new)
+        change.subtract(Counter(old))
+        return sum(n for n in change.values() if n > 0), -sum(n for n in change.values() if n < 0)
     added = removed = 0
     for kind, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
         if kind in ("replace", "delete"):
@@ -611,26 +688,30 @@ def _append_log(home: Path, entry: dict) -> None:
             os.fsync(stream.fileno())
 
 
-def _mark_undone(home: Path, edit_id: str, now: float) -> None:
-    """Set `undone` on the edit's line; every other line is kept byte for byte."""
+def _rewrite_log(home: Path, edit_id: str, change) -> bool:
+    """Replace the edit's line by `change(entry)` (None drops it); every other line is kept byte for byte. A log left
+    empty is removed. False when the log has no such line."""
     path = Path(home) / EDIT_LOG
     with _Ledger(home):
         try:
             lines = path.read_bytes().splitlines(keepends=True)
         except FileNotFoundError:
-            return
+            return False
         changed = False
         for index, line in enumerate(lines):
             try:
                 item = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(item, dict) and item.get("id") == edit_id and item.get("undone") is False:
-                item.update(undone=True, undone_time=now)
-                lines[index] = (json.dumps(item, ensure_ascii=False) + "\n").encode("utf-8")
+            if isinstance(item, dict) and item.get("id") == edit_id:
+                item = change(item)
+                lines[index] = b"" if item is None else (json.dumps(item, ensure_ascii=False) + "\n").encode("utf-8")
                 changed = True
         if not changed:
-            return
+            return False
+        if not any(lines):
+            path.unlink()
+            return True
         temporary = path.with_name(f".{EDIT_LOG}.{secrets.token_hex(6)}.tmp")
         try:
             with temporary.open("xb") as stream:
@@ -640,6 +721,21 @@ def _mark_undone(home: Path, edit_id: str, now: float) -> None:
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
+        return True
+
+
+def _mark_undone(home: Path, edit_id: str, now: float) -> None:
+    """Set `undone` on the edit's line; every other line is kept byte for byte."""
+    _rewrite_log(home, edit_id, lambda item: {**item, "undone": True, "undone_time": now}
+                 if item.get("undone") is False else item)
+
+
+def _drop_line(home, edit_id: str) -> None:
+    """Take back the line of an edit that was refused after it was written (never raises)."""
+    try:
+        _rewrite_log(Path(home), edit_id, lambda item: None)
+    except OSError:
+        pass
 
 
 def read_log(home: Path) -> list[dict]:
@@ -674,9 +770,17 @@ def _graph_key(path) -> str:
         return str(path)
 
 
+def _event_note(entry: dict) -> str:
+    """The note of the `changed` event an edit put in the graph (from its log line, or before it is written)."""
+    return (f"output {entry.get('artifact')} {EVENT_NOTE} by the user: revision {entry.get('from_revision')} -> "
+            f"{entry.get('revision')} ({entry.get('path')})")
+
+
 def lost_edits(graph, home) -> list[str]:
     """`check`'s problems for outputs edited by hand after the graph last recorded them: an edit in the log, not
-    undone, whose revision the graph no longer records (an orchestrator rewrote the graph from an older copy)."""
+    undone, whose revision and path the graph does not record, unless the graph records a later revision and still
+    holds the edit's `changed` event (a later run built on it). Such an edit was lost when an orchestrator rewrote the
+    graph from an older copy."""
     if home is None:
         return []
     key = _graph_key(graph.path)
@@ -691,8 +795,12 @@ def lost_edits(graph, home) -> list[str]:
     for (node_id, artifact_id), entry in newest.items():
         node = next((item for item in graph.nodes if item.id == node_id), None)
         artifact = next((item for item in node.artifacts if item.id == artifact_id), None) if node else None
-        if artifact is not None and artifact.revision >= entry["revision"]:
-            continue
+        if artifact is not None and (artifact.revision, artifact.path) == (entry["revision"], entry.get("path")):
+            continue  # the graph records the edit
+        if artifact is not None and artifact.revision > entry["revision"] and any(
+                event.node == node_id and event.event == "changed" and event.note == _event_note(entry)
+                for event in graph.events):
+            continue  # a later revision, written to a graph that had recorded the edit
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(entry["time"])) \
             if isinstance(entry.get("time"), (int, float)) else "at an unknown time"
         now = (f"the graph says revision {artifact.revision}" if artifact is not None
@@ -877,9 +985,15 @@ def write_output(task, node_id, artifact_id, text, *, dirs, home, backups, expec
         if raw.get("events") is not None and isinstance(raw.get("events"), list) and len(raw["events"]) >= MAX_EVENTS:
             raise OutputError(f"the graph already holds {MAX_EVENTS} events, the most `check` allows; nothing was "
                               "written")
-        event = {"time": now, "node": node_id, "event": "changed",
-                 "note": f"output {artifact_id} {EVENT_NOTE} by the user: revision {before['revision']} -> "
-                         f"{after['revision']} ({after['path']})"}
+        edit_id = secrets.token_hex(6)
+        old_text, new_text = found["data"].decode("utf-8"), text
+        # The log line goes in before the graph is saved, its line counts null until they are made (after the lock
+        # is released): a write stopped at any point after the graph is saved still leaves its line.
+        entry = {"time": now, "id": edit_id, "task": task, "graph": _graph_key(graph_path), "node": node_id,
+                 "agent": str(node.get("agent", "")), "artifact": artifact_id, "from_revision": before["revision"],
+                 "revision": after["revision"], "path": after["path"], "chars_before": len(old_text),
+                 "chars_after": len(new_text), "lines_added": None, "lines_removed": None, "undone": False}
+        event = {"time": now, "node": node_id, "event": "changed", "note": _event_note(entry)}
 
         def merged(current: bytes) -> bytes:
             fresh = _parse(current, name)
@@ -900,24 +1014,32 @@ def write_output(task, node_id, artifact_id, text, *, dirs, home, backups, expec
             return _serialize(fresh)
 
         created: list[str] = []
+        warnings: list[str] = []
         task_fd = _task_folder(project, task)
         try:
             target = _folder_of(task_fd, parts[:-1], create=True, created=created)
             try:
                 written_file = False
+                logged = False
                 try:
                     _write_new(target, parts[-1], data)
                     written_file = True
                     _hook("file")
+                    try:
+                        _append_log(Path(home), entry)
+                        logged = True
+                    except OSError as exc:
+                        warnings.append(f"the edit log could not be written: {exc}")
                     used, written = _replace_graph(folder, name, merged)
                 except BaseException:
+                    if logged:
+                        _drop_line(home, edit_id)
                     if written_file:
                         os.unlink(parts[-1], dir_fd=target)
                     _remove_created(task_fd, created)
                     raise
             finally:
                 os.close(target)
-            edit_id = secrets.token_hex(6)
             record_data = {"version": 1, "op": "edit", "task": task, "graph": _graph_key(graph_path),
                            "node": node_id, "artifact": artifact_id, "before": before, "after": after,
                            "before_digest": _digest(found["data"]), "after_digest": _digest(data),
@@ -928,24 +1050,21 @@ def write_output(task, node_id, artifact_id, text, *, dirs, home, backups, expec
             except BaseException:
                 _undo_graph(folder, name, used, written)
                 _remove_file(task_fd, parts, _digest(data), created)
+                if logged:
+                    _drop_line(home, edit_id)
                 raise
         finally:
             os.close(task_fd)
-        old_text, new_text = found["data"].decode("utf-8"), text
-        added, removed = _line_counts(old_text, new_text)
         fresh = _parse(written, name)
         fresh_node, fresh_artifact = _locate(fresh, node_id, artifact_id)
         shown = shown_output(project, task, fresh_node, fresh_artifact)
     _prune_records(record)
-    entry = {"time": now, "id": edit_id, "task": task, "graph": _graph_key(graph_path), "node": node_id,
-             "agent": str(node.get("agent", "")), "artifact": artifact_id, "from_revision": before["revision"],
-             "revision": after["revision"], "path": after["path"], "chars_before": len(old_text),
-             "chars_after": len(new_text), "lines_added": added, "lines_removed": removed, "undone": False}
-    warnings = []
-    try:
-        _append_log(Path(home), entry)
-    except OSError as exc:
-        warnings.append(f"the edit log could not be written: {exc}")
+    added, removed = _line_counts(old_text, new_text)  # no lock held: never delays another writer
+    if logged:
+        try:
+            _rewrite_log(Path(home), edit_id, lambda item: {**item, "lines_added": added, "lines_removed": removed})
+        except OSError as exc:
+            warnings.append(f"the edit log's line counts could not be written: {exc}")
     stale = _readers(fresh, node_id, artifact_id, after["revision"])
     named = ", ".join(f"{item['id']} ({item['agent']})" for item in stale)
     message = (f"Saved as revision {after['revision']}." + (f" These steps read revision {before['revision']} and now "
@@ -993,16 +1112,20 @@ def _undo_graph(folder: int, name: str, before: bytes, after: bytes) -> None:
         pass
 
 
-def restore_output(record, *, backups, home, now=None) -> dict:
+def restore_output(record, *, backups, home, dirs, now=None) -> dict:
     """Take back an edit: the graph records the earlier revision again (byte for byte, when nothing else changed
     it since) and the edit's file goes. Refused, naming what stands in the way, when a later run replaced the
     output in the graph, or a file was changed after the edit. Returns {"task", "node", "artifact", "changed",
-    "restored", "output", "rev", "text"?, "message"}."""
+    "restored", "output", "rev", "text"?, "message", "warnings"?}. Only a record of a graph in one of `dirs` (the
+    request's graph folders, as a read or a write finds them) is taken back."""
     data = _load_record(record, backups)
     now = time.time() if now is None else now
     task, node_id, artifact_id = data["task"], data["node"], data["artifact"]
     before, after = data["before"], data["after"]
     graph_path = Path(data["graph"])
+    if os.path.dirname(_graph_key(graph_path)) not in {_graph_key(folder) for folder in dirs}:
+        raise OutputError(f"the undo record is for a graph that is not in this project ({graph_path}); nothing was "
+                          "restored")
     project = project_of(graph_path)
     before_parts, after_parts = _inside(task, before["path"]), _inside(task, after["path"])
     if project is None or before_parts is None or after_parts is None or not all(
@@ -1083,15 +1206,18 @@ def restore_output(record, *, backups, home, now=None) -> dict:
         shown = shown_output(project, task, fresh_node, fresh_artifact)
     finally:
         locked.__exit__(None, None, None)
+    warnings = []
     try:
         _mark_undone(Path(home), data["log"], now)
-    except OSError:
-        pass
+    except OSError as exc:
+        warnings.append(f"the edit log could not be updated ({exc}): its line for this edit does not say undone, so "
+                        "`agentgraph check` may still report the edit as lost")
     _drop_record(record)
     text = found["data"].decode("utf-8") if found["editable"] else None
     return {"task": task, "node": node_id, "artifact": artifact_id, "changed": True, "restored": True,
             "output": shown, "rev": shown["rev"], **({"text": text} if text is not None else {}),
-            "message": f"Put back revision {before['revision']}; the hand edit's revision {after['revision']} is gone."}
+            "message": f"Put back revision {before['revision']}; the hand edit's revision {after['revision']} is gone.",
+            **({"warnings": warnings} if warnings else {})}
 
 
 # --- command -------------------------------------------------------------------------------------------
@@ -1120,17 +1246,18 @@ def main(argv: list[str] | None = None) -> int:
     read = actions.add_parser("read", help="print the text of TASK's step NODE's output ARTIFACT")
     write = actions.add_parser("write", help="save a new text as the output's next revision (undoable)")
     restore = actions.add_parser("restore", help="undo an edit from the record it returned")
-    for sub in (read, write):
-        sub.add_argument("task", metavar="TASK")
-        sub.add_argument("node", metavar="NODE")
-        sub.add_argument("artifact", metavar="ARTIFACT")
+    restore.add_argument("record", metavar="RECORD")
+    for sub in (read, write, restore):
+        if sub is not restore:
+            sub.add_argument("task", metavar="TASK")
+            sub.add_argument("node", metavar="NODE")
+            sub.add_argument("artifact", metavar="ARTIFACT")
         where = sub.add_mutually_exclusive_group()
         where.add_argument("--dir", type=Path, metavar="DIR", help="the graph folder (default: found from --from)")
         where.add_argument("--from", dest="start", type=Path, metavar="DIR",
                            help="find .opencode/graph from DIR, as the snapshot does (default: the working folder)")
     write.add_argument("--text-file", metavar="F", required=True, help="the new text from file F, or - for stdin")
     write.add_argument("--expect", metavar="REV", help="refuse, changing nothing, unless the output's rev is REV")
-    restore.add_argument("record", metavar="RECORD")
     for sub in (write, restore):
         sub.add_argument("--home", type=Path, metavar="DIR", help="the memory home the edit log is in (default: "
                          "$AGENTGRAPH_HOME, else the active preset's memory folder)")
@@ -1148,7 +1275,8 @@ def main(argv: list[str] | None = None) -> int:
                                   home=edit_home(args.home), backups=args.backups or skillset.BACKUPS,
                                   expect=args.expect)
         else:
-            result = restore_output(args.record, home=edit_home(args.home), backups=args.backups or skillset.BACKUPS)
+            result = restore_output(args.record, home=edit_home(args.home), backups=args.backups or skillset.BACKUPS,
+                                    dirs=graph_dirs(args.dir, args.start))
     except (OutputError, agentfiles.AgentfilesError, OSError) as exc:
         current = getattr(exc, "rev", None)
         if args.json:

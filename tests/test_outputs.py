@@ -7,6 +7,7 @@ shared with a running orchestrator: its concurrent change is never lost (interle
 hook), and an orchestrator that drops the edit's record makes `check` say so from the edit log. Scratch folders
 only: every test builds its own graph, artifacts folder, memory home and backups folder."""
 import contextlib
+import errno
 import http.client
 import io
 import json
@@ -15,11 +16,12 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agentgraph import agentfiles, check, contract, outputs, server
+from agentgraph import agentfiles, check, contract, handedits, outputs, server
 from agentgraph.snapshot_json import snapshot_document
 from agentgraph.sources import build_snapshot, load_graphs
 
@@ -240,7 +242,7 @@ class ReadWrite(Base):
         log = (self.home / outputs.EDIT_LOG).read_text()
         self.assertNotIn("line 2", log)
         self.assertNotIn("line two", log)
-        outputs.restore_output(answer["record"], backups=self.backups, home=self.home, now=1_800_000_100.0)
+        outputs.restore_output(answer["record"], backups=self.backups, home=self.home, dirs=[self.graphs], now=1_800_000_100.0)
         [entry] = self.log()
         self.assertEqual((entry["undone"], entry["undone_time"]), (True, 1_800_000_100.0))
 
@@ -320,13 +322,13 @@ class Undo(Base):
         before = tree(self.project)
         answer = self.write()
         self.assertNotEqual(tree(self.project), before)
-        undone = outputs.restore_output(answer["record"], backups=self.backups, home=self.home)
+        undone = outputs.restore_output(answer["record"], backups=self.backups, home=self.home, dirs=[self.graphs])
         self.assertEqual(tree(self.project), before)
         self.assertEqual((undone["text"], undone["rev"], undone["output"]["revision"]), (TEXT, self.rev(), 1))
         self.assertFalse(Path(answer["record"]).exists(), "a record undoes once")
         self.assertEqual(self.check()[0], 0)
         with self.assertRaisesRegex(outputs.OutputError, "no such record"):
-            outputs.restore_output(answer["record"], backups=self.backups, home=self.home)
+            outputs.restore_output(answer["record"], backups=self.backups, home=self.home, dirs=[self.graphs])
 
     def test_two_edits_undo_in_turn(self):
         before = tree(self.project)
@@ -334,9 +336,9 @@ class Undo(Base):
         middle = tree(self.project)
         second = self.write("second\n")
         self.assertEqual(self.raw()["nodes"][0]["artifacts"][0]["revision"], 3)
-        outputs.restore_output(second["record"], backups=self.backups, home=self.home)
+        outputs.restore_output(second["record"], backups=self.backups, home=self.home, dirs=[self.graphs])
         self.assertEqual(tree(self.project), middle)
-        outputs.restore_output(first["record"], backups=self.backups, home=self.home)
+        outputs.restore_output(first["record"], backups=self.backups, home=self.home, dirs=[self.graphs])
         self.assertEqual(tree(self.project), before)
 
     def test_undo_after_the_orchestrator_wrote_the_graph_takes_back_only_the_edit(self):
@@ -345,7 +347,7 @@ class Undo(Base):
         raw["nodes"][2]["status"] = "running"
         raw["events"].append({"time": 1_800_000_050.0, "node": "n3", "event": "dispatched", "note": "verifier"})
         write_whole(self.graph, raw)
-        outputs.restore_output(answer["record"], backups=self.backups, home=self.home, now=1_800_000_100.0)
+        outputs.restore_output(answer["record"], backups=self.backups, home=self.home, dirs=[self.graphs], now=1_800_000_100.0)
         raw = self.raw()
         self.assertEqual(raw["nodes"][0]["artifacts"][0],
                          {"id": "report", "path": ".opencode/artifacts/t1/n1/r1/report.md", "revision": 1})
@@ -363,7 +365,7 @@ class Undo(Base):
         before = self.state()
         with self.assertRaisesRegex(outputs.OutputError, "is now revision 3 at .*r3/report.md \\(a later run "
                                                          "replaced it\\), not the hand edit's revision 2"):
-            outputs.restore_output(answer["record"], backups=self.backups, home=self.home)
+            outputs.restore_output(answer["record"], backups=self.backups, home=self.home, dirs=[self.graphs])
         self.assertEqual(self.state(), before)
 
     def test_undo_is_refused_when_the_edited_file_was_changed_after(self):
@@ -371,7 +373,7 @@ class Undo(Base):
         (self.artifacts / "n1" / "r2" / "report.md").write_text("changed again by hand\n")
         before = self.state()
         with self.assertRaisesRegex(outputs.OutputError, "revision 2 was changed after the edit"):
-            outputs.restore_output(answer["record"], backups=self.backups, home=self.home)
+            outputs.restore_output(answer["record"], backups=self.backups, home=self.home, dirs=[self.graphs])
         self.assertEqual(self.state(), before)
 
     def test_a_record_from_elsewhere_is_refused(self):
@@ -379,7 +381,7 @@ class Undo(Base):
         stray.write_text("{}")
         for record in (str(stray), "", "relative/record.json"):
             with self.assertRaisesRegex(outputs.OutputError, "invalid undo record"):
-                outputs.restore_output(record, backups=self.backups, home=self.home)
+                outputs.restore_output(record, backups=self.backups, home=self.home, dirs=[self.graphs])
 
 
 class SharedGraph(Base):
@@ -451,7 +453,7 @@ class SharedGraph(Base):
         self.assertIn("made revision 2 (.opencode/artifacts/t1/n1/r2/report.md), the graph says revision 1", printed)
         self.assertEqual(self.check(home=self.root / "elsewhere")[0], 0, "only the edit log knows")
         # Undo still works: the graph already records the earlier revision, so only the file goes.
-        outputs.restore_output(answer["record"], backups=self.backups, home=self.home)
+        outputs.restore_output(answer["record"], backups=self.backups, home=self.home, dirs=[self.graphs])
         self.assertEqual(self.graph.read_bytes(), older)
         self.assertEqual(self.check()[0], 0)
 
@@ -488,7 +490,7 @@ class Surfaces(Base):
         code, saved = self.command("write", "t1", "n1", "report", *where, *stores, "--text-file", "-", "--expect",
                                    read["rev"], "--json", stdin="mine\n")
         self.assertEqual((code, saved["changed"], [item["id"] for item in saved["stale"]]), (0, True, ["n2", "n3"]))
-        code, undone = self.command("restore", saved["record"], *stores, "--json")
+        code, undone = self.command("restore", saved["record"], *where, *stores, "--json")
         self.assertEqual((code, undone["restored"]), (0, True))
         self.assertEqual(tree(self.project), before)
         code, message = self.command("write", "t1", "n1", "report", *where, *stores, "--text-file", "-", "--expect",
@@ -578,6 +580,218 @@ class DesktopPath(Base):
         self.assertEqual([entry["revision"] for entry in self.log()], [2])
         code, document = run("agentgraph.snapshot_json", "--task", "t1", cwd=self.project)
         self.assertEqual([entry["stale"] for entry in document["graph"]["nodes"][1]["inputs"]], [True])
+
+
+# --- correctness review round 7 (`.opencode/artifacts/agentgraph-desktop/n8/r7/findings.md`, rulings) -------------
+
+
+def fresh_python(script: str, payload: dict, timeout: float = 60):
+    """Run `script` in a new Python with the payload on stdin; None when it had to be killed at `timeout`."""
+    try:
+        return subprocess.run([sys.executable, "-c", script], input=json.dumps(payload), cwd=ROOT, capture_output=True,
+                              text=True, timeout=timeout, env={**os.environ, "PYTHONPATH": str(ROOT)})
+    except subprocess.TimeoutExpired:
+        return None
+
+
+WRITE = """
+import json, os, sys, time
+from pathlib import Path
+from agentgraph import outputs
+args = json.loads(sys.stdin.read())
+if args.get("die_while_counting"):
+    outputs._line_counts = lambda *a: os._exit(9)  # killed after the graph is saved, before the log line is done
+started = time.monotonic()
+outputs.write_output("t1", "n1", "report", args["text"], dirs=[Path(args["graphs"])], home=Path(args["home"]),
+                     backups=Path(args["backups"]))
+print(time.monotonic() - started)
+"""
+
+
+class Review7LineCounts(Base):
+    """M1: the line counts were a quadratic (worse: cubic) diff run while the graph lock was held."""
+
+    def test_m1_a_write_of_one_repeated_line_over_another_returns_fast_and_is_logged(self):
+        (self.artifacts / "n1" / "r1" / "report.md").write_bytes(b"\n" * outputs.TEXT_LIMIT)
+        new = "\n" * (outputs.TEXT_LIMIT - 2) + "x\n"
+        done = fresh_python(WRITE, {"text": new, "graphs": str(self.graphs), "home": str(self.home),
+                                    "backups": str(self.backups)})
+        self.assertIsNotNone(done, "the write did not return within 60 seconds")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertLess(float(done.stdout.split()[-1]), 2.0)
+        [entry] = self.log()
+        self.assertEqual((entry["revision"], entry["chars_before"], entry["chars_after"]),
+                         (2, outputs.TEXT_LIMIT, len(new)))
+        self.assertEqual((entry["lines_added"], entry["lines_removed"]), (1, 2))
+
+    def test_m1_the_counts_are_made_after_the_graph_lock_is_released(self):
+        held = []
+        real = outputs._line_counts
+
+        def spy(*args):
+            held.append(outputs._LOCK.locked())
+            return real(*args)
+        with patch.object(outputs, "_line_counts", spy):
+            self.write()
+        self.assertEqual(held, [False])
+
+    def test_m1_counts_are_linear_for_long_texts_and_a_diff_for_short_ones(self):
+        self.assertEqual(outputs._line_counts("a\nb\n", "b\na\n"), (1, 1))  # a diff: a line moved counts
+        started = time.monotonic()  # the diff took about 70 s here: cubic in the lines of one repeated line
+        self.assertEqual(outputs._line_counts("\n".join(["a"] * 2000), "\n".join(["a", "x"] * 1000)), (1000, 1000))
+        self.assertLess(time.monotonic() - started, 1.0)
+
+
+class Review7RestoreReach(Base):
+    """Minor 1: an undo record is only taken back in the request's own project."""
+
+    def other_project(self):
+        other = self.root / "other"
+        graphs = other / ".opencode" / "graph"
+        graphs.mkdir(parents=True)
+        (other / ".opencode" / "artifacts" / "t1" / "n1" / "r1").mkdir(parents=True)
+        (other / ".opencode" / "artifacts" / "t1" / "n1" / "r1" / "report.md").write_text(TEXT)
+        (graphs / "t1.json").write_text(json.dumps(graph_raw(), indent=1))
+        answer = outputs.write_output("t1", "n1", "report", "theirs\n", dirs=[graphs], home=self.home,
+                                      backups=self.backups)
+        return other, graphs, answer["record"]
+
+    def test_minor1_the_module_refuses_a_record_of_another_project(self):
+        other, graphs, record = self.other_project()
+        before = tree(other), tree(self.project)
+        with self.assertRaisesRegex(outputs.OutputError, "not in this project"):
+            outputs.restore_output(record, backups=self.backups, home=self.home, dirs=[self.graphs])
+        self.assertEqual((tree(other), tree(self.project)), before)
+        self.assertTrue(Path(record).is_file())
+        self.assertTrue(outputs.restore_output(record, backups=self.backups, home=self.home, dirs=[graphs])["restored"])
+
+    def test_minor1_the_endpoint_refuses_a_record_of_another_project(self):
+        other, _, record = self.other_project()
+        post = Surfaces.endpoint(self)
+        before = tree(other), tree(self.project)
+        status, answer = post({"op": "restore", "record": record})
+        self.assertEqual(status, 400, answer)
+        self.assertIn("not in this project", answer["error"])
+        self.assertEqual((tree(other), tree(self.project)), before)
+
+    def test_minor1_the_command_refuses_a_record_of_another_project(self):
+        other, _, record = self.other_project()
+        before = tree(other), tree(self.project)
+        code, answer = Surfaces.command(self, "restore", record, "--dir", str(self.graphs), "--home", str(self.home),
+                                        "--backups", str(self.backups), "--json")
+        self.assertEqual(code, 1, answer)
+        self.assertIn("not in this project", answer["error"])
+        self.assertEqual((tree(other), tree(self.project)), before)
+
+
+class Review7HardLinks(Base):
+    """Minor 2: a file with another name (a hard link) may be a file outside the project; it is not read."""
+
+    def test_minor2_a_hard_linked_output_is_neither_read_nor_written_and_a_saved_revision_has_one_link(self):
+        outside = self.root / "outside.md"
+        outside.write_text("secret\n")
+        os.link(outside, self.artifacts / "n1" / "r1" / "linked.md")
+        raw = graph_raw()
+        raw["nodes"][0]["artifacts"].append({"id": "linked", "path": ".opencode/artifacts/t1/n1/r1/linked.md",
+                                              "revision": 1})
+        self.graph.write_text(json.dumps(raw))
+        shown = Shown.document(self)["n1"][1]
+        self.assertFalse(shown["editable"])
+        self.assertIn("hard link", shown["why"])
+        with self.assertRaisesRegex(outputs.OutputError, "cannot be opened here: .*hard link"):
+            outputs.read_output("t1", "n1", "linked", dirs=[self.graphs])
+        before = self.state()
+        with self.assertRaisesRegex(outputs.OutputError, "cannot be edited here: .*hard link"):
+            outputs.write_output("t1", "n1", "linked", "mine\n", **self.where)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(outside.read_text(), "secret\n")
+        # The toolkit's own way of saving a revision (written beside it, linked in, the temporary name removed)
+        # leaves one link, so a saved revision can be opened again.
+        answer = self.write()
+        self.assertEqual(os.stat(self.artifacts / "n1" / "r2" / "report.md").st_nlink, 1)
+        self.assertTrue(answer["output"]["editable"])
+        self.assertEqual(outputs.read_output("t1", "n1", "report", dirs=[self.graphs])["revision"], 2)
+
+
+class Review7Crash(Base):
+    """Minor 3: a write killed between the graph swap and its log line still leaves a trace."""
+
+    def test_minor3_a_write_killed_after_the_swap_is_still_counted_and_undoable(self):
+        before = tree(self.project)
+        done = fresh_python(WRITE, {"text": "line one\nline 2\n", "graphs": str(self.graphs), "home": str(self.home),
+                                    "backups": str(self.backups), "die_while_counting": True})
+        self.assertIsNotNone(done)
+        self.assertEqual(done.returncode, 9, done.stderr)
+        self.assertEqual(self.raw()["nodes"][0]["artifacts"][0]["revision"], 2, "the graph was saved")
+        counted = handedits.output_edits(self.home, 0)
+        self.assertEqual([edit["task"] for edit in counted.get("explorer", [])], ["t1"], "the edit is counted")
+        self.assertEqual(self.check()[0], 1)  # n2 read revision 1: stale, as after any edit
+        [record] = sorted(self.backups.glob("*-outputs/edit-*/record.json"))
+        outputs.restore_output(str(record), backups=self.backups, home=self.home, dirs=[self.graphs])
+        self.assertEqual(tree(self.project), before)
+        self.assertEqual(handedits.output_edits(self.home, 0), {})
+        self.assertEqual(self.check()[0], 0)
+
+
+class Review7LostEdits(Base):
+    """Minor 4: an undo the edit log could not record is said; a lost edit is found by revision and path."""
+
+    def test_minor4_an_edit_log_that_cannot_be_marked_undone_is_said_in_the_answer(self):
+        answer = self.write()
+        os.chmod(self.home, 0o500)
+        self.addCleanup(os.chmod, self.home, 0o700)
+        undone = outputs.restore_output(answer["record"], backups=self.backups, home=self.home, dirs=[self.graphs])
+        self.assertTrue(undone["restored"])
+        self.assertTrue([warning for warning in undone.get("warnings", []) if "edit log" in warning
+                         and "check" in warning], undone)
+
+    def test_minor4_a_later_record_at_another_path_does_not_hide_a_lost_edit(self):
+        older = self.raw()  # the orchestrator's own copy, from before the edit
+        self.write()
+        # The orchestrator rewrites from its copy and records its own revision 2 at another path.
+        older["nodes"][0]["artifacts"][0].update(path=".opencode/artifacts/t1/n1/r2/rerun.md", revision=2)
+        write_whole(self.graph, older)
+        self.assertIn("n1 output 'report' was edited by hand after the graph last recorded it", self.check()[1])
+        # ... or a higher revision, from a copy that never held the edit (its event is not in the graph).
+        older["nodes"][0]["artifacts"][0].update(path=".opencode/artifacts/t1/n1/r3/report.md", revision=3)
+        write_whole(self.graph, older)
+        self.assertIn("n1 output 'report' was edited by hand after the graph last recorded it", self.check()[1])
+
+
+class Review7Lock(Base):
+    """Minor 5: a flock that fails releases the process lock and closes the folder."""
+
+    def test_minor5_a_failed_flock_releases_the_lock_and_the_folder(self):
+        self.addCleanup(lambda: outputs._LOCK.locked() and outputs._LOCK.release())
+        opened = len(os.listdir("/dev/fd"))
+        with patch.object(outputs.fcntl, "flock", side_effect=OSError(errno.ENOLCK, "No locks available")):
+            with self.assertRaises((OSError, outputs.OutputError)):
+                outputs.read_output("t1", "n1", "report", dirs=[self.graphs])
+        self.assertFalse(outputs._LOCK.locked(), "the process lock was kept: every later edit would wait forever")
+        self.assertEqual(len(os.listdir("/dev/fd")), opened, "the folder was left open")
+        self.assertTrue(self.write()["changed"])
+
+
+class Review7SnapshotCost(Base):
+    """Minor 6: the snapshot does not read every output again on every snapshot."""
+
+    def test_minor6_a_second_snapshot_reads_no_output_again_and_a_changed_one_is_read(self):
+        first = Shown.document(self)
+        reads = []
+        real = outputs.text_problem
+
+        def spy(data):
+            reads.append(len(data))
+            return real(data)
+        with patch.object(outputs, "text_problem", spy):
+            second = Shown.document(self)
+        self.assertEqual(reads, [], "the second snapshot read an output it had read")
+        self.assertEqual(second, first)
+        (self.artifacts / "n1" / "r1" / "report.md").write_text(TEXT.replace("one", "uno"))  # the same size
+        third = Shown.document(self)["n1"][0]
+        self.assertNotEqual(third["rev"], first["n1"][0]["rev"])
+        self.assertEqual(third["rev"], self.rev())
+        self.assertLessEqual(len(outputs._SEEN), outputs.SEEN_LIMIT)
 
 
 if __name__ == "__main__":
