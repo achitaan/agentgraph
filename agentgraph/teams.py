@@ -44,7 +44,7 @@ except ImportError:  # pragma: no cover
     fcntl = None
 
 from .snapshot_json import FLOW_ID, FLOW_TEXT_LIMIT, FLOWS_FOLDER, HEAD_BYTES, STRUCTURE_DIR, read_settings
-from .structure import StructureError, clean_text
+from .structure import StaleError, StructureError, clean_text, expect_rev
 
 TEAMS_FOLDER = "teams"  # inside the structure folder: one file per team, never a group of agents
 TEAM_MEMBERS_LIMIT = 12
@@ -229,9 +229,11 @@ def read_team(data: bytes) -> tuple[str, list[str], str] | None:
     return lead, members, body[:-1] if body.endswith("\n") else body
 
 
-def _team_dict(team_id: str, lead: str, members: list[str], text: str, hub: str) -> dict:
+def _team_dict(team_id: str, lead: str, members: list[str], text: str, hub: str, data: bytes) -> dict:
+    """A team as read; `rev` is the hash of its file's bytes (agentfiles.rev), which a write takes as `expect`."""
+    from .agentfiles import rev  # agentfiles imports modules that import structure
     return {"id": team_id, "lead": lead, "members": list(members), "text": text,
-            "generated": text == team_text(lead, members, hub)}
+            "generated": text == team_text(lead, members, hub), "rev": rev(data)}
 
 
 def _load(root: Path, shape: dict) -> tuple[list[dict], list[str]]:
@@ -254,9 +256,10 @@ def _load(root: Path, shape: dict) -> tuple[list[dict], list[str]]:
         if path.is_symlink() or not path.is_file():
             continue
         try:
-            parsed = read_team(path.read_bytes())
+            data = path.read_bytes()
         except OSError:
             continue
+        parsed = read_team(data)
         if parsed is None:
             warnings.append(f"structure: team {path.stem} ignored: it has no readable lead and members")
             continue
@@ -266,7 +269,7 @@ def _load(root: Path, shape: dict) -> tuple[list[dict], list[str]]:
         except TeamError as exc:
             warnings.append(f"structure: team {path.stem} ignored: {exc}")
             continue
-        teams_read.append(_team_dict(path.stem, lead, members, text, _hub(shape)))
+        teams_read.append(_team_dict(path.stem, lead, members, text, _hub(shape), data))
     return teams_read, warnings
 
 
@@ -277,7 +280,7 @@ def read_teams(structure_dir: Path | None = None) -> tuple[list[dict], list[str]
 
 
 def teams(structure_dir: Path | None = None) -> list[dict]:
-    """The teams as `{"id", "lead", "members", "text", "generated"}` in id order; empty when there is no
+    """The teams as `{"id", "lead", "members", "text", "generated", "rev"}` in id order; empty when there is no
     `teams/` folder or no structure folder."""
     root = Path(structure_dir) if structure_dir is not None else STRUCTURE_DIR
     try:
@@ -336,6 +339,12 @@ def _bytes(teams_fd: int, team_id: str) -> bytes | None:
         return None
     with os.fdopen(handle, "rb") as stream:
         return stream.read(4 * FLOW_TEXT_LIMIT + 8192)
+
+
+def _whole(teams_fd: int, team_id: str) -> bytes:
+    """A team's file as _load reads it (all of it), for its rev."""
+    with os.fdopen(os.open(team_id + ".md", os.O_RDONLY | _NOFOLLOW, dir_fd=teams_fd), "rb") as stream:
+        return stream.read()
 
 
 def _unchanged(teams_fd: int, team_id: str, before: bytes) -> None:
@@ -421,8 +430,9 @@ def add(lead, members, text: str | None = None, structure_dir: Path | None = Non
         return _team(_load(root, shape)[0], team_id), notes
 
 
-def set_text(team_id, text, structure_dir: Path | None = None) -> dict:
-    """Replace a team's instruction. Blank text means "write it again from the lead and members"."""
+def set_text(team_id, text, structure_dir: Path | None = None, *, expect: str | None = None) -> dict:
+    """Replace a team's instruction. Blank text means "write it again from the lead and members". Given `expect`
+    (the rev the view showed), refused with StaleError, nothing written, when the file's rev is another."""
     clean_text(text)
     root = Path(structure_dir) if structure_dir is not None else STRUCTURE_DIR
     with _locked(root) as root_fd:
@@ -431,6 +441,7 @@ def set_text(team_id, text, structure_dir: Path | None = None) -> dict:
         try:
             found = _find(teams_fd, team_id)
             before = _regular(teams_fd, found)
+            expect_rev(expect, _whole(teams_fd, found), f"team {found}")
             team = _team(_load(root, shape)[0], found)
             if not text.strip():
                 text = team_text(team["lead"], team["members"], _hub(shape))
@@ -443,9 +454,11 @@ def set_text(team_id, text, structure_dir: Path | None = None) -> dict:
         return _team(_load(root, shape)[0], found)
 
 
-def set_members(team_id, members, structure_dir: Path | None = None) -> tuple[dict, list[str]]:
+def set_members(team_id, members, structure_dir: Path | None = None, *,
+                expect: str | None = None) -> tuple[dict, list[str]]:
     """Replace a team's members. A generated instruction is written again for the new members; an edited one
-    is kept. Returns the team and notes."""
+    is kept. Returns the team and notes. Given `expect`, refused (StaleError) when the file's rev is another: the
+    members were picked from an old list."""
     root = Path(structure_dir) if structure_dir is not None else STRUCTURE_DIR
     with _locked(root) as root_fd:
         shape = _agents(root)
@@ -453,6 +466,7 @@ def set_members(team_id, members, structure_dir: Path | None = None) -> tuple[di
         try:
             found = _find(teams_fd, team_id)
             before = _regular(teams_fd, found)
+            expect_rev(expect, _whole(teams_fd, found), f"team {found}")
             loaded, _ = _load(root, shape)
             team = _team(loaded, found)
             others = [other for other in loaded if other["id"] != found]
@@ -467,10 +481,11 @@ def set_members(team_id, members, structure_dir: Path | None = None) -> tuple[di
         return _team(_load(root, shape)[0], found), notes
 
 
-def remove(team_id, structure_dir: Path | None = None) -> dict:
+def remove(team_id, structure_dir: Path | None = None, *, expect: str | None = None) -> dict:
     """Delete a team's file, and the `teams` folder once nothing is left in it. Returns the team removed
     (`add(team["lead"], team["members"], team["text"])` puts it back, under the same id, byte for byte); a
-    file that cannot be read as a team returns just `{"id": ...}`."""
+    file that cannot be read as a team returns just `{"id": ...}`. Given `expect`, refused (StaleError) when the
+    file's rev is another."""
     root = Path(structure_dir) if structure_dir is not None else STRUCTURE_DIR
     with _locked(root) as root_fd:
         shape = _agents(root)
@@ -478,6 +493,7 @@ def remove(team_id, structure_dir: Path | None = None) -> dict:
         try:
             found = _find(teams_fd, team_id)
             before = _regular(teams_fd, found)
+            expect_rev(expect, _whole(teams_fd, found), f"team {found}")
             gone = next((team for team in _load(root, shape)[0] if team["id"] == found), {"id": found})
             _unchanged(teams_fd, found, before)
             os.unlink(found + ".md", dir_fd=teams_fd)
@@ -616,6 +632,9 @@ def main(argv: list[str] | None = None) -> int:
                              help="structure folder (default: the orchestration's own)")
     for command in (adding, text, setting, removing):
         command.add_argument("--json", action="store_true", help="print the team and the list as JSON")
+    for command in (text, setting, removing):
+        command.add_argument("--expect", metavar="REV", help="refuse, changing nothing, unless the team's rev is REV "
+                                                             "(the rev the caller last read)")
     args = parser.parse_args(argv)
     notes: list[str] = []
     result: dict = {}
@@ -627,19 +646,21 @@ def main(argv: list[str] | None = None) -> int:
             result, notes = add(args.lead, args.members, given, args.structure)
             listing = teams(args.structure)
         elif args.command == "text":
-            result = set_text(args.id, _read_text(args.text_file), args.structure)
+            result = set_text(args.id, _read_text(args.text_file), args.structure, expect=args.expect)
             listing = teams(args.structure)
         elif args.command == "members":
-            result, notes = set_members(args.id, args.members, args.structure)
+            result, notes = set_members(args.id, args.members, args.structure, expect=args.expect)
             listing = teams(args.structure)
         else:
-            result = remove(args.id, args.structure)
+            result = remove(args.id, args.structure, expect=args.expect)
             listing = teams(args.structure)
     except (StructureError, OSError) as exc:
+        current = exc.rev if isinstance(exc, StaleError) else None
         if getattr(args, "json", False):
-            print(json.dumps({"error": str(exc)}))
+            print(json.dumps({"error": str(exc), **({"rev": current} if current is not None else {})}))
         else:
-            print(f"agentgraph teams: {exc}", file=sys.stderr)
+            print(f"agentgraph teams: {exc}" + (f" (rev now {current})" if current is not None else ""),
+                  file=sys.stderr)
         return 1
     if getattr(args, "json", False):
         print(json.dumps({**({"team": result} if result else {}), "teams": listing, **({"notes": notes} if notes else {})}))

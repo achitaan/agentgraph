@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from . import flowrun, sources
+from . import flowrun, names, sources
 
 COMMANDS_DIR = sources.CONFIG_DIR / "commands"
 MARK = "# agentgraph: flow command"
@@ -50,7 +50,9 @@ def applies(name: str, on: bool) -> str:
     """What a command write does in OpenCode, as measured (APPLIES)."""
     return APPLIES.format(name=name, state="there" if on else "gone")
 # What OpenCode does to a command's text before sending it (2.3.2): `$ARGUMENTS` and `$1`, `$2`, ... become the
-# arguments, and !`...` runs as a shell command. The instruction is fixed text, so it may hold none of them.
+# arguments, and !`...` runs as a shell command (the goal typed after /NAME included, which nothing here can check).
+# The instruction is fixed text, so it may hold none of them. An @path file reference is sent as plain text, never
+# attached, fenced or not (measured with a recording stand-in model: n96/r2/at-reference-proof.md), so it is allowed.
 _EXPANDED = re.compile(r"\$(?:ARGUMENTS|[1-9])|!`")
 FILE_LIMIT = 64 * 1024  # as agentfiles.FILE_LIMIT: the folder helpers read no more
 
@@ -135,7 +137,14 @@ class Folder:
             return self._context.__exit__(*exc)
         return False
 
+    @staticmethod
+    def _command(name) -> None:
+        """Only a valid command name (agentgraph.names) is ever a file name here."""
+        if not isinstance(name, str) or not names.COMMAND.fullmatch(name):
+            raise CommandError(f"{str(name)[:40]!r} is not a valid command name")
+
     def read(self, name: str) -> bytes | None:
+        self._command(name)
         if self.fd is None:
             return None
         from . import agentfiles
@@ -146,6 +155,7 @@ class Folder:
 
     def write(self, name: str, data: bytes | None, before: bytes | None) -> None:
         """`data` as NAME.md (None: delete it), refused when the file is no longer `before` (None: no file)."""
+        self._command(name)
         if self.fd is None:
             if data is None and before is None:
                 return

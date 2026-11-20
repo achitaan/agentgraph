@@ -47,10 +47,10 @@ try:  # POSIX; elsewhere the in-process lock is the only one
 except ImportError:  # pragma: no cover
     fcntl = None
 
-from . import flowcommands, flowrun
+from . import agentfiles, flowcommands, flowrun
 from .snapshot_json import (FLOW_FILES_LIMIT, FLOW_ID, FLOW_NAME, FLOW_TEXT_LIMIT, FLOWS_FOLDER, STRUCTURE_DIR,
-                            flow_refusal, flow_steps, hub_names, is_self_loop, ledger_home, load_structure, read_flow,
-                            seat_lead)
+                            flow_fields, flow_refusal, flow_steps, hub_names, is_self_loop, ledger_home, load_structure,
+                            read_flow, seat_lead)
 
 FLOW_STEPS_LIMIT = 20
 _LOCK = threading.Lock()  # one writer at a time inside a process; flock on the folder across processes
@@ -60,6 +60,30 @@ _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 
 class StructureError(Exception):
     """A refused request; the message says why in plain words."""
+
+
+class StaleError(StructureError):
+    """A write from a view that has not seen a later change (stale-contract.md): nothing was written; `rev` is the
+    current one. The endpoints answer it with status 409."""
+
+    def __init__(self, message: str, rev: str):
+        super().__init__(message)
+        self.rev = rev
+
+
+def _expect_seen(expect, current: str, what: str) -> None:
+    try:
+        agentfiles.check_expect(expect, current, what)
+    except agentfiles.StaleError as exc:
+        raise StaleError(str(exc), exc.rev) from None
+    except agentfiles.AgentfilesError as exc:
+        raise StructureError(str(exc)) from None
+
+
+def expect_rev(expect, data: bytes, what: str) -> None:
+    """Refuse (StaleError) a write from a view showing `expect` when the thing's bytes `data` now have another rev
+    (agentfiles.rev and agentfiles.check_expect, shared by every writer); no check when `expect` is None."""
+    _expect_seen(expect, agentfiles.rev(data), what)
 
 
 def arrow(path: list[str]) -> str:
@@ -373,14 +397,16 @@ def add_flow(names, text: str | None = None, directory: Path | None = None, *, n
         return _flow(root, flow_id), notes
 
 
-def _open_flow(root_fd: int, shape: dict, flow_id):
-    """(the flows folder's fd, the id as found, the flow as read) for a change to an existing flow."""
+def _open_flow(root_fd: int, shape: dict, flow_id, expect=None):
+    """(the flows folder's fd, the id as found, the flow as read) for a change to an existing flow; refused
+    (StaleError) when the view showed it as `expect` and its rev is now another."""
     flows_fd = _open_flows(root_fd, False)
     if flows_fd is None:
         raise StructureError(f"there is no flow {str(flow_id)[:80]!r}")
     try:
         found = _lookup(flows_fd, flow_id)
         _regular(flows_fd, found)
+        expect_rev(expect, _bytes(flows_fd, found), f"flow {found}")
         flow = next((flow for flow in shape["flows"] if flow["id"] == found), None)
         if flow is None:
             raise StructureError(f"flow {found} cannot be read as a flow (see the snapshot's warnings); "
@@ -391,7 +417,8 @@ def _open_flow(root_fd: int, shape: dict, flow_id):
     return flows_fd, found, flow
 
 
-def set_flow_text(flow_id, text, directory: Path | None = None, *, commands_dir: Path | None = None) -> dict:
+def set_flow_text(flow_id, text, directory: Path | None = None, *, commands_dir: Path | None = None,
+                  expect: str | None = None) -> dict:
     """Replace a flow's instruction. A text that is empty or only whitespace means "write it again from the
     path": the instruction made from the path replaces it (the view's way back to the generated text). A flow whose
     command is on gets its command file written again with the new instruction."""
@@ -399,7 +426,7 @@ def set_flow_text(flow_id, text, directory: Path | None = None, *, commands_dir:
     root = Path(directory) if directory is not None else STRUCTURE_DIR
     with _locked(root) as root_fd, _plain():
         shape = _shape(root)
-        flows_fd, found, flow = _open_flow(root_fd, shape, flow_id)
+        flows_fd, found, flow = _open_flow(root_fd, shape, flow_id, expect)
         try:
             if not text.strip():
                 text = flow_text(flow["path"], hub_names(shape))
@@ -424,14 +451,15 @@ def set_flow_text(flow_id, text, directory: Path | None = None, *, commands_dir:
         return _flow(root, found)
 
 
-def set_flow_name(flow_id, name, directory: Path | None = None, *, commands_dir: Path | None = None) -> dict:
+def set_flow_name(flow_id, name, directory: Path | None = None, *, commands_dir: Path | None = None,
+                  expect: str | None = None) -> dict:
     """Name a flow (`name` "" clears it). A flow whose command is on gets its command renamed with it: the new
     file is written, then the flow, then the old file removed."""
     name = clean_name(name) or None
     root = Path(directory) if directory is not None else STRUCTURE_DIR
     with _locked(root) as root_fd, _plain():
         shape = _shape(root)
-        flows_fd, found, flow = _open_flow(root_fd, shape, flow_id)
+        flows_fd, found, flow = _open_flow(root_fd, shape, flow_id, expect)
         try:
             if name == flow["name"]:
                 return _flow(root, found)
@@ -465,7 +493,8 @@ def set_flow_name(flow_id, name, directory: Path | None = None, *, commands_dir:
         return _flow(root, found)
 
 
-def set_flow_command(flow_id, on, directory: Path | None = None, *, commands_dir: Path | None = None) -> dict:
+def set_flow_command(flow_id, on, directory: Path | None = None, *, commands_dir: Path | None = None,
+                     expect: str | None = None) -> dict:
     """Turn a flow's command on (write `NAME.md` into the commands folder, then `command: on` into the flow) or
     off (the flow first, then the file). The flow needs a name; turning on a command that is on writes a missing
     file again."""
@@ -474,7 +503,7 @@ def set_flow_command(flow_id, on, directory: Path | None = None, *, commands_dir
     root = Path(directory) if directory is not None else STRUCTURE_DIR
     with _locked(root) as root_fd, _plain():
         shape = _shape(root)
-        flows_fd, found, flow = _open_flow(root_fd, shape, flow_id)
+        flows_fd, found, flow = _open_flow(root_fd, shape, flow_id, expect)
         try:
             hubs = hub_names(shape)
             if on:
@@ -507,10 +536,31 @@ def set_flow_command(flow_id, on, directory: Path | None = None, *, commands_dir
         return _flow(root, found)
 
 
-def remove_flow(flow_id, directory: Path | None = None, *, commands_dir: Path | None = None) -> dict | None:
+def _unreadable_command(shape: dict, flow_id: str, data: bytes) -> tuple[str, bytes] | None:
+    """For a flow file that cannot be read as a flow (an agent on its path is gone, say): (its command's name, the
+    bytes its command file had when it was written), when its lines say its command is on, its name is valid and
+    no readable flow holds that name; else None. Its command file goes with it only while it is exactly those bytes."""
+    fields = flow_fields(data)
+    if fields is None or not fields["command"] or not FLOW_NAME.fullmatch(fields["name"]):
+        return None
+    if any(flow.get("name") == fields["name"] for flow in shape["flows"]):
+        return None  # the name is another path's now: its command file is that path's
+    path = [seat_lead(shape, name) or name for name in fields["path"]]
+    try:
+        wanted = flowcommands.render({"id": flow_id, "path": path, "text": fields["text"], "name": fields["name"]},
+                                     hub_names(shape))
+    except flowcommands.CommandError:
+        return None
+    return fields["name"], wanted
+
+
+def remove_flow(flow_id, directory: Path | None = None, *, commands_dir: Path | None = None,
+                expect: str | None = None) -> dict | None:
     """Delete a flow's file, and the `flows` folder once nothing is left in it; a flow whose command is on loses
-    its command file first. Returns the flow as it was ({"id", "path", "text", "name", "command"}; None for a file
-    that could not be read as a flow), so `add_flow` can put it back."""
+    its command file first. A file that cannot be read as a flow (an agent on its path is gone, say) is removed the
+    same way: its command file goes too while it is exactly what was written for it. Returns the flow as it was
+    ({"id", "path", "text", "name", "command"}; None for a file that could not be read as a flow), so `add_flow`
+    can put it back. Given `expect`, refused (StaleError) when the file's rev is another."""
     root = Path(directory) if directory is not None else STRUCTURE_DIR
     with _locked(root) as root_fd, _plain():
         shape = _shape(root)
@@ -520,6 +570,8 @@ def remove_flow(flow_id, directory: Path | None = None, *, commands_dir: Path | 
         try:
             found = _lookup(flows_fd, flow_id)
             _regular(flows_fd, found)
+            data = _bytes(flows_fd, found)
+            expect_rev(expect, data, f"flow {found}")
             flow = next((flow for flow in shape["flows"] if flow["id"] == found), None)
             if flow is not None and flow["command"]:
                 with flowcommands.Folder(commands_dir, create=False) as folder:
@@ -527,6 +579,11 @@ def remove_flow(flow_id, directory: Path | None = None, *, commands_dir: Path | 
                                                        flowcommands.render(flow, hub_names(shape)), leave_foreign=True)
                     if old is not None:
                         folder.write(flow["command"], None, old)
+            elif flow is None and (command := _unreadable_command(shape, found, data)) is not None:
+                with flowcommands.Folder(commands_dir, create=False) as folder:
+                    there = folder.read(command[0])
+                    if there is not None and there == command[1]:
+                        folder.write(command[0], None, there)
             os.unlink(found + ".md", dir_fd=flows_fd)
             empty = not os.listdir(flows_fd)
         finally:
@@ -539,8 +596,9 @@ def remove_flow(flow_id, directory: Path | None = None, *, commands_dir: Path | 
         return flow
 
 
-def flow_prompt(flow_id, goal, directory: Path | None = None) -> str:
-    """The run message for a flow and a goal (read-only)."""
+def flow_prompt(flow_id, goal, directory: Path | None = None, *, expect: str | None = None) -> str:
+    """The run message for a flow and a goal (read-only). Given `expect`, refused (StaleError) when the flow's rev
+    is another: the view would run a path it is not showing."""
     try:
         flowrun.clean_goal(goal)
     except flowrun.RunError as exc:
@@ -551,6 +609,8 @@ def flow_prompt(flow_id, goal, directory: Path | None = None) -> str:
     flow = next((flow for flow in shape["flows"] if flow["id"] == flow_id), None)
     if flow is None:
         raise StructureError(f"there is no flow {flow_id[:80]!r}")
+    if expect is not None:
+        _expect_seen(expect, flow["rev"], f"flow {flow_id}")
     return flowrun.run_message(flow, goal, hub_names(shape))
 
 
@@ -592,6 +652,9 @@ def _money(value) -> str:
 def _show_stats(stats: dict | None) -> str:
     if stats is None:
         return "    never ran\n"
+    if stats["runs"] is None:
+        return ("    runs unknown: a task graph cannot show this path (a loop of one agent on itself, or one agent and "
+                "the hub)\n")
     rounds, cost = stats["rounds"], stats["cost"]
     last = time.strftime("%Y-%m-%d %H:%M", time.localtime(stats["last"])) if stats["last"] is not None else "unknown"
     return (f"    runs {stats['runs']}, passed {stats['passed']}, rounds "
@@ -668,6 +731,9 @@ def main(argv: list[str] | None = None) -> int:
     for parser_ in (add, text, name, command, remove):
         parser_.add_argument("--commands", type=Path, metavar="DIR",
                              help="OpenCode's commands folder (default: ~/.config/opencode/commands)")
+    for parser_ in (text, name, command, prompt, remove):
+        parser_.add_argument("--expect", metavar="REV", help="refuse, changing nothing, unless the flow's rev is REV "
+                                                             "(the rev the caller last read)")
     args = parser.parse_args(argv)
     action = getattr(args, "action", None)
     notes: list[str] = []
@@ -676,6 +742,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "teams":
         return _list_teams(args.structure, args.json)
     commands_dir = getattr(args, "commands", None)
+    expect = getattr(args, "expect", None)
+    unreadable: list[dict] = []
     try:
         if args.command == "flows":
             shape = _shape(args.structure)
@@ -687,52 +755,60 @@ def main(argv: list[str] | None = None) -> int:
                                          db_path=args.db if args.db is not None else DB_PATH)
             else:
                 flows = flows_of(shape)
+            unreadable = [dict(item) for item in shape.get("unreadable_flows", [])]
         elif action == "add":
             given = _read_text(args.text_file) if args.text_file else None
             result, notes = add_flow(args.agents, given, args.structure, name=args.name or None, command=args.command,
                                      commands_dir=commands_dir)
             flows = drawn_flows(args.structure)
         elif action == "text":
-            result = set_flow_text(args.id, _read_text(args.text_file), args.structure, commands_dir=commands_dir)
+            result = set_flow_text(args.id, _read_text(args.text_file), args.structure, commands_dir=commands_dir,
+                                   expect=expect)
             flows = drawn_flows(args.structure)
         elif action == "name":
-            result = set_flow_name(args.id, args.name, args.structure, commands_dir=commands_dir)
+            result = set_flow_name(args.id, args.name, args.structure, commands_dir=commands_dir, expect=expect)
             flows = drawn_flows(args.structure)
         elif action == "command":
-            result = set_flow_command(args.id, args.on, args.structure, commands_dir=commands_dir)
+            result = set_flow_command(args.id, args.on, args.structure, commands_dir=commands_dir, expect=expect)
             flows = drawn_flows(args.structure)
             if result["name"]:
                 extra["applies"] = flowcommands.applies(result["name"], args.on)
             extra["live"] = flowcommands.LIVE
         elif action == "prompt":
-            text_ = flow_prompt(args.id, _read_text(args.goal_file, flowrun.GOAL_LIMIT, "the goal"), args.structure)
+            text_ = flow_prompt(args.id, _read_text(args.goal_file, flowrun.GOAL_LIMIT, "the goal"), args.structure,
+                                expect=expect)
             if args.json:
                 print(json.dumps({"text": text_}))
             else:
                 print(text_, end="")
             return 0
         else:
-            remove_flow(args.id, args.structure, commands_dir=commands_dir)
+            remove_flow(args.id, args.structure, commands_dir=commands_dir, expect=expect)
             flows = drawn_flows(args.structure)
     except (StructureError, OSError) as exc:
+        current = getattr(exc, "rev", None)
         if getattr(args, "json", False):
-            print(json.dumps({"error": str(exc)}))
+            print(json.dumps({"error": str(exc), **({"rev": current} if current is not None else {})}))
         else:
-            print(f"agentgraph structure: {exc}", file=sys.stderr)
+            print(f"agentgraph structure: {exc}" + (f" (rev now {current})" if current is not None else ""),
+                  file=sys.stderr)
         return 1
     if args.json:
         print(json.dumps({**({"flow": result} if result else {}), "flows": flows, **extra,
-                          **({"notes": notes} if notes else {})}))
+                          **({"unreadable": unreadable} if unreadable else {}), **({"notes": notes} if notes else {})}))
         return 0
     for note in notes:
         print(note)
     if args.command == "flows":
-        if not flows:
+        if not flows and not unreadable:
             print("no drawn flows")
         for item in flows:
             print(_show(item), end="")
             if args.stats:
                 print(_show_stats(item["stats"]), end="")
+        for item in unreadable:
+            print(f"{item['id']}: cannot be read as a flow ({item['reason']}); `agentgraph flow remove {item['id']}` "
+                  "removes it")
     elif action == "add":
         print("added flow " + _show(result), end="")
     elif action == "text":

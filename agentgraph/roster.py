@@ -19,7 +19,7 @@ import stat
 import sys
 import unicodedata
 
-from . import agentfiles, flowcommands, skillset, sources
+from . import agentfiles, flowcommands, names, skillset, sources
 from . import structure as structure_module
 from . import teams as teams_module
 from .skillset import BACKUPS, CONFIG, MAP, SkillsetError
@@ -46,7 +46,7 @@ HOST_AGENTS = ("user", "build", "plan", "general", "compaction", "summary", "tit
 AGENTS_DIR = sources.CONFIG_DIR / "agents"
 SEAT_PREFIX = "councillor-"
 
-NAME = re.compile(r"[a-z][a-z0-9_-]{0,63}")
+NAME = names.AGENT  # agentgraph.names: the one definition of an agent name
 MODEL = re.compile(r"[^/\s]+/\S+")  # the plugin's provider/model shape (ProviderModelIdSchema)
 COLOR = re.compile(r"#[0-9a-fA-F]{6}|primary|secondary|accent|success|warning|error|info")
 MAX_DESCRIPTION, MAX_PROMPT = 300, 8000
@@ -2091,8 +2091,8 @@ def expecting(name, expect, *, config=CONFIG, map_path=MAP, structure=None):
     if expect is None:
         yield None
         return
-    if not isinstance(expect, str):
-        raise RosterError("expect must be text: the rev the view was showing")
+    if not isinstance(expect, str) or not expect:
+        raise RosterError(agentfiles.EXPECT_TEXT)
     with _structure_locked(Path(structure) if structure is not None else STRUCTURE_DIR) as root_fd:
         yield lambda data: _expect_agent(name, expect, data=data, root_fd=root_fd, config=config, map_path=map_path)
 

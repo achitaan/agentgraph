@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote
 
-from . import flowcommands, flowrun, roster, skillfiles, skillset, structure, teams
+from . import agentfiles, flowcommands, flowrun, roster, skillfiles, skillset, structure, teams
 from .demo import demo_snapshot
 from .snapshot_json import ledger_home, learning_document, load_structure, skills_document, snapshot_document
 from .sources import DB_PATH, ORCHESTRATION_GRAPH_DIR, build_snapshot
@@ -31,6 +31,16 @@ _TEAM_BODY_LIMIT = 32768  # as a flow: an instruction of 2000 characters
 _POSTS = (_FLOW_PATH, _SKILLS_PATH, _ROSTER_PATH, _SKILLFILE_PATH, _TEAM_PATH)
 _LOOPBACK = frozenset({"127.0.0.1", "::1"})
 _FLOW_BODY_LIMIT = 32768  # an instruction of 2000 characters, each up to 12 bytes as escaped JSON (and a goal of 4000)
+# A write from a view that has not seen a later change (stale-contract.md): every op that names an existing thing
+# takes an optional "expect", the `rev` the view was showing; a stale one changes nothing and answers 409 with
+# {"error", "rev"}, the current rev. Without "expect" an op works as it always did.
+_STALE = (agentfiles.StaleError, structure.StaleError)
+
+
+def _expect_ok(request: dict) -> bool:
+    """A request's "expect", when it has one, is a rev: text, not empty. An empty one is bad input (400), never taken
+    as no "expect" and never compared; the command lines and the Desktop plugin refuse it alike."""
+    return "expect" not in request or (isinstance(request["expect"], str) and request["expect"] != "")
 _TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -81,6 +91,8 @@ def make_server(
     paths = {"config": skills_config or skillset.CONFIG, "map_path": skills_map or skillset.MAP,
              "backups": skills_backups or skillset.BACKUPS, "profiles": skills_profiles or skillset.PROFILES}
     directory = (web_dir if web_dir is not None else Path(__file__).with_name("web")).resolve()
+    structure_root = structure_dir if structure_dir is not None else roster.STRUCTURE_DIR  # what the writers use
+    EXPECT = "expect"  # a shape's fourth item: the op takes an optional "expect"
 
     class Handler(BaseHTTPRequestHandler):
         timeout = 10
@@ -116,6 +128,9 @@ def make_server(
         def _refuse(self, status: int, message: str):
             self._reply(status, "application/json", json.dumps({"error": message}).encode("utf-8"))
 
+        def _stale(self, exc):
+            self._reply(409, "application/json", json.dumps({"error": str(exc), "rev": exc.rev}).encode("utf-8"))
+
         def _json_body(self, what: str, limit: int):
             """The request's JSON body, or None after refusing it. Only this page may change anything: a
             loopback client, a JSON body of bounded length, and an Origin (browsers always send one on a
@@ -139,6 +154,18 @@ def make_server(
                 self._refuse(411, "the body needs a Content-Length")
                 return None
             if not 0 < length <= limit:
+                # Read what arrives of a body up to twice the limit first, while it keeps coming: closing with it
+                # unread resets the connection, and the client may never see the answer.
+                if limit < length <= 2 * limit:
+                    try:
+                        self.connection.settimeout(1.0)
+                        while length > 0:
+                            chunk = self.rfile.read1(min(length, 65536))
+                            if not chunk:
+                                break
+                            length -= len(chunk)
+                    except OSError:
+                        pass
                 self._refuse(413, "the body is empty or too large")
                 return None
             try:
@@ -163,23 +190,25 @@ def make_server(
             op = request.get("op") if isinstance(request, dict) else None
             valid = isinstance(op, str) and (
                 (op == "add" and {"op", "path"} <= set(request) <= {"op", "path"} | optional)
-                or (op in shapes and set(request) == shapes[op]))
+                or (op in shapes and shapes[op] <= set(request) <= shapes[op] | {"expect"}))
             if valid:
-                kinds = {"id": str, "text": str, "name": str, "goal": str, "path": list, "on": bool, "command": bool}
-                valid = all(isinstance(request[key], kinds[key]) for key in request if key in kinds)
+                kinds = {"id": str, "text": str, "name": str, "goal": str, "path": list, "on": bool, "command": bool,
+                         "expect": str}
+                valid = all(isinstance(request[key], kinds[key]) for key in request if key in kinds) and _expect_ok(request)
             if not valid:
                 self._refuse(400, 'expected {"op": "add", "path": [agents]} (and optional "text", "name", "command"), '
                                   '{"op": "text", "id": flow, "text": text}, {"op": "name", "id": flow, "name": name}, '
                                   '{"op": "command", "id": flow, "on": true|false}, {"op": "prompt", "id": flow, '
-                                  '"goal": text} or {"op": "remove", "id": flow}')
+                                  '"goal": text} or {"op": "remove", "id": flow}; each but "add" with an optional "expect": rev')
                 return
             if demo and op != "prompt":
                 self._refuse(403, "the demo cannot change the structure")
                 return
+            expect = request.get("expect")
             try:
                 answer: dict = {}
                 if op == "prompt":
-                    answer["text"] = structure.flow_prompt(request["id"], request["goal"], structure_dir)
+                    answer["text"] = structure.flow_prompt(request["id"], request["goal"], structure_dir, expect=expect)
                 elif op == "add":
                     answer["flow"], notes = structure.add_flow(
                         request["path"], request.get("text"), structure_dir, name=request.get("name") or None,
@@ -188,19 +217,22 @@ def make_server(
                         answer["notes"] = notes
                 elif op == "text":
                     answer["flow"] = structure.set_flow_text(request["id"], request["text"], structure_dir,
-                                                             commands_dir=commands_dir)
+                                                             commands_dir=commands_dir, expect=expect)
                 elif op == "name":
                     answer["flow"] = structure.set_flow_name(request["id"], request["name"], structure_dir,
-                                                             commands_dir=commands_dir)
+                                                             commands_dir=commands_dir, expect=expect)
                 elif op == "command":
                     answer["flow"] = flow = structure.set_flow_command(request["id"], request["on"], structure_dir,
-                                                                       commands_dir=commands_dir)
+                                                                       commands_dir=commands_dir, expect=expect)
                     answer["applies"] = flowcommands.applies(flow["name"], request["on"])
                     answer["live"] = flowcommands.LIVE
                 else:
-                    structure.remove_flow(request["id"], structure_dir, commands_dir=commands_dir)
+                    structure.remove_flow(request["id"], structure_dir, commands_dir=commands_dir, expect=expect)
                 if op != "prompt":
                     answer["flows"] = structure.drawn_flows(structure_dir)
+            except structure.StaleError as exc:
+                self._stale(exc)
+                return
             except structure.StructureError as exc:
                 self._refuse(400, str(exc))
                 return
@@ -215,21 +247,30 @@ def make_server(
             request = self._json_body("skills", _SKILLS_BODY_LIMIT)
             if request is None:
                 return
-            keys = set(request) if isinstance(request, dict) else None
+            keys = set(request) - {"expect"} if isinstance(request, dict) else None
             valid = (keys == {"agent", "skill", "on"} and isinstance(request["on"], bool)
                      and isinstance(request["skill"], str)) or (keys == {"agent", "all"} and request["all"] is True)
-            if not valid or not isinstance(request["agent"], str):
-                self._refuse(400, 'expected {"agent": name, "skill": name, "on": true|false} or {"agent": name, "all": true}')
+            if not valid or not isinstance(request["agent"], str) or not _expect_ok(request):
+                self._refuse(400, 'expected {"agent": name, "skill": name, "on": true|false} or {"agent": name, "all": true}'
+                                  ', each with an optional "expect": rev')
                 return
             if demo:
                 self._refuse(403, "the demo cannot change skills")
                 return
             try:
-                where = {**paths, "agents_dir": agents_dir or skillset.AGENTS_DIR, "skills_dir": skills_dir}
+                where = {**paths, "agents_dir": agents_dir or skillset.AGENTS_DIR, "skills_dir": skills_dir,
+                         "structure": structure_root}
+                expect = request.get("expect")
                 if "all" in request:
-                    result = skillset.set_all(request["agent"], **where)
+                    result = skillset.set_all(request["agent"], expect=expect, **where)
                 else:
-                    result = (skillset.add if request["on"] else skillset.remove)(request["agent"], request["skill"], **where)
+                    result = (skillset.add if request["on"] else skillset.remove)(request["agent"], request["skill"],
+                                                                                  expect=expect, **where)
+                current = roster.agent_rev(request["agent"], config=paths["config"], map_path=paths["map_path"],
+                                           agents_dir=where["agents_dir"], structure=structure_root)
+            except agentfiles.StaleError as exc:
+                self._stale(exc)
+                return
             except skillset.SkillsetError as exc:
                 self._refuse(400, str(exc))
                 return
@@ -237,19 +278,21 @@ def make_server(
                 self._refuse(500, f"could not change the skills: {exc}")
                 return
             answer = {"agent": result["agent"], "skills": result["skills"], "warnings": result.get("warnings", []),
-                      "changed": bool(result.get("changed")), "message": result.get("message", "")}
+                      "changed": bool(result.get("changed")), "message": result.get("message", ""), "rev": current}
             self._reply(200, "application/json", json.dumps(answer).encode("utf-8"))
 
         def _request(self, what: str, limit: int, shapes: dict, expected: str):
             """The request when its body passes `_json_body` and its keys and types fit one of `shapes`
-            ({op: (required keys, allowed keys, {key: types})}), else None after refusing it."""
+            ({op: (required keys, allowed keys, {key: types}[, EXPECT])}; with EXPECT the op also takes an optional
+            "expect", text), else None after refusing it."""
             request = self._json_body(what, limit)
             if request is None:
                 return None
             op = request.get("op") if isinstance(request, dict) else None
             shape = shapes.get(op) if isinstance(op, str) else None
-            if (shape is None or not shape[0] <= set(request) <= shape[1]
-                    or not all(isinstance(request[key], shape[2].get(key, str)) for key in request if key != "op")):
+            if (shape is None or not shape[0] <= set(request) <= shape[1] | ({"expect"} if shape[3:] else set())
+                    or not all(isinstance(request[key], shape[2].get(key, str)) for key in request if key != "op")
+                    or not _expect_ok(request)):
                 self._refuse(400, "expected " + expected)
                 return None
             if demo:
@@ -258,9 +301,13 @@ def make_server(
             return request
 
         def _answer(self, call, *errors):
-            """Run `call`; a refusal (one of `errors`) is a 400 with its message, a file error a 500."""
+            """Run `call`; a stale write is a 409 with the current rev, a refusal (one of `errors`) a 400 with its
+            message, a file error a 500."""
             try:
                 answer = call()
+            except _STALE as exc:
+                self._stale(exc)
+                return
             except errors as exc:
                 self._refuse(400, str(exc))
                 return
@@ -282,13 +329,14 @@ def make_server(
                      "copy_of": optional, "template": optional, "skills": (list, type(None)),
                      "read_only": (bool, type(None))}
             request = self._request("the agents", _ROSTER_BODY_LIMIT, {
-                "add": ({"op", "name"}, add_keys, types), "remove": ({"op", "name"}, {"op", "name"}, {}),
+                "add": ({"op", "name"}, add_keys, types), "remove": ({"op", "name"}, {"op", "name"}, {}, EXPECT),
                 "restore": ({"op", "record"}, {"op", "record"}, {}), "read": ({"op", "name"}, {"op", "name"}, {}),
-                "text": ({"op", "name", "text"}, {"op", "name", "text"}, {}),
-                "rename": ({"op", "name", "to"}, {"op", "name", "to"}, {})},
+                "text": ({"op", "name", "text"}, {"op", "name", "text"}, {}, EXPECT),
+                "rename": ({"op", "name", "to"}, {"op", "name", "to"}, {}, EXPECT)},
                 '{"op": "add", "name", "model", "description", "prompt"} (or "copy_of" or "template"; optional '
                 '"variant", "skills", "read_only"), {"op": "read"|"remove", "name"}, {"op": "text", "name", "text"}, '
-                '{"op": "rename", "name", "to"} or {"op": "restore", "record"}')
+                '{"op": "rename", "name", "to"} or {"op": "restore", "record"}; remove, text and rename with an '
+                'optional "expect": rev')
             if request is None:
                 return
             if request.get("skills") is not None and not names(request["skills"]):
@@ -297,6 +345,7 @@ def make_server(
             folder = agents_dir or roster.AGENTS_DIR
             files = {"config": paths["config"], "map_path": paths["map_path"], "backups": paths["backups"],
                      "structure": structure_dir, "agents_dir": folder}
+            expect = request.get("expect")
 
             def run():
                 op = request["op"]
@@ -308,19 +357,22 @@ def make_server(
                         copy_of=request.get("copy_of"), template=request.get("template"), skills_dir=skills_dir,
                         **files)
                 elif op == "remove":
-                    result = roster.remove_agent(request["name"], **files)
+                    result = roster.remove_agent(request["name"], expect=expect, **files)
                 elif op == "rename":
-                    result = roster.rename_agent(request["name"], request["to"], commands_dir=commands_dir, **files)
+                    result = roster.rename_agent(request["name"], request["to"], commands_dir=commands_dir, expect=expect,
+                                                 **files)
                 elif op == "restore":
                     result = roster.restore_agent(request["record"], commands_dir=commands_dir, **files)
                 elif op == "read":
-                    return roster.read_agent(request["name"], agents_dir=folder)
+                    return roster.read_agent(request["name"], agents_dir=folder, config=paths["config"],
+                                             map_path=paths["map_path"], structure=structure_root)
                 else:
                     result = roster.text_agent(request["name"], request["text"], agents_dir=folder,
-                                               backups=paths["backups"])
+                                               backups=paths["backups"], expect=expect, config=paths["config"],
+                                               map_path=paths["map_path"], structure=structure_root)
                 keys = ("agent", "kind", "action", "presets", "changed", "copy_of", "template", "model", "skills",
                         "permission", "structure_file", "record", "removed", "restored", "renamed", "name", "description",
-                        "text", "warnings", "message")
+                        "text", "warnings", "message", "rev")
                 return {key: result[key] for key in keys if key in result}
 
             self._answer(run, skillset.SkillsetError, structure.StructureError)
@@ -329,11 +381,12 @@ def make_server(
             # Read a skill's text, write it, create a skill (and give it to an agent), delete it or restore it.
             request = self._request("skills", _SKILLFILE_BODY_LIMIT, {
                 "read": ({"op", "id"}, {"op", "id"}, {}),
-                "write": ({"op", "id", "text"}, {"op", "id", "text", "description"}, {}),
+                "write": ({"op", "id", "text"}, {"op", "id", "text", "description"}, {}, EXPECT),
                 "create": ({"op", "id", "description", "text"}, {"op", "id", "description", "text", "assign"}, {}),
-                "delete": ({"op", "id"}, {"op", "id"}, {}), "restore": ({"op", "record"}, {"op", "record"}, {})},
+                "delete": ({"op", "id"}, {"op", "id"}, {}, EXPECT), "restore": ({"op", "record"}, {"op", "record"}, {})},
                 '{"op": "read"|"delete", "id"}, {"op": "write", "id", "text"} (optional "description"), '
-                '{"op": "create", "id", "description", "text"} (optional "assign") or {"op": "restore", "record"}')
+                '{"op": "create", "id", "description", "text"} (optional "assign") or {"op": "restore", "record"}; '
+                'write and delete with an optional "expect": rev')
             if request is None:
                 return
             where = {"skills": skills_dir or skillfiles.SKILLS, "backups": paths["backups"]}
@@ -344,9 +397,10 @@ def make_server(
                     return skillfiles.show(request["id"], skills=where["skills"], bundled=skills_bundled)
                 if op == "write":
                     done = skillfiles.write(request["id"], body=request["text"], description=request.get("description"),
-                                            **where)
+                                            expect=request.get("expect"), **where)
                     return {"id": done["id"], "description": done["frontmatter"]["description"], "text": done["body"],
-                            "changed": done["changed"], **{key: done[key] for key in ("record", "message") if key in done}}
+                            "changed": done["changed"],
+                            **{key: done[key] for key in ("record", "message", "rev") if key in done}}
                 if op == "create":
                     done = skillfiles.create_skill(request["id"], request["description"], request["text"],
                                                    request.get("assign"), config=paths["config"],
@@ -357,7 +411,8 @@ def make_server(
                             **{key: done[key] for key in ("assigned", "warnings", "message") if key in done}}
                 if op == "delete":
                     return skillfiles.delete(request["id"], config=paths["config"], wildcards_hold=False,
-                                             agents_dir=agents_dir or skillset.AGENTS_DIR, **where)
+                                             agents_dir=agents_dir or skillset.AGENTS_DIR, expect=request.get("expect"),
+                                             **where)
                 done = skillfiles.restore(request["record"], **where)
                 return {"id": done["id"], "changed": True, **({"record": done["record"]} if "frontmatter" in done else {})}
 
@@ -368,10 +423,12 @@ def make_server(
             names = (list,)
             request = self._request("the structure", _TEAM_BODY_LIMIT, {
                 "add": ({"op", "lead", "members"}, {"op", "lead", "members", "text"}, {"members": names}),
-                "members": ({"op", "id", "members"}, {"op", "id", "members"}, {"members": names}),
-                "text": ({"op", "id", "text"}, {"op", "id", "text"}, {}), "remove": ({"op", "id"}, {"op", "id"}, {})},
+                "members": ({"op", "id", "members"}, {"op", "id", "members"}, {"members": names}, EXPECT),
+                "text": ({"op", "id", "text"}, {"op", "id", "text"}, {}, EXPECT),
+                "remove": ({"op", "id"}, {"op", "id"}, {}, EXPECT)},
                 '{"op": "add", "lead", "members": [agents]} (and an optional "text"), {"op": "members", "id", '
-                '"members": [agents]}, {"op": "text", "id", "text"} or {"op": "remove", "id"}')
+                '"members": [agents]}, {"op": "text", "id", "text"} or {"op": "remove", "id"}; each but "add" with '
+                'an optional "expect": rev')
             if request is None:
                 return
 
@@ -381,11 +438,13 @@ def make_server(
                     answer["team"], notes = teams.add(request["lead"], request["members"], request.get("text"),
                                                       structure_dir)
                 elif request["op"] == "members":
-                    answer["team"], notes = teams.set_members(request["id"], request["members"], structure_dir)
+                    answer["team"], notes = teams.set_members(request["id"], request["members"], structure_dir,
+                                                              expect=request.get("expect"))
                 elif request["op"] == "text":
-                    answer["team"] = teams.set_text(request["id"], request["text"], structure_dir)
+                    answer["team"] = teams.set_text(request["id"], request["text"], structure_dir,
+                                                    expect=request.get("expect"))
                 else:
-                    answer["team"] = teams.remove(request["id"], structure_dir)
+                    answer["team"] = teams.remove(request["id"], structure_dir, expect=request.get("expect"))
                 answer["teams"] = teams.teams(structure_dir)
                 if notes:
                     answer["notes"] = notes
@@ -429,7 +488,7 @@ def make_server(
                     skillset.annotate(document, config=paths["config"], profiles=paths["profiles"],
                                       agents_dir=agents_dir or roster.AGENTS_DIR, skills_dir=skills_dir)
                     roster.annotate(document, config=paths["config"], map_path=paths["map_path"],
-                                    agents_dir=agents_dir or roster.AGENTS_DIR)
+                                    agents_dir=agents_dir or roster.AGENTS_DIR, structure=structure_root)
                     skillfiles.annotate(document, skills=skills_dir or skillfiles.SKILLS, bundled=skills_bundled)
                 body = json.dumps(document, allow_nan=False).encode("utf-8")
             except Exception as exc:

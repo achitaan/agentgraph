@@ -11,7 +11,7 @@ from itertools import pairwise
 from math import isfinite
 from pathlib import Path
 
-from . import contract
+from . import contract, names
 from .contract import Agent, Session, Snapshot, TaskGraph
 from .demo import demo_snapshot
 from .sources import CONFIG_DIR, ORCHESTRATION_GRAPH_DIR, build_snapshot, top_level_session
@@ -179,10 +179,10 @@ def read_settings(data: bytes) -> tuple[list[tuple[str, str]], list[str], int]:
 
 FLOWS_FOLDER = "flows"  # inside the structure folder: one file per flow, never a group of agents
 TEAMS_FOLDER = "teams"  # inside the structure folder: one file per team (agentgraph.teams), never a group of agents
-FLOW_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
+FLOW_ID = names.FLOW_ID  # a flow's (and a group's) file name: the one definition is agentgraph.names
 FLOW_TEXT_LIMIT = 2000
 FLOW_FILES_LIMIT = 200
-FLOW_NAME = re.compile(r"[a-z0-9][a-z0-9-]{1,31}")  # a path's name: also its command's name (`/NAME`)
+FLOW_NAME = names.FLOW_NAME  # a path's name: also its command's name (`/NAME`; agentgraph.names)
 
 
 def seat_lead(shape: dict, name: str) -> str:
@@ -296,14 +296,24 @@ def read_flow(data: bytes) -> tuple[list[str], str] | None:
 
 def load_flows(root: Path, shape: dict) -> None:
     """Read `flows/` into shape["flows"] ({"id", "path", "text", "name",
-    "command"}, in id order; `name` the path's name or None, `command` the
-    name when its command is on, else None); a file that cannot be read or
+    "command", "rev"}, in id order; `name` the path's name or None, `command` the
+    name when its command is on, else None; `rev` the hash of the file's bytes,
+    agentfiles.rev, which a write from a view takes as `expect`); a file that cannot be read or
     whose path is no longer valid is skipped with a warning, and so is a second
-    loop of one agent on itself. A name that is not valid or that an earlier
+    loop of one agent on itself. Each skipped file is also listed in
+    shape["unreadable_flows"] ({"id", "reason", "rev"}): `agentgraph flow remove ID` removes it (and its
+    command file). A name that is not valid or that an earlier
     flow already has is dropped with a warning (and with it the command). Adding
     stops at FLOW_FILES_LIMIT files; files beyond it (put there by hand) are
     named in a warning, never dropped silently."""
+    from .agentfiles import rev  # agentfiles imports modules that import this one
     shape["flows"] = []
+    shape["unreadable_flows"] = []
+
+    def skip(stem: str, reason: str, data: bytes) -> None:
+        shape["warnings"].append(f"structure: flow {stem} ignored: {reason}; `agentgraph flow remove {stem}` "
+                                 "removes it (and its command file)")
+        shape["unreadable_flows"].append({"id": stem, "reason": reason, "rev": rev(data)})
     folder = root / FLOWS_FOLDER
     if folder.is_symlink() or not folder.is_dir():
         return
@@ -322,22 +332,22 @@ def load_flows(root: Path, shape: dict) -> None:
         if path.is_symlink() or not path.is_file():
             continue
         try:
-            fields = flow_fields(path.read_bytes())
+            data = path.read_bytes()
         except OSError:
             continue
+        fields = flow_fields(data)
         if fields is None:
-            shape["warnings"].append(f"structure: flow {path.stem} ignored: it has no readable path line")
+            skip(path.stem, "it has no readable path line", data)
             continue
         names, text = fields["path"], fields["text"]
         names = [seat_lead(shape, name) or name for name in names]  # a seat stands for its council
         reason = flow_refusal(shape, names)
         if reason:
-            shape["warnings"].append(f"structure: flow {path.stem} ignored: {reason}")
+            skip(path.stem, reason, data)
             continue
         if is_self_loop(names):
             if names[0] in looped:
-                shape["warnings"].append(f"structure: flow {path.stem} ignored: {names[0]} already loops on itself "
-                                         f"in flow {looped[names[0]]}")
+                skip(path.stem, f"{names[0]} already loops on itself in flow {looped[names[0]]}", data)
                 continue
             looped[names[0]] = path.stem
         name = fields["name"] or None
@@ -355,7 +365,7 @@ def load_flows(root: Path, shape: dict) -> None:
             shape["warnings"].append(f"structure: flow {path.stem}: its command is on but it has no name; "
                                      "the command was left out")
         shape["flows"].append({"id": path.stem, "path": names, "text": text, "name": name,
-                               "command": name if name is not None and fields["command"] else None})
+                               "command": name if name is not None and fields["command"] else None, "rev": rev(data)})
 
 
 def load_structure(directory: Path | None = None) -> dict | None:
@@ -375,7 +385,7 @@ def load_structure(directory: Path | None = None) -> dict | None:
     except OSError:
         return None
     shape: dict = {"groups": [], "titles": {}, "group_of": {}, "pool": {}, "escalation": [], "seats": {}, "about": {},
-                   "files": {}, "flows": [], "teams": [], "warnings": []}
+                   "files": {}, "flows": [], "unreadable_flows": [], "teams": [], "warnings": []}
     for folder in folders:
         group = re.sub(r"^\d+[-_]", "", folder.name)
         if not group or group in shape["titles"]:
@@ -420,7 +430,7 @@ def load_teams(root: Path, shape: dict) -> None:
     from . import teams  # teams imports this module
     agents = {"group_of": shape["group_of"], "seats": shape["seats"], "hubs": sorted(hub_names(shape))}
     found, warnings = teams._load(root, agents)
-    shape["teams"] = [{key: team[key] for key in ("id", "lead", "members", "text")} for team in found]
+    shape["teams"] = [{key: team[key] for key in ("id", "lead", "members", "text", "rev")} for team in found]
     shape["warnings"].extend(warnings)
 
 

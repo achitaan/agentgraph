@@ -63,6 +63,10 @@ The web page is the clean view: one network of your agents that you can pan, zoo
 | `agentgraph cost [--session ID] [--cap N]` | Where one chat's money went: warm and cold turns, why the cold ones happened, cost by context size, and what earlier compaction or a one-hour cache would have cost instead. |
 | `agentgraph cost --trend [--days N] [--json]` | What chats cost per turn over time, split by the cost settings in force (compaction buffer, cache lifetime), so a settings change can be judged. Each run notes the current settings in `cost-settings.jsonl`; `signals` shows the last two periods (`--no-cost` skips them). |
 
+**Stale changes.** Every listing and read gives each flow, group, skill and agent a `rev` (16 hex digits of its file's bytes). Every command that changes or removes an existing one takes `--expect REV`: when the thing changed since that rev was read, the command changes nothing and fails with "changed since you opened it; reload and try again" and the current rev (`{"error", "rev"}` with `--json`; exit 1). Without `--expect` nothing changes; an empty `--expect` is bad input, never taken as none. A thing removed and made again with identical bytes has the same `rev` (it is the same thing). The web endpoints take `"expect"` (400 when empty or not text) and answer such a refusal with 409; the Desktop panel passes it through as `--expect`.
+
+**Names.** One definition per kind, in `agentgraph/names.py`, used by the commands, the server, the Desktop plugin and the terminal panel: an agent is `[a-z][a-z0-9_-]{0,63}`, a skill `[a-z][a-z0-9-]{0,63}`, a flow id `[a-z0-9][a-z0-9-]{0,79}`, and a flow name (also its command name) 2 to 32 lowercase letters, digits and `-`.
+
 Keys in the live view: `1` agents, `2` tasks, `3` loops, `4` events, `5` issues, `0` dashboard, `j`/`k` or arrows to scroll, `?` help, `q` quit.
 
 ## Where things live

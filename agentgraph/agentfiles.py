@@ -34,7 +34,7 @@ import secrets
 import stat
 import unicodedata
 
-from . import skillset, sources
+from . import names, skillset, sources
 
 AGENTS_DIR = sources.CONFIG_DIR / "agents"
 BACKUPS = skillset.BACKUPS
@@ -44,7 +44,7 @@ MARK = "# agentgraph: added"
 _MARK_LINE = MARK + " (written by `agentgraph agent add`; change it with `agentgraph agent text` and `agentgraph skills`)"
 FILE_LIMIT = 64 * 1024
 MAX_DESCRIPTION, MAX_TEXT = 300, 8000
-NAME = re.compile(r"[a-z][a-z0-9_-]{0,63}")
+NAME = names.AGENT  # agentgraph.names: the one definition of an agent name
 ACTION = re.compile(r"[a-z*][a-z0-9_*-]{0,63}")
 MODEL = re.compile(r"[^/#\s\"\\]+/[^#\s\"\\]+(?:#[^#\s\"\\]+)?")  # Config.AgentEncoded's model pattern, no spaces
 EFFECTS = ("allow", "ask", "deny")
@@ -104,6 +104,9 @@ class AgentfilesError(skillset.SkillsetError):
 STALE = "changed since you opened it; reload and try again"
 
 
+EXPECT_TEXT = "expect must be text, not empty: the rev the view was showing"
+
+
 class StaleError(AgentfilesError):
     """A write from a view that has not seen a later change: nothing was written; `rev` is the current one."""
 
@@ -127,11 +130,12 @@ def rev(*parts):
 
 
 def check_expect(expect, current, what):
-    """Refuse (StaleError) a write given `expect` when it is not `current`; no check when `expect` is None."""
+    """Refuse (StaleError) a write given `expect` when it is not `current`; no check when `expect` is None. An
+    `expect` that is given must be a rev: text, not empty (an empty one is bad input, never compared)."""
     if expect is None:
         return
-    if not isinstance(expect, str):
-        raise AgentfilesError("expect must be text: the rev the view was showing")
+    if not isinstance(expect, str) or not expect:
+        raise AgentfilesError(EXPECT_TEXT)
     if expect != current:
         raise StaleError(what, current)
 
@@ -736,7 +740,7 @@ def prune_records(record):
     total stays bounded however many days pass); `record` itself is always kept, and no record among the newest
     MAX_BACKUPS is removed. Only folders holding nothing but a record are removed, and a day's folder left empty."""
     folder = Path(record).parent
-    found = re.fullmatch(r"((?:text|remove|rename)-[a-z][a-z0-9_-]{0,63})-[0-9a-f]{12}", folder.name)
+    found = re.fullmatch(rf"((?:text|remove|rename)-{names.AGENT_PATTERN})-[0-9a-f]{{12}}", folder.name)
     if not found:
         return
     same = re.compile(re.escape(found.group(1)) + r"-[0-9a-f]{12}")
@@ -769,7 +773,8 @@ def drop_record(record):
             break
 
 
-RECORD_PATH = re.compile(r"\d{4}-\d{2}-\d{2}-agent-files/(text|remove|rename)-([a-z][a-z0-9_-]{0,63})-[0-9a-f]{12}/record\.json")
+RECORD_PATH = re.compile(rf"\d{{4}}-\d{{2}}-\d{{2}}-agent-files/(text|remove|rename)-({names.AGENT_PATTERN})-[0-9a-f]{{12}}"
+                         r"/record\.json")
 
 
 def load_record(record, backups):

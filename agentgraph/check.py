@@ -257,7 +257,51 @@ def _walk_chain(working: list[str], start, index):
 
 def _checked_flows(flows, hubs):
     # A loop of one agent on itself adds no rule: a task graph cannot show it. It is printed with the others.
-    return [flow for flow in flows if not is_self_loop(flow["path"]) and len(flow_steps(flow["path"], hubs)[0]) >= 2]
+    return [flow for flow in flows if measurable(flow, hubs)]
+
+
+def measurable(flow: dict, hubs=frozenset()) -> bool:
+    """Whether a task graph can show `flow`: not a loop of one agent on itself, nor one agent and the hub. `check`
+    enforces only these, and only these have stats (agentgraph.flowrun: the others' numbers are unknown, null)."""
+    return not is_self_loop(flow["path"]) and len(flow_steps(flow["path"], hubs)[0]) >= 2
+
+
+def follows(graph: TaskGraph, flow: dict, hubs=frozenset(), seats=None, index=None) -> tuple[list[dict], list[str]]:
+    """The one definition of a task graph following a drawn flow, used by `check` (flow_problems) and by the
+    stats (flow_chains, agentgraph.flowrun). Returns (chains, problems): `chains` holds the chain ({agent: node id})
+    from each node of the flow's first agent (a FLOW_START_TYPES type, any status) that has the rest of the path after
+    it; `problems` one message per such node not yet passed that has none (a passed node's work is done: the flow
+    may have been drawn after it). The graph follows the flow when it has a chain and no problem. A flow a task graph
+    cannot show (`measurable` false) gives ([], [])."""
+    if not measurable(flow, hubs):
+        return [], []
+    index = index if index is not None else _chain_index(graph, seats)
+    by_id, runs, _ = index
+    working, _ = flow_steps(flow["path"], hubs)
+    label = " → ".join(flow["path"])
+    chains: list[dict] = []
+    problems: list[str] = []
+    for start in graph.nodes:
+        if runs[start.id] != working[0] or start.type not in FLOW_START_TYPES:
+            continue
+        found, best, ran_out = _walk_chain(working, start, index)
+        if found is not None:
+            chains.append(found)
+            continue
+        if start.status == "passed":
+            continue
+        step, (current, chain) = best
+        if ran_out:
+            problems.append(f"{start.id} ({start.agent}): its chain is too tangled to check: flow {label}")
+            continue
+        agent = working[step]
+        where = "" if current == start.id else f" after {by_id[current].agent} ({current})"
+        if agent in chain:
+            problems.append(f"{start.id} ({start.agent}) is not sent back to {agent}{where}: {current} must be a gate "
+                            f"whose feedback_to names {chain[agent]}: flow {label}")
+        else:
+            problems.append(f"{start.id} ({start.agent}) is not followed by {agent}{where}: flow {label}")
+    return chains, problems
 
 
 def flow_problems(graph: TaskGraph, flows, hubs=frozenset(), seats=None) -> list[str]:
@@ -277,46 +321,17 @@ def flow_problems(graph: TaskGraph, flows, hubs=frozenset(), seats=None) -> list
     if not flows:
         return []
     index = _chain_index(graph, seats)
-    by_id, runs, _ = index
-    problems: list[str] = []
-    for flow in flows:
-        working, _ = flow_steps(flow["path"], hubs)
-        label = " → ".join(flow["path"])
-        for start in graph.nodes:
-            if runs[start.id] != working[0] or start.type not in FLOW_START_TYPES or start.status == "passed":
-                continue
-            found, best, ran_out = _walk_chain(working, start, index)
-            if found is not None:
-                continue
-            step, (current, chain) = best
-            if ran_out:
-                problems.append(f"{start.id} ({start.agent}): its chain is too tangled to check: flow {label}")
-                continue
-            agent = working[step]
-            where = "" if current == start.id else f" after {by_id[current].agent} ({current})"
-            if agent in chain:
-                problems.append(f"{start.id} ({start.agent}) is not sent back to {agent}{where}: {current} must be a gate "
-                                f"whose feedback_to names {chain[agent]}: flow {label}")
-            else:
-                problems.append(f"{start.id} ({start.agent}) is not followed by {agent}{where}: flow {label}")
-    return problems
+    return [problem for flow in flows for problem in follows(graph, flow, hubs, seats, index)[1]]
 
 
 def flow_chains(graph: TaskGraph, flow: dict, hubs=frozenset(), seats=None) -> list[dict[str, str]]:
     """`flow_problems` turned round: the chains ({agent: node id}) along which the graph followed `flow`, one per
     node of its first agent (of a FLOW_START_TYPES type, whatever its status) that has the whole rest of the path
-    after it. Empty for a flow `check` does not enforce (a loop of one agent on itself, or one agent and the hub)."""
-    if not _checked_flows([flow], hubs):
-        return []
-    working, _ = flow_steps(flow["path"], hubs)
-    index = _chain_index(graph, seats)
-    chains = []
-    for start in graph.nodes:
-        if index[1][start.id] == working[0] and start.type in FLOW_START_TYPES:
-            found, _, _ = _walk_chain(working, start, index)
-            if found is not None:
-                chains.append(found)
-    return chains
+    after it, when the graph follows the flow (`follows`: `check` finds no problem with it for this flow); else
+    empty. Empty too for a flow `check` does not enforce (a loop of one agent on itself, or one agent and the
+    hub)."""
+    chains, problems = follows(graph, flow, hubs, seats)
+    return [] if problems else chains
 
 
 def print_flows(flows) -> None:

@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agentgraph import check, flowcommands, flowrun, server, snapshot_json, sources, structure
+from agentgraph import agentfiles, check, flowcommands, flowrun, server, snapshot_json, sources, structure
 from agentgraph.contract import TaskGraph
 import tests.test_agentfiles as agentfile_tests
 import tests.test_structure as structure_tests
@@ -53,7 +53,8 @@ class Name(Scratch):
         write_flow(self.root, "named", "path: impl-openai -> verifier -> impl-openai\nname: check-loop\n\nLoop.\n")
         flows = {flow["id"]: flow for flow in snapshot_json.load_structure(self.root)["flows"]}
         self.assertEqual(flows["plain"], {"id": "plain", "path": ["impl-openai", "reviewer"], "text": "Check it.",
-                                          "name": None, "command": None})
+                                          "name": None, "command": None,
+                                          "rev": agentfiles.rev((self.root / "flows" / "plain.md").read_bytes())})
         self.assertEqual((flows["named"]["name"], flows["named"]["text"]), ("check-loop", "Loop."))
         self.assertEqual(snapshot_json.read_flow((self.root / "flows" / "named.md").read_bytes()),
                          (["impl-openai", "verifier", "impl-openai"], "Loop."))
@@ -118,11 +119,12 @@ class Prompt(Scratch):
     def test_the_message_names_the_goal_the_path_the_return_and_the_instruction(self):
         flow = self.add_loop()
         text = structure.flow_prompt(flow["id"], "add a health endpoint", self.root)
-        self.assertIn("impl-openai -> verifier -> impl-openai", text)
-        self.assertIn("3. impl-openai: a return. verifier checks the work and sends it back to impl-openai", text)
+        self.assertIn("1. impl-openai\n2. verifier\n3. impl-openai (return)\n", text)
+        self.assertIn("(return): back to an agent already on the path; the step before checks the work and sends it "
+                      "back until it passes.", text)
         self.assertIn("Goal (data):\n```\nadd a health endpoint\n```", text)
-        self.assertIn("The path's instruction (data):\n```\n" + flow["text"] + "\n```", text)
-        self.assertIn("`agentgraph check` passes", text)
+        self.assertIn("Instruction (data):\n```\n" + flow["text"] + "\n```", text)
+        self.assertIn("`agentgraph check` must pass with this flow drawn", text)
         self.assertLess(len(text) - len("add a health endpoint") - len(flow["text"]), 1500)
 
     def test_the_template_stays_under_1500_characters_for_a_long_path(self):
@@ -133,6 +135,92 @@ class Prompt(Scratch):
             with self.subTest(path=path):
                 flow = {"id": "x", "path": path, "text": "", "name": "some-long-name-for-a-path"}
                 self.assertLess(flowrun.template_size(flow, hubs), 1500)
+
+    @staticmethod
+    def accepted_paths(steps, count=12, most=None, length=64, hub_first=False):
+        """The paths of `steps` steps the toolkit accepts over `count` agents with names of `length` characters
+        (64, the longest an agent may have, by default) and the hub (the first `most`, returns tried first), up to
+        renaming the agents. `hub_first` tries the hub before the agents at either end."""
+        names = [chr(ord("a") + index) * length for index in range(count)]
+        shape = {"group_of": {name: "build" for name in names} | {"orchestrator": "hub"}, "seats": {}}
+        found = []
+
+        def grow(path):
+            if most is not None and len(found) >= most:
+                return
+            if len(path) >= 2 and snapshot_json.flow_refusal(shape, path):
+                return  # a refused start stays refused: the rules look back, never ahead (the hub may only end it)
+            if len(path) == steps:
+                found.append(list(path))
+                return
+            on = sorted(set(path) - {"orchestrator"})
+            fresh = next((name for name in names if name not in path), None)  # new agents are interchangeable
+            hub = ["orchestrator"] if len(path) in (0, steps - 1) else []
+            for agent in (hub if hub_first else []) + on + ([fresh] if fresh else []) + ([] if hub_first else hub):
+                if path and agent == path[-1]:
+                    continue
+                path.append(agent)
+                grow(path)
+                path.pop()
+
+        grow([])
+        return found
+
+    def test_the_verifier_case_four_longest_names_and_the_longest_path_name_stay_under_1500(self):
+        # "Four 64-character agent names and a 32-character path name gave 1,711": every path over four such agents
+        # (eight steps at most, the hub at either end) with the longest name or the longest id.
+        hubs = frozenset({"orchestrator"})
+        paths = [path for steps in range(2, 9) for path in self.accepted_paths(steps, count=4)]
+        self.assertGreater(len(paths), 100)
+        for path in paths:
+            for called in ({"name": "n" * 32, "id": "x"}, {"name": None, "id": "i" * 80}):
+                size = flowrun.template_size({"path": path, "text": "", **called}, hubs)
+                self.assertLess(size, 1500, (size, path))
+
+    CALLED = ({"name": "n" * 32, "id": "x"}, {"name": None, "id": "i" * 80})  # the longest name, the longest id
+
+    def bound(self, path, called):
+        return flowrun.TEMPLATE_FIXED + sum(len(agent) + flowrun.STEP_SHARE for agent in path) \
+            + len(called["name"] or called["id"])
+
+    def test_twenty_steps_of_twelve_character_names_stay_under_1500(self):
+        # The contract: under 1,500 characters before the goal and the instruction for every path whose agent names
+        # are 12 characters or fewer, at the longest path the toolkit accepts (structure.FLOW_STEPS_LIMIT steps, a
+        # 32-character name or an 80-character id, returns and the hub included). The hub's name, orchestrator, is
+        # 12 characters too. Measured on the worst mixes of returns and hub steps, and proved by the formula.
+        hubs = frozenset({"orchestrator"})
+        self.assertEqual(len("orchestrator"), 12)
+        steps = structure.FLOW_STEPS_LIMIT
+        self.assertLess(flowrun.TEMPLATE_FIXED + steps * (12 + flowrun.STEP_SHARE) + 80, 1500)
+        paths = self.accepted_paths(steps, count=13, most=3000, length=12)
+        paths += self.accepted_paths(steps, count=13, most=3000, length=12, hub_first=True)
+        self.assertEqual({len(path) for path in paths}, {steps})
+        self.assertTrue(any(path[0] == path[-1] == "orchestrator" for path in paths), "the hub at both ends")
+        self.assertGreaterEqual(max(sum(line.endswith(" (return)") for line in flowrun._steps(path, hubs))
+                                    for path in paths), 8)
+        worst = 0
+        for path in paths:
+            for called in self.CALLED:
+                size = flowrun.template_size({"path": path, "text": "", **called}, hubs)
+                self.assertLess(size, 1500, (size, path))
+                self.assertLessEqual(size, self.bound(path, called), path)
+                worst = max(worst, size)
+        self.assertGreater(worst, 1300)  # the worst mixes were measured, not only short paths
+
+    def test_at_the_limits_the_formula_bounds_the_template(self):
+        # Longer names: the template's own share is at most TEMPLATE_FIXED plus, per step, its name and STEP_SHARE,
+        # plus the path's name or id; tested at the longest path the toolkit accepts with 64-character names
+        # (returns wherever allowed, the hub at either end), and on the shortest shapes, where the fixed text
+        # weighs most (a loop on itself, the hub and one agent).
+        hubs = frozenset({"orchestrator"})
+        long = "a" * 64
+        shapes = self.accepted_paths(structure.FLOW_STEPS_LIMIT, count=11, most=3000)
+        shapes += [[long, long], [long, "b" * 64], ["orchestrator", long], [long, "orchestrator"],
+                   ["orchestrator", long, "orchestrator"], ["a", "a"], ["orchestrator", "a"]]
+        for path in shapes:
+            for called in self.CALLED:
+                size = flowrun.template_size({"path": path, "text": "", **called}, hubs)
+                self.assertLessEqual(size, self.bound(path, called), path)
 
     def test_a_graph_shaped_as_the_message_says_passes_check(self):
         flow = {"id": LOOP_ID, "path": LOOP_PATH, "text": ""}
@@ -561,7 +649,7 @@ class FlowEndpoint(unittest.TestCase):
             state = tree(self.root), tree(self.commands)
             status, body, _ = self.post({"op": "prompt", "id": flow["id"], "goal": "add a health endpoint"})
             self.assertEqual(status, 200)
-            self.assertIn("impl-openai -> verifier -> impl-openai", body["text"])
+            self.assertIn("1. impl-openai\n2. verifier\n3. impl-openai (return)\n", body["text"])
             for op in ({"op": "name", "id": flow["id"], "name": "check-loop"}, {"op": "command", "id": flow["id"], "on": True}):
                 self.assertEqual(self.post(op)[0], 403)
             self.assertEqual((tree(self.root), tree(self.commands)), state)

@@ -10,7 +10,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from agentgraph import teams
+from agentgraph import agentfiles, teams
 from agentgraph.structure import StructureError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,7 +71,8 @@ class Writing(Base):
                          b"and sends one report to orchestrator.\n")
         self.assertEqual(team, {"id": "reviewer", "lead": "reviewer", "members": ["impl-openai", "impl-claude"],
                                 "text": "impl-openai and impl-claude report to reviewer. reviewer reconciles their "
-                                        "results and sends one report to orchestrator.", "generated": True})
+                                        "results and sends one report to orchestrator.", "generated": True,
+                                "rev": agentfiles.rev((self.root / "teams" / "reviewer.md").read_bytes())})
 
     def test_the_generated_instruction_is_grammatical_for_one_two_and_more_members(self):
         self.assertEqual(teams.team_text("A", ["B"]),
@@ -443,7 +444,8 @@ class Command(Base):
         self.assertEqual(self.run_main("members", "reviewer", "designer", "researcher")[0], 0)
         listing = json.loads(self.run_main("list", "--json")[1])
         self.assertEqual(listing, {"teams": [{"id": "reviewer", "lead": "reviewer", "members": ["designer", "researcher"],
-                                              "text": "From stdin.", "generated": False}]})
+                                              "text": "From stdin.", "generated": False,
+                                              "rev": agentfiles.rev((self.root / "teams" / "reviewer.md").read_bytes())}]})
         code, _, err = self.run_main("add", "reviewer", "designer")
         self.assertEqual(code, 1)
         self.assertIn("reviewer already leads a team (reviewer)", err)

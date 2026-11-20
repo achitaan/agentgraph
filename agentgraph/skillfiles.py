@@ -14,13 +14,13 @@ import sys
 import tempfile
 import unicodedata
 
-from . import skillset
+from . import names, skillset
 
 SKILLS = skillset.sources.CONFIG_DIR / "skills"
 BACKUPS = skillset.BACKUPS
 CONFIG = skillset.CONFIG
 SkillfilesError = skillset.SkillsetError
-_ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
+_ID = names.SKILL  # the one definition of a skill's id (agentgraph.names)
 _KEY = re.compile(r"""("(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[^ \t#'"[\]{},?:&*!|>%@`-][^:]*?):([ \t]+|$)(.*)\Z""")
 _NEWLINE = re.compile(r"\r\n|\r|\n")
 _LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$")
@@ -319,8 +319,22 @@ def _prune(backup_dir, kind):
             old.rmdir()
 
 
-def write(id, body=None, description=None, *, skills=SKILLS, backups=BACKUPS):
-    """Atomically update body/description, preserving all other frontmatter bytes."""
+def _rev(text):
+    """A skill's rev: the hash of its SKILL.md (agentfiles.rev; the text is the file's bytes decoded strictly, so
+    the same hash). A write from a view takes it as `expect`."""
+    from . import agentfiles  # agentfiles imports skillset, as this module does
+    return agentfiles.rev(text)
+
+
+def _expect(expect, text, id):
+    """Refuse (agentfiles.StaleError) a write from a view that showed SKILL.md as `expect` when it is now `text`."""
+    from . import agentfiles
+    agentfiles.check_expect(expect, _rev(text), f"skill {id}")
+
+
+def write(id, body=None, description=None, *, skills=SKILLS, backups=BACKUPS, expect=None):
+    """Atomically update body/description, preserving all other frontmatter bytes. Given `expect` (the rev the view
+    showed), refused with agentfiles.StaleError, nothing written, when SKILL.md's rev is another."""
     _id(id)
     if body is not None:
         _text(body, "body", 200_000)
@@ -329,6 +343,7 @@ def write(id, body=None, description=None, *, skills=SKILLS, backups=BACKUPS):
     with _operation(skills, backups=backups) as root:
         _refuse_read_only(id, root)
         text, mode, parsed, others = _load(root, id)
+        _expect(expect, text, id)
         fields, old_body, span, body_start, newline = parsed
         kind = _write_backup_kind(root, id)
         updated = text
@@ -347,9 +362,9 @@ def write(id, body=None, description=None, *, skills=SKILLS, backups=BACKUPS):
         new_parsed = _parse(updated)
         result = _result(id, new_parsed, others)
         if updated == text:
-            return {**result, "changed": False, "message": "No change needed."}
+            return {**result, "changed": False, "message": "No change needed.", "rev": _rev(text)}
         backup, record = _replace_text(root, id, text, updated, mode, kind, backups)
-        return {**result, "changed": True, "backup": backup, "record": record}
+        return {**result, "changed": True, "backup": backup, "record": record, "rev": _rev(updated)}
 
 
 def _replace_text(root, id, text, updated, mode, kind, backups):
@@ -379,16 +394,17 @@ def _digest(text):
 
 
 def delete(id, *, skills=SKILLS, backups=BACKUPS, config=CONFIG, force=False, wildcards_hold=True,
-           agents_dir=skillset.AGENTS_DIR):
+           agents_dir=skillset.AGENTS_DIR, expect=None):
     """Move a skill to backups, checking references in every plugin preset and in every agent file in
     `agents_dir` (added ones by their rules, hand-written ones when their frontmatter names the skill). An agent
     with every skill ('*') holds it too, unless `wildcards_hold` is False: then it is only named in a warning (it
-    loses this one)."""
+    loses this one). Given `expect`, refused (agentfiles.StaleError) when SKILL.md's rev is another."""
     _id(id)
     from . import agentfiles  # agentfiles imports skillset, as this module does
     with _operation(skills, config=config, backups=backups) as root:
         _refuse_read_only(id, root)
-        _load(root, id)  # Refuse unreadable frontmatter and unsafe ancillary files.
+        text = _load(root, id)[0]  # Refuse unreadable frontmatter and unsafe ancillary files.
+        _expect(expect, text, id)
         obj = skillset._parse(skillset._read(Path(config), "config")[0])
         held, every_file = agentfiles.holders(id, agents_dir) if agents_dir is not None else ([], [])
         holding = {id, "*"} if wildcards_hold else {id}
@@ -542,12 +558,14 @@ def _refuse_read_only(id, root):
 
 
 def show(id, *, skills=SKILLS, bundled=None):
-    """{"id", "description", "text" (the body without frontmatter), "editable", "why" when not}. A read-only
+    """{"id", "description", "text" (the body without frontmatter), "editable", "why" when not, "rev"}. A read-only
     skill is read where it lives."""
     editable, why = access(id, skills=skills, bundled=bundled)
     if editable:
-        result = read(id, skills=skills)
-        description, text = result["frontmatter"]["description"], result["body"]
+        _id(id)
+        with _operation(skills) as root:
+            raw, _, parsed, _ = _load(root, id)
+        description, text = parsed[0]["description"], parsed[1]
     else:
         entry = Path(os.path.abspath(skills)) / id
         if not os.path.lexists(entry):
@@ -559,11 +577,13 @@ def show(id, *, skills=SKILLS, bundled=None):
             description = fields["description"]
         except SkillfilesError:
             description, text = "", raw
-    return {"id": id, "description": description, "text": text, "editable": editable, **({"why": why} if why else {})}
+    return {"id": id, "description": description, "text": text, "editable": editable, **({"why": why} if why else {}),
+            "rev": _rev(raw)}
 
 
 def annotate(document, *, skills=SKILLS, bundled=None):
-    """Add `editable` (and `why` when false) to each installed skill in a snapshot document. Never raises."""
+    """Add `editable` (and `why` when false) to each installed skill in a snapshot document, and `rev` (its
+    SKILL.md's, as `show` gives it) when the skill folder's SKILL.md can be read. Never raises."""
     try:
         bundled = bundled_roots() if bundled is None else bundled
     except OSError:
@@ -576,6 +596,11 @@ def annotate(document, *, skills=SKILLS, bundled=None):
         row["editable"] = editable
         if why:
             row["why"] = why
+        if editable:
+            try:
+                row["rev"] = _rev(skillset._read(Path(os.path.abspath(skills)) / row["name"] / "SKILL.md", "SKILL.md")[0])
+            except (SkillfilesError, OSError, TypeError, KeyError):
+                pass
     return document
 
 
@@ -652,6 +677,9 @@ def skill_main(argv=None):
         if op in {"create", "write"}:
             sub.add_argument("--description", required=op == "create")
             sub.add_argument("--text-file", required=True, help="a file, or - for stdin")
+        if op in {"write", "delete"}:
+            sub.add_argument("--expect", metavar="REV", help="refuse, changing nothing, unless the skill's rev is REV "
+                                                             "(the rev the caller last read)")
         if op == "create":
             sub.add_argument("--assign", metavar="AGENT", help="also give the new skill to this agent")
     args = parser.parse_args(argv)
@@ -670,22 +698,25 @@ def skill_main(argv=None):
             result = {"id": args.id, "description": created["frontmatter"]["description"], "text": created["body"],
                       "changed": True, **{key: created[key] for key in ("assigned", "warnings", "message") if key in created}}
         elif args.op == "write":
-            written = write(args.id, body=_read_body(args.text_file), description=args.description, **where)
+            written = write(args.id, body=_read_body(args.text_file), description=args.description,
+                            expect=args.expect, **where)
             result = {"id": args.id, "description": written["frontmatter"]["description"], "text": written["body"],
                       "changed": written["changed"],
-                      **{key: written[key] for key in ("record", "message") if key in written}}
+                      **{key: written[key] for key in ("record", "message", "rev") if key in written}}
         elif args.op == "delete":
             result = delete(args.id, config=pick("config", CONFIG), wildcards_hold=False,
-                            agents_dir=pick("agents", skillset.AGENTS_DIR), **where)
+                            agents_dir=pick("agents", skillset.AGENTS_DIR), expect=args.expect, **where)
         else:
             restored = restore(str(args.record), **where)
             result = {"id": restored["id"], "changed": True, **({"record": restored["record"]}
                                                                 if "frontmatter" in restored else {})}
     except (SkillfilesError, OSError, UnicodeError) as exc:
+        current = getattr(exc, "rev", None)
         if as_json:
-            print(json.dumps({"error": str(exc)}))
+            print(json.dumps({"error": str(exc), **({"rev": current} if current is not None else {})}))
         else:
-            print(f"agentgraph skill: {exc}", file=sys.stderr)
+            print(f"agentgraph skill: {exc}" + (f" (rev now {current})" if current is not None else ""),
+                  file=sys.stderr)
         return 1
     if as_json:
         print(json.dumps(result, ensure_ascii=False))

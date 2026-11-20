@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agentgraph import check, server, snapshot_json, structure
+from agentgraph import agentfiles, check, server, snapshot_json, structure
 from agentgraph.demo import demo_snapshot
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -52,6 +52,11 @@ def tree(root: Path) -> dict:
             for path in sorted(root.rglob("*"))}
 
 
+def file_rev(root: Path, flow_id: str) -> str:
+    """The rev a flow carries: agentfiles.rev of its file's bytes."""
+    return agentfiles.rev((root / "flows" / f"{flow_id}.md").read_bytes())
+
+
 def write_flow(root: Path, flow_id: str, data) -> Path:
     path = root / "flows" / f"{flow_id}.md"
     path.parent.mkdir(exist_ok=True)
@@ -68,7 +73,8 @@ class Loader(unittest.TestCase):
         write_flow(self.root, "mine", data)
         shape = snapshot_json.load_structure(self.root)
         flow = {"id": "mine", "path": ["researcher", "impl-claude", "reviewer"],
-                "text": "First line.\n\npath: not -> a setting\n\tTabbed.", "name": None, "command": None}
+                "text": "First line.\n\npath: not -> a setting\n\tTabbed.", "name": None, "command": None,
+                "rev": agentfiles.rev(data)}
         self.assertEqual(shape["flows"], [flow])
         self.assertEqual(snapshot_json.read_flow(data), (flow["path"], flow["text"]))
         self.assertEqual(structure.flow_file(flow["path"], flow["text"]), data)
@@ -116,8 +122,9 @@ class Loader(unittest.TestCase):
         write_flow(self.root, "impl-claude-impl-claude-2", "path: impl-claude -> impl-claude\n\nAgain.\n")
         shape = snapshot_json.load_structure(self.root)
         self.assertEqual([flow["id"] for flow in shape["flows"]], ["impl-claude-impl-claude"])
-        self.assertIn("structure: flow impl-claude-impl-claude-2 ignored: impl-claude already loops on itself in flow impl-claude-impl-claude",
-                      shape["warnings"])
+        self.assertIn("structure: flow impl-claude-impl-claude-2 ignored: impl-claude already loops on itself in flow "
+                      "impl-claude-impl-claude; `agentgraph flow remove impl-claude-impl-claude-2` removes it (and its "
+                      "command file)", shape["warnings"])
 
     def test_more_flow_files_than_are_read_are_named_in_a_warning_never_dropped_silently(self):
         for index in range(snapshot_json.FLOW_FILES_LIMIT + 2):
@@ -139,7 +146,8 @@ class Loader(unittest.TestCase):
         doc = snapshot_json.snapshot_document(demo_snapshot(1000), "demo", structure=snapshot_json.load_structure(self.root))
         self.assertEqual(sorted(doc["structure"]), ["flows", "source", "teams"])
         self.assertEqual(doc["structure"]["flows"], [{"id": "impl-openai-verifier-impl-openai", "path": ["impl-openai", "verifier", "impl-openai"],
-                                                      "text": LOOP, "name": None, "command": None, "source": "drawn"}])
+                                                      "text": LOOP, "name": None, "command": None, "source": "drawn",
+                                                  "rev": file_rev(self.root, "impl-openai-verifier-impl-openai")}])
         self.assertTrue(all("checks" not in agent for agent in doc["agents"]))
         self.assertNotIn("checks", snapshot_json.SETTING_KEYS)
 
@@ -225,7 +233,8 @@ class Command(unittest.TestCase):
         added = json.loads(out)
         self.assertEqual(added["flow"], {"id": "researcher-impl-claude-reviewer", "path": ["researcher", "impl-claude", "reviewer"],
                                          "text": "researcher's work goes to impl-claude, then impl-claude's work goes to reviewer.",
-                                         "name": None, "command": None, "source": "drawn"})
+                                         "name": None, "command": None, "source": "drawn",
+                                         "rev": file_rev(self.root, "researcher-impl-claude-reviewer")})
         self.assertEqual([flow["id"] for flow in added["flows"]], ["impl-openai-verifier-impl-openai", "researcher-impl-claude-reviewer"])
         code, out, _ = self.run_cli("flow", "text", "researcher-impl-claude-reviewer", "--text-file", "-", stdin="Mine.\n")
         self.assertEqual((code, self.flows()[1]["text"]), (0, "Mine.\n"))
@@ -847,10 +856,11 @@ class Endpoint(unittest.TestCase):
     def test_each_op(self):
         status, body, _ = self.post(ADD)
         flow = {"id": "impl-openai-verifier-impl-openai", "path": ADD["path"], "source": "drawn",
-                "text": structure.flow_text(ADD["path"], HUB), "name": None, "command": None}
+                "text": structure.flow_text(ADD["path"], HUB), "name": None, "command": None,
+                "rev": file_rev(self.root, "impl-openai-verifier-impl-openai")}
         self.assertEqual((status, body), (200, {"flow": flow, "flows": [flow]}))
         status, body, _ = self.post({"op": "text", "id": flow["id"], "text": "Edited ✓\n\tby hand."}, {"Origin": None})
-        edited = {**flow, "text": "Edited ✓\n\tby hand."}
+        edited = {**flow, "text": "Edited ✓\n\tby hand.", "rev": file_rev(self.root, flow["id"])}
         self.assertEqual((status, body), (200, {"flow": edited, "flows": [edited]}))
         status, body, _ = self.post({"op": "add", "path": ["councillor-a", "impl-openai"], "text": "Given."})
         self.assertEqual((status, body["flow"]["path"], body["flow"]["text"]), (200, ["council", "impl-openai"], "Given."))

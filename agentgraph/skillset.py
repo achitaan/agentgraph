@@ -16,7 +16,7 @@ import sys
 import tempfile
 import unicodedata
 
-from . import sources
+from . import names, sources
 from .snapshot_json import skills_document
 
 CONFIG = sources.CONFIG_DIR / "oh-my-opencode-slim.json"
@@ -37,13 +37,17 @@ def _name(value, kind):
     if (not isinstance(value, str) or not value or len(value) > 100 or value.startswith("-")
             or any(unicodedata.category(c) in {"Cc", "Cs"} for c in value)):
         raise SkillsetError(f"invalid {kind} name: use 1–100 characters, no leading '-' or control characters")
+    if kind == "skill" and value != "*" and not names.SKILL.fullmatch(value):
+        raise SkillsetError("invalid skill name, so it is not installed: a skill's name is a lowercase letter, then "
+                            "lowercase letters, digits or '-' (64 at most)")
 
 
 def _agent_name(value):
-    """An agent name that is safe as a key and as part of a file name."""
+    """An agent name (agentgraph.names: the one definition), safe as a key and as part of a file name."""
     _name(value, "agent")
-    if "/" in value or "\\" in value or value.startswith(".") or ".." in value:
-        raise SkillsetError("invalid agent name: no '/', '\\', '..' or leading '.'")
+    if not names.valid("agent", value):
+        raise SkillsetError("invalid agent name: use a lowercase letter, then lowercase letters, digits, '_' or '-' "
+                            "(64 at most)")
 
 
 def _read(path, label):
@@ -573,8 +577,8 @@ def _commit(files, dir_fds, prepare):
         return backup
 
 
-def _file_change(op, agent, skill, info, *, agents_dir, backups, skills_dir):
-    """Change an added agent's skills in its agent file (live at once)."""
+def _file_change(op, agent, skill, info, *, agents_dir, backups, skills_dir, check=None):
+    """Change an added agent's skills in its agent file (live at once); `check`: see agentfiles._change."""
     from . import agentfiles
     if not info["added"] or not info["parsed"]:
         raise SkillsetError(info["why"])
@@ -588,22 +592,33 @@ def _file_change(op, agent, skill, info, *, agents_dir, backups, skills_dir):
         new = old if "*" in old or skill in old else [*old, skill]
     else:
         new = [name for name in (catalogue if "*" in old else old) if name != skill]
-    shown, record, changed = agentfiles.set_skills(agent, new, agents_dir=agents_dir, backups=backups)
+    shown, record, changed = agentfiles.set_skills(agent, new, agents_dir=agents_dir, backups=backups, check=check)
     return {"agent": agent, "preset": "agent file", "skills": shown["skills"], "editable": True,
             "differing_presets": [], "changed": changed, "changed_presets": [], "warnings": [],
             **({"record": record} if record else {}), "message": agentfiles.LIVE if changed else "No change needed."}
 
 
 def _change(op, agent, skill, *, config, presets, map_path, backups, profiles, skills_dir=None,
-            agents_dir=AGENTS_DIR):
+            agents_dir=AGENTS_DIR, expect=None, structure=None):
+    """Given `expect` (the agent's rev the view showed: roster.agent_rev, over `structure`, default the roster's
+    structure folder), refused with agentfiles.StaleError, nothing written, when the agent's rev is another."""
     _agent_name(agent)
     if op != "all":
         _name(skill, "skill")
     config, map_path, backups = Path(config), Path(map_path), Path(backups)
+    from . import roster  # roster imports this module
+    structure = Path(structure) if structure is not None else roster.STRUCTURE_DIR
     info = _file_agent(_parse(_read(config, "config")[0]), agent, agents_dir)
     if info is not None:
-        return _file_change(op, agent, skill, info, agents_dir=agents_dir, backups=backups, skills_dir=skills_dir)
+        with roster.expecting(agent, expect, config=config, map_path=map_path, structure=structure) as check:
+            return _file_change(op, agent, skill, info, agents_dir=agents_dir, backups=backups, skills_dir=skills_dir,
+                                check=check)
     with _locked(config, map_path) as dirs:
+        if expect is not None:
+            from . import agentfiles
+            agentfiles.check_expect(expect, roster.agent_rev(agent, config=config, map_path=map_path,
+                                                             agents_dir=agents_dir, structure=structure),
+                                    f"{agent!r}")
         text, mode = _read(config, "config")
         obj = _parse(text)
         if agent in _seat_names(obj):
@@ -647,25 +662,28 @@ def _change(op, agent, skill, *, config, presets, map_path, backups, profiles, s
 
 
 def add(agent, skill, *, config=CONFIG, presets=None, map_path=MAP, backups=BACKUPS, profiles=PROFILES,
-        skills_dir=None, agents_dir=AGENTS_DIR):
+        skills_dir=None, agents_dir=AGENTS_DIR, expect=None, structure=None):
     """Add one installed skill (one in `skills_dir`, default the real skills folder) to the selected presets, or
-    to an added agent's file in `agents_dir`."""
+    to an added agent's file in `agents_dir`. `expect`, `structure`: see `_change`."""
     return _change("add", agent, skill, config=config, presets=presets, map_path=map_path,
-                   backups=backups, profiles=profiles, skills_dir=skills_dir, agents_dir=agents_dir)
+                   backups=backups, profiles=profiles, skills_dir=skills_dir, agents_dir=agents_dir, expect=expect,
+                   structure=structure)
 
 
 def remove(agent, skill, *, config=CONFIG, presets=None, map_path=MAP, backups=BACKUPS, profiles=PROFILES,
-           skills_dir=None, agents_dir=AGENTS_DIR):
+           skills_dir=None, agents_dir=AGENTS_DIR, expect=None, structure=None):
     """Remove one installed skill, expanding a wildcard if needed."""
     return _change("remove", agent, skill, config=config, presets=presets, map_path=map_path,
-                   backups=backups, profiles=profiles, skills_dir=skills_dir, agents_dir=agents_dir)
+                   backups=backups, profiles=profiles, skills_dir=skills_dir, agents_dir=agents_dir, expect=expect,
+                   structure=structure)
 
 
 def set_all(agent, *, config=CONFIG, presets=None, map_path=MAP, backups=BACKUPS, profiles=PROFILES,
-            skills_dir=None, agents_dir=AGENTS_DIR):
+            skills_dir=None, agents_dir=AGENTS_DIR, expect=None, structure=None):
     """Set the selected presets (or an added agent's file) to the wildcard skill list."""
     return _change("all", agent, None, config=config, presets=presets, map_path=map_path,
-                   backups=backups, profiles=profiles, skills_dir=skills_dir, agents_dir=agents_dir)
+                   backups=backups, profiles=profiles, skills_dir=skills_dir, agents_dir=agents_dir, expect=expect,
+                   structure=structure)
 
 
 OUTSIDE_REASON = ("This agent is not in the plugin's roster (one of OpenCode's own agents); "
@@ -710,6 +728,7 @@ def main(argv=None):
         target.add_argument("--backups", type=Path, dest=prefix + "backups")
         target.add_argument("--agents", type=Path, dest=prefix + "agents", help="OpenCode's agents folder")
         target.add_argument("--skills-dir", type=Path, dest=prefix + "skills_dir", help="the skills folder")
+        target.add_argument("--structure", type=Path, dest=prefix + "structure", help="the structure folder")
         target.add_argument("--json", action="store_true", dest=prefix + "json")
 
     options(parser, "root_")
@@ -719,6 +738,9 @@ def main(argv=None):
         sub.add_argument("agent")
         if op in {"add", "remove"}:
             sub.add_argument("skill")
+        if op != "show":
+            sub.add_argument("--expect", metavar="REV", help="refuse, changing nothing, unless the agent's rev is REV "
+                                                             "(the rev the caller last read)")
     args = parser.parse_args(argv)
     output_json = args.json or args.root_json
     kw = {"config": args.config or args.root_config or CONFIG,
@@ -730,16 +752,18 @@ def main(argv=None):
         else:
             kw.update(map_path=args.map_path or args.root_map_path or MAP,
                       backups=args.backups or args.root_backups or BACKUPS,
-                      skills_dir=args.skills_dir or args.root_skills_dir)
+                      skills_dir=args.skills_dir or args.root_skills_dir, expect=args.expect,
+                      structure=args.structure or args.root_structure)
             if args.op == "all":
                 result = set_all(args.agent, **kw)
             else:
                 result = (add if args.op == "add" else remove)(args.agent, args.skill, **kw)
     except (SkillsetError, OSError) as exc:
+        current = getattr(exc, "rev", None)
         if output_json:
-            print(json.dumps({"error": str(exc)}))
+            print(json.dumps({"error": str(exc), **({"rev": current} if current is not None else {})}))
         else:
-            print(f"skillset: {exc}", file=sys.stderr)
+            print(f"skillset: {exc}" + (f" (rev now {current})" if current is not None else ""), file=sys.stderr)
         return 1
     if output_json:
         print(json.dumps(result))
@@ -757,4 +781,8 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Run as `python -m agentgraph.skillset`, this file is __main__ and its classes are copies: an error the
+    # package's modules raise (agentgraph.skillset.SkillsetError, agentfiles.StaleError) would escape this copy's
+    # `except`. The package's own main catches them.
+    from agentgraph.skillset import main as package_main
+    raise SystemExit(package_main())
