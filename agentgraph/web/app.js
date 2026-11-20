@@ -2251,8 +2251,9 @@
     function keepTyped(old, selector, value, rev) {
       const field = old?.isConnected ? old : detailScroll.querySelector(selector);
       if (!field) return null;
-      // The box the user typed in still holds their newest typing; one drawn again gets it.
-      const typed = old ? old.value : value;
+      // The box the user typed in still holds their newest typing; one drawn again gets it, unless the user has typed in
+      // that one since (it differs from what it was drawn with): then its own is newer and stays. (No box: what was sent.)
+      const typed = !old ? value : old.isConnected || field.value === field.dataset.saved ? old.value : field.value;
       if (field !== old && field.value !== typed) field.value = typed;
       if (rev) field.dataset.rev = rev; else delete field.dataset.rev;
       return field;

@@ -7592,6 +7592,34 @@
           assert(host.writes().length === 2 && order.join(', ') === 'sent 1, answered 1, sent 2' && host.files['write-report/report'].text === 'mine, more\n' && !/changed/i.test(outputState(root)), 'the save typed meanwhile was not saved after the answer (' + order.join(', ') + '; ' + JSON.stringify(host.files['write-report/report'].text) + '; ' + outputState(root) + ')');
         }, { actions: { output: host.output } });
       });
+      await test('n105 item 28 (review r9 minor): an output closed and opened again while its save is out, more typed in the box shown, then that save refused as changed elsewhere (409) or not answered within 15 s: the box keeps what was typed after opening it again, is marked not saved, nothing is resent, and Save then sends it with the latest rev', async () => {
+        const problems = [];
+        for (const ending of ['409', 'no answer']) {
+          const clock = fakeClock(), data = outputFixture();
+          let release = null, writes = 0;
+          const host = outputHost(data, { gate: request => { if (request.op !== 'write' || ++writes > 1) return undefined; return new Promise(resolve => { release = resolve; }); } });
+          await using(data, async root => {
+            const opener = () => root.querySelector('.ag-detail [data-output-open]'), file = host.files['write-report/report'];
+            await openOutput(root);
+            outputBox(root).focus(); typeIn(outputBox(root), 'mine\n'); press(outputBox(root), 'Enter', { ctrlKey: true });
+            await until(() => release !== null);
+            opener().click(); await settled(); opener().click(); await settled();
+            typeIn(outputBox(root), 'mine, and newer\n'); await settled();
+            if (ending === '409') { Object.assign(file, { text: 'theirs\n', revision: file.revision + 1 }); release(); }
+            else { clock.tick(15000); }
+            await settled(); await settled();
+            const box = outputBox(root), label = ending + ': ';
+            if (box?.value !== 'mine, and newer\n') problems.push(label + 'the box holds ' + JSON.stringify(box?.value) + ', not what was typed after opening it again');
+            if (!box || box.value === box.dataset.saved || /^saved$/i.test(outputState(root)) || root.querySelector('.ag-detail [data-output-state]')?.dataset.outputState === 'saved') problems.push(label + 'not marked as not saved (' + outputState(root) + ')');
+            if (host.writes().length !== 1) problems.push(label + 'resent: ' + host.writes().map(call => JSON.stringify(call.text)).join(', '));
+            const latest = (await host.output({ op: 'read', task: 'view-tests', node: 'write-report', artifact: 'report' })).rev;
+            root.querySelector('.ag-detail [data-output-save]').click(); await settled(); await settled();
+            const last = host.writes().at(-1);
+            if (host.writes().length !== 2 || last.text !== 'mine, and newer\n' || last.expect !== latest || file.text !== 'mine, and newer\n') problems.push(label + 'Save did not send the typing with the latest rev (' + host.writes().length + ' writes, last ' + JSON.stringify(last?.text) + ', file ' + JSON.stringify(file.text) + ', ' + outputState(root) + ')');
+          }, { actions: { output: host.output }, clock });
+        }
+        assert(!problems.length, problems.join(' | '));
+      });
       await test('n105 item 21 (verifier gap): a loop\'s ring keeps at least 8 px clear of the orchestrator and of every agent not on it (their drawn circles, and their names: the layout\'s RING_SPACE margin), at 1400 and 620 px', async () => {
         const problems = [];
         for (const [width, height] of [[1400, 900], [620, 800]]) {
