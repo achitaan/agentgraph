@@ -4322,7 +4322,7 @@
       viewport.dataset.dragging = 'false';
       cancelPress(); trail = []; trailPending = false; hovered = ''; wire.style.display = 'none';
       // Writes sent before this are not heard (call()); what waited on them starts clean.
-      busyFlows = 0; skillPending.clear(); flowsOut.clear(); replyRevs.clear(); writing.clear(); ownMoves.clear(); teamOverride.clear(); textSessions.clear(); agentTexts.clear(); skillDrafts.clear();
+      busyFlows = 0; skillPending.clear(); flowsOut.clear(); replyRevs.clear(); writing.clear(); ownMoves.clear(); teamOverride.clear(); textSessions.clear(); agentTexts.clear(); skillDrafts.clear(); outputViews.clear(); outputOpen = '';
       if (draft || failedDraft) { draft = null; failedDraft = null; drawDraft(); }
       freshRoutes.clear(); flowErrors.clear(); flowHistory.length = 0; routeViews.clear(); teamLines.clear(); agentNotes.clear(); skillView = null; teamDraft = null; pickedMember = ''; pickedFlow = ''; formBusy = false; trailStatus.textContent = ''; delete root.dataset.agTrail;
       selected = null; selectedOrigin = null; initialSelection = ''; highlightedStep = ''; detailSignature = '';

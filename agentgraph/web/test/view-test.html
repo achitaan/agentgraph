@@ -5716,6 +5716,24 @@
       let refused = null; try { await options.actions.output({ op: 'write' }); } catch (error) { refused = error; }
       assert(refused?.status === 409 && refused.rev === 'feed0001feed0001', 'a 409 is not refused with its status and rev');
     });
+    await test('output lane: reset: text typed in an output and a save sent before reset() are dropped: another project with the same task, step and output shows its own text, the late answer is not said and makes no undo step', async () => {
+      const dataA = outputFixture(), dataB = outputFixture(); let held = deferred(), current = dataA;
+      const hostA = outputHost(dataA, { gate: request => request.op === 'write' ? held.promise : null }), hostB = outputHost(dataB, { text: 'project B text\n' });
+      await using(dataA, async (root, app) => {
+        await openOutput(root);
+        typeIn(outputBox(root), 'typed in A\n'); root.querySelector('.ag-detail [data-output-save]').click(); await settle();
+        assert(hostA.writes().length === 1, 'the save was not sent');
+        current = dataB; await app.reset(); await settle();
+        await openOutput(root);
+        assert(outputBox(root)?.value === 'project B text\n' && outputBox(root).dataset.rev === hostB.revOf(hostB.files['write-report/report']), 'the other project does not show its own text and rev: ' + JSON.stringify(outputBox(root)?.value));
+        held.resolve(); held = null; await settled();
+        assert(hostA.files['write-report/report'].text === 'typed in A\n', 'the fake did not write');
+        assert(!root.querySelector('.ag-detail [data-output-result]') && outputBox(root).value === 'project B text\n' && outputState(root) === 'Saved' && !/revision 2/.test(liveRegion(root)), 'the answer to a save sent before reset was applied: ' + root.querySelector('.ag-detail [data-output-result]')?.textContent + ' / ' + outputState(root));
+        root.querySelector('.ag-close').click(); await settle();
+        const asked = hostA.calls.length + hostB.calls.length; undoKey(viewportOf(root)); await settled();
+        assert(hostA.calls.length + hostB.calls.length === asked && !hostB.writes().length, 'Ctrl/Cmd+Z sent something after reset: ' + JSON.stringify([...hostA.calls, ...hostB.calls].slice(-2)));
+      }, { actions: { output: request => (current === dataA ? hostA : hostB).output(request) }, fetchSnapshot: async () => stampRevs(current) });
+    });
     // ==== output lane (n111): end ====
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
   })().catch(error => { document.getElementById('results').textContent = 'RESULT: FAIL ' + error.stack; });
