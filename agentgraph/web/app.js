@@ -3448,15 +3448,26 @@
     // positionNode) and order (nearer agents drawn last). Going back puts the 2D places and camera back exactly.
     // In 3D lines do not bend round agents (obstaclesFor gives none): a line may pass in front of or behind an agent,
     // and every line and loop ring turns smoothly with the system. A frame is drawn only when the angle or the data
-    // changed. Moving an agent is 2D only; drawing a path (clicks) works the same in both views.
-    const ORBIT_TURN_MS = 40000, ORBIT_CHANGE_MS = 700, ORBIT_ELEVATION = .5, ORBIT_PERSPECTIVE = 4, ORBIT_RESUME_MS = 3000;
+    // changed. The switch is one morph: the camera tips from straight above down to a side view (ORBIT_ELEVATION, just
+    // above the plane) while every agent travels from its 2D place to its 3D place, and back the same way.
+    // The flat view is where the work is done; 3D is for looking. In 3D a click picks (an agent or a line), a
+    // right-click, Enter or i opens the details to read, Escape lets go and undo works; everything that would change
+    // something (drawing a path, a double-click's loop, N and the +, Delete and Backspace, G's run, moving an agent,
+    // typing or pressing a control in the details) is refused with one sentence in the status line (ORBIT_LOOK_SAID).
+    // The sky (first child of the drawing, empty for now) is the layer behind the graph for a later background: it
+    // takes no pointer and no text, and turns with the system at ORBIT_SKY_RATE of its turn.
+    const ORBIT_TURN_MS = 40000, ORBIT_CHANGE_MS = 700, ORBIT_ELEVATION = .32, ORBIT_PERSPECTIVE = 4, ORBIT_RESUME_MS = 3000, ORBIT_SKY_RATE = .25;
     const ORBIT_INCLINATIONS = [.9, -1.05, .7, -.8, 1.15, -.6, 1, -.9];
     const ORBIT_LOW = .06, ORBIT_HIGH = Math.PI / 2, ORBIT_TURN_PX = .008, ORBIT_TILT_PX = .006, ORBIT_KEY_TURN = .2, ORBIT_KEY_TILT = .12;
     const ORBIT_KEY = POSITIONS_KEY + ':view';
-    const ORBIT_MOVE_SAID = 'Agents move in 2D: press D to go back';
+    const ORBIT_LOOK_SAID = '3D is for looking: press D to change things in 2D.';
     const orbit = { want: '2d', shown: false, k: 0, change: null, turn: 0, elevation: ORBIT_ELEVATION, base: null, saved: null, from3d: null, figure: null, depth: new Map(), order: '', raf: 0, last: 0, pausedUntil: 0, resume: null, waiting: false, holding: false, grab: null, frames: 0, frameMs: [] };
     const orbitLayer = svg('g', { class: 'ag-orbits', 'aria-hidden': 'true' });
     stage.insertBefore(orbitLayer, edgeLayer);
+    // An <svg> of its own (not a <g>, which would read as the camera's stage), turned by the one layer inside it.
+    const orbitSkyBox = svg('svg', { class: 'ag-sky', 'aria-hidden': 'true', focusable: 'false' }), orbitSky = svg('g', { class: 'ag-sky-turn' });
+    orbitSkyBox.append(orbitSky);
+    drawing.insertBefore(orbitSkyBox, drawing.firstChild);
     const orbitButton = el('button', 'ag-control ag-orbit-toggle');
     orbitButton.type = 'button'; orbitButton.setAttribute('aria-label', '3D view'); orbitButton.title = '3D view (D)';
     orbitButton.setAttribute('aria-pressed', 'false'); orbitButton.setAttribute('aria-keyshortcuts', 'D');
@@ -3538,7 +3549,9 @@
     }
     // Where everything is now (no drawing): `positions` gets each agent's place on screen, `orbit.depth` its depth.
     function orbitProject() {
-      const e = orbit.k, figure = orbitFigure(), project = orbitCamera(figure, orbit.turn * e, ORBIT_HIGH + (orbit.elevation - ORBIT_HIGH) * e), full = new Map();
+      const e = orbit.k, figure = orbitFigure(), full = new Map();
+      orbit.view = { turn: orbit.turn * e, elevation: ORBIT_HIGH + (orbit.elevation - ORBIT_HIGH) * e };
+      const project = orbitCamera(figure, orbit.view.turn, orbit.view.elevation);
       orbit.depth.clear();
       positions.forEach((p, name) => {
         if (!orbit.base.has(name)) orbit.base.set(name, { x: p.x, y: p.y });
@@ -3608,6 +3621,8 @@
       updateEdges();
       const wireFrom = flowAction && trail.length && !trailPending && positions.get(trail.at(-1));
       if (wireFrom && wire.style.display !== 'none') { wire.setAttribute('x1', wireFrom.x); wire.setAttribute('y1', wireFrom.y); }
+      orbitSky.setAttribute('transform', 'rotate(' + (orbit.view.turn * ORBIT_SKY_RATE * 180 / Math.PI).toFixed(3) + ' ' + (viewport.clientWidth / 2).toFixed(1) + ' ' + (viewport.clientHeight / 2).toFixed(1) + ')');
+      root.dataset.agCameraElevation = orbit.view.elevation.toFixed(4);
       orbit.frames++;
       orbit.frameMs.push(performance.now() - started); if (orbit.frameMs.length > 240) orbit.frameMs.shift();
       orbitMark();
@@ -3648,7 +3663,7 @@
       const resized = !!saved && (Math.abs(view.width - saved.width) > .5 || Math.abs(view.height - saved.height) > .5);
       if (saved && camera.initialized) Object.assign(camera, { x: saved.x, y: saved.y, scale: saved.scale, own: saved.own, touched: saved.touched });
       orbit.base = null; orbit.saved = null; orbit.from3d = null; orbit.figure = null; orbit.frame = null;
-      orbitLayer.replaceChildren(); orbitLayer.style.opacity = '';
+      orbitLayer.replaceChildren(); orbitLayer.style.opacity = ''; orbitSky.removeAttribute('transform'); delete root.dataset.agCameraElevation;
       orbitOrder(false); orbit.dom = null;
       nodes.forEach(node => { node.style.opacity = ''; });
       if (draw && snapshot) {
@@ -3729,7 +3744,10 @@
     }
     function orbitReset() { orbit.turn = 0; orbit.elevation = ORBIT_ELEVATION; orbitTurned(); }
     // moveNode's guard: an agent is moved in 2D only.
-    function orbitRefuseMove() { if (!orbit.shown) return false; orbitSay(ORBIT_MOVE_SAID); return true; }
+    function orbitRefuseMove() { if (!orbit.shown) return false; orbitSay(ORBIT_LOOK_SAID); return true; }
+    // 3D is for looking (not while the morph goes back to 2D).
+    function orbitLooking() { return orbit.shown && orbit.want === '3d'; }
+    function orbitRefuse(event) { event.preventDefault(); event.stopImmediatePropagation(); orbitSay(ORBIT_LOOK_SAID); }
     function orbitPlainKey(event) { return !event.ctrlKey && !event.metaKey && !event.altKey; }
     listen(orbitButton, 'click', orbitToggle);
     // `d` switches the views wherever the view has the keys (not while typing).
@@ -3742,8 +3760,15 @@
       if (!orbit.shown || event.defaultPrevented) return;
       const node = event.target.closest('[data-agent]'), arrow = { ArrowLeft: [1, 0], ArrowRight: [-1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[event.key];
       // Moving an agent from the keyboard is 2D only: the status line says so.
-      if (node && arrow && (event.altKey || event.shiftKey) && !event.ctrlKey && !event.metaKey) { event.preventDefault(); event.stopImmediatePropagation(); orbitSay(ORBIT_MOVE_SAID); return; }
+      if (node && arrow && (event.altKey || event.shiftKey) && !event.ctrlKey && !event.metaKey) { orbitRefuse(event); return; }
       if (event.target !== viewport && !node) return;
+      if (orbitLooking() && orbitPlainKey(event)) {
+        const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+        // Enter and Space on an agent open its details (in 2D, with a path pending, they would draw).
+        if (node && (key === 'Enter' || key === ' ')) { event.preventDefault(); event.stopImmediatePropagation(); activateAgent(node.dataset.agent, node); return; }
+        // Drawing (Enter finishing, l's loop), adding (n), deleting (Delete, Backspace) and running (g): refused.
+        if (['Delete', 'Backspace', 'n', 'g'].includes(key) || (key === 'l' && node) || (key === 'Enter' && trail.length)) { orbitRefuse(event); return; }
+      }
       if ((event.key === 'r' || event.key === 'R') && !event.shiftKey && orbitPlainKey(event)) { event.preventDefault(); event.stopImmediatePropagation(); orbitReset(); return; }
       if (event.target === viewport && arrow && !event.shiftKey && orbitPlainKey(event)) {
         event.preventDefault(); event.stopImmediatePropagation();
@@ -3766,7 +3791,7 @@
       if (!orbit.grab || orbit.grab.id !== id) {
         if (Math.hypot(event.clientX - held.startX, event.clientY - held.startY) <= MOVE_PX) return;
         orbit.grab = { id, x: held.startX, y: held.startY, turn: orbit.turn, elevation: orbit.elevation };
-        if (held === press) { cancelPress(); drag = { id, route: '', member: '', startX: held.startX, startY: held.startY, x: camera.x, y: camera.y, moved: true }; orbitSay(ORBIT_MOVE_SAID); }
+        if (held === press) { cancelPress(); drag = { id, route: '', member: '', startX: held.startX, startY: held.startY, x: camera.x, y: camera.y, moved: true }; }
         else drag.moved = true;
         clearHold(); suppressClick = true; lastClick = null; viewport.dataset.dragging = 'true';
       }
@@ -3776,10 +3801,43 @@
       orbit.elevation = clamp(orbit.grab.elevation + (event.clientY - orbit.grab.y) * ORBIT_TILT_PX, ORBIT_LOW, ORBIT_HIGH);
       orbitTurned();
     }, true);
+    // A click in 3D picks: on an agent it picks that one (a lone armed agent, as a first click in 2D; again lets it go),
+    // never drawing a path or making a loop; on a line it picks the line, letting go of a picked agent first.
+    listen(viewport, 'pointerup', event => {
+      if (!orbitLooking() || pinch || (hold?.id === event.pointerId && hold.fired)) return;
+      if (press && press.id === event.pointerId && !press.moved) {
+        const name = press.key, step = standIn(name);
+        cancelPress(); suppressClick = true; lastClick = null; pickFlow('');
+        if (flowAction && step && !trailPending) { if (trail.length === 1 && trail[0] === step) dropTrail(); else startTrail(name); }
+      } else if (drag && drag.id === event.pointerId && !drag.moved && trail.length && !trailPending && (drag.route || drag.member)) dropTrail();
+    }, true);
+    // Everything in the details, the + and its menu that would change something is refused in 3D: typing in a field,
+    // pressing a control (a button, a choice, a box to tick). Reading stays: closing, the links between agents, opening
+    // a session or a skill's text, the notices, the folds.
+    const ORBIT_READING = '.ag-close, .ag-family-link, .ag-open-session, .ag-skill-open, .ag-spend-row, .ag-run-notices, summary';
+    const orbitControl = target => {
+      const control = target?.closest?.('button, select, input, label, textarea');
+      if (!control || !control.closest('.ag-detail, .ag-add-menu, .ag-add') || control.closest(ORBIT_READING)) return null;
+      return control;
+    };
+    ['click', 'pointerdown', 'mousedown'].forEach(name => listen(root, name, event => {
+      if (!orbitLooking()) return;
+      const control = orbitControl(event.target);
+      if (!control || (control.matches('textarea, input') && !/^(checkbox|radio|button|submit)$/.test(control.type))) return;
+      if (name === 'click') orbitRefuse(event); else { event.preventDefault(); event.stopImmediatePropagation(); }
+    }, true));
+    listen(root, 'beforeinput', event => { if (orbitLooking() && orbitControl(event.target)) orbitRefuse(event); }, true);
+    listen(root, 'keydown', event => {
+      if (!orbitLooking() || !orbitControl(event.target) || !event.target.matches('textarea, input, select')) return;
+      // In a field: Enter saves or runs, a choice's keys change it, Alt+arrows move the agent being named.
+      if (event.key === 'Enter' || (event.target.matches('select') && /^(Arrow|Home|End|Page| )/.test(event.key)) || (event.altKey && event.key.startsWith('Arrow'))) orbitRefuse(event);
+    }, true);
     // After any press (a click as well as a turn) the self-turn goes on: it stopped while the pointer was down.
     ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(name => listen(viewport, name, event => { if (orbit.grab?.id === event.pointerId) { orbit.grab = null; orbitTurned(); } else orbitRequest(); }, true));
     // A double-click on empty space resets the angle in 3D (in 2D it puts the agents back in their places).
     listen(viewport, 'dblclick', event => {
+      // On an agent a double-click would make its loop on itself: refused in 3D.
+      if (orbitLooking() && (event.target.closest?.('[data-agent]') || agentAt(event.clientX, event.clientY))) { orbitRefuse(event); return; }
       if (!orbit.shown || event.target.closest?.('[data-agent], [data-route], [data-team-line], [data-loop-id], [data-work-loop-id], [data-learning], button') || agentAt(event.clientX, event.clientY)) return;
       event.preventDefault(); event.stopImmediatePropagation(); orbitReset();
     }, true);

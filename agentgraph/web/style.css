@@ -263,6 +263,9 @@
 /* A line bent round an agent is a <path>: never filled (it showed as a grey wedge in 2D too, and far more in 3D). */
 .agentgraph path.ag-edge, .agentgraph path.ag-flow { fill: none; }
 .agentgraph[data-ag-view="3d"] .ag-viewport, .agentgraph[data-ag-view="3d"] .ag-agent { cursor: grab; }
+/* 3D is for looking: no line follows the pointer from a picked agent. The sky behind the graph takes no pointer. */
+.agentgraph[data-ag-view="3d"] .ag-wire { display: none !important; }
+.agentgraph .ag-sky, .agentgraph .ag-sky * { pointer-events: none; }
 /* ---- orbit lane (n105) ---- */
 .agentgraph .ag-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--ag-muted); font-size: 11px; pointer-events: none; }
 .agentgraph .ag-detail { position: absolute; inset: 0 0 0 auto; z-index: 5; width: min(340px, 100%); display: flex; flex-direction: column; background: var(--ag-paper); border-left: 1px solid var(--ag-line); box-shadow: -15px 0 50px var(--ag-panel-shadow); }
