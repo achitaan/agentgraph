@@ -468,7 +468,8 @@ await check("main registers exactly one Ipc (<id>.snapshot) with snapshot, flow,
   // Round 2: the skills method joined snapshot and flow.
   assert.deepEqual(Object.keys(token.spec.methods), ["snapshot", "flow", "skills", "roster", "skillfile", "team"]);
   // Round 3: roster, skillfile and team, each with string fields only.
-  assert.deepEqual(Object.keys(token.spec.methods.roster.input.fields), ["op", "name", "record", "model", "variant", "description", "prompt", "skills", "read_only", "copy_of", "template"]);
+  // n96: "to" (the new name of a rename) joined the roster's fields.
+  assert.deepEqual(Object.keys(token.spec.methods.roster.input.fields), ["op", "name", "record", "model", "variant", "description", "prompt", "skills", "read_only", "copy_of", "template", "to"]);
   assert.deepEqual(Object.keys(token.spec.methods.skillfile.input.fields), ["op", "id", "record", "description", "text", "assign"]);
   assert.deepEqual(Object.keys(token.spec.methods.team.input.fields), ["op", "id", "lead", "members", "text"]);
   for (const method of ["roster", "skillfile", "team"]) {
@@ -1060,6 +1061,126 @@ await check("panel render: the view gets actions.flow, which asks main and turns
   r2.dispose();
 });
 
+await check("flow name|command|prompt and add with a name and the command: arguments without a shell, the goal on stdin, the demo gives only the run message", async () => {
+  const before = structureHashes();
+  const python = path.join(TMP, "fake-flow-python");
+  fs.writeFileSync(python, `#!/bin/sh
+shift 3
+input=$(cat)
+if [ "$2" = prompt ]; then printf '{"text": "%s"}\\n' "$input"; exit 0; fi
+printf '{"flow": {"id": "f", "path": ["a", "b"], "text": "t", "name": null, "command": null}, "flows": [], "applies": "after a reload", "live": false, "notes": ["%s"]}\\n' "$*"
+`, { mode: 0o700 });
+  const log = [];
+  const loaded = loadMain(CODE, log);
+  const m = mainContext({ home: ORCHESTRATION, python });
+  resolveDefault(loaded.module.exports).main(m.ctx);
+  const impl = m.provided[0].impl;
+  const named = JSON.parse(await impl.flow({ op: "name", id: "impl-openai-verifier", path: "", text: "check-loop" }));
+  assert.deepEqual(log[0].args, ["-P", "-m", "agentgraph.structure", "flow", "name", "impl-openai-verifier", "check-loop", "--json"]);
+  assert.equal(named.flow.id, "f");
+  await impl.flow({ op: "name", id: "impl-openai-verifier", path: "", text: "" });
+  assert.deepEqual(log[1].args, ["-P", "-m", "agentgraph.structure", "flow", "name", "impl-openai-verifier", "--json"], "an empty name takes it away");
+  const on = JSON.parse(await impl.flow({ op: "command", id: "impl-openai-verifier", path: "", text: "on" }));
+  assert.deepEqual(log[2].args, ["-P", "-m", "agentgraph.structure", "flow", "command", "impl-openai-verifier", "--on", "--json"]);
+  assert.deepEqual([on.applies, on.live], ["after a reload", false]);
+  await impl.flow({ op: "command", id: "impl-openai-verifier", path: "", text: "off" });
+  assert.deepEqual(log[3].args.slice(4), ["command", "impl-openai-verifier", "--off", "--json"]);
+  const goal = "add a health endpoint; $(touch x) `id`";
+  const prompt = JSON.parse(await impl.flow({ op: "prompt", id: "impl-openai-verifier", path: "", text: goal }));
+  assert.deepEqual(log[4].args.slice(4), ["prompt", "impl-openai-verifier", "--goal-file", "-", "--json"]);
+  assert.equal(log[4].stdin, goal);
+  assert.deepEqual(prompt, { text: goal });
+  await impl.flow({ op: "add-command", id: "check-loop", path: "impl-openai verifier impl-openai", text: "Loop." });
+  assert.deepEqual(log[5].args.slice(4), ["add", "impl-openai", "verifier", "impl-openai", "--name", "check-loop", "--command", "--text-file", "-", "--json"]);
+  await impl.flow({ op: "add", id: "check-loop", path: "impl-openai reviewer", text: "" });
+  assert.deepEqual(log[6].args.slice(4), ["add", "impl-openai", "reviewer", "--name", "check-loop", "--json"]);
+  log.length = 0;
+  for (const input of [{ op: "name", id: "f", path: "", text: "-x" }, { op: "name", id: "f", path: "", text: "Upper" }, { op: "name", id: "-f", path: "", text: "ok-name" },
+    { op: "name", id: "f", path: "", text: "a".repeat(33) }, { op: "command", id: "f", path: "", text: "yes" }, { op: "command", id: "f", path: "", text: "" },
+    { op: "command", id: "f", path: "a b", text: "on" }, { op: "prompt", id: "f", path: "", text: "" }, { op: "prompt", id: "f", path: "", text: " \n " },
+    { op: "prompt", id: "f", path: "", text: "x".repeat(4001) }, { op: "prompt", id: "f", path: "", text: "a\0b" }, { op: "prompt", id: "--goal-file", path: "", text: "g" },
+    { op: "add-command", id: "", path: "impl-openai reviewer", text: "" }, { op: "add", id: "-n", path: "impl-openai reviewer", text: "" }]) {
+    const bad = JSON.parse(await impl.flow(input));
+    assert.equal(typeof bad.error, "string", JSON.stringify(input));
+  }
+  assert.equal(log.length, 0, "a bad request spawned the command");
+  assert.ok(JSON.parse(await impl.flow({ op: "prompt", id: "f", path: "", text: "x".repeat(4000) })).text, "a goal of 4000 characters is refused");
+  const demo = mainContext({ home: ORCHESTRATION, python, demo: true });
+  resolveDefault(loaded.module.exports).main(demo.ctx);
+  const demoImpl = demo.provided[0].impl;
+  assert.deepEqual(JSON.parse(await demoImpl.flow({ op: "prompt", id: "f", path: "", text: "g" })), { text: "g" });
+  for (const input of [{ op: "name", id: "f", path: "", text: "check-loop" }, { op: "command", id: "f", path: "", text: "on" }])
+    assert.match(JSON.parse(await demoImpl.flow(input)).error, /demo/);
+  assert.equal(structureHashes(), before, "the real structure folder changed");
+});
+
+await check("panel render: actions.flow takes the name, command and prompt requests; actions.run sends the run message with the host's session.prompt and rejects plainly", async () => {
+  const definition = windowLoad.gui.defined[0];
+  const sent = [];
+  let sendFails = false;
+  const client = { session: { prompt(input) { sent.push({ self: this, input }); return sendFails ? Promise.reject(new Error("offline\nnow")) : Promise.resolve({ data: { type: "user" } }); } } };
+  let session = { key: "srv\nses_a", id: "ses_a", directory: ORCHESTRATION, server: { client } };
+  const props = { get session() { return session; }, screen: {} };
+  const w = windowContext(definition, { session });
+  const asked = [];
+  w.ctx.main = () => ({
+    flow: async (input) => {
+      asked.push(JSON.parse(JSON.stringify(input)));
+      if (input.op === "prompt") return input.id === "ghost" ? JSON.stringify({ error: "there is no flow 'ghost'" }) : JSON.stringify({ text: "RUN " + input.id + ": " + input.text });
+      return JSON.stringify({ flows: [], flow: { id: input.id } });
+    },
+  });
+  definition.setup(w.ctx);
+  const rendered = windowLoad.solid.runWithOwner(() => value(w.added[1].item).render(props));
+  const { flow, run } = mountCalls[mountCalls.length - 1].options.actions;
+  assert.equal(typeof run, "function");
+  await flow({ op: "name", id: "f", name: "check-loop" });
+  await flow({ op: "command", id: "f", on: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(await flow({ op: "prompt", id: "f", goal: "g" }))), { text: "RUN f: g" });
+  await flow({ op: "add", path: ["impl-openai", "reviewer"], text: "T", name: "check-loop", command: true });
+  await flow({ op: "add", path: ["impl-openai", "reviewer"] });
+  assert.deepEqual(asked, [
+    { op: "name", id: "f", path: "", text: "check-loop" },
+    { op: "command", id: "f", path: "", text: "on" },
+    { op: "prompt", id: "f", path: "", text: "g" },
+    { op: "add-command", id: "check-loop", path: "impl-openai reviewer", text: "T" },
+    { op: "add", id: "", path: "impl-openai reviewer", text: "" },
+  ]);
+  const failure = async (action, request) => {
+    try {
+      await action(request);
+    } catch (error) {
+      return error.message;
+    }
+    return "";
+  };
+  asked.length = 0;
+  for (const request of [{ op: "command", id: "f", on: "yes" }, { op: "name", id: "f" }, { op: "prompt", id: "f" }, { op: "add-command", path: ["a", "b"] },
+    { op: "add", path: ["a", "b"], command: "yes" }])
+    assert.equal(await failure(flow, request), "Bad flow request.", JSON.stringify(request));
+  assert.equal(asked.length, 0, "a bad flow request reached main");
+
+  assert.deepEqual(JSON.parse(JSON.stringify(await run({ flow: "f", goal: "add a health endpoint" }))), { sent: true, session: "ses_a" });
+  assert.equal(sent.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(sent[0].input)), { sessionID: "ses_a", text: "RUN f: add a health endpoint" });
+  assert.equal(sent[0].self, client.session, "session.prompt was called on the host's session API");
+  assert.equal(await failure(run, { flow: "f", goal: "  " }), "A goal is required: say what the task must achieve.");
+  assert.equal(await failure(run, { flow: "f" }), "Bad run request.");
+  assert.equal(await failure(run, null), "Bad run request.");
+  assert.equal(await failure(run, { flow: "ghost", goal: "g" }), "there is no flow 'ghost'");
+  sendFails = true;
+  assert.equal(await failure(run, { flow: "f", goal: "g" }), "The message could not be sent: offline now");
+  sendFails = false;
+  session = { ...session, parentID: "ses_root" };
+  assert.match(await failure(run, { flow: "f", goal: "g" }), /orchestrator's session/);
+  session = { key: "srv\nses_a", id: "ses_a", directory: ORCHESTRATION, server: {} };
+  assert.match(await failure(run, { flow: "f", goal: "g" }), /does not let a plugin send/);
+  session = { key: "srv\nses_a", id: "", directory: ORCHESTRATION, server: { client } };
+  assert.equal(await failure(run, { flow: "f", goal: "g" }), "No session is open.");
+  assert.equal(sent.length, 2, "a refused run sent a message");
+  rendered.dispose();
+});
+
 await check("panel render: the view gets actions.skills, which asks main's skills method and turns an error into a rejection", async () => {
   const definition = windowLoad.gui.defined[0];
   const session = { key: "srv\nses_a", id: "ses_a", directory: ORCHESTRATION };
@@ -1148,7 +1269,7 @@ esac
   const m = mainContext({ home: ORCHESTRATION, python });
   resolveDefault(loaded.module.exports).main(m.ctx);
   const impl = m.provided[0].impl;
-  const blank = { op: "", name: "", record: "", model: "", variant: "", description: "", prompt: "", skills: "", read_only: "", copy_of: "", template: "" };
+  const blank = { op: "", name: "", record: "", model: "", variant: "", description: "", prompt: "", skills: "", read_only: "", copy_of: "", template: "", to: "" };
   const roster = async (fields) => JSON.parse(await impl.roster({ ...blank, ...fields }));
   const base = ["-P", "-m", "agentgraph.roster", "agent"];
   // add from the verifier template, as a copy, and from the fields given (the instruction on stdin)
@@ -1172,6 +1293,9 @@ esac
   assert.deepEqual(log[5].args, base.concat(["remove", "checker", "--json"]));
   await roster({ op: "restore", record: "/tmp/backups/2026-11-19-agent-files/remove-checker-0123456789ab/record.json" });
   assert.deepEqual(log[6].args, base.concat(["restore", "/tmp/backups/2026-11-19-agent-files/remove-checker-0123456789ab/record.json", "--json"]));
+  await roster({ op: "rename", name: "checker", to: "auditor" });
+  assert.deepEqual(log[7].args, base.concat(["rename", "checker", "auditor", "--json"]));
+  assert.equal(log[7].stdin, "");
   // skill files
   const skill = async (fields) => JSON.parse(await impl.skillfile({ op: "", id: "", record: "", description: "", text: "", assign: "", ...fields }));
   const sbase = ["-P", "-m", "agentgraph.skillfiles", "skill"];
@@ -1206,7 +1330,10 @@ esac
     { op: "add", name: "x", template: "verifier", copy_of: "impl-claude" }, { op: "add", name: "x", copy_of: "-impl" }, { op: "add", name: "x", model: "--config" , description: "d", prompt: "p" },
     { op: "add", name: "x", skills: "a,-b", template: "verifier" }, { op: "add", name: "x" }, { op: "read", name: "x", prompt: "p" }, { op: "text", name: "x", prompt: " " },
     { op: "text", name: "x", prompt: "p", template: "verifier" }, { op: "remove", name: "x", record: "/r" }, { op: "restore", record: "-r" }, { op: "restore", record: "relative/r.json" },
-    { op: "show", name: "x" }, { op: "add", name: "x", template: "verifier", read_only: "yes" }])
+    { op: "show", name: "x" }, { op: "add", name: "x", template: "verifier", read_only: "yes" },
+    { op: "rename", name: "x" }, { op: "rename", name: "x", to: "-y" }, { op: "rename", name: "x", to: "a b" }, { op: "rename", name: "-x", to: "y" },
+    { op: "rename", name: "x", to: "y", prompt: "p" }, { op: "rename", name: "x", to: "y", record: "/r" }, { op: "remove", name: "x", to: "y" },
+    { op: "restore", record: "/r.json", to: "y" }, { op: "add", name: "x", template: "verifier", to: "y" }])
     assert.equal(typeof (await roster(fields)).error, "string", JSON.stringify(fields));
   assert.equal(typeof JSON.parse(await impl.roster({ op: "add", name: "x" })).error, "string", "missing fields");
   for (const fields of [{ op: "read", id: "-x" }, { op: "write", id: "x", text: "t", assign: "a" }, { op: "create", id: "x", text: "t" }, { op: "restore", record: "r" }, { op: "rename", id: "x" }])
@@ -1232,7 +1359,7 @@ await check("panel render: the view gets actions.roster, actions.skillfile and a
   const call = mountCalls[mountCalls.length - 1];
   const { roster, skillfile, team } = call.options.actions;
   for (const action of [roster, skillfile, team]) assert.equal(typeof action, "function");
-  const empty = { name: "", record: "", model: "", variant: "", description: "", prompt: "", skills: "", read_only: "", copy_of: "", template: "" };
+  const empty = { name: "", record: "", model: "", variant: "", description: "", prompt: "", skills: "", read_only: "", copy_of: "", template: "", to: "" };
   await roster({ op: "add", name: "checker", template: "verifier" });
   await roster({ op: "add", name: "claude-copy", copy_of: "impl-claude", skills: [], read_only: false });
   await roster({ op: "read", name: "checker" });
@@ -1240,6 +1367,7 @@ await check("panel render: the view gets actions.roster, actions.skillfile and a
   const removed = await roster({ op: "remove", name: "checker" });
   assert.equal(removed.record, "/tmp/backups/undo.json");
   await roster({ op: "restore", record: removed.record });
+  await roster({ op: "rename", name: "checker", to: "auditor", text: "ignored" });
   assert.deepEqual(w.calls.filter((c) => c.op === "roster").map((c) => c.input), [
     { ...empty, op: "add", name: "checker", template: "verifier" },
     { ...empty, op: "add", name: "claude-copy", copy_of: "impl-claude", skills: "-", read_only: "false" },
@@ -1247,6 +1375,7 @@ await check("panel render: the view gets actions.roster, actions.skillfile and a
     { ...empty, op: "text", name: "checker", prompt: "New." },
     { ...empty, op: "remove", name: "checker" },
     { ...empty, op: "restore", record: "/tmp/backups/undo.json" },
+    { ...empty, op: "rename", name: "checker", to: "auditor" },
   ]);
   await skillfile({ op: "create", id: "new-skill", description: "D", text: "T", assign: "impl-openai" });
   await skillfile({ op: "restore", record: "/tmp/r.json" });
@@ -1274,7 +1403,8 @@ await check("panel render: the view gets actions.roster, actions.skillfile and a
   assert.match(await failure(team, { op: "add", lead: "orchestrator", members: ["a"] }), /hub/);
   const count = w.calls.length;
   for (const bad of [null, { op: "show", name: "x" }, { op: "add", name: "-x" }, { op: "add", name: "x", skills: "a" }, { op: "add", name: "x", read_only: "true" },
-    { op: "text", name: "x" }, { op: "restore", record: "-r" }, { op: "add", name: "x", copy_of: "a b" }])
+    { op: "text", name: "x" }, { op: "restore", record: "-r" }, { op: "add", name: "x", copy_of: "a b" },
+    { op: "rename", name: "x" }, { op: "rename", name: "x", to: "-y" }, { op: "rename", name: "x", to: "a b" }, { op: "rename", name: "-x", to: "y" }])
     assert.equal(await failure(roster, bad), "Bad roster request.", JSON.stringify(bad));
   for (const bad of [null, { op: "read", id: "-x" }, { op: "write", id: "x", text: 3 }, { op: "restore" }])
     assert.equal(await failure(skillfile, bad), "Bad skill request.", JSON.stringify(bad));

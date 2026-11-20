@@ -7,9 +7,10 @@
  * The desktop app evaluates that one file in two processes (see the GUI plugin guide, "One file, two processes"):
  *   - every window runs `setup`: the panel, the "+" menu item, the command and the styles;
  *   - the Electron main process runs `main`: an Ipc that runs the Python snapshot command, and the structure
- *     command that adds a flow through agents, changes its instruction or removes it (`agentgraph structure flow`),
+ *     command that adds a flow through agents, changes its instruction, name or command, removes it or gives the
+ *     message that runs it on a goal (`agentgraph structure flow`),
  *     the skills command that adds or removes one of an agent's skills or gives it all (`agentgraph skills`),
- *     the roster command that adds, removes or restores an agent (`agentgraph agent`), the skill-file command
+ *     the roster command that adds, renames, removes or restores an agent (`agentgraph agent`), the skill-file command
  *     that reads or edits a skill's text (`agentgraph skill`) and the groups command (`agentgraph team`).
  * The host evaluates the bundle as `Function("require", "module", "exports", code)`, so `__dirname` and
  * `__filename` do not exist, and `require` only knows the modules the app shares. Keep each process's code inside
@@ -50,6 +51,8 @@ const SKILL_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/;
 const FLOW_STEPS_LIMIT = 20;
 // The command's own limit, counted the same way: in characters (code points), not UTF-16 units.
 const FLOW_TEXT_MAX_CHARS = 2000;
+const FLOW_NAME = /^[a-z0-9][a-z0-9-]{1,31}$/; // a path's name, also its command's (/NAME)
+const GOAL_MAX_CHARS = 4000; // the goal of a run message
 const FLOW_TIMEOUT_MS = 10000;
 const FLOW_MAX_BYTES = 1024 * 1024;
 // The commands' own limits, in characters: an agent's description and prompt, a skill's text, a group's instruction.
@@ -138,10 +141,13 @@ function snapshotIpc(pluginId) {
           input: Schema.Struct({ directory: Schema.String, session: Schema.String }),
           output: Schema.String,
         },
-        // Add a flow, change its instruction or remove it in the structure folder. Input: op ("add", "text" or
-        // "remove"), id ("" for add), path (the agents separated by single spaces; "" unless add) and text (the
-        // instruction, "" for the generated one; sent to the command on stdin). Output: JSON text,
-        // {"flow"?, "flows": [...], "notes"?} afterwards, or {"error": "..."}.
+        // Add a flow, change its instruction, name or command, remove it, or get the message that runs it on a
+        // goal. Input: op ("add", "add-command", "text", "name", "command", "prompt" or "remove"), id (the flow; for
+        // add the path's name or ""; add-command is add with the command on and needs the name), path (the agents
+        // separated by single spaces; "" unless add) and text: the instruction for add and text ("" for the
+        // generated one; on stdin), the name for name ("" takes it away), "on" or "off" for command, the goal for
+        // prompt (on stdin), "" for remove. Output: JSON text, {"flow"?, "flows": [...], "notes"?, "applies"?,
+        // "live"?} afterwards, {"text"} for prompt, or {"error": "..."}.
         flow: {
           input: Schema.Struct({ op: Schema.String, id: Schema.String, path: Schema.String, text: Schema.String }),
           output: Schema.String,
@@ -154,9 +160,10 @@ function snapshotIpc(pluginId) {
           output: Schema.String,
         },
         // Add an agent (an agent file, live at once: from a template, a copy or the fields given), read or replace
-        // an added agent's instruction, remove an agent with its flows and groups, or restore what a removal or an
-        // instruction change took. Input: op ("add", "read", "text", "remove" or "restore"), name, record (restore
-        // only), model, variant, description, prompt (the instruction, on stdin; for "text" the new one), skills
+        // an added agent's instruction, rename an added agent with its flows, groups and path commands (one undo
+        // record), remove an agent with its flows and groups, or restore what a removal, a rename or an instruction
+        // change took. Input: op ("add", "read", "text", "rename", "remove" or "restore"), name, to (rename only: the
+        // new name), record (restore only), model, variant, description, prompt (the instruction, on stdin; for "text" the new one), skills
         // (comma-separated; "" for none given, "-" for an empty list), read_only ("", "true" or "false"), copy_of
         // and template ("blank" or "verifier"); "" when not given. Output: JSON text, the command's answer
         // ({"agent", "action", "record"?, "message", ...}) or {"error": "..."}.
@@ -164,7 +171,7 @@ function snapshotIpc(pluginId) {
           input: Schema.Struct({
             op: Schema.String, name: Schema.String, record: Schema.String, model: Schema.String, variant: Schema.String,
             description: Schema.String, prompt: Schema.String, skills: Schema.String, read_only: Schema.String,
-            copy_of: Schema.String, template: Schema.String,
+            copy_of: Schema.String, template: Schema.String, to: Schema.String,
           }),
           output: Schema.String,
         },
@@ -373,8 +380,9 @@ function runCommand(deps, request, label, accept) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Main process: run `python3 -P -m agentgraph.structure flow add|text|remove ... --json` without a shell; the
-// instruction goes to the command on stdin (`--text-file -`), never on the command line.
+// Main process: run `python3 -P -m agentgraph.structure flow add|text|name|command|prompt|remove ... --json` without a
+// shell; the instruction and the goal go to the command on stdin (`--text-file -`, `--goal-file -`), never on the
+// command line.
 
 function createFlowRunner(deps) {
   // deps: { execFile, path, env, home, python, demo, signal, timeoutMs, maxBytes }
@@ -387,15 +395,32 @@ function createFlowRunner(deps) {
     const { op, id, path, text } = input;
     if (![op, id, path, text].every((value) => typeof value === "string")) return fail("Bad flow request.");
     if (text.includes("\0")) return fail("Bad flow request.");
-    if (Array.from(text).length > FLOW_TEXT_MAX_CHARS) return fail("The instruction is longer than " + FLOW_TEXT_MAX_CHARS + " characters.");
     const base = ["-P", "-m", "agentgraph.structure", "flow"];
-    if (op === "add") {
+    if (op === "prompt") {
+      if (!FLOW_ID.test(id) || path) return fail("The flow needs a valid id.");
+      if (!text.trim()) return fail("A goal is required: say what the task must achieve.");
+      if (Array.from(text).length > GOAL_MAX_CHARS) return fail("The goal is longer than " + GOAL_MAX_CHARS + " characters.");
+      return { args: base.concat(["prompt", id, "--goal-file", "-", "--json"]), stdin: text, prompt: true };
+    }
+    if (Array.from(text).length > FLOW_TEXT_MAX_CHARS) return fail("The instruction is longer than " + FLOW_TEXT_MAX_CHARS + " characters.");
+    if (op === "add" || op === "add-command") {
       const names = path.split(" ");
-      if (id || names.length < 2 || names.length > FLOW_STEPS_LIMIT || !names.every((name) => AGENT_NAME.test(name)))
+      if (names.length < 2 || names.length > FLOW_STEPS_LIMIT || !names.every((name) => AGENT_NAME.test(name)))
         return fail("A flow needs two to " + FLOW_STEPS_LIMIT + " agent names.");
+      if (id ? !FLOW_NAME.test(id) : op === "add-command") return fail("A path's name is 2 to 32 lowercase letters, digits and '-'.");
+      const named = (id ? ["--name", id] : []).concat(op === "add-command" ? ["--command"] : []);
       return text.trim()
-        ? { args: base.concat(["add"], names, ["--text-file", "-", "--json"]), stdin: text }
-        : { args: base.concat(["add"], names, ["--json"]), stdin: "" };
+        ? { args: base.concat(["add"], names, named, ["--text-file", "-", "--json"]), stdin: text }
+        : { args: base.concat(["add"], names, named, ["--json"]), stdin: "" };
+    }
+    if (op === "name" || op === "command") {
+      if (!FLOW_ID.test(id) || path) return fail("The flow needs a valid id.");
+      if (op === "name") {
+        if (text && !FLOW_NAME.test(text)) return fail("A path's name is 2 to 32 lowercase letters, digits and '-'.");
+        return { args: base.concat(["name", id], text ? [text] : [], ["--json"]), stdin: "" };
+      }
+      if (text !== "on" && text !== "off") return fail("Bad flow request.");
+      return { args: base.concat(["command", id, "--" + text, "--json"]), stdin: "" };
     }
     if (op === "text" || op === "remove") {
       if (!FLOW_ID.test(id) || path) return fail("The flow needs a valid id.");
@@ -408,20 +433,24 @@ function createFlowRunner(deps) {
   }
 
   const run = (request) => runCommand(deps, request, "The structure command", (doc) => {
+    if (request.prompt) return typeof doc.text === "string" ? { text: doc.text } : null;
     if (!Array.isArray(doc.flows)) return null;
     const answer = { flows: doc.flows };
     if (isPlainObject(doc.flow)) answer.flow = doc.flow;
     if (Array.isArray(doc.notes)) answer.notes = doc.notes;
+    if (typeof doc.applies === "string") answer.applies = doc.applies;
+    if (typeof doc.live === "boolean") answer.live = doc.live;
     return answer;
   });
 
   let queue = Promise.resolve();
   return {
-    // Never rejects: failures become { error }. One change at a time, in the order asked.
+    // Never rejects: failures become { error }. One change at a time, in the order asked. The run message is
+    // read-only, so the demo gives it too.
     flow(input) {
       const request = command(input);
       if (request.error) return Promise.resolve(request);
-      if (deps.demo) return Promise.resolve(fail("The demo cannot change the structure."));
+      if (deps.demo && !request.prompt) return Promise.resolve(fail("The demo cannot change the structure."));
       const next = queue.then(() => run(request));
       queue = next.catch(() => {});
       return next;
@@ -492,18 +521,24 @@ function serialRunner(deps, command, label, accept, demoMessage) {
 
 function createRosterRunner(deps) {
   const fail = (message) => ({ error: oneLine(message) });
-  const KEYS = ["op", "name", "record", "model", "variant", "description", "prompt", "skills", "read_only", "copy_of", "template"];
+  const KEYS = ["op", "name", "record", "model", "variant", "description", "prompt", "skills", "read_only", "copy_of", "template", "to"];
   function command(input) {
     if (!isPlainObject(input) || !KEYS.every((key) => typeof input[key] === "string")) return fail("Bad roster request.");
-    const { op, name, record, model, variant, description, prompt, skills, read_only: readOnly, copy_of: copyOf, template } = input;
+    const { op, name, record, model, variant, description, prompt, skills, read_only: readOnly, copy_of: copyOf, template, to } = input;
     const base = ["-P", "-m", "agentgraph.roster", "agent"];
     const others = [model, variant, description, prompt, skills, readOnly, copyOf, template];
     if (op === "restore") {
-      if (name || others.some(Boolean) || !recordPath(record)) return fail("The restore needs the undo record a removal returned.");
+      if (name || to || others.some(Boolean) || !recordPath(record)) return fail("The restore needs the undo record a removal or a rename returned.");
       return { args: base.concat(["restore", record, "--json"]), stdin: "" };
     }
     if (!AGENT_NAME.test(name)) return fail("The agent needs a valid name.");
     if (record) return fail("Bad roster request.");
+    if (op === "rename") {
+      if (others.some(Boolean)) return fail("Bad roster request.");
+      if (!AGENT_NAME.test(to)) return fail("The new name is not a valid agent name.");
+      return { args: base.concat(["rename", name, to, "--json"]), stdin: "" };
+    }
+    if (to) return fail("Bad roster request.");
     if (op === "remove" || op === "read") {
       if (others.some(Boolean)) return fail("Bad roster request.");
       return { args: base.concat([op === "read" ? "show" : "remove", name, "--json"]), stdin: "" };
@@ -782,19 +817,40 @@ function renderPanel(ctx, solid, props) {
   };
 
   // Drawing a flow in the view writes the structure folder through the main process. The demo writes nothing,
-  // so it gets no flow action and the view only shows the flows.
+  // so it gets no flow action and the view only shows the flows. The requests are the loopback endpoint's
+  // (/api/structure/flow): {op: "add", path, text?, name?, command?}, {op: "text", id, text}, {op: "name", id, name},
+  // {op: "command", id, on}, {op: "prompt", id, goal} (answers {text}) and {op: "remove", id}.
   const flow = async (request) => {
     if (!alive) throw new Error("The panel is closed.");
     if (!isPlainObject(request)) throw new Error("Bad flow request.");
     const path = Array.isArray(request.path) ? request.path : [];
     // The path crosses the bridge as names joined by single spaces, so a name may not hold any space itself.
     if (!path.every((name) => typeof name === "string" && /^\S+$/.test(name))) throw new Error("Bad flow request.");
+    const op = String(request.op || "");
     const input = {
-      op: String(request.op || ""),
+      op,
       id: typeof request.id === "string" ? request.id : "",
       path: path.join(" "),
       text: typeof request.text === "string" ? request.text : "",
     };
+    if (op === "add") {
+      const name = optionalText(request.name);
+      if (typeof name !== "string" || (request.command !== undefined && typeof request.command !== "boolean"))
+        throw new Error("Bad flow request.");
+      if (request.command === true) input.op = "add-command";
+      input.id = name;
+    } else if (op === "name") {
+      if (typeof request.name !== "string") throw new Error("Bad flow request.");
+      input.text = request.name;
+    } else if (op === "command") {
+      if (typeof request.on !== "boolean") throw new Error("Bad flow request.");
+      input.text = request.on ? "on" : "off";
+    } else if (op === "prompt") {
+      if (typeof request.goal !== "string") throw new Error("Bad flow request.");
+      input.text = request.goal;
+    } else if (op === "add-command") {
+      throw new Error("Bad flow request.");
+    }
     const text = await ctx.main(snapshotIpc(ctx.id)).flow(input, { signal: ctx.signal });
     let doc;
     try {
@@ -802,9 +858,38 @@ function renderPanel(ctx, solid, props) {
     } catch (_) {
       throw new Error("The structure command did not answer with JSON.");
     }
-    if (!isPlainObject(doc) || doc.error || !Array.isArray(doc.flows))
+    const valid = op === "prompt" ? (answer) => typeof answer.text === "string" : (answer) => Array.isArray(answer.flows);
+    if (!isPlainObject(doc) || doc.error || !valid(doc))
       throw new Error(oneLine(isPlainObject(doc) && doc.error ? doc.error : "The flow could not be changed."));
     return doc;
+  };
+  // Run a path: the run message for the flow and the goal (from main, as `agentgraph flow prompt` gives it), sent
+  // as a user message to this panel's session (the orchestrator's) with the host's own call,
+  // props.session.server.client.session.prompt({sessionID, text}): the call the Desktop app makes for a message
+  // typed into a session. The orchestrator then takes it as a new task.
+  const run = async (request) => {
+    if (!alive) throw new Error("The panel is closed.");
+    if (!isPlainObject(request) || typeof request.flow !== "string" || typeof request.goal !== "string")
+      throw new Error("Bad run request.");
+    if (!request.goal.trim()) throw new Error("A goal is required: say what the task must achieve.");
+    const session = props.session;
+    const sessionID = session && typeof session.id === "string" ? session.id : "";
+    if (!sessionID) throw new Error("No session is open.");
+    if (typeof session.parentID === "string" && session.parentID)
+      throw new Error("This is a subagent's session; open the orchestrator's session to run a path.");
+    const client = session.server && session.server.client;
+    const send = client && client.session && client.session.prompt;
+    if (typeof send !== "function") throw new Error("This OpenCode does not let a plugin send a message to a session.");
+    const { text } = await flow({ op: "prompt", id: request.flow, goal: request.goal });
+    if (!alive) throw new Error("The panel is closed.");
+    const now = props.session;
+    if (!now || now.id !== sessionID) throw new Error("The session changed before the message was sent; nothing was sent.");
+    try {
+      await send.call(client.session, { sessionID, text });
+    } catch (error) {
+      throw new Error("The message could not be sent: " + oneLine(errorMessage(error)));
+    }
+    return { sent: true, session: sessionID };
   };
   // A skill change in an agent's details runs the skills command through the main process; names cross the
   // bridge as they are, so one holding a space or starting with "-" is refused here and again in main.
@@ -846,8 +931,8 @@ function renderPanel(ctx, solid, props) {
   };
   const roster = async (request) => {
     if (!alive) throw new Error("The panel is closed.");
-    if (!isPlainObject(request) || !["add", "read", "text", "remove", "restore"].includes(request.op)) throw new Error("Bad roster request.");
-    const input = { op: request.op, name: "", record: "", model: "", variant: "", description: "", prompt: "", skills: "", read_only: "", copy_of: "", template: "" };
+    if (!isPlainObject(request) || !["add", "read", "text", "rename", "remove", "restore"].includes(request.op)) throw new Error("Bad roster request.");
+    const input = { op: request.op, name: "", record: "", model: "", variant: "", description: "", prompt: "", skills: "", read_only: "", copy_of: "", template: "", to: "" };
     if (request.op === "restore") {
       if (typeof request.record !== "string" || !request.record || request.record.startsWith("-")) throw new Error("Bad roster request.");
       input.record = request.record;
@@ -858,6 +943,10 @@ function renderPanel(ctx, solid, props) {
     if (request.op === "text") {
       if (typeof request.text !== "string") throw new Error("Bad roster request.");
       input.prompt = request.text;
+    }
+    if (request.op === "rename") {
+      if (!plainName(request.to)) throw new Error("Bad roster request.");
+      input.to = request.to;
     }
     if (request.op === "add") {
       for (const key of ["model", "variant", "description", "prompt", "copy_of", "template"]) {
@@ -920,7 +1009,7 @@ function renderPanel(ctx, solid, props) {
     }
     return askMain("team", input, "groups", (doc) => Array.isArray(doc.teams));
   };
-  const actions = ctx.options && ctx.options.demo === true ? undefined : { flow, skills, roster, skillfile, team };
+  const actions = ctx.options && ctx.options.demo === true ? undefined : { flow, skills, roster, skillfile, team, run };
 
   const showSessionToast = (sessionID, copied) => {
     try {
