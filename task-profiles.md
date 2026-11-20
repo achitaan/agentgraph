@@ -89,10 +89,10 @@ requirement.
 | Actual uncertainty | Skill |
 |---|---|
 | Difficult proof or reformulation | `math-research` (`researcher`, `oracle`) |
-| Exact algebra or calculus | `sympy` (`impl-hard`, `oracle`) |
+| Exact algebra or calculus | `sympy` (`impl-hard`) |
 | Numerical stability or simulation correctness | `research-software-engineering` (`impl-hard`, `researcher`) |
 | Runtime, memory or query bottleneck | `performance-speedup` (`impl-hard`, `oracle-lite`) |
-| Predictive ML training or evaluation | `ml-experiment-standards`, `experimental-design` (`researcher`) |
+| Predictive ML training or evaluation | `ml-experiment-standards` (`impl-hard`, `reviewer`), `experimental-design` (`researcher`) |
 
 A coding-workflow check does not establish research accuracy, and a numerical
 check alone is not a proof.
