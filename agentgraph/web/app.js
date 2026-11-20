@@ -2425,7 +2425,7 @@
       saveTyped(box, true, {
         key: 'output:' + key, selector: '[data-output-text="' + CSS.escape(key) + '"]', state: (kind, said) => setOutputState(key, kind, said), limit: outputLimit,
         shown: () => outputViews.get(key)?.rev || text(outputEntry(task, node, artifact)?.rev || ''),
-        send: (value, rev, answered) => ask(outputAction, withRev({ op: 'write', task, node, artifact, text: value }, rev)).then(async got => {
+        send: (value, rev, answered) => orbitWriteRefused() || ask(outputAction, withRev({ op: 'write', task, node, artifact, text: value }, rev)).then(async got => {
           if (!alive) return got;
           reply = got; answered(got);
           Object.assign(view, { text: box.dataset.saved, rev: box.dataset.rev || view.rev, draft: box.value === box.dataset.saved ? null : box.value,
@@ -4128,13 +4128,69 @@
         ring(1).place.forEach((point, name) => points.set(name, point));
         return { key: group.key, ring };
       });
-      // The sun at the middle of the canvas the details leave (the space the camera had when 3D began), the rings as
-      // wide as the 2D view's agents are from it, narrower where that would not fit there at the nearest (4/3 size).
-      const frame = orbit.frame || { x: hub.x, y: hub.y, fit: Infinity }, wide = count ? total / count * 1.08 : 180;
+      // The sun at the middle of the canvas the details leave, the rings as wide as the 2D view's agents are from it,
+      // narrower where anything drawn round an agent would leave that canvas at some turn or elevation (orbitFit).
+      const frame = orbit.frame || { x: hub.x, y: hub.y, room: null }, wide = count ? total / count * 1.08 : 180;
       points.set(hubName, [0, 0, 0]);
-      const radius = Math.max(wide * .45, Math.min(wide, frame.fit));
+      const radius = frame.room ? orbitFit(frame.room, wide, points) : wide;
       orbit.figure = { rings, points, hub: { x: frame.x, y: frame.y }, radius, shrink: Math.max(.6, radius / wide) };
       return orbit.figure;
+    }
+    // The canvas the details leave, as the 3D figure has it: the sun at its middle (below the top band) and the room
+    // from there to each side, in the drawing's units at the camera's scale. Taken again when the canvas changes size.
+    function orbitFrame() {
+      const W = viewport.clientWidth, H = viewport.clientHeight, s = camera.scale || 1, pad = 4, top = Math.max(pad, topInset());
+      const cx = W / 2, cy = (top + H - pad) / 2, slack = 2 / s;
+      return { size: W + 'x' + H, x: (cx - camera.x) / s, y: (cy - camera.y) / s, room: { left: (cx - pad) / s - slack, right: (W - pad - cx) / s - slack, top: (cy - top) / s - slack, bottom: (H - pad - cy) / s - slack } };
+    }
+    // The largest ring radius (at most `wide`) at which everything drawn round every agent stays in the room at every
+    // turn and elevation (sampled every 7.5 degrees of both, the elevation from the plane to straight above): each
+    // agent's point seen by that camera, and its reach (its circle, name and count, and its seats or members with
+    // theirs, those offsets scaled by the figure's shrink) drawn at 1 + .3 (d + 1)/2 of its size at depth d; the sun
+    // (depth 0) with its glow.
+    function orbitFit(room, wide, points) {
+      const base = orbit.base, seatsOf = new Map(), leads = [];
+      positions.forEach((p, name) => {
+        if (!base.has(name)) return;
+        if (name !== hubName && p.parent && base.has(p.parent)) { if (!seatsOf.has(p.parent)) seatsOf.set(p.parent, []); seatsOf.get(p.parent).push(name); }
+        else leads.push(name);
+      });
+      const reach = (name, shrink) => {
+        const p = positions.get(name), l = base.get(name), b = { ...extentOf(p) };
+        if (name === hubName) { const glow = (Number(p.r) || 0) * 2.4; b.left = Math.min(b.left, -glow); b.right = Math.max(b.right, glow); b.top = Math.min(b.top, -glow); b.bottom = Math.max(b.bottom, glow); }
+        (seatsOf.get(name) || []).forEach(seat => {
+          const o = base.get(seat), e = extentOf(positions.get(seat)), dx = (o.x - l.x) * shrink, dy = (o.y - l.y) * shrink;
+          b.left = Math.min(b.left, dx + e.left); b.right = Math.max(b.right, dx + e.right); b.top = Math.min(b.top, dy + e.top); b.bottom = Math.max(b.bottom, dy + e.bottom);
+        });
+        return b;
+      };
+      const views = [];
+      for (let t = 0; t < 48; t++) for (let e = 0; e <= 12; e++) { const T = t * Math.PI / 24, E = e * Math.PI / 24; views.push([Math.cos(T), Math.sin(T), Math.cos(E), Math.sin(E)]); }
+      const seen = new Map(leads.map(name => {
+        const q = name === hubName ? null : points.get(name);
+        if (!q) return [name, [{ x: 0, up: 0, size: 1.15 }]];
+        return [name, views.map(([ct, st, ce, se]) => {
+          const x = q[0] * ct + q[1] * st, y = -q[0] * st + q[1] * ct, up = y * se + q[2] * ce, d = -y * ce + q[2] * se, k = ORBIT_PERSPECTIVE / (ORBIT_PERSPECTIVE - d);
+          return { x: x * k, up: up * k, size: 1 + .3 * (d + 1) / 2 };
+        })];
+      }));
+      const fits = R => {
+        const shrink = Math.max(.6, R / wide);
+        return leads.every(name => {
+          const b = reach(name, shrink);
+          return seen.get(name).every(({ x, up, size }) => R * x + size * b.right <= room.right && R * x + size * b.left >= -room.left && -R * up + size * b.top >= -room.top && -R * up + size * b.bottom <= room.bottom);
+        });
+      };
+      if (fits(wide)) return wide;
+      let low = 0, high = wide;
+      for (let i = 0; i < 24; i++) { const mid = (low + high) / 2; if (fits(mid)) low = mid; else high = mid; }
+      return Math.max(low, wide * .1);
+    }
+    // The canvas changed size while 3D is shown (the details opened or closed, the pane resized): the figure is fitted
+    // again into the new canvas (scheduleResize's part, after the 2D camera has been placed).
+    function orbitRefit() {
+      if (!orbit.shown || !orbit.frame || orbit.frame.size === viewport.clientWidth + 'x' + viewport.clientHeight) return;
+      orbit.frame = orbitFrame(); orbit.figure = null; orbitProject(); orbit.dirty = true; orbitRequest();
     }
     // The figure k of the way up (figure3D(L, k)): each ring's line and its agents' points, the hub at the middle.
     function orbitRise(figure, k) {
@@ -4335,8 +4391,7 @@
         orbit.base = new Map(); positions.forEach((p, name) => orbit.base.set(name, { x: p.x, y: p.y }));
         orbit.saved = { x: camera.x, y: camera.y, scale: camera.scale, own: camera.own, touched: camera.touched, width: camera.width, height: camera.height };
         orbit.figure = null; orbit.shown = true; orbit.k = 0; orbit.order = ''; orbit.dom = [...nodeLayer.children];
-        const view = viewport.getBoundingClientRect(), s = camera.scale || 1;
-        orbit.frame = { x: (view.width / 2 - camera.x) / s, y: (view.height / 2 - camera.y) / s, fit: (Math.min(view.width, view.height) / 2 / s - 46) / 1.34 };
+        orbit.frame = orbitFrame();
       }
       orbit.from3d = null; orbit.dirty = true;
       if (animate && !reducedMotion()) orbit.change = { from: orbit.k, to: 1, at: performance.now() };
@@ -4436,7 +4491,14 @@
     // Everything in the details, the + and its menu that would change something is refused in 3D: typing in a field,
     // pressing a control (a button, a choice, a box to tick). Reading stays: closing, the links between agents, opening
     // a session or a skill's text, the notices, the folds.
-    const ORBIT_READING = '.ag-close, .ag-family-link, .ag-open-session, .ag-skill-open, .ag-spend-row, .ag-run-notices, summary';
+    const ORBIT_READING = '.ag-close, .ag-family-link, .ag-open-session, .ag-skill-open, .ag-spend-row, .ag-run-notices, summary, [data-output-open]';
+    // A write that would go out while 3D is shown with no press to refuse (a step's output saved again once the save
+    // before it is answered, queued in 2D): refused with the same sentence; the typing stays. The output's send hook.
+    function orbitWriteRefused() {
+      if (!orbitLooking()) return null;
+      orbitSay(ORBIT_LOOK_SAID);
+      return Promise.reject(new Error(ORBIT_LOOK_SAID));
+    }
     const orbitControl = target => {
       const control = target?.closest?.('button, select, input, label, textarea');
       if (!control || !control.closest('.ag-detail, .ag-add-menu, .ag-add') || control.closest(ORBIT_READING)) return null;
@@ -5002,6 +5064,7 @@
         // When the details open or close the graph refits into the space left, unless the user panned or zoomed since
         // (then their view stays). A change of the pane's own size, or of arrangement, refits as before.
         if ((resized || !camera.initialized) && !(camera.own && camera.initialized && !switched && !paneResized)) { fitView(false); reveal(); } else { clampPan(); transform(); }
+        orbitRefit();
       });
     }
     const resize = new ResizeObserver(scheduleResize);
