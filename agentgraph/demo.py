@@ -169,3 +169,12 @@ def demo_snapshot(now: float | None = None) -> Snapshot:
         Objective("o4", "No regression in the existing suite", ["n11"]),
     ]
     return Snapshot(now, roster, root, sessions, [graph], [])
+
+
+def demo_setup() -> dict:
+    """The snapshot's `setup` object for the demo: sample names only, no file is read."""
+    return {"preset": "normal", "presets": ["ultra-fast", "fast", "normal"], "override": None,
+            "saved": [{"name": "cheap-week", "saved": "2026-11-12T09:30:00Z", "preset": "fast", "rev": "0123456789abcdef"},
+                      {"name": "full-power", "saved": "2026-11-18T16:05:00Z", "preset": "normal",
+                       "rev": "fedcba9876543210"}],
+            "undo": None}

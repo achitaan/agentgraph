@@ -685,6 +685,11 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
         skillfiles.annotate(document)
         from . import outputs  # outputs imports this module
         outputs.annotate(document)  # each output of the shown graph: rev, size, editable, why
+        from . import setups  # setups imports this module
+        setups.annotate(document)  # the default preset, its overrides, the saved setups, the newest undo record
+    elif source == "demo":
+        from .demo import demo_setup
+        document["setup"] = demo_setup()
     return document
 
 
