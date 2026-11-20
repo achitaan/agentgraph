@@ -304,3 +304,33 @@ class Stale(Undo):
         self.assertEqual(code, 1)
         self.assertEqual(self.full(), before)
         self.assertEqual(cli("remove", "xavier", "--expect", self.rev())[0], 0)
+
+
+class RenameNameCheck(Undo):
+    """Review n8 r5, minor 1: the new name is checked under the structure and skillset locks, so a name another
+    writer takes between the check and the write is caught."""
+
+    def test_a_preset_agent_planted_with_the_new_name_before_the_write_is_caught(self):
+        self.add("xavier", template="verifier")
+        real = roster._structure_locked
+        planted = []
+        before = {}
+
+        def plant(root):
+            # Another writer gives a preset agent the name 'yusuf' just before the rename takes its locks.
+            if not planted:
+                planted.append(True)
+                with skillset._locked(self.config, self.map):
+                    obj = json.loads(self.config.read_text())
+                    preset = next(iter(obj["presets"]))
+                    obj["presets"][preset]["yusuf"] = {"model": "openai/gpt-5"}
+                    self.config.write_text(json.dumps(obj, indent=2) + "\n")
+                before["state"] = self.full()
+            return real(root)
+
+        with patch.object(roster, "_structure_locked", plant), \
+                self.assertRaisesRegex(skillset.SkillsetError, r"agent 'yusuf' already exists in preset"):
+            roster.rename_agent("xavier", "yusuf", commands_dir=self.commands, **self.paths)
+        self.assertTrue(planted)
+        self.assertEqual(self.full(), before["state"], "a refused rename wrote something")
+        self.assertTrue((self.agents / "xavier.md").is_file())

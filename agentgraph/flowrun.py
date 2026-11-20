@@ -281,13 +281,17 @@ def _inside(short: list[str], long: list[str]) -> list[int]:
 def _longest(found: dict[str, list[dict]], working: dict[str, list[str]]) -> dict[str, list[dict]]:
     """{flow id: its chains in one graph} without the chains a longer flow's chain holds: a chain of flow F is
     dropped when a longer flow G the graph follows has F's agents in a row, at an offset where G's chain is at
-    the same node as F's chain starts. A run counts under the longest flow it follows, never under each part."""
+    the same node as F's chain starts. A run counts under the longest flow it follows, never under each part.
+    Two flows with the same path (the same agents in a row) follow the same chains: one run counts once, under the
+    flow with the lowest id (in string order); the other's chain from that node is dropped."""
     kept = {}
     for flow_id, chains in found.items():
         short = working[flow_id]
         covering = [(working[other], offset, chain) for other, other_chains in found.items()
                     if len(working[other]) > len(short) for offset in _inside(short, working[other])
                     for chain in other_chains]
+        covering += [(short, 0, chain) for other, other_chains in found.items()
+                     if other < flow_id and working[other] == short for chain in other_chains]
         kept[flow_id] = [chain for chain in chains
                          if not any(chain[short[0]] == other_chain[long[offset]] for long, offset, other_chain in covering)]
     return kept

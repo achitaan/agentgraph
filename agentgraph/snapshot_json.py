@@ -677,7 +677,9 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
                          graph_paths=[graph.path for graph in snapshot.graphs], db_path=DB_PATH)
         document["skills"] = skills_document()
         skillset.annotate(document)
-        roster.annotate(document)
+        # The folder every writer uses by default: an agent's rev covers its structure file (the Desktop app's
+        # writers pass no --structure either), and removable reads the flow files as the removal does.
+        roster.annotate(document, structure=STRUCTURE_DIR)
         skillfiles.annotate(document)
     return document
 

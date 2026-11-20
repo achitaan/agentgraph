@@ -1486,8 +1486,15 @@ def _put_back_failed(what, name, exc, failed):
                           "them by hand before trying again (the undo record is kept)") from exc
 
 
-def _structure_back(root_fd, root, removed):
-    """The changes that put back what a removal took from the structure folder, checked to be still possible."""
+# How long an undo record is kept, for a refusal that leaves the record waiting (see _dangling).
+KEPT_ADDED = (f"the newest {skillset.MAX_BACKUPS} records of one kind for one agent are kept, and older ones are "
+              "pruned when a newer one is made")
+KEPT_PRESET = "a default agent's removal records are kept in the backups folder until you delete them"
+
+
+def _structure_back(root_fd, root, removed, kept=KEPT_ADDED):
+    """The changes that put back what a removal took from the structure folder, checked to be still possible
+    (`kept`: how long the record is kept, for a refusal)."""
     changes = [{**change, "before": change["after"], "after": change["before"]} for change in reversed(removed)]
     if changes and root_fd is None:
         raise RosterError(f"no structure folder at {root}; nothing was restored")
@@ -1504,7 +1511,7 @@ def _structure_back(root_fd, root, removed):
                 "flow" if change["folder"] == FLOWS_FOLDER else "structure file")
             raise RosterError(f"the {what} {change['folder']}/{change['name']} was changed or added since the "
                               "agent was removed; nothing was restored")
-    problems = _dangling(root_fd, changes)
+    problems = _dangling(root_fd, changes, kept)
     if problems:
         raise RosterError(f"{'; '.join(problems)}; nothing was restored")
     return changes
@@ -1523,10 +1530,12 @@ def _structure_agents(root_fd):
     return found
 
 
-def _dangling(root_fd, changes):
+def _dangling(root_fd, changes, kept=KEPT_ADDED):
     """What would stand in the way of putting back `changes` (structure changes, made in order): a flow put back
     whose name another flow holds now (it would take the name, and the command, from that flow), or a flow or group
-    put back that names an agent no longer in the structure folder (it would come back hidden). [] when none."""
+    put back that names an agent no longer in the structure folder (it would come back hidden; an agent deleted by
+    hand has no record to restore it from, so the refusal says what can be done and how long the record is kept:
+    `kept`). [] when none."""
     if root_fd is None:
         return []
     touched = {(change["folder"], change["name"]) for change in changes}
@@ -1565,8 +1574,11 @@ def _dangling(root_fd, changes):
             continue
         gone = sorted({agent for agent in names if agent not in agents})
         if gone:
-            problems.append(f"the {what} names {', '.join(gone)}, no longer in the structure folder; restore "
-                            f"{'them' if len(gone) > 1 else 'it'} first")
+            them = "them" if len(gone) > 1 else "it"
+            problems.append(f"the {what} names {', '.join(gone)}, no longer in the structure folder; restore {them} "
+                            f"first. If {'they were' if len(gone) > 1 else 'it was'} deleted by hand, nothing can "
+                            f"restore {them}: add an agent named {' and an agent named '.join(gone)} (agentgraph "
+                            f"agent add NAME) and run this restore again, or leave this record ({kept})")
     return problems
 
 
@@ -1652,7 +1664,7 @@ def restore_agent(record, *, config=CONFIG, map_path=MAP, backups=BACKUPS, struc
             text, mode = skillset._read(config, "config")
             obj = skillset._parse(text)
             new_text, map_files, problems = _plan_restore(data, obj, text, map_path, schema)
-            changes = _structure_back(root_fd, root, removed)
+            changes = _structure_back(root_fd, root, removed, KEPT_PRESET)
             failed = []
             try:
                 _apply(root_fd, changes, failed)
@@ -1812,9 +1824,12 @@ def rename_agent(name, to, *, config=CONFIG, map_path=MAP, backups=BACKUPS, stru
     if to == name:
         raise RosterError(f"{name!r} already has that name")
     agentfiles.check_name(to)
-    _check_new_name(obj, to, list(obj["presets"]), agents_dir)
     root = Path(structure) if structure is not None else STRUCTURE_DIR
-    with _structure_locked(root) as root_fd:
+    # The new name is checked under the locks every other writer of the presets and the structure folder takes
+    # (in remove_agent's order), so no agent can take it between the check and the write.
+    with _structure_locked(root) as root_fd, skillset._locked(config, map_path, wrap=False):
+        obj = skillset._parse(skillset._read(config, "config")[0])
+        _check_new_name(obj, to, list(obj["presets"]), agents_dir)
         with agentfiles._folder(agents_dir) as fd:
             data = agentfiles._read_at(fd, name + ".md")
             held = agentfiles._taken(fd, to)
@@ -2091,7 +2106,7 @@ def expecting(name, expect, *, config=CONFIG, map_path=MAP, structure=None):
     if expect is None:
         yield None
         return
-    if not isinstance(expect, str) or not expect:
+    if not agentfiles.expect_ok(expect):
         raise RosterError(agentfiles.EXPECT_TEXT)
     with _structure_locked(Path(structure) if structure is not None else STRUCTURE_DIR) as root_fd:
         yield lambda data: _expect_agent(name, expect, data=data, root_fd=root_fd, config=config, map_path=map_path)

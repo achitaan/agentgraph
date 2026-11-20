@@ -342,6 +342,27 @@ class CommandLines(agentfile_tests.Base):
         self.assertEqual(self.everything(), before, "an empty expect changed something")
 
 
+    def test_an_expect_that_is_not_a_rev_is_bad_input_by_command(self):
+        # Review n8 r5, note: one rule on every surface: an `expect` must look like a rev (agentfiles.rev's 16
+        # lowercase hex digits); a blank one, a short one or one in capitals is never compared.
+        before = self.everything()
+        cases = self.commands_with_expect()
+        bads = (" ", "0" * 15, "ABCDEF0123456789")
+        jobs = [(module, [*argv, "--expect", bad, *json_], stdin) for bad in bads for json_ in ([], ["--json"])
+                for module, argv, stdin, _ in cases]
+        labels = [(bad, bool(json_), module, argv) for bad in bads for json_ in ([], ["--json"])
+                  for module, argv, _, _ in cases]
+        for (bad, as_json, module, argv), (code, out, err) in zip(labels, self.run_all(jobs)):
+            with self.subTest(module=module, argv=argv[:4], expect=bad, json=as_json):
+                self.assertNotIn("Traceback", err)
+                self.assertEqual(code, 1, (out, err))
+                self.assertIn("expect must be", out if as_json else err)
+                if as_json:
+                    self.assertEqual(set(json.loads(out.strip().splitlines()[-1])), {"error"})
+                self.assertNotIn(STALE, out + err, "a malformed expect was compared")
+        self.assertEqual(self.everything(), before, "a malformed expect changed something")
+
+
 class Endpoints(agentfile_tests.Base):
     """409 with {"error", "rev"} from every endpoint, the snapshot's revs taken as `expect`, old clients unchanged."""
 
@@ -501,6 +522,28 @@ class Endpoints(agentfile_tests.Base):
         for path, body in requests:
             for bad in ("", None, 5, []):
                 with self.subTest(path=path, expect=bad):
+                    status, answer, _ = self.post({**body, "expect": bad}, path=path)
+                    self.assertEqual(status, 400, answer)
+                    self.assertNotIn("rev", answer)
+        self.assertEqual(self.everything(), before)
+
+    def test_an_expect_that_is_not_a_rev_is_400_on_every_endpoint(self):
+        # Review n8 r5, note: a blank rev (" ") was compared and answered 409; it is bad input, as on the Ipc.
+        self.add(template="verifier")
+        flow = self.post({"op": "add", "path": LOOP})[1]["flow"]
+        team = self.post({"op": "add", "lead": "impl-openai", "members": ["designer"]},
+                         path="/api/structure/team")[1]["team"]
+        requests = [("/api/structure/flow", {"op": "text", "id": flow["id"], "text": "x"}),
+                    ("/api/structure/flow", {"op": "remove", "id": flow["id"]}),
+                    ("/api/structure/team", {"op": "remove", "id": team["id"]}),
+                    ("/api/skillfile", {"op": "write", "id": "code-assurance", "text": "x"}),
+                    ("/api/skills", {"agent": "explorer", "skill": "code-assurance", "on": True}),
+                    ("/api/roster", {"op": "text", "name": "checker", "text": "x"}),
+                    ("/api/roster", {"op": "remove", "name": "checker"})]
+        before = self.everything()
+        for path, body in requests:
+            for bad in (" ", "0" * 15, "0" * 17, "ABCDEF0123456789", "0" * 16 + "\n"):
+                with self.subTest(path=path, op=body.get("op"), expect=bad):
                     status, answer, _ = self.post({**body, "expect": bad}, path=path)
                     self.assertEqual(status, 400, answer)
                     self.assertNotIn("rev", answer)

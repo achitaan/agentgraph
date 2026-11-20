@@ -38,9 +38,10 @@ _STALE = (agentfiles.StaleError, structure.StaleError)
 
 
 def _expect_ok(request: dict) -> bool:
-    """A request's "expect", when it has one, is a rev: text, not empty. An empty one is bad input (400), never taken
-    as no "expect" and never compared; the command lines and the Desktop plugin refuse it alike."""
-    return "expect" not in request or (isinstance(request["expect"], str) and request["expect"] != "")
+    """A request's "expect", when it has one, looks like a rev (agentfiles.expect_ok: 16 lowercase hex digits).
+    Anything else (empty, blank, null, another shape) is bad input (400), never taken as no "expect" and never
+    compared; the command lines and the Desktop plugin refuse it alike."""
+    return "expect" not in request or (request["expect"] is not None and agentfiles.expect_ok(request["expect"]))
 _TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",

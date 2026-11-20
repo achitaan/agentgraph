@@ -104,7 +104,15 @@ class AgentfilesError(skillset.SkillsetError):
 STALE = "changed since you opened it; reload and try again"
 
 
-EXPECT_TEXT = "expect must be text, not empty: the rev the view was showing"
+# What a rev looks like (rev's own output). An `expect` that is given must look like one on every surface (the
+# endpoints answer 400, the commands and the Desktop plugin refuse it plainly); anything else is never compared.
+REV = re.compile(r"[0-9a-f]{16}")
+EXPECT_TEXT = "expect must be text in the form of a rev, 16 lowercase hex digits: the rev the view was showing"
+
+
+def expect_ok(expect):
+    """Whether `expect` is None (no check) or looks like a rev."""
+    return expect is None or (isinstance(expect, str) and REV.fullmatch(expect) is not None)
 
 
 class StaleError(AgentfilesError):
@@ -131,10 +139,10 @@ def rev(*parts):
 
 def check_expect(expect, current, what):
     """Refuse (StaleError) a write given `expect` when it is not `current`; no check when `expect` is None. An
-    `expect` that is given must be a rev: text, not empty (an empty one is bad input, never compared)."""
+    `expect` that is given must look like a rev (expect_ok; anything else is bad input, never compared)."""
     if expect is None:
         return
-    if not isinstance(expect, str) or not expect:
+    if not expect_ok(expect):
         raise AgentfilesError(EXPECT_TEXT)
     if expect != current:
         raise StaleError(what, current)

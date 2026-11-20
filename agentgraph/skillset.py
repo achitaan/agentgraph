@@ -42,12 +42,17 @@ def _name(value, kind):
                             "lowercase letters, digits or '-' (64 at most)")
 
 
+AGENT_NAME_REFUSAL = "invalid agent name: use a lowercase letter, then lowercase letters, digits, '_' or '-' (64 at most)"
+# A preset agent whose name the pattern refuses: the snapshot's reason starts with the writer's own refusal.
+AGENT_NAME_REASON = (AGENT_NAME_REFUSAL + "; agent names become file names, so this agent's skills cannot be changed "
+                     "here (rename it in the preset file first)")
+
+
 def _agent_name(value):
     """An agent name (agentgraph.names: the one definition), safe as a key and as part of a file name."""
     _name(value, "agent")
     if not names.valid("agent", value):
-        raise SkillsetError("invalid agent name: use a lowercase letter, then lowercase letters, digits, '_' or '-' "
-                            "(64 at most)")
+        raise SkillsetError(AGENT_NAME_REFUSAL)
 
 
 def _read(path, label):
@@ -142,6 +147,9 @@ def _description(obj, agent, selected, *, native=False):
                   name for name in entries if name != active and by_preset.get(name) != by_preset.get(active)]}
     if seat:
         result["reason"] = SEAT_REASON
+    elif result["editable"] and not names.valid("agent", agent):
+        result["editable"] = False  # the writers refuse it (_agent_name): the view says so too
+        result["reason"] = AGENT_NAME_REASON
     elif not result["editable"]:
         result["reason"] = "This agent has no entry in the plugin's agent presets."
     return result
@@ -457,9 +465,26 @@ def _map_edit(text, old, new, agent):
 
 
 @contextmanager
-def _locked(*paths):
+def _locked(*paths, wrap=True):
     # Directory inodes remain stable when the files are replaced. Lock in
     # inode order so runs that share either file serialize without deadlocking.
+    # `wrap` False: an OSError raised in the body passes through as it is (only
+    # opening and locking are reported as a SkillsetError).
+    if not wrap:
+        with ExitStack() as stack:
+            try:
+                directories = {}
+                for path in paths:
+                    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                    stack.callback(os.close, fd)
+                    info = os.fstat(fd)
+                    directories[info.st_dev, info.st_ino] = fd
+                for _, fd in sorted(directories.items()):
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError as exc:
+                raise SkillsetError(f"skillset file operation failed: {exc}") from exc
+            yield list(directories.values())
+        return
     try:
         with ExitStack() as stack:
             directories = {}
