@@ -11,6 +11,8 @@
  *             "3d": the same system as a turning solid figure, drawn with characters chosen by depth
  *   change    { from, at }: the camera moves from view `from` to `view`, starting at `at` (ms), for CHANGE_MS
  *   colors    { dark, muted }: the theme's background is dark (default) or light, and its muted colour "#rrggbb"
+ *   orbit     { turn, elevation, resume }: the 3D camera turned by hand (orbitCamera, orbitTurned, orbitReset)
+ *   keys      [[key, label], ...]: in 3D, one muted text of the pairs that fit on the canvas's bottom row
  *
  * From the top: one header row (the list's first line, with dollars), at most three "needs you" lines, the canvas,
  * then the instruments (context chart, steps strip, spend bars).
@@ -43,6 +45,15 @@ export const TURN_MS = 40000; // one turn of the 3D figure
 export const CHANGE_MS = 700; // the camera's move between the views
 export const ELEVATION_3D = 0.5; // radians above the figure's equator
 export const DEPTH_CHARS = Object.freeze(["·", ".", ":", "0", "1", "@"]); // far to near
+// Turning the 3D figure by hand (see orbitCamera): the self-turn waits RESUME_MS after the last input, then goes on
+// from where the user left it. The elevation stays between the figure's plane (0) and straight above (PI/2).
+export const RESUME_MS = 3000;
+export const TURN_STEP = Math.PI / 12; // one key press: 15 degrees round the upright axis
+export const ELEVATION_STEP = Math.PI / 24; // one key press: 7.5 degrees up or down
+export const ELEVATION_MIN = 0;
+export const ELEVATION_MAX = Math.PI / 2;
+export const DRAG_TURN_PER_CELL = Math.PI / 30; // a drag: 6 degrees per column across
+export const DRAG_ELEVATION_PER_ROW = Math.PI / 15; // and 12 per row up or down (a row is about two columns tall)
 export const CANVAS_MIN_ROWS = 12;
 // The group colours, by the theme's background. No green or teal: every hue is outside 80-190 degrees.
 export const GROUP_COLORS = Object.freeze({
@@ -1259,15 +1270,63 @@ function draw3D(doc, L, canvas, S, P, now, frame, cam) {
   }
 }
 
+function wrapTurn(a) {
+  const full = 2 * Math.PI;
+  return a >= 0 && a < full ? a : ((a % full) + full) % full;
+}
+
+// The 3D camera at `now` from the orbit `{ turn, elevation, resume }` (each optional): the figure stands at `turn`
+// until `resume` (ms), then turns on from there, once in TURN_MS. No orbit: turn 0 at time 0 and ELEVATION_3D, so
+// the angle is 2 PI (now mod TURN_MS) / TURN_MS. -> { turn (0 to 2 PI), elevation, held (true before `resume`) }
+export function orbitCamera(orbit, now) {
+  const o = isObject(orbit) ? orbit : {};
+  const base = Number.isFinite(Number(o.turn)) ? Number(o.turn) : 0;
+  const resume = o.resume !== undefined && o.resume !== null && Number.isFinite(Number(o.resume)) ? Number(o.resume) : null;
+  const t = Number(now) || 0;
+  const run = resume === null ? t : Math.max(0, t - resume);
+  const turn = wrapTurn(base + 2 * Math.PI * ((((run % TURN_MS) + TURN_MS) % TURN_MS) / TURN_MS));
+  const elevation = Number.isFinite(Number(o.elevation)) ? clamp(Number(o.elevation), ELEVATION_MIN, ELEVATION_MAX) : ELEVATION_3D;
+  return { turn, elevation, held: resume !== null && t < resume };
+}
+
+// The orbit after the user turns it by `dTurn` and `dElevation` (radians) at `now`: from the angle shown at `now`,
+// the elevation clamped, the self-turn held for RESUME_MS.
+export function orbitTurned(orbit, now, dTurn = 0, dElevation = 0) {
+  const cam = orbitCamera(orbit, now);
+  return {
+    turn: wrapTurn(cam.turn + (Number(dTurn) || 0)),
+    elevation: clamp(cam.elevation + (Number(dElevation) || 0), ELEVATION_MIN, ELEVATION_MAX),
+    resume: (Number(now) || 0) + RESUME_MS,
+  };
+}
+
+// The orbit put back to where the 3D view starts (turn 0, ELEVATION_3D), held for RESUME_MS from `now`.
+export function orbitReset(now) {
+  return { turn: 0, elevation: ELEVATION_3D, resume: (Number(now) || 0) + RESUME_MS };
+}
+
 // The camera for a frame: the target view's steady camera, or one on its way between the views.
 function cameraAt(options, now) {
-  const turnNow = (2 * Math.PI * ((((now % TURN_MS) + TURN_MS) % TURN_MS) / TURN_MS));
   const change = changeAt(options, now);
   if (!change) return null;
+  const target = orbitCamera(options.orbit, now);
   const e = change.t * change.t * (3 - 2 * change.t); // smoothstep
   const k = change.to === "3d" ? e : 1 - e; // 0: straight above, unturned; 1: the 3D camera
-  const wrapped = turnNow > Math.PI ? turnNow - 2 * Math.PI : turnNow;
-  return { turn: wrapped * k, elevation: Math.PI / 2 + (ELEVATION_3D - Math.PI / 2) * k };
+  const wrapped = target.turn > Math.PI ? target.turn - 2 * Math.PI : target.turn;
+  return { turn: wrapped * k, elevation: Math.PI / 2 + (target.elevation - Math.PI / 2) * k };
+}
+
+// The keys of the 3D view ([[key, label], ...]) as one muted text on the canvas's bottom row: the pairs that fit.
+function keysText(keys, width) {
+  let text = "";
+  for (const pair of Array.isArray(keys) ? keys : []) {
+    if (!Array.isArray(pair) || pair.length < 2) continue;
+    const piece = `${clean(String(pair[0]))} ${clean(String(pair[1]))}`;
+    const next = text ? text + "  " + piece : piece;
+    if (displayWidth(next) > width) break;
+    text = next;
+  }
+  return text;
 }
 
 function drawCanvas(doc, w, h, now, frame, options) {
@@ -1277,8 +1336,13 @@ function drawCanvas(doc, w, h, now, frame, options) {
   const L = orbitLayout(doc, w, h);
   const P = makePalette(L.keys, options.colors);
   const moving = cameraAt(options, now);
+  if (options.view === "3d" && options.keys) {
+    // the keys of the 3D view, first on the bottom row's text layer, so no name is placed over them
+    const hint = keysText(options.keys, w);
+    if (hint) canvas.put(0, h - 1, hint, styles.get("muted"));
+  }
   if (moving) draw3D(doc, L, canvas, styles, P, now, frame, moving);
-  else if (options.view === "3d") draw3D(doc, L, canvas, styles, P, now, frame, { turn: (2 * Math.PI * (((now % TURN_MS) + TURN_MS) % TURN_MS)) / TURN_MS, elevation: ELEVATION_3D });
+  else if (options.view === "3d") draw3D(doc, L, canvas, styles, P, now, frame, orbitCamera(options.orbit, now));
   else draw2D(doc, L, canvas, styles, P, now, frame);
   return canvas.lines();
 }

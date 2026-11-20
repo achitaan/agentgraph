@@ -2848,6 +2848,128 @@ test("panel scene: frames at 100 ms while work moves; an unchanged frame is not 
 });
 
 // ---------------------------------------------------------------------------------------------------------------
+// orbit lane (n104): turning the 3D orbit by hand (keys and mouse), the 3D keys line. Start of the block.
+
+const idleDemo = () => {
+  const doc = JSON.parse(JSON.stringify(demoWorn));
+  for (const a of doc.agents) a.busy = 0;
+  return doc;
+};
+
+test("orbit: the camera without an orbit is the self-turn; a turn holds it RESUME_MS, then it goes on from the angle left", () => {
+  const full = 2 * Math.PI;
+  for (const now of [0, 166, 9000, 39999, 40000, 123456]) {
+    assert.equal(S.orbitCamera(null, now).turn, (full * (((now % S.TURN_MS) + S.TURN_MS) % S.TURN_MS)) / S.TURN_MS, "no orbit at " + now);
+    assert.equal(S.orbitCamera(null, now).elevation, S.ELEVATION_3D);
+    assert.equal(S.orbitCamera(null, now).held, false);
+  }
+  const t0 = 9000;
+  const o = S.orbitTurned(null, t0, S.TURN_STEP, 0);
+  const shown = S.orbitCamera(null, t0).turn;
+  assert.ok(Math.abs(o.turn - ((shown + S.TURN_STEP) % full)) < 1e-12, "from the angle shown, one step on");
+  assert.equal(o.resume, t0 + S.RESUME_MS);
+  assert.equal(S.RESUME_MS >= 2000 && S.RESUME_MS <= 5000, true, "a few seconds");
+  // held: the same camera until resume
+  for (const dt of [0, 500, S.RESUME_MS - 1]) {
+    assert.equal(S.orbitCamera(o, t0 + dt).turn, o.turn, "held at +" + dt);
+    assert.equal(S.orbitCamera(o, t0 + dt).held, true);
+  }
+  // then on from there at the self-turn's speed: no jump at resume
+  const r = o.resume;
+  assert.equal(S.orbitCamera(o, r).turn, o.turn);
+  const after = S.orbitCamera(o, r + 1000).turn;
+  assert.ok(Math.abs(((after - o.turn + full) % full) - (full * 1000) / S.TURN_MS) < 1e-9, "on at the self-turn's speed");
+  assert.ok(Math.abs(S.orbitCamera(o, r + 1).turn - S.orbitCamera(o, r - 1).turn) < 1e-3, "continuous at resume");
+  // a turn while the self-turn runs again starts from where it is then
+  const later = r + 5000;
+  const o2 = S.orbitTurned(o, later, -S.TURN_STEP, 0);
+  assert.ok(Math.abs(((o2.turn - S.orbitCamera(o, later).turn + full) % full) - (full - S.TURN_STEP)) < 1e-9);
+  // the elevation is clamped: never past looking along the plane or straight down, so it never flips
+  let e = null;
+  for (let i = 0; i < 40; i += 1) e = S.orbitTurned(e, t0, 0, S.ELEVATION_STEP);
+  assert.equal(e.elevation, S.ELEVATION_MAX);
+  assert.equal(S.ELEVATION_MAX, Math.PI / 2);
+  for (let i = 0; i < 80; i += 1) e = S.orbitTurned(e, t0, 0, -S.ELEVATION_STEP);
+  assert.equal(e.elevation, S.ELEVATION_MIN);
+  assert.equal(S.ELEVATION_MIN, 0);
+  assert.equal(S.orbitCamera({ elevation: 9 }, 0).elevation, Math.PI / 2);
+  assert.equal(S.orbitCamera({ elevation: -9 }, 0).elevation, 0);
+  // reset: the starting camera, held
+  assert.deepEqual(S.orbitReset(t0), { turn: 0, elevation: S.ELEVATION_3D, resume: t0 + S.RESUME_MS });
+  // nonsense in, a camera out
+  for (const bad of [{ turn: "x", elevation: null, resume: NaN }, { turn: -7 }, 5, "a"]) {
+    const c = S.orbitCamera(bad, 1000);
+    assert.ok(c.turn >= 0 && c.turn < full && c.elevation >= 0 && c.elevation <= Math.PI / 2, JSON.stringify(bad));
+  }
+});
+
+test("orbit: a turned 3D frame differs from the self-turn's, stands still while held, then turns on; every name once", () => {
+  const doc = idleDemo();
+  const t0 = 20000;
+  const o = S.orbitTurned(null, t0, Math.PI / 2, 0.3);
+  const at = (now, orbit) => sceneText(S.orbitLines(doc, 120, 30, now, Object.assign({ view: "3d" }, orbit ? { orbit } : {}))).join("\n");
+  assert.notEqual(at(t0, o), at(t0, null), "turned by hand: another picture");
+  assert.equal(at(t0 + 1000, o), at(t0, o), "held: the same frame");
+  assert.equal(at(t0 + S.RESUME_MS - 1000, o), at(t0, o)); // a stuck agent blinks twice a second: the same phase
+  assert.notEqual(at(o.resume + 1000, o), at(t0, o), "then it turns on");
+  // the self-turn's frames are unchanged without an orbit
+  assert.equal(at(t0, null), sceneText(S.orbitLines(doc, 120, 30, t0, V3)).join("\n"));
+  // every ring agent's name exactly once, at any turn and elevation, at the smallest size too
+  for (const [w, h] of [[64, 12], [120, 30]]) {
+    for (const elevation of [0, 0.25, S.ELEVATION_3D, 1.2, Math.PI / 2]) {
+      for (const turn of [0, 1.3, 2.9, 4.4]) {
+        const lines = sceneText(S.orbitLines(doc, w, h, 0, { view: "3d", orbit: { turn, elevation, resume: 1e15 }, keys: [["←→↑↓", "turn"], ["0", "reset"]] }));
+        assert.equal(lines.length, h);
+        for (const name of ringNames) assert.equal(countWord(lines, R.truncate(name, 12)), 1, `${name} at ${w}x${h} e=${elevation} t=${turn}\n${lines.join("\n")}`);
+      }
+    }
+  }
+});
+
+test("orbit: the keys line: in 3D only, muted, on the canvas's bottom row, within the width at 64x22; the change starts from the orbit's camera", () => {
+  const keys = [["←→↑↓", "turn"], ["0", "reset"]];
+  const want = "←→↑↓ turn  0 reset";
+  for (const [w, h] of SIZES) {
+    const lines = S.scene(demoWorn, { width: w, height: h, now: 5000, view: "3d", keys });
+    assertExact(lines, w, h, `3D with keys ${w}x${h}`);
+    const text = sceneText(lines);
+    const row = text.findIndex((l) => l.includes(want));
+    assert.ok(row > 0, `the keys at ${w}x${h}\n${text.join("\n")}`);
+    assert.ok(text[row].startsWith(want), "at the left edge");
+    assert.equal(text.filter((l) => l.includes("reset")).length, 1);
+    const span = lines[row].find((s) => s.text.includes("turn"));
+    assert.equal(span.tone, "muted");
+    assert.ok(!span.color, "no group colour");
+    // the canvas's bottom row: the next row is an instrument or the end
+    const plain = sceneText(S.scene(demoWorn, { width: w, height: h, now: 5000, view: "3d" }));
+    assert.deepEqual(text.slice(row + 1), plain.slice(row + 1), "the rows under it are the instruments, unchanged");
+    assert.deepEqual(text.slice(0, 1), plain.slice(0, 1));
+    // 2D: no keys line, the 2D frame unchanged
+    const flat = sceneText(S.scene(demoWorn, { width: w, height: h, now: 5000, view: "2d", keys }));
+    assert.ok(!flat.some((l) => l.includes("reset")), "no keys line in 2D");
+    assert.deepEqual(flat, sceneText(S.scene(demoWorn, { width: w, height: h, now: 5000 })));
+  }
+  // too narrow for a pair: it is left out, never cut
+  const narrow = sceneText(S.orbitLines(demoWorn, 10, 12, 0, { view: "3d", keys: [["abcdefghijk", "x"]] }));
+  assert.ok(!narrow.some((l) => l.includes("abc")));
+  // the change into 3D ends on the turned orbit's steady frame, and the change back starts from it (no jump)
+  const doc = idleDemo();
+  const orbit = { turn: 2.2, elevation: 1.1, resume: 1e15 };
+  const at = 50000;
+  const steady = sceneText(S.orbitLines(doc, 120, 30, at + S.CHANGE_MS, { view: "3d", orbit })).join("\n");
+  const almost = sceneText(S.orbitLines(doc, 120, 30, at + S.CHANGE_MS - 1, { view: "3d", orbit, change: { from: "2d", at } })).join("\n");
+  // where the names stand (the sparse far half of a ring may differ by a dot at a camera a hair away)
+  const spots = (t) => ringNames.map((n) => t.split("\n").map((l, r) => [r, l.search(new RegExp(`(?<![\\w-])${n}(?![\\w-])`))]).find(([, c]) => c >= 0).join(",")).join(" ");
+  assert.equal(spots(almost), spots(steady), "the change into 3D lands on the orbit's camera");
+  const selfTurn = sceneText(S.orbitLines(doc, 120, 30, at + S.CHANGE_MS, V3)).join("\n");
+  assert.notEqual(spots(almost), spots(selfTurn), "not on the self-turn's camera");
+  const leaving = sceneText(S.orbitLines(doc, 120, 30, at + 1, { view: "2d", orbit, change: { from: "3d", at } })).join("\n");
+  assert.equal(spots(leaving), spots(steady), "the change back starts from the orbit's camera");
+});
+
+// orbit lane (n104): end of the block.
+
+// ---------------------------------------------------------------------------------------------------------------
 // Paths: `r` runs a drawn path (structure.flows), the paths row at rest
 
 const RUNNER = await import(src("runner.js"));
