@@ -6329,7 +6329,7 @@
           assert(turnOf(root) === a && framesOf(root) === f, 'the system turns by itself with reduced motion');
         }, { motion: 'none' });
       });
-      await test('n105 item 5 (ruling 3): 3D is for looking: a click picks an agent or a line, a right-click and Enter open details to read, Escape lets go, undo works; drawing a path, a double-click loop, N and the +, Delete, Backspace, G, moving an agent, typing in the details and pressing their controls are each refused with one status-line sentence and ask nothing of the host', async () => {
+      await test('n105 item 5 (ruling 3): 3D is for looking: a click picks an agent or a line, a right-click and Enter open details to read, Escape lets go; undo, drawing a path, a double-click loop, N and the +, Delete, Backspace, G, moving an agent, typing in the details and pressing their controls are each refused with one status-line sentence and ask nothing of the host', async () => {
         const data = n105Data(), host = worldHost(data);
         data.roster = { editable: true, models: ['test/model-a'] };
         data.agents.forEach(a => { a.removable = a.name !== 'orchestrator' && a.name !== 'council' && a.parent !== 'council'; a.added = false; a.skills = []; a.skills_editable = true; });
@@ -6345,7 +6345,7 @@
           const said = () => { const ok = !note.hidden && note.textContent === SAID && root.querySelector('.ag-status').contains(note); note.hidden = true; note.textContent = ''; return ok; };
           let calls = host.calls.length;
           undoKey(viewportOf(root)); await settled();
-          assert(host.calls.length > calls && root.querySelectorAll('[data-route]').length === 6 && in3d(root), 'undo does not work in 3D');
+          assert(said() && host.calls.length === calls && root.querySelectorAll('[data-route]').length === 5 && in3d(root), 'undo was not refused in 3D');
           await clearOf(root, ['impl-claude', 'verifier']);
           calls = host.calls.length;
           // A click picks an agent; a click on another picks that one (no path); again lets it go; a double-click is refused.
@@ -6654,7 +6654,7 @@
       await test('n105 item 9b: the same at 620 px and 1100 px with the council\'s details opened once 3D is shown and zoomed by the user (the figure is fitted again into the canvas left)', async () => {
         await fitSweep(620, { late: true }); await fitSweep(1100, { late: true });
       });
-      await test('n105 item 10: in 3D a step\'s output (the details\' Outputs in TASK) opens to read; typing in it, its Save, Ctrl+Enter and Cmd+Enter there, and a save queued in 2D that would go out after the switch are each refused with the status-line sentence and send nothing; Ctrl+Z of an output edit saved in 2D puts it back as other undo does in 3D', async () => {
+      await test('n105 item 10: in 3D a step\'s output (the details\' Outputs in TASK) opens to read; typing in it, its Save, Ctrl+Enter and Cmd+Enter there, and a save queued in 2D that would go out after the switch are each refused with the status-line sentence and send nothing; Ctrl+Z of an output edit saved in 2D is refused too, and puts it back once in 2D', async () => {
         let held = true, release = null;
         const data = outputFixture(), host = outputHost(data, { gate: request => request.op === 'write' && held ? new Promise(resolve => { release = resolve; }) : undefined });
         await using(data, async root => {
@@ -6690,10 +6690,494 @@
           assert(said() && host.writes().length === 1, 'Ctrl+Enter wrote the output in 3D or was not refused');
           press(box, 'Enter', { metaKey: true }); await settle();
           assert(said() && host.writes().length === 1 && host.files['write-report/report'].text === 'mine\n', 'Cmd+Enter wrote the output in 3D or was not refused');
-          // Undo of the 2D edit works in 3D: the text is put back.
+          // Undo of the 2D edit is refused in 3D (a write); its step stays: back in 2D it puts the text back.
           viewportOf(root).focus(); undoKey(viewportOf(root)); await settled();
-          assert(host.restores().length === 1 && host.files['write-report/report'].text === 'line one\n' && outputBox(root)?.dataset.saved === 'line one\n' && in3d(root), 'Ctrl+Z of the output edit did not put it back in 3D');
+          assert(said() && host.restores().length === 0 && host.files['write-report/report'].text === 'mine\n' && in3d(root), 'Ctrl+Z of the output edit was not refused in 3D');
+          press(viewportOf(root), 'd'); await until(() => in2d(root));
+          viewportOf(root).focus(); undoKey(viewportOf(root)); await settled();
+          assert(host.restores().length === 1 && host.files['write-report/report'].text === 'line one\n' && outputBox(root)?.dataset.saved === 'line one\n', 'Ctrl+Z of the output edit did not put it back in 2D');
         }, { actions: { output: host.output } });
+      });
+      // ---- The look-only rule without exceptions (review n8 view-r2, verifier n88 r4): while anything but the flat view
+      // shows (3D or either morph) no write leaves for the host; reads do. ----
+      const LOOK_SAID = '3D is for looking: press D to change things in 2D.';
+      const lookSaid = root => { const note = root.querySelector('.ag-orbit-note'), ok = !note.hidden && note.textContent === LOOK_SAID && root.querySelector('.ag-status').contains(note); note.hidden = true; note.textContent = ''; return ok; };
+      // The flat view: 2D chosen and not morphing (what a host request is stamped with as it is asked).
+      const flat = root => root.dataset.agView === '2d' && root.dataset.agBlend === '0';
+      const pathSpot = (root, id) => { const step = routeOf(root, id).querySelector('.ag-route-step'); return pointsOf(step, 20).slice(4, 17).find(p => !document.elementFromPoint(p.x, p.y)?.closest('[data-agent]') && document.elementFromPoint(p.x, p.y)?.closest('[data-route]')?.dataset.route === id); };
+      const removableRoster = () => {
+        const data = n105Data();
+        data.roster = { editable: true, models: ['test/model-a'] };
+        data.agents.forEach(a => { a.removable = a.name !== 'orchestrator' && a.name !== 'council' && a.parent !== 'council'; a.added = false; a.skills = []; a.skills_editable = true; });
+        return data;
+      };
+      await test('n105 item 11 (review major 1): Ctrl+Z and Cmd+Z are refused while 3D shows wherever the focus is (the canvas after a click on it, the page, the 3D control, the details), say so and pop no undo step: back in 2D they undo the move and then the name made before', async () => {
+        const data = pathFixture(), host = pathHost(data);
+        await using(data, async root => {
+          await settled();
+          // In 2D: the path named (its details' name field, left), then an agent moved with Alt+arrow.
+          openStep(root, 'f1', 0); await settle();
+          const name = root.querySelector('.ag-detail [data-route-name]');
+          name.focus(); name.value = 'Named'; name.dispatchEvent(new Event('input', { bubbles: true })); leave(name); await settled();
+          assert(host.calls.some(call => call.op === 'name' && call.name === 'Named'), 'the name was not saved in 2D');
+          press(viewportOf(root), 'Escape'); await settle();
+          nodeOf(root, 'impl-openai').focus(); press(nodeOf(root, 'impl-openai'), 'ArrowRight', { altKey: true }); await settle();
+          const movedTo = stored(), calls = host.calls.length, button = root.querySelector('.ag-orbit-toggle');
+          assert(movedTo, 'the move was not kept in 2D');
+          viewportOf(root).focus(); press(viewportOf(root), 'd'); await until(() => in3d(root));
+          assert(in3d(root), 'not in 3D');
+          const places = [
+            ['the canvas after a click on it (Ctrl+Z)', () => { clickAt(root, emptySpot(root)); viewportOf(root).focus(); return viewportOf(root); }, { ctrlKey: true }],
+            ['the canvas (Cmd+Z)', () => viewportOf(root), { metaKey: true }],
+            ['the page', () => { document.activeElement?.blur?.(); return document.body; }, { ctrlKey: true }],
+            ['the 3D control', () => { button.focus(); return button; }, { ctrlKey: true }],
+            ['the details', () => { open(root, 'impl-openai'); const close = root.querySelector('.ag-close'); close.focus(); return close; }, { metaKey: true }]];
+          for (const [where, target, keys] of places) {
+            press(target(), 'z', keys); await settled();
+            assert(lookSaid(root) && host.calls.length === calls && stored() === movedTo && in3d(root), 'undo on ' + where + ' in 3D was not refused or changed something: ' + host.calls.slice(calls).map(call => JSON.stringify(call)).join(' | ') + ' ' + (stored() === movedTo ? '' : 'the move was undone'));
+          }
+          // Back in 2D the two steps are still there, in order.
+          press(viewportOf(root), 'Escape'); viewportOf(root).focus(); press(viewportOf(root), 'd'); await until(() => in2d(root));
+          undoKey(viewportOf(root)); await settled();
+          assert(stored() !== movedTo && host.calls.length === calls, 'back in 2D Ctrl+Z did not undo the move first');
+          undoKey(viewportOf(root)); await settled();
+          assert(host.calls.length === calls + 1 && host.calls.at(-1).op === 'name' && host.calls.at(-1).id === 'f1', 'back in 2D Ctrl+Z did not undo the name: ' + host.calls.slice(calls).map(call => JSON.stringify(call)).join(' | '));
+        }, { actions: { flow: host.flow } });
+      });
+      await test('n105 item 12 (review major 2): with a line picked, or an agent\'s details open, in 2D and the 3D control clicked (the focus stays on it), Delete, Backspace, N and G there, and Delete in the details, are refused while 3D shows and change nothing', async () => {
+        const data = removableRoster(), host = worldHost(data);
+        await using(data, async root => {
+          await settled();
+          const button = root.querySelector('.ag-orbit-toggle'), calls = host.calls.length, spot = pathSpot(root, 'p4');
+          assert(spot, 'p4 has no clear point to click in 2D');
+          clickAt(root, spot); await settle();
+          assert(picked(root, 'p4'), 'p4 was not picked in 2D');
+          button.focus(); button.click(); await until(() => in3d(root));
+          assert(in3d(root) && document.activeElement === button, 'the control did not switch to 3D keeping the focus');
+          for (const key of ['Delete', 'Backspace']) {
+            press(button, key); await settled();
+            assert(lookSaid(root) && routeOf(root, 'p4') && host.calls.length === calls, key + ' on the 3D control removed the picked path in 3D or was not refused: ' + host.calls.slice(calls).join(' | '));
+          }
+          press(button, 'n'); await settle();
+          assert(lookSaid(root) && root.querySelector('.ag-add-menu').hidden, 'N on the 3D control opened the add menu in 3D or was not refused');
+          press(button, 'g'); await settle();
+          assert(lookSaid(root) && !goalBox(root), 'G on the 3D control opened the goal box in 3D or was not refused');
+          button.click(); await until(() => in2d(root));
+          open(root, 'designer'); await settle();
+          assert(detailOpen(root) && root.querySelector('.ag-detail-title').textContent === 'designer', 'designer\'s details did not open in 2D');
+          button.focus(); button.click(); await until(() => in3d(root));
+          press(button, 'Delete'); await settled();
+          assert(lookSaid(root) && nodeOf(root, 'designer') && host.calls.length === calls, 'Delete on the 3D control removed the open agent in 3D or was not refused: ' + host.calls.slice(calls).join(' | '));
+          const close = root.querySelector('.ag-close'); close.focus(); press(close, 'Delete'); await settled();
+          assert(lookSaid(root) && nodeOf(root, 'designer') && routeOf(root, 'p4') && host.calls.length === calls, 'Delete in the details changed something in 3D or was not refused: ' + host.calls.slice(calls).join(' | '));
+        }, { actions: host.actions });
+      });
+      await test('n105 item 13 (review major 3, verifier finding 1): text typed in 2D: a save queued behind one out is not sent while 3D shows (said; the typing stays, marked not saved) and goes back in 2D; the page hidden in 3D sends nothing; at the switch (the control pressed with the focus kept in a field) what is typed is saved at once, and leaving the box in 3D sends nothing', async () => {
+        const data = pathFixture(), gates = [], log = [];
+        let held = true, mounted = null;
+        const host = pathHost(data, { gate: () => held ? new Promise(resolve => gates.push(resolve)) : null });
+        const flow = request => { log.push({ op: request.op, text: request.text, name: request.name, flat: flat(mounted) }); return host.flow(request); };
+        const away = () => log.filter(call => !call.flat);
+        await using(data, async root => {
+          mounted = root; await settled();
+          openStep(root, 'f1', 0); await settle();
+          let box = root.querySelector('.ag-detail [data-route-text]');
+          assert(box, 'the path\'s details did not open (' + detailOpen(root) + ' ' + root.querySelector('.ag-detail-title')?.textContent + ')');
+          box.focus(); box.value = 'one'; box.dispatchEvent(new Event('input', { bubbles: true })); leave(box); await settle();
+          box.focus(); box.value = 'two'; box.dispatchEvent(new Event('input', { bubbles: true })); leave(box); await settle();
+          assert(log.length === 1 && box.dataset.queued === 'true', 'the second save was not queued behind the first');
+          viewportOf(root).focus(); press(viewportOf(root), 'd'); await until(() => in3d(root));
+          assert(in3d(root), 'not in 3D');
+          held = false; gates.shift()(); await settled();
+          box = root.querySelector('.ag-detail [data-route-text]');
+          assert(!away().length && lookSaid(root) && box.value === 'two' && root.querySelector('[data-route-state]').dataset.routeState === 'error', 'the save queued in 2D went in 3D (' + away().map(call => call.text).join() + '), or was not refused with the typing kept and marked not saved');
+          // The page hidden in 3D: nothing is sent.
+          const hidden = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
+          Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+          try { window.dispatchEvent(new Event('pagehide')); document.dispatchEvent(new Event('visibilitychange')); await settled(); }
+          finally { delete document.hidden; Object.defineProperty(Document.prototype, 'hidden', hidden); document.dispatchEvent(new Event('visibilitychange')); }
+          assert(!away().length, 'hiding the page in 3D sent ' + away().map(call => call.op + ' ' + call.text).join());
+          // Back in 2D the usual rules go on: the typing is saved.
+          press(viewportOf(root), 'd'); await until(() => in2d(root)); await until(() => data.structure.flows[0].text === 'two');
+          assert(data.structure.flows[0].text === 'two' && log.at(-1).flat, 'back in 2D the typing was not saved');
+          // At the switch: a name typed with the focus kept in its field and an instruction typed, the 3D control pressed
+          // without taking the focus (as Safari and Firefox on a Mac do): both saved at once, in 2D.
+          await settled(); lookSaid(root);
+          const before = log.length, name = root.querySelector('.ag-detail [data-route-name]');
+          box = root.querySelector('.ag-detail [data-route-text]');
+          assert(name && box, 'the path\'s details are not open in 2D (' + root.querySelector('.ag-detail-title')?.textContent + ', ' + detailOpen(root) + ')');
+          typeIn(box, 'three');
+          name.focus(); name.value = 'Named'; name.dispatchEvent(new Event('input', { bubbles: true }));
+          root.querySelector('.ag-orbit-toggle').click();
+          // Asked at once, in 2D (the second write to the path goes when the first is answered, as every two do).
+          const asked = log.slice(before);
+          await until(() => in3d(root)); await settled();
+          const atSwitch = log.slice(before);
+          assert(asked.length && asked[0].flat && atSwitch.length === 2 && atSwitch.some(call => call.op === 'name' && call.name === 'Named') && atSwitch.some(call => call.op === 'text' && call.text === 'three'), 'what was typed was not saved at the switch, in 2D: ' + JSON.stringify(atSwitch));
+          const after = log.length;
+          box = root.querySelector('.ag-detail [data-route-text]');
+          pointerAt(box, 'pointerdown', { x: 0, y: 0 }); box.focus(); leave(box); await settled();
+          assert(log.length === after && data.structure.flows[0].text === 'three' && data.structure.flows[0].name === 'Named', 'leaving the box in 3D sent ' + log.slice(after).map(call => call.op + ' ' + (call.text ?? call.name)).join());
+        }, { actions: { flow } });
+      });
+      await test('n105 item 14 (review minor 1): the morph back to 2D is look-only too: during it Delete, Backspace and Ctrl+Z are refused and change nothing, and a click on an agent picks it as in 3D (a second agent picks that one, no path)', async () => {
+        const data = n105Data(), host = worldHost(data);
+        await using(data, async root => {
+          await settled();
+          const spot = pathSpot(root, 'p4'); assert(spot, 'p4 has no clear point to click in 2D');
+          clickAt(root, spot); await settle();
+          assert(picked(root, 'p4'), 'p4 was not picked in 2D');
+          viewportOf(root).focus(); press(viewportOf(root), 'd'); await until(() => in3d(root));
+          assert(in3d(root), 'not in 3D');
+          await clearOf(root, ['impl-claude', 'verifier']);
+          const calls = host.calls.length;
+          press(viewportOf(root), 'd');
+          const morphing = root.dataset.agView === '2d' && !flat(root);
+          press(viewportOf(root), 'Delete'); const deleted = lookSaid(root);
+          press(viewportOf(root), 'Backspace'); const backspaced = lookSaid(root);
+          undoKey(viewportOf(root)); const undone = lookSaid(root);
+          tap(root, 'verifier'); const first = root.dataset.agTrail || '';
+          tap(root, 'impl-claude'); const second = root.dataset.agTrail || '';
+          const still = !flat(root);
+          await until(() => in2d(root)); await settled();
+          assert(morphing && still, 'the presses were not made during the morph back');
+          assert(deleted && backspaced && undone && routeOf(root, 'p4') && host.calls.length === calls, 'during the morph back Delete, Backspace or Ctrl+Z changed something or was not refused: ' + host.calls.slice(calls).join(' | '));
+          assert(first === 'verifier' && second === 'impl-claude', 'a click during the morph back did not pick as in 3D (' + first + ' then ' + second + ')');
+        }, { actions: host.actions, motion: 'full' });
+      });
+      await test('n105 item 15 (checks the review left): started in 2D and finished in 3D: a path of two agents is not finished by Enter (refused, the path kept); a new circle being placed is let go at the switch (nothing added); a press on an agent, the switch, then a drag turns and moves nothing; a drag already moving an agent keeps 2D; with storage failing, 3D and back work', async () => {
+        const data = removableRoster(), host = worldHost(data);
+        await using(data, async root => {
+          await settled();
+          // A path of two agents drawn in 2D, then 3D: Enter does not finish it.
+          tap(root, 'impl-claude'); tap(root, 'verifier'); await settle();
+          assert(root.dataset.agTrail === 'impl-claude verifier', 'no path of two in 2D: ' + root.dataset.agTrail);
+          viewportOf(root).focus(); press(viewportOf(root), 'd'); await until(() => in3d(root));
+          press(viewportOf(root), 'Enter'); await settled();
+          assert(lookSaid(root) && root.dataset.agTrail === 'impl-claude verifier' && !host.calls.length, 'Enter in 3D finished the path drawn in 2D, or was not refused: ' + host.calls.join(' | '));
+          press(viewportOf(root), 'd'); await until(() => in2d(root)); press(viewportOf(root), 'Escape'); await settle();
+          // A new circle taken from the + (held), then the switch, then released on the canvas: nothing is added.
+          root.querySelector('.ag-add').click(); await settle();
+          const item = root.querySelector('.ag-add-menu [data-add-kind]'), view = viewportOf(root).getBoundingClientRect(), drop = { x: view.left + 60, y: view.bottom - 60 };
+          pointerAt(item, 'pointerdown', item.getBoundingClientRect()); pointerAt(document.body, 'pointermove', drop);
+          assert(root.querySelector('[data-draft]'), 'no circle is being placed');
+          press(viewportOf(root), 'd'); pointerAt(viewportOf(root), 'pointerup', drop); await settled();
+          assert(!root.querySelector('[data-draft]') && !host.calls.length, 'the circle taken in 2D was added in 3D: ' + host.calls.join(' | '));
+          press(viewportOf(root), 'd'); await until(() => in2d(root));
+          // A press on an agent, the switch, then a drag: it turns and moves nothing.
+          const c = centre(root, 'designer'), turn = turnOf(root);
+          pointerAt(nodeOf(root, 'designer'), 'pointerdown', c); press(viewportOf(root), 'd'); await until(() => in3d(root));
+          for (let i = 1; i <= 6; i++) pointerAt(viewportOf(root), 'pointermove', { x: c.x + 8 * i, y: c.y });
+          pointerAt(viewportOf(root), 'pointerup', { x: c.x + 48, y: c.y }); await settled();
+          assert(stored() === null && !host.calls.length && turnOf(root) !== turn, 'a press made in 2D and dragged in 3D moved an agent, or did not turn');
+          press(viewportOf(root), 'd'); await until(() => in2d(root));
+          // A drag moving an agent: the switch waits for it.
+          const d = centre(root, 'designer');
+          pointerAt(nodeOf(root, 'designer'), 'pointerdown', d); for (let i = 1; i <= 4; i++) pointerAt(viewportOf(root), 'pointermove', { x: d.x + 6 * i, y: d.y });
+          press(viewportOf(root), 'd');
+          assert(root.dataset.agView === '2d', 'the switch happened during a drag moving an agent');
+          pointerAt(viewportOf(root), 'pointerup', { x: d.x + 24, y: d.y }); await settled();
+        }, { actions: host.actions });
+        // Storage that fails (the Desktop panel may have none): the choice is not kept, the views still switch.
+        const get = Storage.prototype.getItem, set = Storage.prototype.setItem, errors = [], seen = event => errors.push(event.message);
+        Storage.prototype.getItem = function () { throw new Error('no storage'); }; Storage.prototype.setItem = function () { throw new Error('no storage'); };
+        window.addEventListener('error', seen);
+        try {
+          await using(n105Data(), async root => {
+            await settled();
+            press(viewportOf(root), 'd'); await until(() => in3d(root)); const went = in3d(root);
+            press(viewportOf(root), 'd'); await until(() => in2d(root));
+            assert(went && in2d(root) && !errors.length, 'with storage failing 3D and back did not work: ' + errors.join(' | '));
+          });
+        } finally { Storage.prototype.getItem = get; Storage.prototype.setItem = set; window.removeEventListener('error', seen); }
+      });
+      await test('n105 item 17 (verifier gap): the system does not turn by itself during the morph back to 2D, nor in 2D after it (no frame of its own)', async () => {
+        await using(n105Data(), async root => {
+          await settled();
+          press(viewportOf(root), 'd'); await until(() => in3d(root));
+          const a = turnOf(root); await until(() => turnOf(root) > a, 600);
+          assert(turnOf(root) > a, 'no self-turn in 3D');
+          press(viewportOf(root), 'd');
+          const t = turnOf(root), turns = [];
+          for (let i = 0; i < 120 && !in2d(root); i++) { await frame(); turns.push(turnOf(root)); }
+          assert(in2d(root) && turns.every(value => value === t), 'the system turned during the morph back: ' + t + ' -> ' + turns.filter(value => value !== t).slice(0, 3).join(', '));
+          const f = framesOf(root);
+          for (let i = 0; i < 12; i++) await frame();
+          assert(turnOf(root) === t && framesOf(root) === f, 'the system turned or drew frames in 2D after the morph back');
+        }, { motion: 'full' });
+      });
+      await test('n105 item 18 (review minor 2): an output closed and opened again while its save is out: the box shown takes that save\'s answer, so the user\'s next save expects what it wrote and is not refused as changed elsewhere', async () => {
+        let held = true, release = null;
+        const data = outputFixture(), host = outputHost(data, { gate: request => request.op === 'write' && held ? new Promise(resolve => { release = resolve; }) : undefined });
+        await using(data, async root => {
+          const opener = () => root.querySelector('.ag-detail [data-output-open]');
+          await openOutput(root);
+          outputBox(root).focus(); typeIn(outputBox(root), 'mine\n'); press(outputBox(root), 'Enter', { ctrlKey: true });
+          await until(() => release !== null);
+          opener().click(); await settled();
+          assert(!outputBox(root), 'the output did not close');
+          opener().click(); await settled();
+          assert(outputBox(root)?.value === 'mine\n', 'the output did not open again with the typing');
+          held = false; release(); await settled();
+          assert(host.writes().length === 1 && host.files['write-report/report'].text === 'mine\n', 'the first save did not go');
+          typeIn(outputBox(root), 'mine, more\n'); root.querySelector('.ag-detail [data-output-save]').click(); await settled();
+          assert(host.writes().length === 2 && host.files['write-report/report'].text === 'mine, more\n' && !/changed/i.test(outputState(root)), 'the next save was refused (' + outputState(root) + ')');
+        }, { actions: { output: host.output } });
+      });
+      await test('n105 item 19 (review minor 3): a save of an output queued behind one out is not sent once a snapshot says the output cannot be edited; it says why and the typing stays', async () => {
+        let held = true, release = null, locked = false;
+        const data = outputFixture(), host = outputHost(data, { gate: request => request.op === 'write' && held ? new Promise(resolve => { release = resolve; }) : undefined });
+        const fetchSnapshot = async () => { const shown = stampRevs(data); if (locked) Object.assign(shown.graph.nodes.find(node => node.id === 'write-report').artifacts.find(item => item.id === 'report'), { editable: false, why: 'A run is writing this output.' }); return shown; };
+        await using(data, async (root, app) => {
+          await openOutput(root);
+          outputBox(root).focus(); typeIn(outputBox(root), 'mine\n'); press(outputBox(root), 'Enter', { ctrlKey: true });
+          await until(() => release !== null);
+          typeIn(outputBox(root), 'more\n'); press(outputBox(root), 'Enter', { ctrlKey: true });
+          assert(outputBox(root).dataset.queued === 'true', 'the second save was not queued');
+          locked = true; await app.refresh(); await settled();
+          held = false; release(); await settled();
+          assert(host.writes().length === 1 && outputBox(root)?.value === 'more\n' && outputState(root) === 'A run is writing this output.', 'the queued save went to an output that cannot be edited (' + host.writes().map(call => JSON.stringify(call.text)).join() + '), or did not say why: ' + outputState(root));
+        }, { actions: { output: host.output }, fetchSnapshot });
+      });
+      // ---- n105 item 16: the general sweep. A fake host records every request the view asks (which action, which op, and
+      // whether the flat view showed as it was asked). The actions are read from app.js itself (every options.actions name
+      // it looks up), so an action added later is recorded too, and app.js must ask every one through call() (the one door
+      // where the rule is kept). In each case below (set up in 2D), every control the view shows is driven: each details
+      // control (clicked, typed in, Enter, Ctrl/Cmd+Enter, Ctrl/Cmd+Z, left), the shortcuts on the canvas, the page, an
+      // agent and each control (Enter, Delete, Backspace, N, G, L, space, Ctrl/Cmd+Z and each key it lists in
+      // aria-keyshortcuts but D and Escape), the timers the view set meanwhile (the pause after typing among them) and the
+      // page hidden. In 2D the drive writes to every action; in 3D and in both morphs only reads are asked. ----
+      const viewSource = [...document.scripts].find(script => script.textContent.includes('function call(fn, request)')).textContent;
+      const actionNames = [...new Set([...viewSource.matchAll(/action\('(\w+)'\)/g), ...viewSource.matchAll(/options\.actions\.(\w+)/g)].map(m => m[1]))];
+      const sweepData = () => {
+        const data = pathFixture();
+        data.structure.flows.push({ id: 'f2', path: ['impl-openai', 'oracle'], text: 'Ask.', source: 'drawn' });
+        data.structure.teams = [{ id: 't1', lead: 'impl-claude', members: ['researcher'], text: 'Report to impl-claude.' }];
+        data.agents.push(agent('scout', 'build', { added: true, removable: true, skills: [], skills_editable: true }));
+        data.agents.find(a => a.name === 'reviewer').skills = ['gamma'];
+        data.graph.nodes = outputFixture().graph.nodes;
+        return data;
+      };
+      const SWEEP_CASES = {
+        'a path of two drawn': async root => { tap(root, 'impl-claude'); tap(root, 'verifier'); },
+        'a path picked': async root => { const spot = pathSpot(root, 'f2'); assert(spot, 'f2 has no clear point'); clickAt(root, spot); },
+        'a group line picked': async root => { const hit = root.querySelector('[data-team-line] .ag-team-hit'), b = hit.getBoundingClientRect(); clickAt(root, { x: b.left + b.width / 2, y: b.top + b.height / 2 }); },
+        'an agent with skills and an output open': async root => { await openOutput(root); },
+        'an added agent': async root => { open(root, 'scout'); },
+        'a group lead': async root => { open(root, 'impl-claude'); },
+        'a path': async root => { openStep(root, 'f1', 0); },
+        'a skill file': async root => { open(root, 'reviewer'); await settle(); skillOpener(root, 'gamma').click(); },
+        'a change to undo': async root => {
+          openStep(root, 'f1', 0); await settle();
+          const name = root.querySelector('.ag-detail [data-route-name]'); name.focus(); name.value = 'Named'; name.dispatchEvent(new Event('input', { bubbles: true })); leave(name); await settled();
+          press(viewportOf(root), 'Escape');
+        }
+      };
+      const SWEEP_KEYS = [['Enter'], ['Delete'], ['Backspace'], ['n'], ['g'], ['l'], [' '], ['z', { ctrlKey: true }], ['z', { metaKey: true }]];
+      const listedKeys = target => (target.getAttribute('aria-keyshortcuts') || '').split(/\s+/).filter(Boolean).map(combo => {
+        const parts = combo.split('+'), key = parts.pop();
+        return [key.length === 1 ? key.toLowerCase() : key, { ctrlKey: parts.includes('Control'), metaKey: parts.includes('Meta'), altKey: parts.includes('Alt'), shiftKey: parts.includes('Shift') }];
+      }).filter(([key]) => !['d', 'Escape'].includes(key));
+      const shown = item => item.isConnected && item.getClientRects().length > 0 && !item.closest('[hidden]') && !item.disabled;
+      // One synchronous drive (a morph cannot end during it): the timers the view sets meanwhile are held and run at its end.
+      function sweep(root) {
+        const held = [], realSet = window.setTimeout, realClear = window.clearTimeout; let next = 1e9;
+        window.setTimeout = (fn, ms, ...args) => { held.push({ id: ++next, fn, ms, args }); return next; };
+        window.clearTimeout = id => { if (id > 1e9) { const at = held.findIndex(item => item.id === id); if (at >= 0) held.splice(at, 1); } else realClear(id); };
+        const hidden = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
+        try {
+          const keys = target => { for (const [key, extra] of [...SWEEP_KEYS, ...listedKeys(target)]) if (target.isConnected) press(target, key, extra); };
+          const detail = root.querySelector('.ag-detail'), toggle = root.querySelector('.ag-orbit-toggle');
+          // With details open, the details' controls (the bar's would replace them); else the bar's.
+          const controls = [...root.querySelectorAll('button, input, textarea, select, summary, [tabindex]')].filter(item => item !== toggle && !item.closest('.ag-drawing') && shown(item) && (detail.hidden ? !item.closest('.ag-viewport') : detail.contains(item)));
+          // Fields first, then the buttons that act here, then those that open something else, remove, or close.
+          const rank = item => item.matches('input, textarea, select') ? 0 : item.matches('.ag-close') ? 4
+            : /^(Delete|Remove this)/.test(item.getAttribute('aria-label') || item.textContent) ? 3
+            : item.matches('summary, .ag-skill-open, .ag-family-link, .ag-flow-row, [data-output-open], [data-team-start], [data-skill-new]') ? 2 : 1;
+          controls.sort((a, b) => rank(a) - rank(b));
+          for (const item of controls) {
+            if (!shown(item)) continue;
+            if (item.matches('input, textarea, select')) {
+              item.focus();
+              if (item.type === 'checkbox' || item.type === 'radio') item.click();
+              else if (item.tagName === 'SELECT') item.selectedIndex = (item.selectedIndex + 1) % Math.max(1, item.options.length);
+              else item.value = item.value + 'x';
+              item.dispatchEvent(new Event('input', { bubbles: true })); item.dispatchEvent(new Event('change', { bubbles: true }));
+              for (const [key, extra] of [['Enter'], ['Enter', { ctrlKey: true }], ['Enter', { metaKey: true }], ['z', { ctrlKey: true }], ['z', { metaKey: true }]]) if (item.isConnected) press(item, key, extra);
+              if (item.isConnected) leave(item);
+            } else { item.click(); keys(item); }
+          }
+          const agent = nodeOf(root, 'scout'); if (agent) { agent.focus(); keys(agent); }
+          viewportOf(root).focus(); keys(viewportOf(root));
+          document.activeElement?.blur?.(); keys(document.body);
+          Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+          window.dispatchEvent(new Event('pagehide')); document.dispatchEvent(new Event('visibilitychange'));
+        } finally {
+          window.setTimeout = realSet; window.clearTimeout = realClear;
+          delete document.hidden; Object.defineProperty(Document.prototype, 'hidden', hidden);
+        }
+        held.filter(item => item.ms < 15000 && typeof item.fn === 'function').forEach(item => item.fn(...item.args));
+        document.dispatchEvent(new Event('visibilitychange'));
+      }
+      // Each case on a page of its own; `phase` switches (or not) and runs the sweep. Answers the requests and the case.
+      async function sweepCases(phase) {
+        const out = [];
+        for (const [name, setup] of Object.entries(SWEEP_CASES)) {
+          const data = sweepData(), world = worldHost(data), path = pathHost(data), output = outputHost(data), log = [];
+          const fakes = { ...world.actions, flow: path.flow, run: path.run, output: output.output };
+          let mounted = null;
+          const actions = Object.fromEntries(actionNames.map(action => [action, request => {
+            log.push({ action, op: request?.op, flat: !mounted || flat(mounted) });
+            return fakes[action] ? fakes[action](request) : Promise.reject(new Error('the sweep has no fake ' + action));
+          }]));
+          await using(data, async root => {
+            mounted = root; await settled();
+            await setup(root); await settled();
+            const from = log.length, ok = await phase(root);
+            await settled();
+            out.push({ name, asked: log.slice(from), ok });
+          }, { actions, motion: 'full' });
+        }
+        return out;
+      }
+      const writesOf = asked => asked.filter(call => call.op !== 'read');
+      await test('n105 item 16a (general sweep, the drive in 2D): app.js asks every action only through call(), the sweep has a fake for each, and its drive writes to every action in 2D', async () => {
+        const bound = [...viewSource.matchAll(/(\w+) = (?:action\('\w+'\)|options\.actions && typeof options\.actions\.\w+)/g)].map(m => m[1]);
+        const direct = bound.filter(name => new RegExp('\\b' + name + '\\s*\\(').test(viewSource)).concat(/options\.actions(\.\w+|\[[^\]]+\])\s*\(/.test(viewSource) ? ['options.actions'] : []);
+        assert(actionNames.length >= 7 && bound.length === actionNames.length && !direct.length, 'an action is asked other than through call(): ' + direct.join(', ') + ' (actions ' + actionNames.join(', ') + '; bound ' + bound.join(', ') + ')');
+        const missing = actionNames.filter(action => !['roster', 'skillfile', 'team', 'skills', 'flow', 'run', 'output'].includes(action));
+        assert(!missing.length, 'the sweep has no fake for ' + missing.join(', '));
+        const cases = await sweepCases(async root => { sweep(root); return flat(root); });
+        const reached = new Set(cases.flatMap(item => writesOf(item.asked).map(call => call.action)));
+        assert(cases.every(item => item.ok), 'the drive left the flat view');
+        assert(actionNames.every(action => reached.has(action)), 'in 2D the drive wrote to no ' + actionNames.filter(action => !reached.has(action)).join(', ') + ' (it wrote ' + cases.map(item => item.name + ': ' + writesOf(item.asked).map(call => call.action + ' ' + call.op).join(' ')).join(' | ') + ')');
+        const idle = cases.filter(item => !writesOf(item.asked).length).map(item => item.name);
+        assert(!idle.length, 'in 2D the drive wrote nothing in: ' + idle.join(', '));
+      });
+      const sweepAssert = (cases, where) => {
+        const leaks = cases.flatMap(item => writesOf(item.asked).filter(call => !call.flat).map(call => item.name + ': ' + call.action + ' ' + call.op));
+        assert(cases.every(item => item.ok), 'the drive did not run ' + where + ': ' + cases.filter(item => !item.ok).map(item => item.name).join(', '));
+        assert(!leaks.length, 'written ' + where + ': ' + leaks.join(' | '));
+      };
+      await test('n105 item 16b (general sweep, in 3D): with each case set up in 2D, the drive while 3D shows asks only reads', async () => {
+        sweepAssert(await sweepCases(async root => {
+          viewportOf(root).focus(); press(viewportOf(root), 'd'); await until(() => in3d(root));
+          const ok = in3d(root); sweep(root); await settled(); return ok && in3d(root);
+        }), 'in 3D');
+      });
+      await test('n105 item 16c (general sweep, the morph to 3D): the drive during the morph to 3D asks only reads', async () => {
+        sweepAssert(await sweepCases(async root => {
+          viewportOf(root).focus(); press(viewportOf(root), 'd');
+          const ok = root.dataset.agView === '3d' && !flat(root); sweep(root); const still = !flat(root);
+          await until(() => in3d(root)); return ok && still;
+        }), 'during the morph to 3D');
+      });
+      await test('n105 item 16d (general sweep, the morph back to 2D): the drive during the morph back to 2D asks only reads', async () => {
+        sweepAssert(await sweepCases(async root => {
+          viewportOf(root).focus(); press(viewportOf(root), 'd'); await until(() => in3d(root));
+          press(viewportOf(root), 'd');
+          const ok = root.dataset.agView === '2d' && !flat(root); sweep(root); const still = !flat(root);
+          await until(() => in2d(root)); return ok && still;
+        }), 'during the morph back to 2D');
+      });
+      await test('n105 item 20 (review minor 4): the camera seam with 3D: back in 2D the view is the one 2D gives for the same change: agents added while 3D shows (in view), details opened in 2D and closed in 3D after a loop formed (the view from before they opened, as closing them in 2D gives), and the user\'s own zoom with an agent added in 3D', async () => {
+        const cameraOf = root => root.querySelector('.ag-drawing > g').getAttribute('transform');
+        const added = data => data.agents.push(agent('scout-one', 'build'), agent('scout-two', 'build'), agent('scout-three', 'verify'), agent('scout-four', 'understand'));
+        const zoomIn = root => { const view = viewportOf(root).getBoundingClientRect(); viewportOf(root).dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -240, clientX: view.left + view.width / 3, clientY: view.top + view.height / 2 })); };
+        // Each case twice: all in 2D (the reference), then with its middle step done while 3D shows.
+        const cases = {
+          'agents added': { change: async (root, app, data) => { added(data); await app.refresh(); } },
+          'details closed after a loop formed': { before: async (root, app, data) => { open(root, 'impl-openai'); await settled(); data.structure.flows.push({ id: 'ring', path: ['impl-claude', 'impl-hard', 'impl-claude'], text: 'ring', source: 'drawn' }); await app.refresh(); await settled(); }, change: async root => { root.querySelector('.ag-close').click(); } },
+          'own zoom, an agent added': { before: async root => { zoomIn(root); await settled(); }, change: async (root, app, data) => { data.agents.push(agent('scout-one', 'build')); await app.refresh(); } }
+        };
+        const problems = [];
+        for (const [name, { before, change }] of Object.entries(cases)) {
+          const seen = {};
+          for (const way of ['2d', '3d']) {
+            const data = flowFixture();
+            await using(data, async (root, app) => {
+              await settled();
+              if (before) await before(root, app, data);
+              if (way === '3d') { viewportOf(root).focus(); press(viewportOf(root), 'd'); await until(() => in3d(root)); }
+              await change(root, app, data); await settled();
+              if (way === '3d') { press(viewportOf(root), 'd'); await until(() => in2d(root)); }
+              await settled(); await frame(); await frame();
+              seen[way] = cameraOf(root);
+              const view = viewportOf(root).getBoundingClientRect(), out = circleBounds(root).filter(({ bounds: b }) => b.left < view.left - .5 || b.right > view.right + .5 || b.top < view.top - .5 || b.bottom > view.bottom + .5).map(item => item.name);
+              if (way === '3d' && name === 'agents added' && out.length) problems.push(name + ': ' + out.join(', ') + ' out of view after the return');
+            });
+          }
+          if (seen['2d'] !== seen['3d']) problems.push(name + ': the view in 2D is ' + seen['2d'] + ', after 3D ' + seen['3d']);
+        }
+        assert(!problems.length, problems.join(' | '));
+      });
+      await test('n105 item 22 (browser trial 4, review major 2): a path picked in 3D by a click on its line, the focus where Chrome puts it (the line), then Delete and Backspace there and on the canvas: refused with the status line, the path kept, nothing asked (on the page, where 2D does nothing with them either, nothing changes)', async () => {
+        const data = n105Data(), host = worldHost(data);
+        await using(data, async root => {
+          await settled();
+          viewportOf(root).focus(); press(viewportOf(root), 'd'); await until(() => in3d(root));
+          assert(in3d(root), 'not in 3D');
+          const spot = pathSpot(root, 'p4'); assert(spot, 'p4 has no clear point to click in 3D');
+          clickAt(root, spot);
+          // A press focuses the nearest focusable thing under it (the line, role=button tabindex=0), as Chrome does.
+          document.elementFromPoint(spot.x, spot.y).closest('[tabindex], button')?.focus();
+          await settle();
+          assert(picked(root, 'p4') && !detailOpen(root) && document.activeElement.closest('[data-route]')?.dataset.route === 'p4', 'the click did not pick p4 in 3D with the focus on its line');
+          const calls = host.calls.length, places = [['the line', () => routeOf(root, 'p4')], ['the canvas', () => viewportOf(root)], ['the page', () => { document.activeElement?.blur?.(); return document.body; }]];
+          for (const [where, target] of places) for (const key of ['Delete', 'Backspace']) {
+            const on = target(); if (on !== document.body) on.focus();
+            press(on, key); await settled();
+            const said = lookSaid(root);
+            assert((said || where === 'the page') && routeOf(root, 'p4') && host.calls.length === calls && in3d(root), key + ' on ' + where + ' removed the path picked in 3D or was not refused: ' + host.calls.slice(calls).join(' | '));
+          }
+        }, { actions: host.actions });
+      });
+      await test('n105 item 23 (browser trial 4, minor): in 3D the screen-reader line never offers drawing a path: an agent clicked, a second clicked, and a path begun in 2D; back in 2D it offers it again', async () => {
+        const data = n105Data(), host = worldHost(data), offers = /another agent|add a step|finish|adds|loop|Backspace/i;
+        await using(data, async root => {
+          await settled();
+          tap(root, 'impl-claude'); tap(root, 'verifier'); await settle();
+          assert(offers.test(liveRegion(root)), 'in 2D the line does not offer drawing: ' + liveRegion(root));
+          viewportOf(root).focus(); press(viewportOf(root), 'd'); await until(() => in3d(root));
+          const begun = liveRegion(root);
+          press(viewportOf(root), 'Escape'); await settle();
+          await clearOf(root, ['designer', 'impl-claude']);
+          tap(root, 'designer'); await settle(); const one = liveRegion(root);
+          tap(root, 'impl-claude'); await settle(); const two = liveRegion(root);
+          assert(root.dataset.agTrail === 'impl-claude', 'the second click did not pick impl-claude');
+          const lines = { 'a path begun in 2D': begun, 'one agent clicked': one, 'a second clicked': two };
+          const bad = Object.entries(lines).filter(([, line]) => !line || offers.test(line));
+          assert(!bad.length, 'in 3D the line offers drawing (or says nothing): ' + bad.map(([what, line]) => what + ': "' + line + '"').join(' | '));
+          assert(/picked/.test(two) && two.includes('impl-claude'), 'the line does not say what is picked: ' + two);
+          press(viewportOf(root), 'd'); await until(() => in2d(root)); await settle();
+          assert(offers.test(liveRegion(root)), 'back in 2D the line does not offer drawing: ' + liveRegion(root));
+        }, { actions: host.actions });
+      });
+      await test('n105 item 21 (verifier gap): a loop\'s ring keeps at least 8 px clear of the orchestrator and of every agent not on it (their drawn circles, and their names: the layout\'s RING_SPACE margin), at 1400 and 620 px', async () => {
+        const problems = [];
+        for (const [width, height] of [[1400, 900], [620, 800]]) {
+          const data = trialRoster();
+          data.groups = [['hub', ['orchestrator']], ['council', ['council', 'fable', 'astra', 'carbon']], ['decide', ['oracle', 'oracle-lite']], ['build', ['designer', 'impl-openai', 'impl-claude', 'impl-hard']], ['verify', ['reviewer', 'verifier']], ['understand', ['explorer', 'researcher']]].map(([id, agents]) => ({ id, title: id, agents }));
+          const loops = [{ id: 'far', path: ['explorer', 'oracle-lite', 'explorer'] }, { id: 'next', path: ['researcher', 'designer', 'researcher'] }, { id: 'tail', path: ['reviewer', 'impl-hard', 'impl-openai', 'impl-hard'] }, { id: 'shared', path: ['oracle-lite', 'verifier', 'oracle-lite'] }];
+          data.structure = { source: 'folder', flows: [] };
+          await using(data, async (root, app) => {
+            await resizeTo(root, width, height); await settle();
+            for (const loop of loops) { data.structure.flows.push({ ...loop, text: loop.id, source: 'drawn' }); await app.refresh(); await settle(); }
+            const shapes = agentShapes(root);
+            loops.forEach(loop => {
+              const on = new Set(loop.path.slice(loop.path.indexOf(loop.path.at(-1)), -1)), steps = [...(routeOf(root, loop.id)?.querySelectorAll('.ag-route-step[data-step="loop"]') || [])];
+              if (!steps.length) { problems.push(width + ': ' + loop.id + ' has no ring'); return; }
+              const points = steps.flatMap(step => pointsOf(step, 120));
+              shapes.filter(shape => !on.has(shape.name)).forEach(shape => {
+                const clear = Math.min(...points.map(p => Math.hypot(p.x - shape.x, p.y - shape.y))) - shape.r, l = shape.label;
+                const named = l && l.width ? Math.min(...points.map(p => Math.hypot(Math.max(l.left - p.x, 0, p.x - l.right), Math.max(l.top - p.y, 0, p.y - l.bottom)))) : Infinity;
+                if (clear < 8 - .01) problems.push(width + ': ' + loop.id + ' is ' + clear.toFixed(1) + ' px from ' + shape.name);
+                if (named < 8 - .01) problems.push(width + ': ' + loop.id + ' is ' + named.toFixed(1) + ' px from ' + shape.name + '\'s name');
+              });
+            });
+          });
+        }
+        assert(!problems.length, problems.length + ' too close: ' + problems.slice(0, 6).join('; '));
       });
     }
     // ---- orbit lane (n105) ----

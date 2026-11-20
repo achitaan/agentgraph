@@ -492,6 +492,7 @@
     // as it is. An automatic view stays too when only a loop formed or went or an agent was added (nothing else moved,
     // so nothing else moves on screen); it only pans what moved (and the open agent) into view. Otherwise it is fitted again.
     function settleCamera() {
+      if (orbitSettleLater()) return;
       if (camera.own) { clampPan(true); transform(); return; }
       if (!layoutChange.steady) { fitView(false); return; }
       revealNames(layoutChange.changed);
@@ -2022,7 +2023,7 @@
       'team-text': 'the group\'s instruction', 'team-remove': 'removing the group' };
     const FLOW_STEPS = new Set(['text', 'name', 'command', 'add', 'remove']);
     function sentence(said) { said = text(said).trim(); return !said || /[.!?…]$/.test(said) ? said : said + '.'; }
-    function keepStep(error) { return error?.noAnswer === true || error?.busy === true || error?.transport === true || error instanceof TypeError; }
+    function keepStep(error) { return error?.noAnswer === true || error?.busy === true || error?.transport === true || error?.looking === true || error instanceof TypeError; }
     function undoSaid(last, error) {
       if (error?.busy === true) return 'Not undone yet: a change to it is still being made. Ctrl+Z tries again.';
       if (keepStep(error)) return 'Not undone: ' + sentence(message(error, 'agentgraph could not be reached')) + (error?.noAnswer === true ? '' : ' Ctrl+Z tries again.');
@@ -2119,6 +2120,7 @@
     // A write sent before reset() is never answered as far as the view goes: its reply and its refusal are dropped.
     const UNHEARD = () => new Promise(() => {});
     function call(fn, request) {
+      const looking = orbitWriteRefused(request); if (looking) return looking;
       const [kind, key] = thingOf(fn, request), id = kind ? kind + ':' + key : '', before = id ? writing.get(id) : null, born = generation;
       const send = () => {
         if (born !== generation) return UNHEARD();
@@ -2143,7 +2145,7 @@
       });
     }
     // A stale refusal or no answer: what was typed is kept (the details may be drawn again).
-    function keepsTyping(error) { return isStale(error) || error?.noAnswer === true; }
+    function keepsTyping(error) { return isStale(error) || error?.noAnswer === true || error?.looking === true; }
     // After a stale refusal: the field the user typed in (drawn again or not) holds their text and the latest rev.
     function keepTyped(old, selector, value, rev) {
       const field = old?.isConnected ? old : detailScroll.querySelector(selector);
@@ -2565,10 +2567,14 @@
       saveTyped(box, true, {
         key: 'output:' + key, selector: '[data-output-text="' + CSS.escape(key) + '"]', state: (kind, said) => setOutputState(key, kind, said), limit: outputLimit,
         shown: () => outputViews.get(key)?.rev || text(outputEntry(task, node, artifact)?.rev || ''),
-        send: (value, rev, answered) => orbitWriteRefused() || ask(outputAction, withRev({ op: 'write', task, node, artifact, text: value }, rev)).then(async got => {
+        // Checked again when it goes (a save queued behind another goes later, perhaps after a snapshot said no).
+        send: (value, rev, answered) => outputEntry(task, node, artifact)?.editable !== true ? Promise.reject(new Error(text(outputEntry(task, node, artifact)?.why) || 'This output cannot be edited here.')) : ask(outputAction, withRev({ op: 'write', task, node, artifact, text: value }, rev)).then(async got => {
           if (!alive) return got;
           reply = got; answered(got);
-          Object.assign(view, { text: box.dataset.saved, rev: box.dataset.rev || view.rev, draft: box.value === box.dataset.saved ? null : box.value,
+          // The output closed and opened again while this was out: the box shown now saves on from this answer.
+          const live = detailScroll.querySelector('[data-output-text="' + CSS.escape(key) + '"]'), shown = live || box;
+          if (live && live !== box) { live.dataset.saved = box.dataset.saved; if (box.dataset.rev) live.dataset.rev = box.dataset.rev; }
+          Object.assign(view, { text: box.dataset.saved, rev: box.dataset.rev || view.rev, draft: shown.value === box.dataset.saved ? null : shown.value,
             result: { revision: got.output?.revision, stale: Array.isArray(got.stale) ? got.stale.filter(item => item && typeof item === 'object') : [], changed: got.changed !== false } });
           showOutputResult(key);
           await afterChange();
@@ -3385,7 +3391,9 @@
       highlight();
     }
     function announce() {
+      // In 3D (and either morph) nothing is drawn, so the line offers no step: it says what is picked and what 3D does.
       trailStatus.textContent = !trail.length ? '' : trailPending ? 'Adding the flow ' + trail.join(' → ')
+        : orbit.shown ? (trail.length === 1 ? trail[0] + ' picked. Enter or i opens its details, Escape lets go.' : 'Flow so far: ' + trail.join(' → ') + ', kept for 2D. Escape lets it go.')
         : trail.length > 1 && isHubAgent(trail.at(-1)) ? 'Flow so far: ' + trail.join(' → ') + '. ' + trail.at(-1) + ' ends it: Enter or a click on it adds the flow, Backspace removes the last step, Escape cancels.'
         : 'Flow so far: ' + trail.join(' → ') + '. Click or press Enter on another agent to add a step; Enter on ' + trail.at(-1) + ' finishes, Backspace removes the last step, Escape cancels. With one agent, a double-click or l adds its loop on itself.';
       if (trail.length) root.dataset.agTrail = trail.join(' '); else delete root.dataset.agTrail;
@@ -4133,7 +4141,7 @@
       sky.timers.add(id);
     }
     function skyFly(key) {
-      if (!sky.tile || !orbitLooking() || reducedMotion()) { skyReveal(key); return; }
+      if (!sky.tile || !(orbit.shown && orbit.want === '3d') || reducedMotion()) { skyReveal(key); return; }
       // To the star's place in whichever copy is in view, a short bright stretch travelling down a diagonal (the
       // terminal's: one column and one row a step, here 8 by 16 px): down from the left or the right by the run's seed,
       // up from below when the star is too near the top, from the other side when it would start off the view.
@@ -4183,7 +4191,7 @@
       const was = sky.runs, fresh = [];
       if (was && was.generation === generation) counts.forEach((n, id) => { for (let k = (was.counts.has(id) ? was.counts.get(id) : (snapshot.structure.flows.some(flow => flow.id === id && was.ids.has(id)) ? 0 : n)) + 1; k <= n && fresh.length < SKY_STREAKS_MAX; k++) fresh.push(id + '#' + k); });
       sky.runs = { generation, counts, ids: new Set((snapshot?.structure?.flows || []).map(flow => flow?.id)) };
-      if (sky.tile) skyRunStars(orbitLooking() ? fresh : []);
+      if (sky.tile) skyRunStars(orbit.shown && orbit.want === '3d' ? fresh : []);
     }
     // The sun's glow and the planets' light (orbitNode's part, 3D only).
     function orbitLight(node, name) {
@@ -4477,7 +4485,8 @@
       if (orbit.raf) { cancelAnimationFrame(orbit.raf); orbit.raf = 0; }
       positions.forEach((p, name) => { const b = orbit.base.get(name); if (b) { p.x = b.x; p.y = b.y; } });
       orbit.shown = false; orbit.k = 0; orbit.change = null; orbit.grab = null; orbit.depth.clear(); orbit.last = 0;
-      const saved = orbit.saved, view = viewport.getBoundingClientRect();
+      if (trail.length && orbit.want === '2d') announce(); // not for 2D's moment inside 3D (a team change)
+      const saved = orbit.saved, view = viewport.getBoundingClientRect(), settle = orbit.settle; orbit.settle = null;
       const resized = !!saved && (Math.abs(view.width - saved.width) > .5 || Math.abs(view.height - saved.height) > .5);
       if (saved && camera.initialized) Object.assign(camera, { x: saved.x, y: saved.y, scale: saved.scale, own: saved.own, touched: saved.touched });
       orbit.base = null; orbit.saved = null; orbit.from3d = null; orbit.figure = null; orbit.frame = null;
@@ -4486,11 +4495,24 @@
       nodes.forEach(node => { node.style.opacity = ''; });
       if (draw && snapshot) {
         renderNodes(visibleAgents); updateEdges();
-        // The space changed while 3D was shown (the details opened, the pane resized): the 2D rules place the camera.
-        if (resized && camera.initialized) { if (saved.own) clampPan(true); else fitView(false); reveal(); }
+        // The space changed while 3D was shown (the details opened or closed, the pane resized): the 2D rules place the
+        // camera as if it had changed in 2D (scheduleResize's, which left the 2D camera alone meanwhile: an automatic view
+        // fitted again or put back as it was before the details opened, the user's own kept). Otherwise the layout
+        // changes that came meanwhile settle it as they would have (an agent added comes into view).
+        if (resized && camera.initialized) scheduleResize(); else if (settle) { layoutChange = settle; settleCamera(); }
         transform();
       }
       orbitMark();
+      // Back in the flat view the usual rules go on: what a refusal in 3D left typed and not saved is saved.
+      if (draw && orbit.want === '2d') flushTyping();
+    }
+    // settleCamera's part: a layout change while 3D is shown (a snapshot added an agent, a loop formed) is kept for the
+    // way back instead of moving the 3D camera; the changes add up.
+    function orbitSettleLater() {
+      if (!orbit.shown) return false;
+      const was = orbit.settle;
+      orbit.settle = { changed: [...new Set([...(was?.changed || []), ...layoutChange.changed])], steady: (was ? was.steady : true) && layoutChange.steady };
+      return true;
     }
     // 2D layout code while 3D is shown: it runs on the 2D places, which are then kept, and the projection follows.
     function orbitHold(fn, ...args) {
@@ -4531,6 +4553,7 @@
         orbit.base = new Map(); positions.forEach((p, name) => orbit.base.set(name, { x: p.x, y: p.y }));
         orbit.saved = { x: camera.x, y: camera.y, scale: camera.scale, own: camera.own, touched: camera.touched, width: camera.width, height: camera.height };
         orbit.figure = null; orbit.shown = true; orbit.k = 0; orbit.order = ''; orbit.dom = [...nodeLayer.children];
+        if (trail.length) announce();
         orbit.frame = orbitFrame();
       }
       orbit.from3d = null; orbit.dirty = true;
@@ -4550,7 +4573,18 @@
     }
     function orbitToggle() {
       if (press?.moved || (drag?.moved && !orbit.grab)) return;
-      if (orbit.want === '3d') orbitLeave(true); else orbitEnter(true);
+      if (orbit.want === '3d') orbitLeave(true); else { if (!orbit.shown) orbitSaveTyped(); orbitEnter(true); }
+    }
+    // The moment the user switches to 3D, before it shows: what is typed and not saved is saved at once, as leaving its
+    // box does (a box with the focus is left for the canvas; a save already out finishes and its answer is applied, one
+    // queued behind it waits for 2D), and a new circle still being placed is let go (as Escape does).
+    function orbitSaveTyped() {
+      if (draft && !draft.pending) dropDraft();
+      if (detailScroll.contains(document.activeElement) && document.activeElement.matches('textarea, input')) viewport.focus({ preventScroll: true });
+      detailScroll.querySelectorAll('[data-route-name]').forEach(field => saveName(field));
+      detailScroll.querySelectorAll('[data-route-text]').forEach(box => { if (box.value !== box.dataset.saved) saveRouteText(box, true); });
+      detailScroll.querySelectorAll('[data-team-text]').forEach(box => { if (box.value !== box.dataset.saved) saveTeamText(box, true); });
+      detailScroll.querySelectorAll('[data-agent-text]').forEach(box => { if (box.value !== box.dataset.saved) saveAgentText(box, true); });
     }
     // Turning by hand pauses the self-turn; it starts again ORBIT_RESUME_MS after the last input.
     function orbitTurned() {
@@ -4562,8 +4596,8 @@
     function orbitReset() { orbit.turn = 0; orbit.elevation = ORBIT_ELEVATION; orbitTurned(); }
     // moveNode's guard: an agent is moved in 2D only.
     function orbitRefuseMove() { if (!orbit.shown) return false; orbitSay(ORBIT_LOOK_SAID); return true; }
-    // 3D is for looking (not while the morph goes back to 2D).
-    function orbitLooking() { return orbit.shown && orbit.want === '3d'; }
+    // 3D is for looking, and so is either morph: anything but the flat 2D view (a click there still picks).
+    function orbitLooking() { return orbit.shown; }
     function orbitRefuse(event) { event.preventDefault(); event.stopImmediatePropagation(); orbitSay(ORBIT_LOOK_SAID); }
     function orbitPlainKey(event) { return !event.ctrlKey && !event.metaKey && !event.altKey; }
     listen(orbitButton, 'click', orbitToggle);
@@ -4632,13 +4666,27 @@
     // pressing a control (a button, a choice, a box to tick). Reading stays: closing, the links between agents, opening
     // a session or a skill's text, the notices, the folds.
     const ORBIT_READING = '.ag-close, .ag-family-link, .ag-open-session, .ag-skill-open, .ag-spend-row, .ag-run-notices, summary, [data-output-open]';
-    // A write that would go out while 3D is shown with no press to refuse (a step's output saved again once the save
-    // before it is answered, queued in 2D): refused with the same sentence; the typing stays. The output's send hook.
-    function orbitWriteRefused() {
-      if (!orbitLooking()) return null;
+    // call()'s part: while anything but the flat view shows no write is asked of the host, whatever started it (a key, a
+    // save queued in 2D, the pause after typing, leaving a box, the page hidden, undo); reads are. Refused with the same
+    // sentence; whoever asked keeps the typing (marked not saved) and the undo step; back in 2D the usual rules go on.
+    // A write asked in 2D (the saves at the switch) goes, after the one to the same thing before it.
+    function orbitWriteRefused(request) {
+      if (request?.op === 'read' || !orbit.shown) return null;
       orbitSay(ORBIT_LOOK_SAID);
-      return Promise.reject(new Error(ORBIT_LOOK_SAID));
+      return Promise.reject(Object.assign(new Error(ORBIT_LOOK_SAID), { looking: true }));
     }
+    // The keys that change things, refused before anything changes wherever the focus is in the view (the canvas, an
+    // agent, the 3D control, the details) or on the page after a press in it: undo (Ctrl/Cmd+Z), Delete, Backspace, N,
+    // G, l on an agent and Enter finishing a path. In a field, typing is refused where it is typed (beforeinput).
+    listen(document, 'keydown', event => {
+      if (!alive || !orbit.shown || event.defaultPrevented) return;
+      const target = event.target, inside = root.contains(target), page = target === document.body || target === document.documentElement || target === document;
+      if (!inside && !(page && lastInside)) return;
+      const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && key === 'z') { orbitRefuse(event); return; }
+      if (!inside || !orbitPlainKey(event) || target.closest('textarea, input, select')) return;
+      if (['Delete', 'Backspace', 'n', 'g'].includes(key) || (key === 'l' && target.closest('[data-agent]')) || (key === 'Enter' && trail.length && !target.closest('.ag-detail, button, [data-agent]'))) orbitRefuse(event);
+    }, true);
     const orbitControl = target => {
       const control = target?.closest?.('button, select, input, label, textarea');
       if (!control || !control.closest('.ag-detail, .ag-add-menu, .ag-add') || control.closest(ORBIT_READING)) return null;
@@ -5181,7 +5229,7 @@
         if (!camera.initialized) fitView(false);
         else if (previousLayout !== layoutSignature) settleCamera();
         // Names measured again just after a loop formed or an agent came, nothing else moved: the view stays (n103).
-        else if (labelsChanged && !camera.touched) { if (layoutChange.steady) { revealNames(layoutChange.changed); clampPan(true); transform(); } else fitView(false); }
+        else if (labelsChanged && !camera.touched && !orbitSettleLater()) { if (layoutChange.steady) { revealNames(layoutChange.changed); clampPan(true); transform(); } else fitView(false); }
       }
       root.dataset.state = visibleAgents.length || graph ? 'ready' : 'empty';
       showEmpty();
@@ -5236,6 +5284,9 @@
         // (then their view stays). A change of the pane's own size, or of arrangement, refits as before.
         // Closing the details puts an automatic view back where it was before they opened (n103: a loop drawn while
         // they were open moves nothing else on screen); only what moved meanwhile is panned into view.
+        // While 3D is shown the 2D camera is left as it was (and the view to go back to when the details close): the
+        // 2D rules place it on the way back (orbitRestore). The figure is fitted into the new canvas.
+        if (orbit.shown) { orbitRefit(); return; }
         const shown = !detail.hidden, before = closedView;
         if (!shown || paneResized || switched) closedView = null;
         const back = !shown && detailsWere && before && before.pane === root.clientWidth + 'x' + root.clientHeight && before.arrangement === arrangement && resized && !camera.own && !switched && !paneResized;
