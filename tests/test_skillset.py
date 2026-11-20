@@ -108,13 +108,22 @@ class SkillsetTest(unittest.TestCase):
         self.change(skillset.remove, "impl-openai", TRIAL, presets=selected)
         self.assertEqual(self.files(), self.original)
 
+    def give_orchestrator_every_skill(self):
+        # The installed presets may name the orchestrator's skills; these tests are about an agent that has `*`.
+        self.change(skillset.set_all, "orchestrator")
+        self.assertEqual(set(map(tuple, self.arrays("orchestrator").values())), {("*",)})
+        shutil.rmtree(self.backups, ignore_errors=True)
+        self.original = self.files()
+
     def test_wildcard_add_is_noop(self):
+        self.give_orchestrator_every_skill()
         result = self.change(skillset.add, "orchestrator", TRIAL)
         self.assertFalse(result["changed"])
         self.assertFalse(self.backups.exists())
         self.assertEqual(self.files(), self.original)
 
     def test_wildcard_remove_expands_in_catalogue_order_and_all_restores(self):
+        self.give_orchestrator_every_skill()
         self.change(skillset.remove, "orchestrator", TRIAL)
         self.assertEqual(self.arrays("orchestrator")[self.preset], [name for name in CATALOGUE if name != TRIAL])
         self.change(skillset.add, "orchestrator", TRIAL)

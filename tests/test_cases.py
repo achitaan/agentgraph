@@ -260,7 +260,9 @@ class Commands(Scratch):
         self.assertEqual(self.cases("--brief", replayable["id"], "--edit", "bad name;")[0], 2)
 
     def test_a_trial_is_recorded_and_the_signal_counts_the_latest_per_case(self):
-        self.make()
+        # A case's side comes from its id, which includes this run's scratch path: enough cases that both sides appear.
+        self.write("t", [node(f"n{i}", attempts=2, base=BASE) for i in range(40)])
+        self.record()
         replayable = [item for item in cases.load(self.home) if item["replayable"]]
         held = [i for i in replayable if i["split"] == "held-out"]
         tune = [i for i in replayable if i["split"] == "tune"]
