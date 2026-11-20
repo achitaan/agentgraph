@@ -543,6 +543,10 @@ def set_baseline(home: Path, paths: Paths, *, preset: str | None = None, budget:
     data = {"version": 1, "time": time.time() if now is None else now, "preset": preset,
             "budget_chars": budget, "growth": growth, "paths": paths.to_json(),
             "agents": {agent: row["chars"] for agent, row in rows.items()}}
+    from . import models
+    fingerprint = models.fingerprint(paths.config, preset)  # the preset's name and a hash; nothing else of the file
+    if fingerprint:
+        data["models"] = fingerprint
     home = Path(home)
     home.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".bloat-", dir=home)

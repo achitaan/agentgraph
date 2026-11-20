@@ -523,6 +523,8 @@ def improved(
             raise ValueError("size_change maps agent names to whole numbers of characters")
         fields["size_change"] = size_change
     fields.update(_measured_size(home))
+    from . import models
+    fields.update(models.stored_field(home))
     return _append(home / _IMPROVEMENTS, now, fields)
 
 
@@ -589,6 +591,17 @@ def _overturned(home: Path, now: float | None, runs: list[dict], notes: list[dic
         return overturned.signal(home, runs, notes, improvements, _now(now), **extra)
     except (OSError, ValueError) as exc:
         return {"due": False, "error": str(exc)}
+
+
+def _models(home: Path, improvements: list[dict]) -> dict:
+    from . import models
+    return models.signal(home, improvements)
+
+
+def _print_models(report: dict) -> None:
+    from . import models
+    for line in models.signal_lines(report or {}):
+        print(line)
 
 
 def _print_overturned(report: dict) -> None:
@@ -844,6 +857,7 @@ def signals(home: Path, now: float | None, *, all_items: bool = False, cost_db: 
         "bloat": _bloat(home),
         "hand_edits": _hand_edits(home, generated, improvements, hand_edits),
         "cases": case_report,
+        "models": _models(home, improvements),
         "verifier": _overturned(home, generated, runs, responses, improvements, hand_edits),
     }
     if message_db is not None:
@@ -888,6 +902,7 @@ def _print_report(report: dict) -> None:
     _print_hand_edits(report.get("hand_edits") or {})
     _print_cases(report.get("cases") or {})
     _print_overturned(report.get("verifier") or {})
+    _print_models(report.get("models") or {})
     _print_cost(report)
     for title, field in (("Feedback", "feedback"), ("Lessons", "lessons"), ("Discovered", "discovered")):
         if report[field]:
@@ -1071,6 +1086,7 @@ def main(argv: list[str] | None = None) -> int:
             with _lock(home, writing=False):
                 rows, responses, improvements = _history(home)
             _print_overturned(_overturned(home, None, _records(rows), responses, improvements, _hand_options(args)))
+            _print_models(_models(home, improvements))
             return result.code
         if args.command == "feedback":
             if feedback(home, None, _feedback_text(args), agent=args.agent, task=args.task) is None:
