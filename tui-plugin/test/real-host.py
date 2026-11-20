@@ -63,8 +63,7 @@ The list (what the panel opens on):
 
 The orbit (the full-panel scene):
     --fullscreen    press `f` once the view shows (the panel's full-screen key), before the captures. With --demo,
-                    require the 2D scene: the hub ring (the hub's glyph inside the canvas with braille dots round it
-                    and open cells beside it), at least 8 agent names over at least 6 rows on both sides of the hub,
+                    require the 2D scene: the hub ball (the hub's glyph inside the canvas with braille dots round it), at least 8 agent names over at least 6 rows on both sides of the hub,
                     at least 3 group colours, the context chart, and two captures 1 s apart that differ.
     --expect-scene  require the scene without --demo (the hub ring).
     --view3d        after the 2D captures press `d` (the orbit's 2D/3D key), wait 1 s and capture the 3D view, then
@@ -88,7 +87,8 @@ The orbit (the full-panel scene):
 The `g` key (orbit or list):
     --gcheck        after the view shows (and after the keys of --pre), capture, press `g`, capture, press `g`,
                     capture. Fails unless the second capture shows the other view than the first and the third the
-                    first's again. Prints the panel size the plugin measured (from the plugin's debug log). Use it with
+                    first's again, and when g made the panel full screen (a second panel size in the log; not with `f` in --pre).
+                    Prints the panel size the plugin measured (from the plugin's debug log). Use it with
                     --demo. Not with --view3d or --fullscreen: those are the d/f checks above.
     --pre KEYS      keys pressed one by one (1.5 s apart) before the first capture of --gcheck: `f` full screen, `d`
                     2D/3D, `g` the view, `R` close with `q` and open the panel again with /graph.
@@ -593,6 +593,9 @@ def drive_dialog(term, found_lines):
     term.wait_for(lambda ls: not any("Stop impl-claude?" in l for l in ls), CEILING)
     term.wait_log(lambda log: any("action: stop " in l for l in log), CEILING)  # the plugin saw the answer
     term.pump(1.0)  # time for a leaked Enter to act, if it did
+    # the demo has no real session to stop: the host's error toast covers the sidebar for a few seconds; wait it out
+    if found:
+        term.wait_for(lambda ls: cursor_row(ls, found) is not None, CEILING)
     after = term.lines()
     screens.append(("Enter in the dialog", after))
     if any("Stop impl-claude?" in l for l in after):
@@ -1019,6 +1022,14 @@ def drive(term, args):
     started = app_started(term)
     if not args.no_graph:
         open_panel(term, args)
+    if (args.list_mode or args.dialog or args.open or args.paths or args.live_paths) and not args.fullscreen:
+        # /graph opens on the orbit when the panel fits it (36x14 up, so the side panel of every size run here): these
+        # runs test the list, so show it with `g` first (the panel's own key, remembered while the app runs)
+        if term.wait_for(orbit_on, args.wait):
+            term.pump(1.0)
+            term.write(b"g")
+            term.wait_for(lambda ls: find_view(ls) is not None and not orbit_on(ls), args.wait)
+            term.pump(0.5)
     if args.fullscreen and find_view(term.lines()) is not None:
         col = find_view(term.lines())[1]
         term.write(b"f")
@@ -1162,8 +1173,8 @@ def canvas_rows(lines, found):
 
 
 def hub_ring(lines, found, rows):
-    """-> (row, col) of the hub's glyph inside the canvas with braille dots round it (the ring) and blank cells
-    either side of it (open inside), or None."""
+    """-> (row, col) of the hub's glyph inside the canvas with braille dots round it (the ball: its rim and shaded dots;
+    it was a ring with blank cells either side), or None."""
     _, col0, _ = found
     for r in range(rows[0], rows[1] + 1):
         c = lines[r].find("◉", col0 + 2)
@@ -1171,8 +1182,7 @@ def hub_ring(lines, found, rows):
             continue
         near = sum(1 for rr in range(max(0, r - 3), min(len(lines), r + 4))
                    for ch in lines[rr][max(0, c - 9):c + 10] if BRAILLE.match(ch) and ch not in SPIN)
-        open_inside = lines[r][c - 2:c] == "  " and lines[r][c + 1:c + 3] == "  "
-        if near >= 6 and open_inside:
+        if near >= 6:
             return r, c
     return None
 
@@ -1260,7 +1270,7 @@ def scene_report(lines, names, colours=None):
     hub = hub_ring(lines, found, rows)
     if hub is None:
         return ["no hub ring"], facts
-    facts.append(f"canvas rows {rows[0]}-{rows[1]}; hub ring round row {hub[0]}, column {hub[1]}, open inside")
+    facts.append(f"canvas rows {rows[0]}-{rows[1]}; hub ring round row {hub[0]}, column {hub[1]}")
     seen, left, right = names_report(lines, found, rows, names, hub[1])
     facts.append(f"{len(seen)} names on {len(left | right)} rows: {len(left)} rows left of the hub, {len(right)} right")
     if len(seen) < 8:
@@ -1344,6 +1354,10 @@ def report_g(label, args, started, how, steps):
     shown = ["orbit" if k else "list" for k in kinds]
     if kinds[1] == kinds[0] or kinds[2] != kinds[0]:
         print(f"===== {label}: FAIL, g did not switch the view and back: {' -> '.join(shown)}; panel {', '.join(sizes) or '?'}")
+        return 1
+    if "f" not in args.pre and len(set(sizes)) > 1:
+        # g never makes the panel full screen (only the user's `f` does): the panel was laid out at a second size
+        print(f"===== {label}: FAIL, g changed the panel's size, so it went full screen: {', '.join(sizes)}")
         return 1
     print(f"===== {label}: PASS, g switched the view and back: {' -> '.join(shown)}; panel {', '.join(sizes) or '?'}")
     return 0
@@ -1475,7 +1489,7 @@ def main():
         for fact in facts:
             print(f"   list: {fact}")
         if scene_on:
-            problems.append("the orbit is on screen; the panel opens on the list")
+            problems.append("the orbit is on screen after `g`: the list was expected")
         if not differs:
             problems.append("the screen did not change in 1 s (the spinners)")
         if problems:

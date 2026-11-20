@@ -61,7 +61,7 @@ Names are cut in the middle (`impl-superc…alidocious`), goals at their end; no
 right-hand part of a row (elapsed time, idle count) goes before a name is cut.
 
 Sizes measured in the real host (OpenCode 2.3.2): the sidebar is drawn at 37 columns (at 130x40 it starts at
-column 90); the panel is a 75x39 side panel at 130x40, and full screen below about 120 columns (90x40: the whole
+column 90); the panel is a 75x39 side panel at 130x40, and full screen below about 107 columns (measured: 105x40 is full screen and `f` changes nothing, 108x40 is a side panel; 90x40: the whole
 terminal). The panel never draws narrower than 37 columns (`panelWidth`). Tests also cover 20 and 24 columns.
 
 While any host dialog is open (the host's keymap leaves its `base` mode, as it does for every dialog), and until a
@@ -89,7 +89,11 @@ view, the list opens as a session panel:
 - Command `agentgraph.graph`, title `Agent graph`, in the command palette, or type `/graph` (alias `/agents`). It
   toggles: it closes the panel if this plugin's panel is the open one, otherwise it opens it. Outside a session
   there is nothing to show, so it only shows a short toast.
-- It opens on the list, even when the orbit would fit. `g` shows the orbit, and so does full screen by `f`.
+- It opens straight on the orbit (the picture) whenever the panel fits it (at least 36 columns by 14 rows: the orbit
+  compresses to the panel's size), and on the
+  list when it does not. `g` switches between them and the choice is remembered while the app runs (after `g` to the
+  list, `/graph` opens the list again); `g` never goes full screen; `f` does,
+  and only when you press it.
 - Keys, while the panel has the keyboard (each one only when the host has the call it needs):
 
 | key | does |
@@ -99,7 +103,7 @@ view, the list opens as a session panel:
 | `s` | stop the selected working agent: asks `ui.dialog.confirm`, then `client.session.interrupt`; the result is a toast |
 | `m` | message the selected working agent: `ui.dialog.prompt`, then `client.session.prompt` with `delivery: "steer"` into its running session; the result is a toast |
 | `r` | run a drawn path (only when the snapshot has one): the host's chooser (`ui.dialog.select`, widened with `ui.dialog.set({ size: "large" })`; skipped with one path) lists `name  a → b → a` (the id when unnamed), most recently run first, with `3 runs · $1.20 avg · 2.0 rounds` from its stats (a dash for a null field, nothing without stats); then `ui.dialog.prompt` for the goal (required, at most 4,000 characters, refused with a toast); then the run message from `agentgraph flow prompt ID --goal-file -` (below); then `client.session.prompt({ sessionID, text })`, a normal user message, to the orchestrator's session (the snapshot's root session, never a child). A toast says sent, or the back end's or the host's error. `r` is off from the press until it is sent or given up, so nothing is sent twice, and `r run` leaves the key line for that time. The `r` layer is registered while the snapshot has a path and unregistered when the paths go. The selected row does not matter: a busy child selected still sends to the root. When the snapshot gives the path a `rev`, it goes along as `--expect REV`: path ids are reused (a removed and redrawn path can get the same id), and a path that changed since the chooser showed it is refused by the back end ("changed since you opened it"); then nothing is sent, both views refresh at once, a warning toast says `<name> changed since you opened it: nothing was sent. Press r again.`, and the next goal prompt for that id starts with the goal typed (not another path's prompt: the goal waits for its own path). Without `rev` (an older back end) no `--expect` is passed |
-| `f` | full screen on and off; full screen shows the orbit, back to a side panel the list |
+| `f` | full screen on and off (yours: `g` never does it); full screen shows the orbit, and a side panel keeps it |
 | `q` | close the panel |
 | `g` | orbit or list (remembered while the app runs) |
 | `d` | the orbit's 2D or 3D view |
@@ -109,16 +113,28 @@ view, the list opens as a session panel:
   here goes round the orchestrator: it does not know you did it, and a stopped agent's step stays as it was until
   the orchestrator looks.
 - Widths: the text follows the panel's width, never narrower than the sidebar's 37 columns and never wider than
-  100, so lines do not stretch across a huge terminal. The host keeps narrow terminals in full screen by itself.
+  100, so lines do not stretch across a huge terminal. The host keeps narrow terminals (under about 107 columns) in full screen by itself.
 - It watches the panel's session with the same runner and `intervalMs` as the sidebar, starts when the panel opens
   and stops when it closes or the plugin is disposed.
 - A host without `ui.panel`, `keymap.layer` or `ui.toast` gets the sidebar only, as before.
 
 ## The orbit (the panel's scene)
 
-After `g` (or full screen by `f`), when the panel is at least 64 columns by 22 rows, it draws the orbit instead of
-the list: a full-panel animated picture of the same snapshot. Smaller than that, and until the panel's height is
-known, it draws the list. The sidebar always draws the list.
+The picture lives in the side panel beside the chat. When the panel is at least 36 columns by 14 rows (the smallest
+that still reads; the sidebar's 37 columns would fit) it opens on the orbit, drawn instead of the list, whatever its
+size (`g` switches to the list and back; full screen is only ever the user's `f`, or the host's own choice on a narrow
+terminal). Smaller than 36x14, and until the panel's height is known, it draws the list. The sidebar always draws the
+list.
+
+**Small panels.** The orbit compresses instead of giving up. As space shrinks it gives way in this order: the three
+instruments (c, b, a), then the needs lines, then the header (its right side `4/11  $7.65` goes, then the hub's name
+is cut), then the names (cut with an ellipsis, never over another name or the figure, the nearer label wins a place),
+then the ring itself gets smaller. The hub, every agent's glyph, the working pulses, the moons and the sun's flares
+stay. At 36x14 the canvas is 12 rows: a 2D ring about 20 cells wide, and the 3D figure's moons show (a moon hidden
+behind its parent for a moment shows nothing). So the sun's flares can leave the ball at that size, the 3D ball is never
+smaller than 7 dots in radius on screen (across and up; about 3 cells, a little bigger than 0.2 of the figure there);
+larger panels keep 0.2. The `d` morph works at that size too, and a frame costs no more than the
+limit below.
 
 From the top: the header line (the list's first line, with dollars), up to three "needs you" lines, the canvas (at
 least 12 rows), then three instruments: a. the context chart of `root.wear` with the wear line, b. the steps strip,
@@ -135,14 +151,24 @@ not selectable. Each orbit row is one node that stays while the orbit shows (a r
 during the morph or an animation always lands: the host drops a press whose target was replaced since its last
 paint.
 
-`g` always changes what the panel shows. The side panel of an ordinary terminal is about 56 columns wide, too
-narrow for the orbit, so it opens on the list; there `g` goes full screen and shows the orbit, and `g` again returns
-to the list and leaves full screen (only if `g` entered it; `f` is yours and `g` never takes you out of it). Only
-when the orbit would not fit even full screen (the terminal is smaller than 64 columns by 22 rows) does `g` do
-nothing.
+`g` switches what the panel shows between the orbit and the list at the size the panel has, and never changes the
+panel's presentation: it does not call the full-screen toggle, not in a narrow panel and not when the orbit would fit
+only full screen (it used to). In a panel smaller than 36x14 there is only the list and `g` does nothing.
+
+**What the host decides.** On a terminal narrower than about 107 columns the host forces the panel to full screen,
+whatever the plugin does: measured in the real host, 100x40 and 105x40 open full screen and `f` (`toggleFullscreen`)
+changes nothing (`presentation` stays `"fullscreen"`), while 108x40 and wider open a 62-column side panel. There the
+plugin can only draw the orbit at the full-screen size it is given (90x40: the whole terminal); it cannot make the
+panel narrower or force a side panel, and drawing a small picture in a corner of a full-screen panel is possible but
+not built. The host's own sidebar (shown from about 120 columns, 37 columns wide, drawn by the plugin's
+`sidebar.content` slot, which always draws the list) could show the small picture instead: 37 columns is above the 36
+minimum, the slot's height would be measured like the panel's (`onSizeChange`), and the same orbit code would draw it.
+That is not built.
 
 **2D** is the ring seen from above, in braille dots (a dot is about square, so the geometry comes out round). The
-hub is a ring outline with open space inside; it breathes by one dot while work moves. The agents sit on a larger
+hub is a ball: a rim of dots with shaded dots inside, dithered denser toward a light at the upper left (the other
+way round on a light theme, so the lit side reads lighter either way), still at rest, its rim breathing by one dot
+while work moves (not with reduced motion). While the hub itself works it is the sun (below). The agents sit on a larger
 faint dotted ellipse in the structure order of the desktop app (lead group at the top, then decide, build, verify,
 understand; a folder structure keeps its groups order), with names outside it. A thin spoke (every third dot) runs
 from outside the hub's ring to short of each agent that has worked in this session; while an agent works a pulse runs
@@ -152,9 +178,32 @@ nothing working one faint dot circles the ring, a lap in 20 s.
 **3D** draws the same system as a turning solid figure: the hub at the centre, each group on its own tilted orbit
 ring (like an armillary sphere), the whole figure turning once in 40 s round its vertical axis. Characters are chosen
 by depth, far to near: `·` `.` `:` `0` `1` `@`; far parts are also dimmed toward the muted colour. Agents keep their
-glyph and name; near names are at full strength, far ones muted, and the nearer label wins a place. While an agent
+glyph and name; near names are at full strength, far ones muted, and the nearer label wins a place. The hub is a
+ball of depth characters shaded from the upper left (`@` the lit side on a dark theme, `·` the shadow side; the other
+way round on a light one), drawn behind the near arcs of the rings. The agents under a parent (the council's seats, or
+any group built the same way: `agents[].parent`) are its **moons**: a `•` and a short name each (`fable`, not
+`councillor-fable`) on one small faint ring round the parent, evenly spaced, the ring leaning 63° out of the group's
+ring and growing with the number of moons (0.11 + 0.04 per moon of the figure's radius, at most 0.4). The moons go
+round once in 24 s, from the clock (`now`), not the frame count, whatever the camera does; with `motion: "reduced"`
+they stand still. A moon's name takes a place like any other, nearest first, and never goes over another name or its
+parent's; a moon hidden behind its parent shows no glyph and no name for that moment. In 2D the seats stay dots in a
+small circle round the parent and nothing about them moves. While an agent
 works, `0`/`1` digits stream along its spoke from the hub out to it in its group colour; on a loop's arc they stream
 toward whoever has the work. A stuck agent blinks in the danger colour.
+
+**The sun** (2D and 3D): while the hub itself works (not just any agent) it flares. 7 to 12 flame spikes (by the hub's
+size: 7 at a radius of 5 dots, 12 at 9) shoot out of its rim and draw back, each with its own seeded life of 0.6 to 1.6 s
+and its own start (so they are out of step; one life in five is skipped, and each life takes a new direction and
+length), reaching at most 0.6 of the ball's radius beyond its rim; a faint glow ring swells and shrinks round the ball
+every 1.4 s, and in 2D the ball's shaded dots turn warm. They start ramped in over 0.3 s after the hub begins to work
+and die down over 1 s after it stops: the scene knows when from `previous` (`{ doc, at }`, the document drawn before and
+when this one arrived), and `frameInterval` keeps the working rate for that second. In 2D they are braille dots, in 3D
+the depth characters `:` `.` `·` (a spike's base `:`, its tip `·`), at a depth below the whole figure, so every spoke,
+arc, agent and name covers them and the ball covers the spikes that point at the camera. Colours: the build group's
+orange toward a pale yellow core, none green and none a group's colour (dark: core `#ffe9a8`, flame `#f2a65a`, glow
+`#a9673f`; light: core `#b87200`, flame `#c0501a`, glow `#cf8a60`, all at least 2:1 against white). With
+`motion: "reduced"` the spikes are short (0.3 of the radius), still and drawn while the hub works, the glow does not
+swell and the rim does not breathe. A hub that is not working shows none of this.
 
 **The change**: `d` (or a click) morphs between the views over 0.7 s: each agent travels on screen from its 2D place
 to its 3D place (and back) while the rings tilt, drawn in the depth characters, ending exactly on the target view's
@@ -408,7 +457,7 @@ folder.``
 - Theme colours: plain is drawn `#eeeeee` and muted `#808080` (the theme's `text.base` and `text.muted`).
 - The context bar from `root.wear`: `$0.00  31.3k↑ 4↓  ━─────── 31.3k` (31.3k of 250k, one cell) at 90×40 and
   160×45, in the panel and the sidebar.
-- The orbit, with `--demo` at 120×40 and 160×45 (in the panel and full screen): the 2D view with the open hub ring,
+- The orbit, with `--demo` at 120×40 and 160×45 (in the panel and full screen): the 2D view with the hub ball,
   10 agent names and all five group colours; `d` switches to the 3D view (`@`, `0`, `1` and the other depth
   characters on the canvas, no braille, 10 names, all five group colours) and two 3D captures 1 s apart differ. At
   90×40 on the throwaway session (no demo) the orbit draws the session's own agents. `q` closes the panel after
@@ -426,14 +475,15 @@ python3 tui-plugin/test/real-host.py --size 160x45
 python3 tui-plugin/test/real-host.py --size 90x40
 python3 tui-plugin/test/real-host.py --size 160x45 --no-graph
 python3 tui-plugin/test/real-host.py --size 120x40 --demo --fullscreen --view3d
-python3 tui-plugin/test/real-host.py --size 160x45 --demo --view3d   # fails: the side panel is 56 columns wide, so the list shows; add --fullscreen
+python3 tui-plugin/test/real-host.py --size 160x45 --demo --view3d   # the orbit in the side panel (it opens on the orbit); --fullscreen presses f first
 python3 tui-plugin/test/real-host.py --size 160x45 --demo --gcheck [--pre f|g|gd|d|R|gR]
 ```
 
-- `--demo`: runs the app with `AGENTGRAPH_TUI_DEMO=1` and requires the 2D orbit: the hub ring (the hub's glyph inside
-  the canvas, braille dots round it, open cells beside it), at least 8 agent names on at least 6 rows on both sides
+- `--demo`: runs the app with `AGENTGRAPH_TUI_DEMO=1` and requires the 2D orbit: the hub ball (the hub's glyph inside
+  the canvas, braille dots round it), at least 8 agent names on at least 6 rows on both sides
   of the hub, at least 3 group colours (matched by hue, so resting mixes count) and none green or teal, the context
-  chart, and two captures 1 s apart that differ.
+  chart, and two captures 1 s apart that differ. (`--demo` alone at 130x40, and `--dialog`, `--open`, `--paths` and
+  `--live-paths`, test the list: the panel opens on the orbit, so the run presses `g` first and requires the list.)
 - `--fullscreen`: presses `f` once the view shows.
 - `--expect-scene`: requires the hub ring without the demo (a live session's own agents).
 - `--view3d`: after the 2D captures presses `d`, waits 1 s and captures the 3D view, then again 1 s later. With
@@ -444,7 +494,7 @@ python3 tui-plugin/test/real-host.py --size 160x45 --demo --gcheck [--pre f|g|gd
 - `--plugin DIR`: loads only the terminal plugin in `DIR` (a scratch config folder), for testing a checkout.
 - `--gcheck`: presses `g`, captures, presses `g` again, captures; fails unless the first press changed between orbit
   and list and the second changed it back. It prints the panel size the plugin measured (from its debug log; sizes
-  come in order, so `56x44, 160x45` is a side panel and then full screen). `--pre KEYS` presses keys first: `f`, `d`,
+  come in order, so `62x39, 130x40` is a side panel and then full screen by `f`); it also fails when `g` changes the panel's size (`g` never goes full screen; not checked when `--pre` has `f`). `--pre KEYS` presses keys first: `f`, `d`,
   `g`, and `R` (close with `q`, reopen with `/graph`). Use it with `--demo`, not with `--fullscreen` or `--view3d`.
 
 The script always starts the app with `--standalone`, and so must anyone who drives the app by hand for a test. A

@@ -10,8 +10,10 @@
  * width) and the command "agentgraph.graph" (slash /graph, alias /agents) that opens and closes it. Every host
  * function is feature-detected; a host without them gets the sidebar only.
  *
- * The panel opens on the list. It draws the orbit (src/scene.js) when asked: `g`, or `f` (full screen), and only when
- * it has at least 64 columns and 22 rows; its size is measured from the panel's own box (OpenTUI `onSizeChange`,
+ * The panel opens on the orbit (src/scene.js) in the side panel, at whatever size it has down to 36 columns by 14 rows
+ * (the orbit compresses to fit), and on the list below that: `g` switches between them, from then on remembered while
+ * the app runs, and never makes the panel full screen (only the user's `f` does, and the host on a narrow terminal);
+ * its size is measured from the panel's own box (OpenTUI `onSizeChange`,
  * `width`, `height`), because the documented panel input has no height. `d` switches the orbit between its 2D view
  * (the ring from above, braille dots) and its 3D view (a turning figure in depth characters). On the 3D view ←/→ turn
  * it round its upright axis, ↑/↓ change the elevation and `0` resets, named on its bottom row; a click on the orbit
@@ -604,12 +606,11 @@ export function createPlugin(host) {
       };
     }
 
-    // The view chosen with `g` in the panel, remembered while the app runs: "auto" (the list, or the orbit while `f`
-    // made the panel full screen), "scene" or "list".
+    // The view chosen with `g` in the panel, remembered while the app runs: "auto" (the orbit when it fits: what the
+    // panel opens on; the list when it does not), "scene" or "list" (chosen with `g`).
     const [viewMode, setViewMode] = host.createSignal("auto");
     const [fullByF, setFullByF] = host.createSignal(false); // the user made the panel full screen with `f`
-    // The orbit is wanted after `g`, or while the panel is full screen by `f` (not once the host has made it a side
-    // panel again by its own key: then `presentation` says "panel").
+    // The orbit is wanted unless the user chose the list with `g`; it is drawn only where it fits (sceneFits).
     const presentationOf = (p) => {
       try {
         return p ? p.presentation : undefined;
@@ -617,7 +618,7 @@ export function createPlugin(host) {
         return undefined;
       }
     };
-    const wantScene = (p) => viewMode() === "scene" || (viewMode() === "auto" && fullByF() && presentationOf(p) !== "panel");
+    const wantScene = () => viewMode() !== "list";
 
     // The list's rows in the panel: the selected row's key (remembered while the app runs) and the rows last drawn.
     const [selection, setSelection] = host.createSignal(null);
@@ -867,17 +868,6 @@ export function createPlugin(host) {
         })
         .finally(() => setRunBusy(false));
     };
-    // The terminal's size, which is the panel's size in full screen; null when the host does not say.
-    const screenSize = () => {
-      try {
-        const out = typeof host.screenSize === "function" ? host.screenSize() : globalThis.process && globalThis.process.stdout;
-        const width = Math.floor(Number(out && (out.width !== undefined ? out.width : out.columns)));
-        const height = Math.floor(Number(out && (out.height !== undefined ? out.height : out.rows)));
-        return width > 0 && height > 0 ? { width, height } : null;
-      } catch (_) {
-        return null;
-      }
-    };
     // The orbit's view chosen with `d`, remembered while the app runs; it opens in 2D. A switch morphs the old view
     // into the new one over CHANGE_MS (each agent travels from its place in one to its place in the other).
     const [dimension, setDimension] = host.createSignal({ view: "2d", change: null });
@@ -1007,7 +997,12 @@ export function createPlugin(host) {
         noteRuns(snap);
         return scene(snap.doc, Object.assign(viewOptions(), { width: size.width, height: size.height, now: clock(), previous: snap.previous ? { doc: snap.previous, at: snap.at } : undefined }));
       };
-      watcher.sceneInterval = (doc) => frameInterval(doc, viewOptions(), clock());
+      // the frame interval at now; the previous document is part of it (the sun's spikes draw back for a second after the hub stops)
+      watcher.sceneInterval = (doc) => {
+        const snap = watcher.state();
+        const previous = snap && snap.doc === doc && snap.previous ? { doc: snap.previous, at: snap.at } : undefined;
+        return frameInterval(doc, Object.assign(viewOptions(), previous ? { previous } : {}), clock());
+      };
       let lastSize = null;
       watcher.beforeTick = () => {
         if (!lastSize) return true;
@@ -1202,10 +1197,6 @@ export function createPlugin(host) {
           return false;
         }
       };
-      // `g` shows the orbit and the panel is too small for it as it is, but the screen is not: `g` goes full screen.
-      // enteredFullscreen: it was `g` that did, so `g` back to the list leaves full screen again.
-      let enteredFullscreen = false;
-      let unverified = false; // the screen's size was not known: check the orbit fits once the panel is measured
       const fullscreenNow = () => {
         try {
           return panel.presentation === "fullscreen";
@@ -1213,51 +1204,17 @@ export function createPlugin(host) {
           return false;
         }
       };
-      const fullscreenToggle = () => {
-        try {
-          if (typeof panel.toggleFullscreen === "function") {
-            panel.toggleFullscreen();
-            return true;
-          }
-        } catch (_) {
-          /* ignore */
-        }
-        return false;
-      };
-      const leaveFullscreen = () => {
-        if (enteredFullscreen && fullscreenNow()) fullscreenToggle();
-        enteredFullscreen = false;
-        unverified = false;
-      };
-      // `g` always changes what the panel shows, unless the orbit cannot fit even full screen.
+      // `g` switches between the orbit and the list in the panel as it is. It never makes the panel full screen (the
+      // user's `f` does, and the host does by itself on a narrow terminal): the orbit compresses to what the panel
+      // has (sceneFits), and a panel smaller than that has only the list, so `g` has nothing to switch to.
       const switchView = (currentSize) => {
         const known = currentSize();
-        const orbitShown = wantScene(panel) && !!known && sceneFits(known.width, known.height);
-        if (orbitShown) {
-          setViewMode("list");
-          leaveFullscreen();
-        } else if (known && sceneFits(known.width, known.height)) {
-          setViewMode("scene");
-        } else if (fullscreenNow()) {
-          // already full screen and still too small: nothing to show
-        } else {
-          const screen = screenSize();
-          if (!screen || sceneFits(screen.width, screen.height)) {
-            if (fullscreenToggle()) {
-              enteredFullscreen = true;
-              unverified = !screen;
-              setViewMode("scene");
-            }
-          }
-        }
+        const fits = !!known && sceneFits(known.width, known.height);
+        if (fits) setViewMode(wantScene(panel) ? "list" : "scene");
         requestRender();
       };
-      // The panel was measured: when `g` guessed that full screen would fit and it does not, go back.
-      const sized = (next) => {
-        if (!unverified || !enteredFullscreen || !fullscreenNow()) return;
-        unverified = false;
-        if (!sceneFits(next.width, next.height)) leaveFullscreen();
-      };
+      // kept for the panel's measure callback: nothing to undo now that `g` never changes the presentation
+      const sized = () => {};
       const onList = () => ours() && !rows.scene && rows.items.length > 0 && !dialogOpen();
       // the 3D orbit shows: the arrow keys turn it (left and right in the turn layer, up and down in the layer above)
       const turning = () => ours() && rows.scene && dimension().view === "3d" && !dialogOpen();
@@ -1275,7 +1232,6 @@ export function createPlugin(host) {
             bind: "f",
             enabled: ours,
             run: () => {
-              enteredFullscreen = false; // full screen is the user's now: `g` no longer leaves it
               const told = typeof presentationOf(panel) === "string"; // the host says whether it is full screen
               const before = told ? fullscreenNow() : fullByF();
               act("toggleFullscreen")();

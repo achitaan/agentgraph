@@ -1818,7 +1818,7 @@ test("panel: never empty for its own name: loading, error, no session and a draw
 
 const S = await import(src("scene.js"));
 const DM = await import(src("demo.js"));
-const SIZES = [[64, 22], [92, 40], [120, 40], [160, 45], [200, 60]];
+const SIZES = [[36, 14], [37, 14], [40, 20], [64, 22], [92, 40], [120, 40], [160, 45], [200, 60]];
 const demoWorn = DM.demoDocument(demo, 60000); // the demo document with a wear history, as AGENTGRAPH_TUI_DEMO draws it
 const DARK = { dark: true, muted: "#808080" };
 const LIGHT = { dark: false, muted: "#8c8c8c" };
@@ -1869,9 +1869,10 @@ test("scene: exact width and height, one style per run, at every size, in both v
       }
     }
   }
+  assert.equal(S.sceneFits(36, 14), true);
   assert.equal(S.sceneFits(64, 22), true);
-  assert.equal(S.sceneFits(63, 40), false);
-  assert.equal(S.sceneFits(200, 21), false);
+  assert.equal(S.sceneFits(35, 40), false);
+  assert.equal(S.sceneFits(200, 13), false);
   assert.equal(S.sceneFits(undefined, undefined), false);
 });
 
@@ -1898,21 +1899,29 @@ test("scene 2D: header, needs lines, the hub ring, names on both sides, the inst
   }
 });
 
-test("scene 2D: the hub is a ring with open space inside; no 6x3 window is more than 60% heavy braille", () => {
+test("scene 2D: the hub is a ball (a rim, shaded dots inside, lit from the upper left); no 6x3 window is more than 60% heavy braille", () => {
   for (const [w, h] of [[120, 30], [92, 30], [160, 35], [64, 14]]) {
     const L = S.orbitLayout(demoWorn, w, h);
     for (let now = 0; now < 3200; now += 100) {
       const grid = S.orbitLines(demoWorn, w, h, now).map(cellsOf);
-      // inside the ring: blank but for the hub's glyph
+      // inside the rim: the ball's shaded dots, denser toward the upper left than toward the lower right (it was blank)
       const inner = L.hubR - 1.5; // dots
+      let upperLeft = 0;
+      let lowerRight = 0;
+      let inside = 0;
       for (let r = 0; r < h; r += 1) {
         for (let c = 0; c < w; c += 1) {
           const corners = [[c * 2, r * 4], [c * 2 + 2, r * 4], [c * 2, r * 4 + 4], [c * 2 + 2, r * 4 + 4]];
           if (!corners.every(([x, y]) => Math.hypot(x - L.cx, y - L.cy) < inner)) continue;
           const ch = grid[r][c].ch;
-          assert.ok(ch === " " || ch === "◉", `${w}x${h}@${now}: cell ${c},${r} inside the hub's ring is ${JSON.stringify(ch)}`);
+          assert.ok(ch === " " || ch === "◉" || /[\u2800-\u28ff]/.test(ch), `${w}x${h}@${now}: cell ${c},${r} inside the hub's rim is ${JSON.stringify(ch)}`);
+          inside += dotsIn(ch);
+          if (c * 2 + 1 < L.cx && r * 4 + 2 < L.cy) upperLeft += dotsIn(ch);
+          if (c * 2 + 1 > L.cx && r * 4 + 2 > L.cy) lowerRight += dotsIn(ch);
         }
       }
+      if (L.hubR >= 8) assert.ok(inside >= 3, `${w}x${h}@${now}: a ball, not a bare ring: ${inside} dots inside`); // smaller hubs have no whole cell inside the rim
+      assert.ok(upperLeft >= lowerRight, `${w}x${h}@${now}: lit from the upper left: ${upperLeft} dots there, ${lowerRight} at the lower right`);
       assert.ok(grid.some((row) => row.some((x) => x.ch === "◉")), "the hub's glyph");
       // density
       const heavy = grid.map((row) => row.map((x) => (dotsIn(x.ch) >= 4 ? 1 : 0)));
@@ -2512,17 +2521,17 @@ const sizePanel = (view, width, height) => {
   view.props.onSizeChange.call(view);
 };
 
-// `g` in the newest panel's view layer: the panel opens on the list, `g` shows the orbit.
+// `g` in the newest panel's view layer: the panel opens on the orbit (when it fits), `g` switches to the list and back.
 const pressG = (state) => state.layers.filter((l) => (l.commands || []).some((c) => c.bind === "g")).pop().commands.find((c) => c.bind === "g").run();
 // The orbit is on screen: the hub's glyph inside the canvas (the list has it only at the start of its first line).
-const isOrbit = (lines) => lines.length >= 22 && lines.slice(1).some((l) => l.indexOf("◉") > 4);
+const isOrbit = (lines) => lines.length >= 14 && lines.slice(1).some((l) => l.indexOf("◉") > 4);
 // The 3D view: the near side of a ring in @, and 0s and 1s, inside the canvas rows (no braille ring there).
 const has3D = (lines) => {
   const body = lines.slice(4, -6).join("\n");
   return /@@/.test(body) && /[01]/.test(body) && !/[\u2801-\u28ff]/.test(body.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, ""));
 };
 
-test("panel scene: the panel opens on the list; g shows the orbit from 64x22 with a measured size; g switches back; sidebar unchanged", async () => {
+test("panel scene: the panel opens on the orbit when it fits (from 36x14, measured), the list before it is measured; g switches to the list and back; sidebar unchanged", async () => {
   const { plugin, spawned, clockRef } = makeScenePlugin();
   const { ctx, state, panelClaim } = makePanelHost();
   const stop = plugin.setup(ctx);
@@ -2535,21 +2544,20 @@ test("panel scene: the panel opens on the list; g shows the orbit from 64x22 wit
     assert.ok(screen(view).length < 40 && !isOrbit(screen(view)), "the list while the height is unknown");
     const gLayer = () => state.layers.find((l) => (l.commands || []).some((c) => c.bind === "g"));
     assert.equal(gLayer(), undefined, "no g before there is an orbit to switch to");
-    // measured, room for the orbit: still the list (at most 16 rows), until g
+    // measured, room for the orbit: the orbit straight away (it opened on the list before /graph's change)
     sizePanel(view, 120, 40);
-    assert.ok(!isOrbit(screen(view)) && screen(view).length <= 16, "the list by default\n" + screen(view).join("\n"));
-    gLayer().commands.find((c) => c.bind === "g").run();
     assert.equal(screen(view).length, 40);
     assert.ok(screen(view).every((l) => R.displayWidth(l) === 120));
-    assert.ok(isOrbit(screen(view)), "the orbit");
-    // smaller than 64x22: the list
-    sizePanel(view, 63, 40);
+    assert.ok(isOrbit(screen(view)), "the orbit by default\n" + screen(view).join("\n"));
+    // smaller than 36x14: the list
+    sizePanel(view, 35, 40);
     assert.ok(!isOrbit(screen(view)) && screen(view).length < 40);
-    sizePanel(view, 100, 21);
+    sizePanel(view, 100, 13);
     assert.ok(!isOrbit(screen(view)));
-    sizePanel(view, 64, 22);
-    assert.equal(screen(view).length, 22);
-    assert.ok(screen(view).every((l) => R.displayWidth(l) === 64));
+    sizePanel(view, 36, 14);
+    assert.ok(isOrbit(screen(view)));
+    assert.equal(screen(view).length, 14);
+    assert.ok(screen(view).every((l) => R.displayWidth(l) === 36));
     // d: 2D to 3D and back, the camera moving over CHANGE_MS; the orbit opens in 2D
     sizePanel(view, 120, 40);
     assert.ok(!has3D(screen(view)), "opens in 2D");
@@ -2605,7 +2613,45 @@ function fullscreenPanel(presentation = "panel") {
   return panel;
 }
 
-test("panel scene: g always changes what is shown; too small as a side panel, it goes full screen and back", async () => {
+test("panel scene: /graph opens straight on the orbit whenever the panel fits it (36x14 and up) and on the list when it does not; g to the list is remembered for the next opening", async () => {
+  const { plugin } = makeScenePlugin();
+  const { ctx, state, panelClaim } = makePanelHost();
+  const stop = plugin.setup(ctx);
+  globalThis.__agentgraphStub.cleanups.length = 0;
+  try {
+    for (const [w, h, orbit] of [[36, 14, true], [37, 39, true], [56, 44, true], [75, 39, true], [120, 40, true], [200, 60, true], [35, 40, false], [100, 13, false], [20, 30, false], [30, 12, false]]) {
+      for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+      const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: w }));
+      await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
+      sizePanel(view, w, h);
+      assert.equal(isOrbit(screen(view)), orbit, `${w}x${h}: ${orbit ? "the orbit" : "the list"} on opening\n` + screen(view).join("\n"));
+      if (orbit) {
+        assert.equal(screen(view).length, h);
+        assert.ok(!has3D(screen(view)), "in 2D");
+      }
+    }
+    // g to the list is remembered: the next opening shows the list, and g brings the orbit back
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
+    await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
+    sizePanel(view, 120, 40);
+    assert.ok(isOrbit(screen(view)));
+    pressG(state);
+    assert.ok(!isOrbit(screen(view)), "g: the list");
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    const again = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
+    await waitFor(() => screen(again).length > 3, 5000, "demo snapshot");
+    sizePanel(again, 120, 40);
+    assert.ok(!isOrbit(screen(again)), "reopened on the list the user chose");
+    pressG(state);
+    assert.ok(isOrbit(screen(again)), "g: the orbit again");
+  } finally {
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    stop();
+  }
+});
+
+test("panel scene: g switches the orbit and the list in the side panel at the size it has (56 and 37 columns too) and never asks for full screen; only f does", async () => {
   const { plugin } = makeScenePlugin({ screen: { width: 160, height: 45 } });
   const { ctx, state, panelClaim } = makePanelHost();
   const stop = plugin.setup(ctx);
@@ -2614,49 +2660,39 @@ test("panel scene: g always changes what is shown; too small as a side panel, it
     const panel = fullscreenPanel();
     const view = panelClaim().render(panel);
     await waitFor(() => screen(view).length > 5, 5000, "demo snapshot");
-    sizePanel(view, 56, 44); // the side panel of a 160-column terminal
-    assert.ok(!isOrbit(screen(view)), "the list: 56 columns are too narrow");
     const key = (bind) => state.layers.filter((l) => (l.commands || []).some((c) => c.bind === bind)).pop().commands.find((c) => c.bind === bind);
-    key("g").run();
-    assert.equal(panel.calls.full, 1, "g asked for full screen");
-    sizePanel(view, 160, 45); // the host lays the panel out full screen
-    assert.ok(isOrbit(screen(view)), "g: the orbit");
-    key("d").run(); // d does not change what g leaves
-    key("g").run();
-    assert.equal(panel.calls.full, 2, "g back leaves the full screen that g entered");
-    assert.equal(panel.presentation, "panel");
-    sizePanel(view, 56, 44);
-    assert.ok(!isOrbit(screen(view)), "g: the list");
-    key("g").run();
-    sizePanel(view, 160, 45);
-    assert.ok(isOrbit(screen(view)), "g again: the orbit");
-    // f in between: full screen is the user's now, g to the list keeps it
+    for (const [w, h] of [[56, 44], [37, 39], [36, 14]]) {
+      sizePanel(view, w, h); // the side panel of a 160-column terminal, a narrower one, the smallest
+      assert.ok(isOrbit(screen(view)), `${w}x${h}: it opens on the orbit\n` + screen(view).join("\n"));
+      key("g").run();
+      assert.ok(!isOrbit(screen(view)), `${w}x${h}: g: the list`);
+      key("g").run();
+      assert.ok(isOrbit(screen(view)), `${w}x${h}: g: the orbit`);
+      assert.equal(panel.calls.full, 0, `${w}x${h}: g never asked for full screen`);
+      assert.equal(panel.presentation, "panel");
+    }
+    // f is the user's: it toggles, and g after it still does not
     key("f").run();
-    assert.equal(panel.calls.full, 4, "f toggled it");
-    sizePanel(view, 56, 44);
-    assert.ok(!isOrbit(screen(view)), "f left full screen: the list");
-    key("g").run();
+    assert.equal(panel.calls.full, 1, "f toggled it");
     sizePanel(view, 160, 45);
-    assert.ok(isOrbit(screen(view)), "g after f: the orbit");
-    key("f").run(); // the user leaves full screen while the orbit shows ...
-    sizePanel(view, 56, 44);
-    assert.ok(!isOrbit(screen(view)));
-    // ... and a panel already full screen (by f) stays so when g shows the list and the orbit again
-    key("f").run();
-    sizePanel(view, 160, 45);
-    const full = panel.calls.full;
+    assert.ok(isOrbit(screen(view)), "f: the orbit, full screen");
     key("g").run();
     assert.ok(!isOrbit(screen(view)), "g: the list");
     key("g").run();
     assert.ok(isOrbit(screen(view)), "g: the orbit");
-    assert.equal(panel.calls.full, full, "g did not touch a full screen it did not enter");
+    assert.equal(panel.calls.full, 1, "g did not touch the full screen");
+    key("f").run();
+    assert.equal(panel.calls.full, 2);
+    sizePanel(view, 56, 44);
+    assert.ok(isOrbit(screen(view)), "f back: the side panel keeps the orbit");
+    assert.equal(panel.calls.full, 2);
   } finally {
     for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
     stop();
   }
 });
 
-test("panel scene: f full screen shows the orbit, f back to a side panel the list; the list's keys are off while the orbit shows", async () => {
+test("panel scene: f full screen shows the orbit, f back to a side panel that fits keeps it; the list's keys are off while the orbit shows", async () => {
   const { plugin } = makeScenePlugin({ screen: { width: 160, height: 45 } });
   const { ctx, state, panelClaim } = makePanelHost();
   ctx.ui.router = { navigate: () => {} };
@@ -2666,9 +2702,12 @@ test("panel scene: f full screen shows the orbit, f back to a side panel the lis
     const panel = fullscreenPanel();
     const view = panelClaim().render(panel);
     await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
-    sizePanel(view, 75, 39); // the side panel of a 130x40 terminal: room for the orbit, but the list is shown
-    assert.ok(!isOrbit(screen(view)) && screen(view).length <= 16, "the list in the side panel");
+    sizePanel(view, 75, 39); // the side panel of a 130x40 terminal: room for the orbit, so it opens on the orbit
+    assert.ok(isOrbit(screen(view)), "the orbit in the side panel");
     const key = (bind) => state.layers.filter((l) => (l.commands || []).some((c) => c.bind === bind)).pop().commands.find((c) => c.bind === bind);
+    assert.equal(key("down").enabled(), false, "no row keys on the orbit");
+    key("g").run();
+    assert.ok(!isOrbit(screen(view)) && screen(view).length <= 16, "g: the list in the side panel");
     assert.equal(key("down").enabled(), true);
     key("f").run();
     assert.equal(panel.presentation, "fullscreen");
@@ -2679,86 +2718,48 @@ test("panel scene: f full screen shows the orbit, f back to a side panel the lis
     key("f").run();
     assert.equal(panel.presentation, "panel");
     sizePanel(view, 75, 39);
-    assert.ok(!isOrbit(screen(view)), "f again: the list");
+    assert.ok(isOrbit(screen(view)), "f again: a side panel that fits keeps the orbit");
+    assert.equal(key("down").enabled(), false);
+    key("g").run();
+    assert.ok(!isOrbit(screen(view)), "g: the list");
     assert.equal(key("down").enabled(), true);
-    // the host leaves full screen by its own key: the list, not the orbit in a side panel
+    // the host leaves full screen by its own key: the orbit stays (it fits)
     key("f").run();
     sizePanel(view, 160, 45);
     assert.ok(isOrbit(screen(view)));
     panel.presentation = "panel";
     sizePanel(view, 75, 39);
-    assert.ok(!isOrbit(screen(view)), "the host's own key: the list");
+    assert.ok(isOrbit(screen(view)), "the host's own key: a side panel that fits keeps the orbit");
   } finally {
     for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
     stop();
   }
 });
 
-test("panel scene: g does nothing only when the orbit cannot fit even full screen; an unknown screen is tried and undone", async () => {
+test("panel scene: below 36x14 the list shows and g has nothing to switch to; it never asks for full screen, whatever the screen's size or when it is unknown", async () => {
   const keyOf = (state, bind) => state.layers.filter((l) => (l.commands || []).some((c) => c.bind === bind)).pop().commands.find((c) => c.bind === bind);
-  // a screen too small for the orbit: nothing to switch to
-  {
-    const { plugin } = makeScenePlugin({ screen: { width: 60, height: 40 } });
-    const { ctx, state, panelClaim } = makePanelHost();
-    const stop = plugin.setup(ctx);
-    globalThis.__agentgraphStub.cleanups.length = 0;
-    try {
-      const panel = fullscreenPanel();
-      const view = panelClaim().render(panel);
-      await waitFor(() => screen(view).length > 5, 5000, "demo snapshot");
-      sizePanel(view, 40, 39);
-      keyOf(state, "g").run();
-      assert.equal(panel.calls.full, 0, "no full screen that would not help");
-      assert.ok(!isOrbit(screen(view)));
-    } finally {
-      for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
-      stop();
-    }
-  }
-  // already full screen and too small: nothing either
-  {
-    const { plugin } = makeScenePlugin({ screen: { width: 60, height: 40 } });
-    const { ctx, state, panelClaim } = makePanelHost();
-    const stop = plugin.setup(ctx);
-    globalThis.__agentgraphStub.cleanups.length = 0;
-    try {
-      const panel = fullscreenPanel("fullscreen");
-      const view = panelClaim().render(panel);
-      await waitFor(() => screen(view).length > 5, 5000, "demo snapshot");
-      sizePanel(view, 60, 40);
-      keyOf(state, "g").run();
-      assert.equal(panel.calls.full, 0);
-      assert.ok(!isOrbit(screen(view)));
-    } finally {
-      for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
-      stop();
-    }
-  }
-  // the screen's size is unknown: g tries full screen; when the panel measures too small it goes back
-  {
-    const { plugin } = makeScenePlugin({ screen: null });
-    const { ctx, state, panelClaim } = makePanelHost();
-    const stop = plugin.setup(ctx);
-    globalThis.__agentgraphStub.cleanups.length = 0;
-    try {
-      const panel = fullscreenPanel();
-      const view = panelClaim().render(panel);
-      await waitFor(() => screen(view).length > 5, 5000, "demo snapshot");
-      sizePanel(view, 56, 44);
-      keyOf(state, "g").run();
-      assert.equal(panel.calls.full, 1, "tried");
-      sizePanel(view, 60, 40);
-      assert.equal(panel.calls.full, 2, "and undone");
-      assert.equal(panel.presentation, "panel");
-      assert.ok(!isOrbit(screen(view)));
-      // and when it does fit, it stays
-      keyOf(state, "g").run();
-      sizePanel(view, 120, 40);
-      assert.equal(panel.calls.full, 3);
-      assert.ok(isOrbit(screen(view)));
-    } finally {
-      for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
-      stop();
+  for (const screenSize of [{ width: 160, height: 45 }, { width: 60, height: 40 }, null]) {
+    for (const [w, h] of [[35, 39], [40, 13], [20, 30]]) {
+      const { plugin } = makeScenePlugin({ screen: screenSize });
+      const { ctx, state, panelClaim } = makePanelHost();
+      const stop = plugin.setup(ctx);
+      globalThis.__agentgraphStub.cleanups.length = 0;
+      try {
+        const panel = fullscreenPanel();
+        const view = panelClaim().render(panel);
+        await waitFor(() => screen(view).length > 5, 5000, "demo snapshot");
+        sizePanel(view, w, h);
+        assert.ok(!isOrbit(screen(view)), `${w}x${h}: the list`);
+        keyOf(state, "g").run();
+        assert.equal(panel.calls.full, 0, `${w}x${h} on ${JSON.stringify(screenSize)}: no full screen`);
+        assert.ok(!isOrbit(screen(view)), `${w}x${h}: still the list`);
+        sizePanel(view, 36, 14); // grown to the minimum: the orbit, and g leaves it alone
+        assert.ok(isOrbit(screen(view)), "36x14: the orbit");
+        assert.equal(panel.calls.full, 0);
+      } finally {
+        for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+        stop();
+      }
     }
   }
 });
@@ -2782,7 +2783,6 @@ test("panel scene: dark or light from the theme's background; the group colours 
       const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
       await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
       sizePanel(view, 120, 40);
-      pressG(state); // the panel opens on the list
       const fgs = allFg(view);
       assert.ok(fgs.length > 20);
       for (const fg of fgs) assert.match(fg, /^#[0-9a-f]{6}$/);
@@ -2809,7 +2809,6 @@ test("panel scene: frames at 100 ms while work moves; an unchanged frame is not 
     const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
     await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
     sizePanel(view, 120, 40);
-    pressG(state); // the panel opens on the list
     // the clock stands still: ticks compute the same frame and push nothing
     await sleep(150);
     const rendersStill = state.renders;
@@ -2909,8 +2908,11 @@ test("orbit: a turned 3D frame differs from the self-turn's, stands still while 
   const o = S.orbitTurned(null, t0, Math.PI / 2, 0.3);
   const at = (now, orbit) => sceneText(S.orbitLines(doc, 120, 30, now, Object.assign({ view: "3d" }, orbit ? { orbit } : {}))).join("\n");
   assert.notEqual(at(t0, o), at(t0, null), "turned by hand: another picture");
-  assert.equal(at(t0 + 1000, o), at(t0, o), "held: the same frame");
-  assert.equal(at(t0 + S.RESUME_MS - 1000, o), at(t0, o)); // a stuck agent blinks twice a second: the same phase
+  // the moons go round their parents by the clock whatever the camera does (see the moons' check), so the held camera's
+  // frame is compared with the moons still (motion: reduced)
+  const still = (now, orbit) => sceneText(S.orbitLines(doc, 120, 30, now, { view: "3d", orbit, motion: "reduced" })).join("\n");
+  assert.equal(still(t0 + 1000, o), still(t0, o), "held: the same frame");
+  assert.equal(still(t0 + S.RESUME_MS - 1000, o), still(t0, o)); // a stuck agent blinks twice a second: the same phase
   assert.notEqual(at(o.resume + 1000, o), at(t0, o), "then it turns on");
   // the self-turn's frames are unchanged without an orbit
   assert.equal(at(t0, null), sceneText(S.orbitLines(doc, 120, 30, t0, V3)).join("\n"));
@@ -2980,6 +2982,7 @@ test("orbit panel: in 3D the arrow keys turn it and 0 resets, only on the 3D orb
     const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
     await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
     sizePanel(view, 120, 40);
+    pressG(state); // the panel opens on the orbit; g shows the list
     const left = commandOf(state, "agentgraph.graph.turn-left");
     const right = commandOf(state, "agentgraph.graph.turn-right");
     const reset = commandOf(state, "agentgraph.graph.turn-reset");
@@ -3057,6 +3060,7 @@ test("orbit panel: a click on the orbit switches 2D and 3D, a drag turns the 3D 
     const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
     await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
     sizePanel(view, 120, 40);
+    pressG(state); // the panel opens on the orbit; g shows the list
     const p = view.props;
     for (const k of ["onMouseDown", "onMouseDrag", "onMouseUp", "onMouseOver"]) assert.equal(typeof p[k], "function", k);
     const click = (x, y) => {
@@ -3412,6 +3416,397 @@ test("orbit sky: the hub drawn brighter (accent) in 3D while the orchestrator wo
   assert.equal(accents(idle).replace(/\s/g, ""), "");
 });
 
+// ---- moons and the sun
+
+const BRAILLE_BITS = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
+// every braille dot of the frame with the style of its cell: [{ x, y, color }] in dots
+function frameDots(lines) {
+  const out = [];
+  lines.forEach((l, r) => cellsOf(l).forEach((c, col) => {
+    const code = c.ch.codePointAt(0) - 0x2800;
+    if (code < 1 || code > 255) return;
+    for (let y = 0; y < 4; y += 1) for (let x = 0; x < 2; x += 1) if (code & BRAILLE_BITS[y][x]) out.push({ x: col * 2 + x, y: r * 4 + y, color: c.color, tone: c.tone });
+  }));
+  return out;
+}
+const SUN_ALL = new Set([...Object.values(S.SUN_COLORS.dark), ...Object.values(S.SUN_COLORS.light)]);
+// the cells of a frame drawn in the sun's colours: [{ col, row, ch }]
+function warmCells(lines) {
+  const out = [];
+  lines.forEach((l, row) => cellsOf(l).forEach((c, col) => {
+    if (c.color && SUN_ALL.has(c.color) && c.ch !== " ") out.push({ col, row, ch: c.ch });
+  }));
+  return out;
+}
+const lumaOf = (hex) => {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+const contrast = (a, b) => (Math.max(lumaOf(a), lumaOf(b)) + 0.05) / (Math.min(lumaOf(a), lumaOf(b)) + 0.05);
+const hubIdle = () => {
+  const d = idleDemo();
+  if (d.root) d.root.busy = false;
+  return d;
+};
+const hubBusy = () => {
+  const d = hubIdle();
+  d.agents.find((a) => a.group === "hub").busy = 1;
+  return d;
+};
+
+test("moons 3D: each parent's moons are on one small ring round it, evenly spaced, leaning out of the group's ring, growing with their number", () => {
+  const doc = hubIdle();
+  const L = S.orbitLayout(doc, 120, 30);
+  const F = S.figure3D(L);
+  const council = L.placed.find((p) => p.seats.length === 3);
+  assert.ok(council, "the demo's council has three seats");
+  const seats = F.seats.filter((x) => x.lead === council.agent.name);
+  assert.deepEqual(seats.map((x) => x.agent.name).sort(), council.seats.map((x) => x.name).sort());
+  const c = F.agents.get(council.agent.name);
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const len = (a) => Math.hypot(...a);
+  for (const phase of [0, 1.3, 4]) {
+    const rel = seats.map((x) => sub(S.moonPoint(x, phase), c));
+    // one ring: the same distance from the parent, all in one plane through it
+    for (const r of rel) assert.ok(Math.abs(len(r) - len(rel[0])) < 1e-9 && len(r) > 0.1 && len(r) < 0.45, "a small ring round the parent: " + len(r));
+    const n = [rel[0][1] * rel[1][2] - rel[0][2] * rel[1][1], rel[0][2] * rel[1][0] - rel[0][0] * rel[1][2], rel[0][0] * rel[1][1] - rel[0][1] * rel[1][0]];
+    for (const r of rel) assert.ok(Math.abs(dot(r, n)) / (len(n) * len(r)) < 1e-9, "one plane");
+    // evenly spaced: the same angle between neighbours (120 degrees for three)
+    for (let i = 0; i < 3; i += 1) {
+      const a = rel[i];
+      const b = rel[(i + 1) % 3];
+      assert.ok(Math.abs(dot(a, b) / (len(a) * len(b)) + 0.5) < 1e-9, "120 degrees apart");
+    }
+    // tilted differently from the group's ring: the plane's normal is not the ring's
+    const ring = F.rings.find((x) => x.key === council.key);
+    const tilt = Math.acos(Math.abs(dot(n, ring.normal)) / len(n));
+    assert.ok(tilt > 0.6, "leans out of the group's ring by " + tilt.toFixed(2) + " rad");
+  }
+  // the ring grows with the number of moons
+  const mk = (k) => {
+    const d = D([A("orchestrator", "hub"), A("lead", "council"), ...Array.from({ length: k }, (_, i) => A("m" + i, "council", 0, "lead"))]);
+    return S.figure3D(S.orbitLayout(d, 120, 30)).seats[0].ring.radius;
+  };
+  assert.ok(mk(2) < mk(4) && mk(4) < mk(6), "radius " + [mk(2), mk(4), mk(6)]);
+  // morph: flat with the group's ring at the start (the moons sit on the 2D plane), the full lean at the end
+  const flat = S.figure3D(L, 0).seats.filter((x) => x.lead === council.agent.name);
+  for (const x of flat) assert.ok(Math.abs(S.moonPoint(x, 0.7)[2] - S.figure3D(L, 0).agents.get(council.agent.name)[2]) < 1e-9, "flat at the start of the morph");
+});
+
+test("moons 3D: a lap in 24 s from the clock, never from the frame count; still with reduced motion; names once, none over another or the parent's", () => {
+  assert.equal(S.MOON_LAP_MS, 24000);
+  assert.equal(S.moonPhase(0, false), 0);
+  assert.ok(Math.abs(S.moonPhase(6000, false) - Math.PI / 2) < 1e-12);
+  assert.ok(Math.abs(S.moonPhase(24000, false)) < 1e-9 || Math.abs(S.moonPhase(24000, false) - 2 * Math.PI) < 1e-9);
+  assert.equal(S.moonPhase(7777, true), 0);
+  const doc = hubIdle();
+  const orbit = { turn: 0.4, elevation: S.ELEVATION_3D, resume: 1e15 };
+  const at = (now, extra = {}, size = [120, 40]) => sceneText(S.scene(doc, Object.assign({ width: size[0], height: size[1], now, view: "3d", orbit }, extra)));
+  const t0 = 50000;
+  assert.deepEqual(at(t0 + 24000), at(t0), "a lap in 24 s: the same frame");
+  assert.notDeepEqual(at(t0 + 6000), at(t0), "a quarter lap on: another frame");
+  assert.notDeepEqual(at(t0 + 12000), at(t0 + 6000));
+  // the clock, not the frame count: `frame` is ignored, `now` decides
+  assert.deepEqual(at(t0, { frame: 1 }), at(t0, { frame: 9999 }));
+  assert.deepEqual(at(t0, { motion: "reduced" }), at(t0 + 5000, { motion: "reduced" }), "reduced motion: the moons stand still");
+  // names: at 120x40 and 160x45, through a lap, each ring agent's name once, the parent's name once, and each moon's name
+  // whole (never cut by another name) whenever it is drawn, and drawn in most frames
+  const moonNames = ["fable", "astra", "carbon"];
+  for (const size of [[120, 40], [160, 45]]) {
+    let shown = 0;
+    let frames = 0;
+    for (let now = t0; now < t0 + 24000; now += 1500) {
+      const lines = at(now, {}, size).slice(4, size[1] - 6); // the canvas (the spend bars below name agents too)
+      frames += 1;
+      for (const name of ringNames) assert.equal(countWord(lines, name), 1, `${name} at ${size} @${now}\n${lines.join("\n")}`);
+      for (const name of moonNames) {
+        const n = countWord(lines, name);
+        assert.ok(n <= 1, `${name} drawn ${n} times at ${size} @${now}`);
+        shown += n;
+      }
+    }
+    assert.ok(shown >= 0.8 * moonNames.length * frames, `the moons' names are drawn: ${shown} of ${moonNames.length * frames} at ${size}`);
+  }
+  // the moons' glyphs `•` stay put with reduced motion and move with the clock
+  const bullets = (now, extra) => at(now, Object.assign({ sky: false }, extra)).flatMap((l, r) => [...l].map((ch, c) => (ch === "•" ? r * 1000 + c : -1)).filter((x) => x >= 0)).join(",");
+  assert.ok(bullets(t0).length > 0);
+  assert.notEqual(bullets(t0), bullets(t0 + 4000));
+  assert.equal(bullets(t0, { motion: "reduced" }), bullets(t0 + 4000, { motion: "reduced" }));
+  // the morph still ends on each view's steady frame: the frame at the end of the change is the steady one, the moons too
+  const change = { from: "2d", at: t0 - S.CHANGE_MS };
+  assert.deepEqual(at(t0, { change }), at(t0));
+  const to2d = (now) => sceneText(S.scene(doc, { width: 120, height: 40, now, view: "2d", change: { from: "3d", at: t0 - S.CHANGE_MS } }));
+  assert.deepEqual(to2d(t0), sceneText(S.scene(doc, { width: 120, height: 40, now: t0, view: "2d" })));
+  // 2D is unchanged by the moons: it still has its idle rate
+  assert.equal(S.frameInterval(doc, { view: "2d" }, t0), S.FRAME_MS_IDLE);
+});
+
+test("hub 3D and 2D at rest: a ball, lit from the upper left, still, no sun colours", () => {
+  const doc = hubIdle();
+  const w = 120;
+  const h = 30;
+  const L = S.orbitLayout(doc, w, h);
+  // 3D: the nearest-to-the-light side takes the heavier characters
+  const o3 = { view: "3d", orbit: HELD, sky: false };
+  const project = S.camera3D(L, HELD.turn, HELD.elevation);
+  const hub = project.hub;
+  const grid = (now) => S.orbitLines(doc, w, h, now, o3).map((l) => cellsOf(l).map((c) => c.ch));
+  const weight = (ch) => Math.max(0, S.DEPTH_CHARS.indexOf(ch));
+  const g0 = grid(0);
+  let ul = 0;
+  let lr = 0;
+  let cells = 0;
+  for (let r = 0; r < h; r += 1) {
+    for (let c = 0; c < w; c += 1) {
+      const dx = (c * 2 + 1 - hub.x) / hub.rx;
+      const dy = (r * 4 + 2 - hub.y) / hub.ry;
+      if (dx * dx + dy * dy > 0.8) continue;
+      cells += 1;
+      if (dx < -0.15 && dy < -0.15) ul += weight(g0[r][c]);
+      if (dx > 0.15 && dy > 0.15) lr += weight(g0[r][c]);
+    }
+  }
+  assert.ok(cells >= 20, "a ball of " + cells + " cells");
+  assert.ok(ul > lr + 3, `3D: heavier characters toward the upper left (${ul}) than the lower right (${lr})`);
+  // still: the ball's cells do not change from one frame to the next, with the camera held
+  const inBall = (g) => g.flatMap((row, r) => row.filter((_, c) => ((c * 2 + 1 - hub.x) / hub.rx) ** 2 + ((r * 4 + 2 - hub.y) / hub.ry) ** 2 <= 0.8)).join("");
+  assert.equal(inBall(grid(0)), inBall(grid(1500)));
+  assert.equal(inBall(grid(0)), inBall(grid(7300)));
+  // 2D: the ball's dots are the same at any time while nothing works
+  const ball2D = (now) => frameDots(S.orbitLines(doc, w, h, now)).filter((d) => Math.hypot(d.x - L.cx, d.y - L.cy) <= L.hubR + 0.5).map((d) => d.x + "," + d.y).join(" ");
+  assert.ok(ball2D(0).split(" ").length > 30, "a ball of dots: " + ball2D(0).split(" ").length);
+  assert.equal(ball2D(0), ball2D(900));
+  assert.equal(ball2D(0), ball2D(12345));
+  // no sun colours at rest, either view, either theme
+  for (const colors of [DARK, LIGHT]) {
+    for (const o of [{}, { view: "3d" }]) assert.deepEqual(warmCells(S.orbitLines(doc, w, h, 3000, Object.assign({ colors }, o))), []);
+  }
+  // an idle 2D frame equal to the last stays equal (nothing new animates at rest); the hub adds nothing that moves
+  const hubRegion = (now) => S.orbitLines(doc, w, h, now).slice(Math.floor(L.cy / 4) - 4, Math.floor(L.cy / 4) + 5).map((l) => cellsOf(l).slice(Math.floor(L.cx / 2) - 8, Math.floor(L.cx / 2) + 9).map((c) => c.ch + c.color).join("")).join("|");
+  assert.equal(hubRegion(100), hubRegion(2100));
+});
+
+test("hub working, the sun: 7 to 12 spikes by size, each its own seeded time 0.6 to 1.6 s, within 0.6 of the radius beyond the rim, in warm colours, under the agents and names", () => {
+  assert.equal(S.spikeCount(5), 7);
+  assert.equal(S.spikeCount(9), 12);
+  assert.ok(S.spikeCount(7) > 7 && S.spikeCount(7) < 12);
+  assert.equal(S.SPIKE_REACH, 0.6);
+  // the spikes' own times: each runs 0.6 to 1.6 s from nothing to nothing, spikes not in step
+  const n = 12;
+  const runs = new Map();
+  const seen = new Set();
+  let most = 0;
+  for (let now = 0; now <= 30000; now += 20) {
+    const live = S.sunSpikes(n, now, 1, false);
+    most = Math.max(most, live.length);
+    assert.ok(live.length <= n);
+    for (const sp of live) {
+      assert.ok(sp.reach > 0 && sp.reach <= S.SPIKE_REACH + 1e-9, "reach " + sp.reach);
+      assert.ok(Math.abs(Math.hypot(...sp.dir) - 1) < 1e-9);
+      seen.add(sp.i);
+      const r = runs.get(sp.i) || { start: now, last: now, done: [] };
+      if (now - r.last > 20) {
+        r.done.push(r.last - r.start + 20);
+        r.start = now;
+      }
+      r.last = now;
+      runs.set(sp.i, r);
+    }
+  }
+  assert.equal(seen.size, n, "every spike shows");
+  const lengths = [...runs.values()].flatMap((r) => r.done.slice(1)); // the first run may be cut by the start
+  assert.ok(lengths.length > 100, "lives counted: " + lengths.length);
+  for (const ms of lengths) assert.ok(ms >= 500 && ms <= 1660, "a spike lives " + ms + " ms");
+  assert.ok(new Set(lengths.map((ms) => Math.round(ms / 100))).size >= 7, "irregular: their lives differ");
+  assert.ok(most >= 4 && most <= n, "several at once, never more than there are: " + most);
+  const starts = [...runs.keys()].map((i) => S.sunSpikes(n, 0, 1, false).some((s) => s.i === i));
+  assert.ok(starts.some((x) => x) && starts.some((x) => !x), "not in step: some are out at one instant, some in");
+  // the same seeds give the same spikes
+  assert.deepEqual(S.sunSpikes(n, 4321, 1, false), S.sunSpikes(n, 4321, 1, false));
+  // reduced motion: short, still
+  const still = S.sunSpikes(n, 100, 1, true);
+  assert.ok(still.length >= 7 && still.every((sp) => sp.reach > 0 && sp.reach <= 0.35));
+  assert.deepEqual(still, S.sunSpikes(n, 98765, 1, true));
+
+  const doc = hubBusy();
+  const w = 120;
+  const h = 30;
+  const L = S.orbitLayout(doc, w, h);
+  // 2D: warm dots reach at most 0.6 of the radius beyond the rim (one dot of rounding), at every time
+  const reach2D = [];
+  const lit = new Set();
+  for (let now = 0; now < 8000; now += 100) {
+    const lines = S.orbitLines(doc, w, h, now);
+    const warm = frameDots(lines).filter((d) => d.color && SUN_ALL.has(d.color) && !(d.color === S.SUN_COLORS.dark.core && Math.hypot(d.x - L.cx, d.y - L.cy) < L.hubR));
+    for (const d of warm) {
+      const dist = Math.hypot(d.x - L.cx, d.y - L.cy);
+      assert.ok(dist <= L.hubR * (1 + S.SPIKE_REACH) + 1.01, `a warm dot ${dist.toFixed(1)} dots out, the rim at ${L.hubR}, at ${now}`);
+      reach2D.push(dist);
+    }
+    lit.add(warm.map((d) => d.x + "," + d.y).join(" "));
+  }
+  assert.ok(Math.max(...reach2D) > L.hubR * 1.3, "the spikes do shoot out: " + Math.max(...reach2D));
+  assert.ok(lit.size >= 40, "they move: " + lit.size + " distinct frames of 80");
+  // 3D, the same, in cells of the screen: a warm cell at most 0.6 of the ball's radius (plus a cell) beyond its rim
+  const project = S.camera3D(L, HELD.turn, HELD.elevation);
+  const hub = project.hub;
+  const lit3 = new Set();
+  let far = 0;
+  for (let now = 0; now < 8000; now += 100) {
+    const cells = warmCells(S.orbitLines(doc, w, h, now, { view: "3d", orbit: HELD, sky: false }));
+    for (const c of cells) {
+      assert.ok(/^[:.·]$/.test(c.ch), "the sun is drawn in depth characters: " + c.ch);
+      const dx = (c.col * 2 + 1 - hub.x) / hub.rx;
+      const dy = (c.row * 4 + 2 - hub.y) / hub.ry;
+      const d = Math.hypot(dx, dy);
+      assert.ok(d <= 1 + S.SPIKE_REACH + Math.max(2 / hub.rx, 4 / hub.ry) + 0.15, `3D: a warm cell ${d.toFixed(2)} radii out at ${now}`);
+      far = Math.max(far, d);
+    }
+    lit3.add(cells.map((c) => c.col + "," + c.row).join(" "));
+  }
+  assert.ok(far > 1.25, "3D spikes shoot out: " + far.toFixed(2));
+  assert.ok(lit3.size >= 30, "3D: they move: " + lit3.size);
+  // the warm colours: the build orange toward a pale yellow, none green, none a group colour, readable on light and dark
+  for (const [theme, bg] of [["dark", "#000000"], ["light", "#ffffff"]]) {
+    for (const [name, c] of Object.entries(S.SUN_COLORS[theme])) {
+      const hue = S.hueOf(c);
+      assert.ok(hue >= 10 && hue <= 60, `${theme} ${name} ${c}: hue ${hue}`);
+      if (name !== "glow" || theme === "light") assert.ok(contrast(c, bg) >= 2, `${theme} ${name} ${c} against ${bg}: ${contrast(c, bg).toFixed(2)}`);
+      for (const group of Object.values(S.GROUP_COLORS[theme])) assert.notEqual(c, group, "not a group's colour");
+    }
+  }
+  // under everything: no warm cell is a name, a glyph or a loop's digit (text and digit streams cover the spikes)
+  for (const view of [{}, { view: "3d" }]) {
+    for (let now = 0; now < 4000; now += 400) {
+      for (const lineSet of [S.scene(doc, Object.assign({ width: 120, height: 40, now }, view))]) {
+        for (const line of lineSet) for (const span of line) if (span.color && SUN_ALL.has(span.color)) assert.ok(!/[A-Za-z0-9○●◉!↩•⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(span.text) || /^[⠀-⣿:.·]+$/.test(span.text), `a sun-coloured span over text: ${JSON.stringify(span.text)}`);
+      }
+    }
+  }
+});
+
+test("hub working: the spikes ramp in when the hub starts, die down within 1 s of it stopping, and frames keep coming while they do; reduced motion: short still spikes", () => {
+  const busy = hubBusy();
+  const idle = hubIdle();
+  const w = 120;
+  const h = 30;
+  const T = 100000;
+  const sceneAt = (doc, now, extra = {}) => S.orbitLines(doc, w, h, now, extra);
+  const warmAt = (doc, now, extra) => warmCells(sceneAt(doc, now, extra)).length;
+  for (const view of [{}, { view: "3d", orbit: HELD, sky: false }]) {
+    // stopping: spikes at the instant, none a second later, and the frame is then the resting one
+    const prev = { doc: busy, at: T };
+    let max = 0;
+    for (let dt = 0; dt < 1000; dt += 100) max = Math.max(max, warmAt(idle, T + dt, Object.assign({ previous: prev }, view)));
+    assert.ok(warmAt(idle, T + 50, Object.assign({ previous: prev }, view)) > 0, "still spiked right after it stops");
+    assert.ok(max > 0);
+    // dying down: the lit level falls steadily to 0 at 1 s and the spikes' total reach falls with it
+    let total = Infinity;
+    for (const dt of [0, 250, 500, 750, 999]) {
+      const level = S.sunLevel(idle, { previous: prev }, T + dt);
+      assert.ok(Math.abs(level - (1 - dt / 1000)) < 1e-9, "level " + level);
+      const reach = Array.from({ length: 40 }, (_, k) => S.sunSpikes(12, T + dt + k * 137, level, false).reduce((t, x) => t + x.reach, 0)).reduce((t, x) => t + x, 0);
+      assert.ok(reach < total, `the spikes' reach falls: ${reach} at +${dt}`);
+      total = reach;
+    }
+    assert.equal(warmAt(idle, T + 1000, Object.assign({ previous: prev }, view)), 0, "none 1 s after it stopped");
+    assert.deepEqual(sceneAt(idle, T + 1000, Object.assign({ previous: prev }, view)).map((l) => l.map((s) => s.text).join("")), sceneAt(idle, T + 1000, view).map((l) => l.map((s) => s.text).join("")), "the resting frame");
+    // a hub that was not working before: the spikes are not there at the instant it starts, and are in a moment
+    const start = { doc: idle, at: T };
+    assert.equal(warmAt(busy, T, Object.assign({ previous: start }, view)), 0, "nothing at the first instant");
+    assert.ok(warmAt(busy, T + 600, Object.assign({ previous: start }, view)) > 0, "lit after a moment");
+    // no previous: lit from the start (first frame drawn)
+    assert.ok(warmAt(busy, T, view) > 0);
+    // reduced motion: short still spikes; gone within a second of the stop
+    const red = Object.assign({ motion: "reduced" }, view);
+    assert.deepEqual(warmCells(sceneAt(busy, T, red)), warmCells(sceneAt(busy, T + 3700, red)), "still");
+    assert.ok(warmCells(sceneAt(busy, T, red)).length > 0, "short spikes");
+    assert.equal(warmAt(idle, T + 1000, Object.assign({ previous: prev }, red)), 0);
+  }
+  // frames keep coming at the working rate for the second the spikes need, then fall back to the idle rate
+  const prev = { doc: busy, at: T };
+  for (const view of ["2d", "3d"]) {
+    assert.equal(S.frameInterval(idle, { view, previous: prev }, T + 100), S.FRAME_MS_WORKING);
+    assert.equal(S.frameInterval(idle, { view, previous: prev }, T + 900), S.FRAME_MS_WORKING);
+    assert.equal(S.frameInterval(idle, { view, previous: prev }, T + 1000), view === "3d" ? S.FRAME_MS_IDLE_3D : S.FRAME_MS_IDLE);
+    assert.equal(S.frameInterval(idle, { view }, T + 100), view === "3d" ? S.FRAME_MS_IDLE_3D : S.FRAME_MS_IDLE);
+  }
+  assert.equal(S.sunLevel(busy, {}, 5), 1);
+  assert.equal(S.sunLevel(idle, {}, 5), 0);
+  assert.equal(S.SUN_FADE_MS, 1000);
+});
+
+test("small panel: the orbit draws from 36x14 in 2D and 3D with the hub, every agent, working pulses, the moons and the sun's flares, no name over another; the narrow header and instruments give way first", () => {
+  assert.equal(S.SCENE_MIN_WIDTH, 36);
+  assert.equal(S.SCENE_MIN_HEIGHT, 14);
+  assert.equal(S.sceneFits(36, 14), true);
+  assert.equal(S.sceneFits(35, 14), false);
+  assert.equal(S.sceneFits(36, 13), false);
+  const labels = [...ringNames, "fable", "astra", "carbon", "orchestrator"];
+  // a name token: whole, or cut with an ellipsis
+  const tokensOf = (lines) => lines.join("\n").match(/[A-Za-z][A-Za-z-]{2,}…?/g) || [];
+  const matches = (t, n) => (t.endsWith("…") ? n.startsWith(t.slice(0, -1)) && n.length > t.length - 1 : n === t);
+  const orbit = (turn) => ({ turn, elevation: S.ELEVATION_3D, resume: 1e15 });
+  let moons = 0;
+  let bullets = 0;
+  let frames3 = 0;
+  for (const view of ["2d", "3d"]) {
+    for (const [doc, what] of [[hubIdle(), "at rest"], [hubBusy(), "hub working"], [demoWorn, "agents working"]]) {
+      for (const [w, h] of [[36, 14], [37, 14], [40, 16], [36, 30]]) {
+        for (let k = 0; k < 8; k += 1) {
+          const now = 1000 + k * 3700;
+          const opts = { width: w, height: h, now, view, orbit: orbit(k * 0.8), colors: k % 2 ? LIGHT : DARK };
+          const full = S.sceneStrict(doc, opts);
+          assertExact(full, w, h, `${what} ${view} ${w}x${h}@${now}`);
+          const text = sceneText(full);
+          assert.match(text[0], /^◉ orchestrator/, "the header is the hub's line");
+          assert.ok(text[0].trimEnd().length <= w);
+          // the canvas without the needs lines and the instruments, which are text of their own
+          const shown = text.slice(1).filter((l) => !/stuck|sent back|ctx|━|\$/.test(l));
+          const tokens = tokensOf(shown);
+          const here = `${what} ${view} ${w}x${h}@${now}\n${text.join("\n")}`;
+          for (const t of tokens) assert.ok(labels.some((n) => matches(t, n)), `"${t}" is no name, or one overwritten: ${here}`);
+          for (const n of ringNames) assert.equal(tokens.filter((t) => matches(t, n)).length, 1, `${n} once: ${here}`);
+          for (const n of ["fable", "astra", "carbon"]) assert.ok(tokens.filter((t) => matches(t, n)).length <= 1, `${n} not twice: ${here}`);
+          assert.ok(text.slice(1).some((l) => l.includes("◉")), `the hub: ${here}`);
+          if (view === "3d") {
+            frames3 += 1;
+            moons += tokens.filter((t) => ["fable", "astra", "carbon"].some((n) => matches(t, n))).length;
+            bullets += [...text.slice(1).join("")].filter((ch) => ch === "•").length;
+          }
+        }
+      }
+    }
+  }
+  assert.ok(bullets >= 1.5 * frames3, `the moons' glyphs show: ${bullets} in ${frames3} frames`);
+  assert.ok(moons >= 1.5 * frames3, `the moons' names show at the small size: ${moons} in ${frames3} frames`);
+  // the order of giving way at 36 columns: the instruments go before the canvas shrinks below its minimum rows, the
+  // header stays one line, a long name is cut with an ellipsis and the figure's glyphs stay
+  const small = sceneText(S.scene(demoWorn, { width: 36, height: 14, now: 5000 }));
+  assert.ok(!small.some((l) => /ctx|━/.test(l)), "no instrument at 14 rows");
+  const tall = sceneText(S.scene(demoWorn, { width: 36, height: 40, now: 5000 }));
+  assert.ok(tall.some((l) => /ctx|━/.test(l)), "the instruments come back with room");
+  assert.ok(small.some((l) => l.includes("…")), "names cut with an ellipsis, not overlapped");
+  // the sun's flares at the smallest size, in both views: warm cells beyond the ball while the hub works, none at rest
+  for (const view of ["2d", "3d"]) {
+    let flared = 0;
+    for (let k = 0; k < 10; k += 1) {
+      const now = 5000 + k * 190;
+      const o = { width: 36, height: 14, now, view, orbit: orbit(0.3), colors: DARK };
+      const busy = warmCells(S.scene(hubBusy(), o));
+      const rest = warmCells(S.scene(hubIdle(), o));
+      assert.equal(rest.length, 0, `${view}: none at rest`);
+      if (busy.length >= 3) flared += 1;
+    }
+    assert.ok(flared >= 8, `${view}: the flares show at 36x14 (${flared} of 10 frames)`);
+  }
+  // working pulses in 2D: a working agent's frame changes with the clock, an idle one's does not
+  const two = (doc, now) => sceneText(S.scene(doc, { width: 36, height: 14, now })).join("\n");
+  assert.notEqual(two(demoWorn, 1000), two(demoWorn, 1300), "working: it moves");
+  assert.equal(two(hubIdle(), 1000), two(hubIdle(), 1300), "at rest: it stands still");
+});
+
 test("orbit sky panel: no streak on opening or switching to 3D; a run finished while 3D shows flies exactly one streak and its star stays; one finished in 2D flies none; an unchanged frame is not pushed", async () => {
   const docFile = path.join(tmp, "sky-doc.json");
   const debugLog = path.join(tmp, "sky-debug.log");
@@ -3441,8 +3836,7 @@ test("orbit sky panel: no streak on opening or switching to 3D; a run finished w
     const view = panelClaim().render(makePanel({ sessionID: "ses_sky", width: 120 }));
     await waitFor(() => screen(view).length > 3, 5000, "the snapshot");
     sizePanel(view, 120, 40);
-    pressG(state);
-    assert.ok(isOrbit(screen(view)));
+    assert.ok(isOrbit(screen(view)), "opens on the orbit");
     commandOf(state, "agentgraph.graph.dimension").run();
     clockRef.t += S.CHANGE_MS + 50;
     await waitFor(() => has3D(screen(view)), 3000, "3D");
@@ -3531,7 +3925,6 @@ test("orbit panel: a click during or right after the 2D/3D morph is never lost (
     const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
     await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
     sizePanel(view, 120, 40);
-    pressG(state);
     commandOf(state, "agentgraph.graph.dimension").run();
     clockRef.t += S.CHANGE_MS + 50;
     await waitFor(() => has3D(screen(view)), 3000, "3D");
