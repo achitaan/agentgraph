@@ -1771,7 +1771,7 @@ def _command_changes(folder, commands, hubs):
             current = folder.read(before["command"])
             if current is None or not flowcommands.is_ours(current):
                 continue
-            if current != flowcommands.render(before, hubs):
+            if current not in flowcommands.written(before, hubs):  # this version's or an earlier one's
                 raise RosterError(f"the command file {before['command']}.md of flow {before['id']} was changed by hand; "
                                   "nothing was changed. Edit or delete it, or turn the command off, first")
             out.append({"name": before["command"], "before": current, "after": flowcommands.render(after, hubs)})

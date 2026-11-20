@@ -18,13 +18,13 @@ Starting points, not bundles. Pick the line for the agent doing the work, then
 one or two skills from it that fit the item.
 
 - `impl-openai`: `engineering-delivery`, `code-assurance`
-- `impl-claude`: `project-contracts`, `codebase-map`
+- `impl-claude`: `engineering-delivery`, `codebase-map`
 - `impl-hard`: `performance-speedup`, `research-software-engineering`
 - `verifier`: `code-assurance`, `playwright-cli`
-- `reviewer`: `code-assurance`, `project-contracts`
+- `reviewer`: `code-assurance`
 - `designer`: `ui-ux-pro-max`, `playwright-cli`
-- `researcher`: `exa-research`, `research-summarizer`
-- `explorer`: `codebase-map`, `context7-mcp`
+- `researcher`: `exa-research`
+- `explorer`: `codebase-map`
 
 Other skills on the same lists fit narrower needs, for example `sympy` or
 `math-research` for exact or proof work, `ml-experiment-standards` or
@@ -39,9 +39,9 @@ an existing-interface audit.
 | Engineer | `impl-openai`; `impl-claude` when big or cross-module; `impl-hard` when subtle | `engineering-delivery` for a substantial increment, `code-assurance` for a bug or risky change | A targeted test, typecheck, build or lint on the owned paths; for a bug, one that fails before the fix |
 | Optimizer | `impl-hard` for subtle numerics or performance; `impl-openai` for a mechanical change | `performance-speedup` for a measured bottleneck, `research-software-engineering` for numerical code | A named metric on a representative input, plus the correctness checks that must keep passing |
 | Interface Builder | `designer` | `ui-ux-pro-max` for app UI, `design-taste-frontend` for a new landing page, `impeccable` for an audit | Required states exercised in a browser (`playwright-cli`), plus a read of the result |
-| Researcher | `researcher` for judgment about papers or techniques; `explorer` for codebase search and library docs | `exa-research` for public discovery, `research-summarizer` for supplied sources, `codebase-map` or `context7-mcp` for `explorer` | Claims tied to sources, assumptions and open questions separated |
+| Researcher | `researcher` for judgment about papers or techniques; `explorer` for codebase search and library docs | `exa-research` for public discovery, `codebase-map` for `explorer` | Claims tied to sources, assumptions and open questions separated |
 | Investigator | `explorer` to map code; `impl-hard` when a persistent bug needs a fix | `code-assurance` for a bug, `codebase-map` for a relationship question | A cause shown by evidence, not a guess |
-| Reviewer | `reviewer` for the final gate; `verifier` for one item inside a loop | `code-assurance` for code, `project-contracts` when an interface is disputed | Findings tied to the original requirements and the real changed files |
+| Reviewer | `reviewer` for the final gate; `verifier` for one item inside a loop | `code-assurance` for code | Findings tied to the original requirements and the real changed files |
 
 Non-coding work uses the matching research, writing or science skill; do not
 force it through an engineering profile. A small known edit needs no skill.

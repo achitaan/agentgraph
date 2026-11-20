@@ -211,7 +211,9 @@ def show_all(*, config=CONFIG, agents_dir=None):
 
 
 _PROFILE_ROW = re.compile(r"^[-*|]\s*`([a-z0-9-]+)`\s*[:|]\s*(.+)$", re.M)
-_PROFILE_SKILL = re.compile(r"`([a-z0-9]+(?:-[a-z0-9]+)+)`")
+# A skill named in a profile row: any name in backticks shaped like a skill's folder, hyphen or not; only an
+# installed skill's name counts (`_profile_refs`), so an ordinary word in backticks never does.
+_PROFILE_SKILL = re.compile(r"`([a-z0-9]+(?:-[a-z0-9]+)*)`")
 
 
 def _profile_refs(profiles, installed):

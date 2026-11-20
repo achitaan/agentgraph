@@ -5,7 +5,12 @@ goal; its first frontmatter line is a marker saying this toolkit wrote it. agent
 flow's command is turned on, renames it with the flow, rewrites it with the flow's instruction and removes it when the
 command is turned off or the flow is removed. The bytes follow from the flow alone, so undoing any of these writes the
 same file again, byte for byte; a file whose bytes differ from what the flow would give (changed by hand) is never
-replaced or removed.
+replaced or removed. What an earlier version of this toolkit wrote for the flow (agentgraph.flowearlier) counts as
+what it would give (`written`): such a file is rewritten in the current shape, renamed and removed like one this
+version wrote.
+
+The body holds no list of the other drawn paths that bind a run: they change after the file is written. It states
+the general rule and how to see which apply now (`agentgraph flow prompt --name NAME`).
 
 Every write happens inside the commands folder, opened without following a symlink and locked for one writer at a
 time: a new file by exclusive rename (never over a file that appeared), a change by rename over the file it read, and
@@ -16,7 +21,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from . import flowrun, names, sources
+from . import flowearlier, flowrun, names, sources
 
 COMMANDS_DIR = sources.CONFIG_DIR / "commands"
 MARK = "# agentgraph: flow command"
@@ -77,17 +82,25 @@ def _quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def _file(flow: dict, body: str) -> bytes:
+    description = f"Run the path {flow['name']} ({' -> '.join(flow['path'])}) on the goal given after /{flow['name']}"
+    return ("---\n" + _MARK_LINE + "\ndescription: " + _quote(description) + "\n---\n" + body).encode("utf-8")
+
+
 def render(flow: dict, hubs=frozenset()) -> bytes:
     """The bytes of the command file for `flow` ({"id", "path", "text", "name"}, the name set)."""
     reason = text_refusal(flow.get("text") or "")
     if reason:
         raise CommandError(reason)
-    description = f"Run the path {flow['name']} ({' -> '.join(flow['path'])}) on the goal given after /{flow['name']}"
-    body = flowrun.run_message(flow, "$ARGUMENTS", hubs, checked=False)
-    data = ("---\n" + _MARK_LINE + "\ndescription: " + _quote(description) + "\n---\n" + body).encode("utf-8")
+    data = _file(flow, flowrun.run_message(flow, "$ARGUMENTS", hubs, checked=False, command=True))
     if len(data) > FILE_LIMIT:
         raise CommandError("the command file would be too large")
     return data
+
+
+def written(flow: dict, hubs=frozenset()) -> tuple[bytes, ...]:
+    """Every command file this toolkit, this version or an earlier one, wrote for `flow`: `render` first."""
+    return (render(flow, hubs), *(_file(flow, body) for body in flowearlier.bodies(flow, hubs).values()))
 
 
 def text_refusal(text: str) -> str:
@@ -172,16 +185,21 @@ class Folder:
             raise CommandError(str(exc).replace("agent file", "command file")) from None
 
 
-def check_free(folder: Folder, name: str, expected: bytes | None = None) -> bytes | None:
+def _accepted(expected) -> tuple[bytes, ...]:
+    return () if expected is None else (expected,) if isinstance(expected, bytes) else tuple(expected)
+
+
+def check_free(folder: Folder, name: str, expected: bytes | tuple[bytes, ...] | None = None) -> bytes | None:
     """Refuse a name that is taken: a command OpenCode, the plugin or this toolkit has, or a file in the folder that
-    is not `expected` (the file this flow's command would be). Returns the file's bytes when it is `expected`."""
+    is not `expected` (the file this flow's command would be, or any of them: `written`). Returns the file's bytes
+    when it is `expected`."""
     reason = name_refusal(name)
     if reason:
         raise CommandError(reason)
     data = folder.read(name)
     if data is None:
         return None
-    if expected is not None and data == expected:
+    if data in _accepted(expected):
         return data
     if not is_ours(data):
         raise CommandError(f"the commands folder already has {name}.md, which this toolkit did not write; give the "
@@ -190,13 +208,14 @@ def check_free(folder: Folder, name: str, expected: bytes | None = None) -> byte
                        "the path another name")
 
 
-def check_unchanged(folder: Folder, name: str, expected: bytes, *, leave_foreign: bool = False) -> bytes | None:
-    """The bytes of this flow's command file NAME.md when they are exactly `expected` (None when there is no such
-    file); CommandError when it was changed by hand, so it is never replaced or removed. `leave_foreign`: a file
+def check_unchanged(folder: Folder, name: str, expected: bytes | tuple[bytes, ...], *,
+                    leave_foreign: bool = False) -> bytes | None:
+    """The bytes of this flow's command file NAME.md when they are exactly `expected`, or one of them (`written`)
+    (None when there is no such file); CommandError when it was changed by hand, so it is never replaced or removed. `leave_foreign`: a file
     without this toolkit's marker is not this flow's command; None, and it is left alone (turning a command off or
     removing the flow then only changes the flow)."""
     data = folder.read(name)
-    if data is None or data == expected:
+    if data is None or data in _accepted(expected):
         return data
     if not is_ours(data):
         if leave_foreign:
