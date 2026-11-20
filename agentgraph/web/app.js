@@ -333,7 +333,8 @@
       return { left: Math.min(-p.r - 14, p.labelMin ?? -40), right: Math.max(p.r + 14, p.labelMax ?? 40), top: -p.r - (p.labelUp ? 26 : 16), bottom: p.r + (p.labelUp ? 16 : 28) };
     }
     function graphBounds() {
-      const points = visibleAgents.map(a => positions.get(a.name)).filter(Boolean);
+      // (Where agents are going: a fit during a glide fits where it ends.)
+      const points = visibleAgents.map(a => finalOf(a.name)).filter(Boolean);
       if (!points.length) return null;
       const spans = points.map(p => { const e = extentOf(p); return { left: p.x + e.left, right: p.x + e.right, top: p.y + e.top, bottom: p.y + e.bottom }; });
       // And every loop's circle (n114): the fit shows it, and a drag reaches it.
@@ -481,6 +482,14 @@
       revealNames([selected.key]);
       clampPan(camera.own); clearOfCovers(point); transform();
     }
+    // Whether the whole picture (agents and loop rings) is in the canvas: as it is, or (`scale`) at that zoom anywhere.
+    function fitsView(scale) {
+      const b = graphBounds(), width = viewport.clientWidth, height = viewport.clientHeight;
+      if (!b || !width || !height) return true;
+      if (scale) return (b.right - b.left) * scale <= width - 4 && (b.bottom - b.top) * scale <= height - topInset() - 8;
+      const s = camera.scale;
+      return b.left * s + camera.x >= -.5 && b.right * s + camera.x <= width + .5 && b.top * s + camera.y >= -.5 && b.bottom * s + camera.y <= height + .5;
+    }
     function fitView(userAction) {
       if (!positions.size) return;
       const rect = viewport.getBoundingClientRect(), bounds = graphBounds();
@@ -555,6 +564,9 @@
       followCanvas();
       if (camera.own) { holdPan(); transform(); return; }
       if (!layoutChange.steady) { fitView(false); return; }
+      // A narrow automatic view whose picture no longer fits, but would at a readable size, is fitted again (n114: no
+      // agent or ring left cut by the edge when a pan-free view exists).
+      if (arrangement === 'compact' && !fitsView() && fitsView(READABLE)) { fitView(false); reveal(); return; }
       revealNames(layoutChange.changed);
       clampPan(true); transform();
       reveal();
@@ -920,8 +932,9 @@
       // The earlier loop is then placed after every other loop (so it keeps clear of them too) and just before the loops
       // it makes room for; only when no other loop goes through its agents.
       const first = pass(new Map()), looking = new Map(), worse = list => [clashes, blocked].map(test => rings.filter((ring, index) => test(list[index])).length), before = worse(first);
+      // (A narrow canvas has no room to spare: a later loop pushed out of the room counts too, n114.)
       rings.forEach((ring, k) => {
-        if (!clashes(first[k])) return;
+        if (!(canvas.wide ? clashes(first[k]) : blocked(first[k]))) return;
         const fixedOn = ring.names.filter(name => !ring.movable.includes(name));
         rings.forEach((earlier, j) => {
           if (j >= k || fixedOn.length !== 1 || !earlier.movable.includes(fixedOn[0]) || blocked(first[j])) return;
