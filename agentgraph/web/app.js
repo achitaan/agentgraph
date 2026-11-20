@@ -401,6 +401,11 @@
       const point = selected?.type === 'agent' || selected?.type === 'work-loop' ? positions.get(selected.key) : null;
       const width = viewport.clientWidth, height = viewport.clientHeight;
       if (!point || !width || !height) return;
+      // An open agent comes into view with the agents its paths join it to, when they fit together (n103).
+      if (selected.type === 'agent') {
+        const names = [selected.key, ...new Set(routes().flatMap(flow => (flow.path || []).flatMap((name, i, path) => name !== selected.key ? [] : [path[i - 1], path[i + 1]]).filter(name => name && name !== selected.key && positions.has(name))))];
+        if (names.length > 1 && revealNames(names, true)) { clampPan(true); clearOfCovers(point); transform(); return; }
+      }
       const e = extentOf(point), s = camera.scale;
       const top = (point.y + e.top) * s + camera.y, bottom = (point.y + e.bottom) * s + camera.y;
       const left = (point.x + e.left) * s + camera.x, right = (point.x + e.right) * s + camera.x;
@@ -827,15 +832,16 @@
       const rect = { width: root.clientWidth, height: Math.max(1, root.clientHeight - (notice.hidden ? 0 : notice.offsetHeight)) };
       if (rect.width <= 0 || viewport.clientWidth <= 0 || viewport.clientHeight <= 0) return;
       const compact = arrangement === 'compact';
-      // The canvas as it is with the details closed: a narrow oval grows into it, and opening the sheet does not re-lay
-      // out the agents (the camera fits them into what is left).
-      const sheet = compact && root.classList.contains('ag-details-open') ? parseFloat(getComputedStyle(root).getPropertyValue('--ag-sheet-height')) || 0 : 0;
-      const canvasHeight = Math.max(1, Math.round(viewport.clientHeight + sheet));
+      // The canvas as it is: a narrow oval grows into spare height. With the sheet open (n103) it is shaped for what the
+      // sheet leaves, so every circle and name fits above it at a readable size; closing the sheet puts it back.
+      const canvasHeight = Math.max(1, Math.round(viewport.clientHeight));
       // Wide: the oval is shaped for the canvas the details panel (DETAIL_WIDTH) leaves, open or not, so opening it
       // never re-lays out the agents and they still fit at a readable size beside it.
-      const aspect = Math.round(clamp((rect.width - DETAIL_WIDTH) / rect.height, 1, 1.3) * 20) / 20;
+      // A canvas the details leave taller than wide (n103: 760 px) gets a taller oval, chosen below once its size is known.
+      const open = (rect.width - DETAIL_WIDTH) / rect.height, tall = open < 1;
+      const aspect = Math.round(clamp(open, 1, 1.3) * 20) / 20;
       const byAgent = new Map(agents.map(a => [a.name, a])), orbit = satellites(byAgent), rings = loopRings(byAgent, orbit);
-      const base = JSON.stringify([arrangement, compact ? [Math.round(rect.width), canvasHeight] : aspect, hubName, snapshot?.structure?.source === 'folder' ? (snapshot.groups || []).map(group => group.id) : null, agents.map(a => [a.name, a.group, a.parent]).sort(), [...orbit].sort()]);
+      const base = JSON.stringify([arrangement, compact ? [Math.round(rect.width), canvasHeight] : tall ? ['tall', Math.round(rect.width), Math.round(rect.height)] : aspect, hubName, snapshot?.structure?.source === 'folder' ? (snapshot.groups || []).map(group => group.id) : null, agents.map(a => [a.name, a.group, a.parent]).sort(), [...orbit].sort()]);
       const signature = JSON.stringify([base, rings.map(ring => [ring.key, ring.names, ring.movable])]);
       if (signature === layoutSignature) return;
       // Only the loops changed: the agents that move glide to their places (once, briefly).
@@ -872,13 +878,28 @@
       let rx, ry;
       if (compact) {
         rx = Math.max(60, rect.width / 2 - 23 - EDGE);
-        ry = Math.max(least, rx / 1.3);
+        // Flatter with the sheet open: it leaves a canvas wider than tall.
+        ry = Math.max(least, rx / (root.classList.contains('ag-details-open') ? 1.45 : 1.3));
         if (perimeter(rx, ry) < needed) ry = grow(value => perimeter(rx, value) >= needed);
         // A tall panel is used, not left empty: the oval grows into spare height.
         ry = Math.max(ry, Math.min(rx * 2.2, canvasHeight / 2 - Math.max(depth + 34, 96)));
       } else {
-        ry = perimeter(aspect * least, least) < needed ? grow(value => perimeter(aspect * value, value) >= needed) : least;
-        rx = aspect * ry;
+        const oval = a => perimeter(a * least, least) < needed ? grow(value => perimeter(a * value, value) >= needed) : least;
+        let shape = aspect;
+        if (tall) {
+          // Of the ovals from tall to round, the one the open canvas shows largest (names either side, the seats above
+          // and the names below, the figures on top), while the closed canvas, as high and wider, still fits it at a
+          // readable size.
+          const across = rect.width - DETAIL_WIDTH - 2 * EDGE, high = rect.height - 2 * EDGE;
+          let best = -Infinity;
+          for (let step = 0; step <= 12; step++) {
+            const a = .4 + step * .05, value = oval(a), w = 2 * a * value + 110, h = 2 * value + depth + 60;
+            const score = Math.min(across / w, high / h) + (high / h >= READABLE ? 10 : 0);
+            if (score > best + 1e-9) { best = score; shape = a; }
+          }
+        }
+        ry = oval(shape);
+        rx = shape * ry;
       }
       const path = ellipse(rx, ry), spread = clamp((path.length - groups.length * GROUP_GAP) / (filled || 1), 1, 1.25);
       groups.forEach(group => { group.units.forEach(unit => { unit.width *= spread; }); group.width *= spread; });
