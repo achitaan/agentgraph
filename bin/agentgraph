@@ -20,6 +20,10 @@
 #   agentgraph skill show ID        a skill's text (skill create ID / write ID --text-file F|-, skill delete ID, skill restore RECORD)
 #   agentgraph output read TASK NODE ARTIFACT   a step's output (output write ... --text-file F|- [--expect REV] /
 #                                   output restore RECORD; --dir DIR or --from DIR, --home DIR, --backups DIR)
+#   agentgraph preset show          the default preset, the presets and what overrides it (preset switch NAME / preset restore RECORD;
+#                                   --json, --config FILE, --backups DIR, --dir PROJECT)
+#   agentgraph setup save NAME      save the managed files as a named setup (setup list / show NAME / restore NAME / undo RECORD /
+#                                   remove NAME; save --replace; --config-dir, --orchestration, --json)
 #   agentgraph cost [--session ID]  where one chat's money went, and what would have made it cheaper
 #   agentgraph cost --trend         cost per turn over time, split at each change to the cost settings
 #   agentgraph bloat [--json]       the fixed text each agent's turn costs, dead weight, what piles up (--set-baseline)
@@ -67,6 +71,8 @@ case "$1" in
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.skillfiles "$@" ;;
   output)
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.outputs "$@" ;;
+  preset|setup)
+    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.setups "$@" ;;
   team)
     shift
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.teams "$@" ;;

@@ -13,8 +13,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote
 
-from . import agentfiles, flowcommands, flowrun, mcpview, outputs, roster, skillfiles, skillset, structure, teams
-from .demo import demo_snapshot
+from . import (agentfiles, flowcommands, flowrun, mcpview, outputs, roster, setups, skillfiles, skillset, structure,
+               teams)
+from .demo import demo_setup, demo_snapshot
 from .snapshot_json import ledger_home, learning_document, load_structure, skills_document, snapshot_document
 from .sources import DB_PATH, ORCHESTRATION_GRAPH_DIR, build_snapshot, find_graph_dir
 
@@ -30,7 +31,9 @@ _TEAM_PATH = "/api/structure/team"
 _TEAM_BODY_LIMIT = 32768  # as a flow: an instruction of 2000 characters
 _OUTPUT_PATH = "/api/output"  # a step's output: read, write (undoable), restore (agentgraph.outputs)
 _OUTPUT_BODY_LIMIT = 12 * outputs.TEXT_LIMIT + 16384  # an output's text as escaped JSON
-_POSTS = (_FLOW_PATH, _SKILLS_PATH, _ROSTER_PATH, _SKILLFILE_PATH, _TEAM_PATH, _OUTPUT_PATH)
+_SETUP_PATH = "/api/setup"  # the default preset and saved setups: switch, save, restore, undo, remove (agentgraph.setups)
+_SETUP_BODY_LIMIT = 4096
+_POSTS = (_FLOW_PATH, _SKILLS_PATH, _ROSTER_PATH, _SKILLFILE_PATH, _TEAM_PATH, _OUTPUT_PATH, _SETUP_PATH)
 _LOOPBACK = frozenset({"127.0.0.1", "::1"})
 _FLOW_BODY_LIMIT = 32768  # an instruction of 2000 characters, each up to 12 bytes as escaped JSON (and a goal of 4000)
 # A write from a view that has not seen a later change (stale-contract.md): every op that names an existing thing
@@ -77,7 +80,7 @@ def make_server(
     skills_backups: Path | None = None, skills_profiles: Path | None = None,
     skills_dir: Path | None = None, skills_bundled: list[Path] | None = None, agents_dir: Path | None = None,
     opencode_dir: Path | None = None, ledger_root: Path | None = None, commands_dir: Path | None = None,
-    sessions_db: Path | None = None,
+    sessions_db: Path | None = None, setups_dir: Path | None = None,
 ) -> ThreadingHTTPServer:
     """Bind a server; the caller is responsible for running and closing it.
     `structure_dir` is the folder `POST /api/structure/flow` edits (default: the
@@ -90,7 +93,9 @@ def make_server(
     `structure_dir`. A snapshot reads `opencode.json` from `opencode_dir` (and the models catalogue only for the
     real folder) and the ledger (`memory-<preset>`) from `ledger_root`; each defaults to the real one. A flow's
     command is written into `commands_dir` (default: OpenCode's commands folder). The sessions come from
-    `sessions_db` (default: OpenCode's database), and so do the costs in each flow's `stats`."""
+    `sessions_db` (default: OpenCode's database), and so do the costs in each flow's `stats`. `POST /api/setup`
+    switches the default preset in `skills_config` and saves, restores and removes setups in `setups_dir` (default:
+    the orchestration's `setups/`) over the same files, folders and `skills_backups`."""
     paths = {"config": skills_config or skillset.CONFIG, "map_path": skills_map or skillset.MAP,
              "backups": skills_backups or skillset.BACKUPS, "profiles": skills_profiles or skillset.PROFILES}
     directory = (web_dir if web_dir is not None else Path(__file__).with_name("web")).resolve()
@@ -180,7 +185,7 @@ def make_server(
         def do_POST(self):
             target = self.path.partition("?")[0]
             handler = {_SKILLS_PATH: self._skills, _ROSTER_PATH: self._roster, _SKILLFILE_PATH: self._skillfile,
-                       _TEAM_PATH: self._team, _OUTPUT_PATH: self._output}.get(target)
+                       _TEAM_PATH: self._team, _OUTPUT_PATH: self._output, _SETUP_PATH: self._setup}.get(target)
             if handler is not None:
                 handler()
                 return
@@ -484,6 +489,44 @@ def make_server(
 
             self._answer(run, outputs.OutputError)
 
+        def _setup_paths(self):
+            return {"config": paths["config"], "map_path": paths["map_path"], "backups": paths["backups"],
+                    "agents_dir": agents_dir, "structure": structure_root, "commands_dir": commands_dir,
+                    "setups": setups_dir}
+
+        def _setup(self):
+            # Switch the default preset (applies at the next start of OpenCode) or undo that, save the files the
+            # toolkit manages as a named setup, restore, remove or undo one (agentgraph.setups).
+            request = self._request("the setups", _SETUP_BODY_LIMIT, {
+                "preset-switch": ({"op", "name"}, {"op", "name"}, {}),
+                "preset-restore": ({"op", "record"}, {"op", "record"}, {}),
+                "save": ({"op", "name"}, {"op", "name", "replace"}, {"replace": bool}, EXPECT),
+                "restore": ({"op", "name"}, {"op", "name"}, {}, EXPECT),
+                "undo": ({"op", "record"}, {"op", "record"}, {}),
+                "remove": ({"op", "name"}, {"op", "name"}, {}, EXPECT)},
+                '{"op": "preset-switch"|"restore"|"remove", "name"}, {"op": "save", "name"} (with an optional '
+                '"replace": true), {"op": "preset-restore"|"undo", "record"}; save, restore and remove with an '
+                'optional "expect": rev')
+            if request is None:
+                return
+            where = self._setup_paths()
+            op = request["op"]
+
+            def run():
+                if op == "preset-switch":
+                    return setups.switch_preset(request["name"], project=cwd, **where)
+                if op == "preset-restore":
+                    return setups.restore_preset(request["record"], **where)
+                if op == "undo":
+                    return setups.undo(request["record"], **where)
+                if op == "save":
+                    return setups.save(request["name"], replace=request.get("replace", False),
+                                       expect=request.get("expect"), **where)
+                return (setups.restore if op == "restore" else setups.remove)(request["name"],
+                                                                              expect=request.get("expect"), **where)
+
+            self._answer(run, setups.SetupError)
+
         def _reply(self, status: int, content_type: str, body: bytes):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -510,7 +553,9 @@ def make_server(
                 document = snapshot_document(snapshot, "demo" if use_demo else "live", task,
                                              session=None if use_demo else session,
                                              structure=None if use_demo else load_structure(structure_dir))
-                if not use_demo:
+                if use_demo:
+                    document["setup"] = demo_setup()
+                else:
                     document["learning"] = learning_document(ledger_root, config_path=paths["config"])
                     flowrun.annotate(document, structure_dir=structure_dir,
                                      ledger=ledger_home(ledger_root, config_path=paths["config"]),
@@ -524,6 +569,7 @@ def make_server(
                     roster.annotate(document, config=paths["config"], map_path=paths["map_path"],
                                     agents_dir=agents_dir or roster.AGENTS_DIR, structure=structure_root)
                     skillfiles.annotate(document, skills=skills_dir or skillfiles.SKILLS, bundled=skills_bundled)
+                    setups.annotate(document, project=cwd, **self._setup_paths())
                     outputs.annotate(document)  # each output of the shown graph: rev, size, editable, why
                 body = json.dumps(document, allow_nan=False).encode("utf-8")
             except Exception as exc:
