@@ -180,6 +180,15 @@ def demo_setup() -> dict:
             "undo": None}
 
 
+def demo_spend(document: dict) -> dict:
+    """The snapshot's `spend` object for the demo: a sample limit, near its warning, and the split of the demo's own
+    costs (the root session against every other one); no file is read."""
+    root = (document.get("root") or {}).get("cost") or 0.0
+    total = (document.get("totals") or {}).get("cost") or 0.0
+    limit = 10.0
+    return {"limit": limit, "warn": 9.0, "rate": 4.2, "chat": round(root, 6), "workers": round(max(0.0, total - root), 6)}
+
+
 # --- the example chat of each demo session ---------------------------------------------
 
 # Each script lists (seconds before now, kind, text or tool name, tool status). A busy session's script ends on

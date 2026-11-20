@@ -706,9 +706,12 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
         outputs.annotate(document)  # each output of the shown graph: rev, size, editable, why
         from . import setups  # setups imports this module
         setups.annotate(document)  # the default preset, its overrides, the saved setups, the newest undo record
+        from . import spend  # spend imports sources lazily
+        spend.annotate(document, db_path=DB_PATH, root=snapshot.root, sessions=snapshot.sessions, now=snapshot.now)
     elif source == "demo":
-        from .demo import demo_setup
+        from .demo import demo_setup, demo_spend
         document["setup"] = demo_setup()
+        document["spend"] = demo_spend(document)
     from . import sidechat  # sidechat imports this module's siblings
     if source == "live":
         sidechat.annotate(document)  # whether the side chat is installed, its session and its spend
