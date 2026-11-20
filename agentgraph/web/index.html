@@ -37,6 +37,8 @@
       const skillfile = post('/api/skillfile', 'The skill could not be changed');
       const team = post('/api/structure/team', 'The group could not be changed');
       window.AgentGraph.mount(root, {
+        // The page is the graph: it takes the keys on load (a host's panel does not pass this).
+        autofocus: true,
         actions: params.has('demo') ? undefined : { flow, skills, roster, skillfile, team },
         fetchSnapshot: async () => {
           const response = await fetch('/api/snapshot' + query, { cache: 'no-store' });

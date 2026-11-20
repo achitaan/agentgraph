@@ -3908,7 +3908,15 @@
       else renderDetail();
       highlight();
       keepFocus();
+      // On a page of its own (options.autofocus) the graph takes the keys once it is drawn, so N works without a click;
+      // never from something the user is already in, and never in a host's panel (no autofocus there).
+      if (options.autofocus === true && !autofocused && visibleAgents.length) {
+        autofocused = true;
+        const current = document.activeElement;
+        if (!current || current === document.body || current === document.documentElement) viewport.focus({ preventScroll: true });
+      }
     }
+    let autofocused = false;
     const paneSize = { width: 0, height: 0 };
     function scheduleResize() {
       if (!alive || resizeFrame !== null) return;
