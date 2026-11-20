@@ -77,7 +77,7 @@ ENV_BINARY = "OPENCODE_CLI"
 QUESTION_LIMIT = 4000
 BRIEF_LIMIT = 24000
 ANSWER_LIMIT = 6000
-TIMEOUT = 180.0
+TIMEOUT = 120.0  # for the whole question, fallback included: under the hosts' own 150 s kill, so this module stops its children first
 GRAPH_CAP = 6500
 LIST_CAP = 2500
 HEAD_EACH = 3000
@@ -640,9 +640,13 @@ def ask(question, *, main, project=None, db_path=None, config_dir=None, session_
             models.append(MODELS[1])
         title = f"side chat for {main}"
         total_cost, tokens, attempt, last = 0.0, {}, 0, None
+        deadline = time.monotonic() + timeout
         for index, chosen in enumerate(models):
             cmd = command(model=chosen, side=side, title=title, tree=tree, executable=executable)
-            code, found, stderr = _run(cmd, message, project, timeout)
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise SidechatError(f"the side chat did not answer within {int(timeout)} seconds and was stopped")
+            code, found, stderr = _run(cmd, message, project, left)
             total_cost += found["cost"]
             for key, value in found["tokens"].items():
                 tokens[key] = tokens.get(key, 0) + value

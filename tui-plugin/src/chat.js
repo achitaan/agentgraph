@@ -123,7 +123,7 @@ function toolLines(item, width) {
   const raw = word(item.status);
   const state = raw ? STATE_WORDS[raw] || raw : "";
   const tone = state === "failed" ? "danger" : state === "running" ? "accent" : "muted";
-  const stateText = state ? " " + truncate(state, 12) : "";
+  const stateText = state ? " " + truncate(state, Math.max(1, Math.min(12, width - 6))) : ""; // the name keeps three columns
   const room = Math.max(1, width - 2 - displayWidth(stateText));
   const line = [sp("▸ ", "muted"), sp(truncate(name, room), "muted")];
   if (stateText) line.push(sp(stateText, tone));
@@ -165,7 +165,8 @@ export function itemLines(item, width) {
   if (kind === "reasoning") return textLines(item, width, { tone: "muted", mark: "· ", indent: "  " });
   if (kind === "text") return textLines(item, width, { tone: "plain" });
   if (kind === "user") {
-    const label = [sp(item.pending === true ? "told (pending) " : "told ", "accent")];
+    const told = item.pending !== true ? "told " : width >= 24 ? "told (pending) " : "told… "; // a narrow chat keeps room for the text
+    const label = [sp(told, "accent")];
     return textLines(item, width, { tone: "plain", label, indent: "  " });
   }
   if (kind === "tool") return toolLines(item, width);

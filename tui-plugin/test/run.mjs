@@ -4942,16 +4942,17 @@ test("chat lines: each kind, thinking dimmer than what was said, a tool is its n
   assert.deepEqual(CH.chatLines({ state: "feed", feed: feedOf("s", []) }, 40).map(joined), ["Nothing said yet"]);
 });
 
-test("chat lines: every string is cleaned again; escape sequences, controls, tabs, wide characters and very long lines stay inside 36, 42 and 160 columns", () => {
+test("chat lines: every string is cleaned again; escape sequences, controls, tabs, wide characters and very long lines stay inside every width from 8 to 160 columns", () => {
   const nasty = [
     { kind: "user", text: "\u001b[31mred\u001b[0m \u001b]0;title\u0007 x\ty\u0000z\u009b2J\r\nnext line" },
     { kind: "reasoning", text: "日本語".repeat(40) + " and 😀😀😀 " + "w".repeat(300) },
     { kind: "text", text: "a".repeat(500) + "\u001b[2J" },
     { kind: "tool", name: "\u001b[1mbold\u001b[0m" + "n".repeat(100), status: "\u001b]52;c;AAAA\u0007running" },
+    { kind: "text", user: true, pending: true, text: "steer " + "p".repeat(60) },
     { kind: "note" },
     { kind: "bogus", text: "ignored" },
   ];
-  for (const width of [36, 42, 160]) {
+  for (const width of [8, 12, 17, 23, 24, 36, 42, 160]) {
     const lines = CH.chatLines({ state: "feed", feed: feedOf("s", nasty, { warning: "\u001b[31mwarn\u001b[0m" }) }, width);
     assert.ok(lines.length > 5);
     for (const line of lines) {
@@ -4960,7 +4961,8 @@ test("chat lines: every string is cleaned again; escape sequences, controls, tab
       assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(t), `${width}: a control character in ${JSON.stringify(t)}`);
     }
     assert.ok(!lines.map(joined).join("\n").includes("title"), "an OSC is dropped with its text");
-    assert.ok(lines.map(joined).join("\n").includes("x y"), "a tab is a space");
+    if (width >= 36) assert.ok(lines.map(joined).join("\n").includes("x y"), "a tab is a space"); // narrower, the two wrap apart
+    else assert.ok(!lines.map(joined).join("\n").includes("\t"), "no tab left");
   }
   // the error and loading views are one line too
   for (const state of [{ state: "error", error: "\u001b[31m" + "e".repeat(300) }, { state: "loading" }]) {

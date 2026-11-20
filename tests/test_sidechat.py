@@ -406,6 +406,15 @@ class RunTests(Case):
         self.assertEqual(len(self.calls()), 2)
         self.assertFalse(sidechat.is_busy(self.project))
 
+    def test_the_time_limit_covers_the_whole_question_fallback_included(self):
+        self.assertLess(sidechat.TIMEOUT, 150)  # the hosts kill the command at 150 s: this module must stop its children first
+        self.plan([{"error": "nope", "exit": 1, "sleep": 1.5}, {"text": "never", "sleep": 30, "session": SIDE}])
+        started = time.time()
+        with self.assertRaisesRegex(sidechat.SidechatError, "did not answer within"):
+            self.ask(timeout=2.5)
+        self.assertLess(time.time() - started, 6)  # 1.5 s on the first model, the rest (not another 2.5 s) on the second
+        self.assertEqual(len(self.calls()), 2)
+
     def test_the_fallback_model_asked_first_is_not_retried_on_itself(self):
         self.plan([{"error": "nope", "exit": 1}])
         with self.assertRaises(sidechat.SidechatError):
