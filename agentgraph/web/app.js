@@ -2002,7 +2002,7 @@
       selected = { type, key }; selectedOrigin = origin || selectedOrigin; highlightedStep = step || '';
       if (step) openSteps.add(step);
       if (detail.hidden) rememberClosedView();
-      detailSignature = ''; detail.hidden = false; root.classList.add('ag-details-open'); renderDetail(); updateEdges(); scheduleResize();
+      detailSignature = ''; detail.hidden = false; root.classList.add('ag-details-open'); renderDetail(); chatSync(); updateEdges(); scheduleResize();
       reveal();
       close.focus({ preventScroll: true });
       if (step) Array.from(detailScroll.querySelectorAll('[data-step]')).find(row => row.dataset.step === step)?.scrollIntoView({ block: 'nearest' });
@@ -2010,7 +2010,7 @@
     function closeDetails() {
       failedDraft = null; agentTexts.clear();
       if (draft && !draft.pending) { draft = null; drawDraft(); }
-      selected = null; highlightedStep = ''; detail.hidden = true; root.classList.remove('ag-details-open'); detailSignature = ''; updateEdges(); scheduleResize();
+      selected = null; highlightedStep = ''; detail.hidden = true; root.classList.remove('ag-details-open'); detailSignature = ''; chatSync(); updateEdges(); scheduleResize();
       if (selectedOrigin && selectedOrigin.isConnected) selectedOrigin.focus({ preventScroll: true });
       else viewport.focus({ preventScroll: true });
     }
@@ -3463,6 +3463,264 @@
       if (view?.error) { const error = el('p', 'ag-form-error', view.error); error.setAttribute('role', 'alert'); form.append(error); }
       detailScroll.append(form);
     }
+    // ---- A chat on every agent (loop n5): what it is thinking, a way to steer and stop it, a transcript otherwise ----
+    // An agent's details hold its chat: the newest session's feed (agentgraph.chatfeed, WEB_API.md), read through
+    // actions.chat(sessionID, { limit }) where the host gives it, else (the page itself) from options.chatUrl (default /api/chat). Only the
+    // agent whose details are open is read: every CHAT_POLL_MS while its session is busy, once when it is not, never
+    // while the page is hidden, and one read in flight at a time. The box (actions.send) and Stop (actions.stop) show
+    // only where the host gives them and the session can take them; without them the chat is a transcript. Feed text
+    // reaches the page as textContent only: no markup, link or URL is ever made from it. Reading, sending and stopping
+    // are not changes to the setup, so they work in 3D too (ORBIT_READING names .ag-chat).
+    const chatAction = action('chat'), sendAction = action('send'), stopAction = action('stop');
+    const CHAT_POLL_MS = 1500, CHAT_LIMIT = 40, CHAT_ITEMS = 200, CHAT_TEXT = 2000, CHAT_NEAR = 24, CHAT_KINDS = ['reasoning', 'text', 'tool', 'user', 'note'];
+    const chatUrl = typeof options.chatUrl === 'string' && options.chatUrl ? options.chatUrl : '/api/chat', chatCanRead = !!(chatAction || typeof fetch === 'function');
+    // `sending` and `stopping` hold the session id a request is out for; `set` is the scroll position the view itself set
+    // last (its scroll event is not the user's).
+    const chat = { session: '', signature: '', feed: null, failed: false, loaded: false, staleBusy: true, busy: false, inflight: false, again: false, timer: null, token: 0, follow: true, top: 0, set: -1, sending: '', stopping: '', confirm: false, result: null, choice: new Map(), drafts: new Map() };
+    const oneLine = (value, max = 200) => text(value).replace(/\s+/g, ' ').trim().slice(0, max);
+    function chatBuild() {
+      chat.el = el('section', 'ag-detail-section ag-chat');
+      chat.title = el('h3', '', 'Chat');
+      chat.sessions = el('div', 'ag-chat-sessions');
+      const newer = el('button', 'ag-text-button', '‹'), older = el('button', 'ag-text-button', '›');
+      newer.type = older.type = 'button'; newer.dataset.chatStep = 'newer'; older.dataset.chatStep = 'older';
+      newer.setAttribute('aria-label', 'Newer session'); older.setAttribute('aria-label', 'Older session');
+      chat.which = el('span', 'ag-chat-which'); chat.sessions.append(newer, chat.which, older);
+      chat.log = el('div', 'ag-chat-log'); chat.log.setAttribute('role', 'log'); chat.log.setAttribute('aria-label', 'Chat'); chat.log.setAttribute('aria-live', 'off'); chat.log.tabIndex = 0;
+      chat.status = el('p', 'ag-chat-status'); chat.status.setAttribute('aria-live', 'polite');
+      chat.compose = el('div', 'ag-chat-compose');
+      chat.box = el('textarea', 'ag-chat-box'); chat.box.rows = 2; chat.box.spellcheck = false; chat.box.dataset.chatBox = ''; chat.box.setAttribute('aria-keyshortcuts', 'Enter');
+      chat.send = el('button', 'ag-text-button ag-chat-send', 'Send'); chat.send.type = 'button'; chat.send.dataset.chatSend = '';
+      chat.count = el('p', 'ag-chat-count'); chat.count.setAttribute('aria-live', 'polite');
+      const row = el('div', 'ag-route-actions'); row.append(chat.count, chat.send); chat.compose.append(chat.box, row);
+      chat.stopRow = el('div', 'ag-chat-stop-row');
+      chat.note = el('p', 'ag-chat-result'); chat.note.setAttribute('aria-live', 'polite');
+      listen(chat.log, 'scroll', () => {
+        if (chat.log.scrollTop === chat.set) { chat.set = -1; return; }
+        chat.set = -1; chat.top = chat.log.scrollTop;
+        chat.follow = chat.log.scrollHeight - chat.log.scrollTop - chat.log.clientHeight <= CHAT_NEAR;
+      });
+      listen(chat.sessions, 'click', event => {
+        const step = event.target.closest('[data-chat-step]'), target = step && chatTarget();
+        if (!target) return;
+        const at = target.list.indexOf(target.session), next = target.list[at + (step.dataset.chatStep === 'older' ? 1 : -1)];
+        if (next) { chat.choice.set(target.agent.name, next.id); chatSync(); }
+      });
+      listen(chat.box, 'keydown', event => {
+        if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
+        event.preventDefault(); chatSend();
+      });
+      listen(chat.box, 'input', () => { if (chat.session) chat.drafts.set(chat.session, chat.box.value); chatCount(); });
+      listen(chat.send, 'click', () => chatSend());
+      listen(chat.stopRow, 'click', event => {
+        const button = event.target.closest('button');
+        if (!button) return;
+        if ('chatStop' in button.dataset) { chat.confirm = true; chatPaint(); chat.stopRow.querySelector('[data-chat-stop-no]')?.focus({ preventScroll: true }); }
+        else if ('chatStopNo' in button.dataset) { chat.confirm = false; chatPaint(); chat.stopRow.querySelector('[data-chat-stop]')?.focus({ preventScroll: true }); }
+        else if ('chatStopYes' in button.dataset) chatStop();
+      });
+      listen(document, 'visibilitychange', () => { if (!document.hidden) chatSync(); });
+      cleanups.push(() => { chat.token++; if (chat.timer !== null) clock.clearTimeout(chat.timer); chat.timer = null; });
+    }
+    // The agent whose details are open (null when none are, so nothing is read), its sessions newest first and the one
+    // shown: the user's choice, else the orchestrator's root session, else the newest.
+    function chatTarget() {
+      if (!alive || !snapshot || detail.hidden || selected?.type !== 'agent') return null;
+      const agent = agentsByName.get(selected.key);
+      if (!agent) return null;
+      const list = (Array.isArray(agent.sessions) ? agent.sessions : []).filter(session => session && typeof session.id === 'string' && session.id);
+      const own = agent.name === hubName;
+      const session = list.find(item => item.id === chat.choice.get(agent.name)) || (own && list.find(item => item.id === snapshot.root?.id)) || list[0] || null;
+      return { agent, session, list, own };
+    }
+    // What the box would do: steer a busy session, or (the orchestrator, idle) a plain prompt; null: no box.
+    function chatMode(target) {
+      if (!sendAction || !target?.session) return null;
+      return target.session.busy ? 'steer' : target.own ? 'prompt' : null;
+    }
+    function chatReset(id) {
+      if (chat.session) chat.drafts.set(chat.session, chat.box.value);
+      chat.token++; if (chat.timer !== null) clock.clearTimeout(chat.timer);
+      Object.assign(chat, { session: id, signature: '', feed: null, failed: false, loaded: false, staleBusy: true, inflight: false, again: false, timer: null, follow: true, top: 0, set: -1, confirm: false, result: null });
+      chat.box.value = id ? chat.drafts.get(id) || '' : '';
+    }
+    function chatSync() {
+      const target = chatTarget(), id = target?.session?.id || '';
+      if (id !== chat.session) chatReset(id);
+      if (!target) return;
+      chat.busy = !!target.session?.busy;
+      chatPaint();
+      chatSchedule();
+    }
+    // A read starts when none is out or waiting: while busy (the timer asks again), when the last answer failed, when
+    // nothing was read yet, and once more after the session stops being busy (it ends with its last words).
+    function chatSchedule() {
+      if (!chatCanRead || !chat.session || document.hidden || chat.inflight) return;
+      if (chat.timer !== null) {
+        if (chat.busy || !chat.staleBusy) return;
+        clock.clearTimeout(chat.timer); chat.timer = null;
+      }
+      if (chat.busy || chat.failed || !chat.loaded || chat.staleBusy) chatRead();
+    }
+    function chatFetch(id) {
+      if (chatAction) return chatAction(id, { limit: CHAT_LIMIT });
+      return fetch(chatUrl + '?session=' + encodeURIComponent(id) + '&limit=' + CHAT_LIMIT + (options.chatDemo ? '&demo=1' : ''), { cache: 'no-store' })
+        .then(response => { if (!response.ok) throw new Error('The chat could not be read (' + response.status + ')'); return response.json(); });
+    }
+    function chatTidy(feed) {
+      const items = feed.items.filter(item => item && typeof item === 'object' && CHAT_KINDS.includes(item.kind)).slice(-CHAT_ITEMS).map(item => {
+        const body = typeof item.text === 'string' ? item.text : '';
+        return { kind: item.kind, time: Number(item.time) || 0, text: body.slice(0, CHAT_TEXT), cut: item.cut === true || body.length > CHAT_TEXT, name: oneLine(item.name, 80), status: oneLine(item.status, 40), pending: item.pending === true };
+      });
+      return { items, more: feed.more === true, truncated: feed.truncated === true, busy: typeof feed.busy === 'boolean' ? feed.busy : null, warning: feed.warning ? oneLine(feed.warning) : '' };
+    }
+    function chatRead() {
+      if (chat.inflight || !chatCanRead || !chat.session) return;
+      const id = chat.session, token = chat.token, busyAtRead = chat.busy;
+      chat.inflight = true;
+      let work;
+      try { work = within(chatFetch(id)); } catch (error) { work = Promise.reject(error); }
+      work.then(feed => {
+        if (!alive || token !== chat.token) return;
+        if (!feed || typeof feed !== 'object' || !Array.isArray(feed.items)) throw new Error('The chat came back in a form that cannot be shown');
+        chat.feed = chatTidy(feed); chat.failed = false; chat.loaded = true; chat.staleBusy = busyAtRead;
+      }).catch(() => { if (alive && token === chat.token) chat.failed = true; }).finally(() => {
+        if (!alive || token !== chat.token) return;
+        chat.inflight = false; chatPaint();
+        if (chat.again) { chat.again = false; chatRead(); return; }
+        if ((chat.busy || chat.failed) && !document.hidden) chat.timer = clock.setTimeout(() => { chat.timer = null; chatSync(); }, CHAT_POLL_MS);
+        else chatSchedule();
+      });
+    }
+    // Soon after a message or a stop: the chat shows what it did.
+    function chatReadAgain() { if (chat.inflight) chat.again = true; else chatRead(); }
+    function chatScroll() {
+      if (!chat.el.isConnected) return;
+      chat.log.scrollTop = chat.follow ? chat.log.scrollHeight : chat.top;
+      chat.set = chat.log.scrollTop; chat.top = chat.set;
+    }
+    function chatItem(item) {
+      const row = el('div', 'ag-chat-item'), body = el('span', 'ag-chat-body');
+      row.dataset.kind = item.kind;
+      if (item.time) row.title = ago(item.time);
+      if (item.kind === 'tool') body.textContent = [item.name, item.status].filter(Boolean).join(' · ') || 'tool';
+      else if (item.kind === 'note') body.textContent = 'note';
+      else body.textContent = item.text;
+      const label = item.kind === 'reasoning' ? 'thinking' : item.kind === 'user' ? (item.pending ? 'you · waiting' : 'you') : '';
+      if (item.pending) row.dataset.pending = 'true';
+      if (label) row.append(el('span', 'ag-chat-label', label), ' ');
+      row.append(body);
+      if (item.cut && (item.kind === 'reasoning' || item.kind === 'text' || item.kind === 'user')) row.append(el('span', 'ag-chat-cut', ' … cut'));
+      return row;
+    }
+    function chatCount() {
+      const counted = goalCount(chat.box.value);
+      chat.count.textContent = counted ? counted.said : ''; if (counted) chat.count.dataset.kind = counted.kind; else delete chat.count.dataset.kind;
+    }
+    function chatPaint() {
+      const target = chatTarget();
+      if (!target) return;
+      const session = target.session, mode = chatMode(target), canStop = !!(stopAction && session?.busy), feed = chat.feed;
+      const streaming = !!session?.busy && feed?.busy !== false;
+      if (!canStop || chat.stopping === session?.id) chat.confirm = false;
+      chat.el.dataset.chatSession = session?.id || ''; chat.el.dataset.busy = String(!!session?.busy);
+      chat.el.dataset.state = !session ? 'none' : !chatCanRead ? 'unavailable' : chat.failed ? 'error' : chat.loaded ? 'ready' : 'loading';
+      // Sessions: the newest shows; with more, a small way to step through them.
+      const at = session ? target.list.indexOf(session) : -1;
+      chat.which.textContent = target.list.length > 1 ? (at + 1) + ' of ' + target.list.length : '';
+      chat.which.title = session ? oneLine(session.title, 120) : '';
+      chat.sessions.querySelector('[data-chat-step="newer"]').disabled = at <= 0;
+      chat.sessions.querySelector('[data-chat-step="older"]').disabled = at < 0 || at >= target.list.length - 1;
+      // The log, drawn again only when the feed or the busy mark changed.
+      const signature = JSON.stringify([feed, streaming, !!session]);
+      if (signature !== chat.signature) {
+        chat.signature = signature; chat.log.replaceChildren();
+        if (feed) {
+          if (feed.more || feed.truncated) chat.log.append(el('div', 'ag-chat-edge', [feed.more ? 'Older chat is not shown.' : '', feed.truncated ? 'Long text is cut.' : ''].filter(Boolean).join(' ')));
+          feed.items.forEach(item => chat.log.append(chatItem(item)));
+        }
+        if (streaming) { const caret = el('span', 'ag-chat-caret'); caret.setAttribute('aria-hidden', 'true'); chat.log.append(caret); }
+        chatScroll();
+      }
+      chat.el.dataset.streaming = String(streaming);
+      chat.status.textContent = !session ? 'No session yet.' : !chatCanRead ? 'The chat cannot be read here.' : chat.failed ? 'Could not read the chat. Trying again.' : feed?.warning ? feed.warning : chat.loaded && !feed.items.length ? 'Nothing said yet.' : '';
+      chat.status.dataset.kind = session && chatCanRead && chat.failed ? 'error' : '';
+      // The box: only where the host can send and the session takes it.
+      if (mode) {
+        const said = mode === 'steer' ? 'Steer this agent' : 'Message the orchestrator';
+        chat.box.placeholder = said + '…'; chat.box.setAttribute('aria-label', said);
+        chat.send.textContent = chat.sending === session.id ? 'Sending…' : 'Send';
+        if (chat.sending === session.id) chat.send.setAttribute('aria-disabled', 'true'); else chat.send.removeAttribute('aria-disabled');
+        chat.compose.dataset.mode = mode;
+      }
+      // Stop, and its one question.
+      if (canStop) {
+        const stopping = chat.stopping === session.id;
+        chat.stopRow.dataset.confirming = String(chat.confirm);
+        const want = chat.confirm ? 'confirm' : stopping ? 'stopping' : 'stop';
+        if (chat.stopRow.dataset.shown !== want || !chat.stopRow.firstChild) {
+          chat.stopRow.dataset.shown = want; chat.stopRow.replaceChildren();
+          const button = (label, key, extra) => { const item = el('button', 'ag-text-button ' + (extra || ''), label); item.type = 'button'; item.dataset[key] = ''; return item; };
+          if (want === 'confirm') chat.stopRow.append(el('span', 'ag-chat-ask', 'Stop this agent?'), button('Stop', 'chatStopYes', 'ag-chat-stop-yes'), button('Keep going', 'chatStopNo', 'ag-chat-stop-no'));
+          else { const stop = button(stopping ? 'Stopping…' : 'Stop', 'chatStop', 'ag-chat-stop'); if (stopping) stop.setAttribute('aria-disabled', 'true'); chat.stopRow.append(stop); }
+        }
+      }
+      const said = chat.result && chat.result.session === session?.id ? chat.result : null;
+      chat.note.textContent = said ? said.text : ''; if (said) chat.note.dataset.kind = said.kind; else delete chat.note.dataset.kind;
+      // The parts that show, in order; replaced only when the set changes (a box with the focus keeps it).
+      const wanted = [chat.title, target.list.length > 1 ? chat.sessions : null, session ? chat.log : null, chat.status.textContent ? chat.status : null, mode ? chat.compose : null, canStop ? chat.stopRow : null, chat.note.textContent ? chat.note : null].filter(Boolean);
+      const current = [...chat.el.children];
+      if (wanted.length !== current.length || wanted.some((part, index) => part !== current[index])) {
+        const focused = chat.el.contains(document.activeElement) ? document.activeElement : null;
+        chat.el.replaceChildren(...wanted);
+        if (focused?.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
+        if (chat.el.isConnected) chatScroll();
+      }
+      chatCount();
+    }
+    function chatSay(id, said, kind) { chat.result = said ? { session: id, text: said, kind } : null; }
+    async function chatSend() {
+      const target = chatTarget(), mode = chatMode(target);
+      if (!mode) return;
+      const id = target.session.id;
+      if (chat.sending === id) return;
+      const value = chat.box.value, message = value.trim();
+      if (!message) { chatSay(id, 'Write a message first.', 'error'); chatPaint(); return; }
+      if (chars(value) > RUN_GOAL_CHARS) { chatSay(id, goalCount(value).said, 'error'); chatPaint(); return; }
+      chat.sending = id; chatSay(id, '', ''); chatPaint();
+      let reply;
+      try { reply = await within(sendAction(id, message, { steer: mode === 'steer' })); }
+      catch (error) { reply = { ok: false, error: error?.noAnswer ? 'Not confirmed as sent. Look in the chat before you send it again.' : error?.message }; }
+      if (chat.sending === id) chat.sending = '';
+      if (!alive) return;
+      if (reply && reply.ok === true) {
+        if (chat.drafts.get(id) === value) chat.drafts.delete(id);
+        if (chat.session === id && chat.box.value === value) chat.box.value = '';
+        chatSay(id, 'Sent.', 'ok'); chatReadAgain();
+      } else chatSay(id, oneLine(reply?.error) || 'Not sent.', 'error');
+      chatPaint();
+    }
+    async function chatStop() {
+      const target = chatTarget(), session = target?.session;
+      if (!stopAction || !session?.busy || chat.stopping === session.id) return;
+      const id = session.id;
+      chat.confirm = false; chat.stopping = id; chatSay(id, '', ''); chatPaint();
+      let reply;
+      try { reply = await within(stopAction(id)); }
+      catch (error) { reply = { ok: false, error: error?.noAnswer ? NO_ANSWER_SAID : error?.message }; }
+      if (chat.stopping === id) chat.stopping = '';
+      if (!alive) return;
+      if (reply && reply.ok === true) { chatSay(id, 'Stop sent.', 'ok'); chatReadAgain(); } else chatSay(id, oneLine(reply?.error) || 'Not stopped.', 'error');
+      chatPaint();
+      chat.stopRow.querySelector('[data-chat-stop]')?.focus?.({ preventScroll: true });
+    }
+    // What an agent that is working is doing now (agents[].activity), for the line under its name.
+    function activityLine(agent) {
+      const doing = agent.activity;
+      if (!doing || typeof doing !== 'object') return '';
+      return doing.kind === 'tool' ? 'running ' + (oneLine(doing.tool, 80) || 'a tool') : doing.kind === 'reasoning' ? 'thinking' : doing.kind === 'text' ? 'replying' : '';
+    }
+    chatBuild();
     function renderDetail(force = false) {
       if (!selected || !snapshot) return;
       const graph = snapshot.graph;
@@ -3493,8 +3751,10 @@
       const renaming = selected.type === 'agent' ? detailScroll.querySelector('[data-rename]') : null;
       if (!force && renaming && renaming.dataset.rename === selected.key && agentsByName.has(selected.key) && (document.activeElement === renaming || renaming.value !== selected.key)) return;
       detailSignature = signature;
+      chatSync();
       const scroll = detailScroll.scrollTop;
       const focused = document.activeElement;
+      const focusedChat = chat.el.contains(focused) ? focused : null;
       const focusedStep = detailScroll.contains(focused) ? focused.closest('[data-step]')?.dataset.step : null;
       // A skill control with focus gets it back after the rebuild (the same control of the same skill).
       const focusedSkill = detailScroll.contains(focused) ? SKILL_CONTROLS.find(key => key in focused.dataset) : null, focusedValue = focusedSkill ? focused.dataset[focusedSkill] : null;
@@ -3567,6 +3827,8 @@
         eyebrow.textContent = 'Agent';
         if (!agent) { detailScroll.append(el('h2', 'ag-detail-title', 'Unavailable')); return; }
         detailScroll.append(el('h2', 'ag-detail-title', agent.name));
+        const doing = activityLine(agent);
+        if (doing) { const line = el('p', 'ag-detail-activity', doing); line.dataset.kind = text(agent.activity.kind); detailScroll.append(line); }
         if (agent.about) detailScroll.append(el('p', 'ag-detail-about', text(agent.about)));
         detailScroll.append(el('p', 'ag-detail-intro', agent.model || '—'));
         const badges = el('div', 'ag-detail-badges');
@@ -3578,6 +3840,7 @@
         // The red dot on its circle (and the "! N" above the graph): what it means for this agent.
         const trouble = attentionAgents().get(agent.name);
         if (trouble) { const line = el('p', 'ag-agent-note ag-attention-note', 'Needs attention: ' + trouble + '. This is the red dot on its circle, counted in the “! N” above the graph.'); line.dataset.kind = 'error'; detailScroll.append(line); }
+        detailScroll.append(chat.el);
         agentActions(agent);
         agentTextSection(agent);
         skillSection(agent);
@@ -3620,6 +3883,7 @@
         renderRunDetail(graph);
       }
       detailScroll.scrollTop = scroll;
+      if (chat.el.isConnected) { chatScroll(); if (focusedChat?.isConnected && document.activeElement !== focusedChat) focusedChat.focus({ preventScroll: true }); }
       if (focusedStep) Array.from(detailScroll.querySelectorAll('[data-step]')).find(row => row.dataset.step === focusedStep)?.querySelector('summary').focus({ preventScroll: true });
       if (focusedSkill && !detailScroll.contains(document.activeElement)) Array.from(detailScroll.querySelectorAll('button, textarea')).find(item => item.dataset[focusedSkill] === focusedValue)?.focus({ preventScroll: true });
       // Its control gone (a skill deleted, a row taken away): the first control of the same section.
@@ -5115,7 +5379,7 @@
     // Everything in the details, the + and its menu that would change something is refused in 3D: typing in a field,
     // pressing a control (a button, a choice, a box to tick). Reading stays: closing, the links between agents, opening
     // a session or a skill's text, the notices, the folds.
-    const ORBIT_READING = '.ag-close, .ag-family-link, .ag-open-session, .ag-skill-open, .ag-spend-row, .ag-run-notices, summary, [data-output-open]';
+    const ORBIT_READING = '.ag-chat, .ag-close, .ag-family-link, .ag-open-session, .ag-skill-open, .ag-spend-row, .ag-run-notices, summary, [data-output-open]';
     // call()'s part: while anything but the flat view shows no write is asked of the host, whatever started it (a key, a
     // save queued in 2D, the pause after typing, leaving a box, the page hidden, undo); reads are. Refused with the same
     // sentence; whoever asked keeps the typing (marked not saved) and the undo step; back in 2D the usual rules go on.
@@ -5681,6 +5945,7 @@
       // The host's answer stands for an agent's skills only until a snapshot shows the same list.
       skillOverride.forEach((list, name) => { const agent = (data.agents || []).find(item => item?.name === name); if (!agent || JSON.stringify(agent.skills) === JSON.stringify(list)) skillOverride.delete(name); });
       indexSteps();
+      chatSync();
       if (activeTeam !== previousTeam) { rememberTeam(previousTeam); restoreTeam(activeTeam); }
       if (trail.some(name => !shownAgents.has(name))) dropTrail();
       const graph = data.graph;
@@ -5827,7 +6092,7 @@
       visibleAgents = []; hubName = ''; openSteps.clear(); openFolds.clear(); teamViews.clear(); positions.clear(); nodes.clear(); lines.clear(); loopViews.clear(); workLoopViews.clear();
       agentsByName.clear(); stepsByAgent.clear(); stepsById.clear(); nodeOwners.clear(); shownAgents.clear();
       nodeLayer.replaceChildren(); spokeLayer.replaceChildren(); escalationLayer.replaceChildren(); flowLayer.replaceChildren(); loopLayer.replaceChildren(); routeLayer.replaceChildren(); teamLayer.replaceChildren(); trailLayer.replaceChildren();
-      detailScroll.replaceChildren(); detail.hidden = true; root.classList.remove('ag-details-open');
+      detailScroll.replaceChildren(); detail.hidden = true; root.classList.remove('ag-details-open'); chat.choice.clear(); chat.drafts.clear(); chatSync();
       root.style.removeProperty('--ag-sheet-height');
       delete root.dataset.team; root.dataset.state = 'loading';
       notice.hidden = true; notice.textContent = ''; notice.title = '';

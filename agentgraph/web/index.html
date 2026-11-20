@@ -41,6 +41,8 @@
       window.AgentGraph.mount(root, {
         // The page is the graph: it takes the keys on load (a host's panel does not pass this).
         autofocus: true,
+        // An agent's chat is read from /api/chat (the demo's example chats with demo=1). The page has no way to steer or stop.
+        chatUrl: '/api/chat', chatDemo: params.has('demo'),
         actions: params.has('demo') ? undefined : { flow, skills, roster, skillfile, team, output },
         fetchSnapshot: async () => {
           const response = await fetch('/api/snapshot' + query, { cache: 'no-store' });

@@ -415,6 +415,32 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   starts one). Ctrl/Cmd+Z sends { op: "restore", record }: one step per save; refused, it is dropped with
 //   "Could not undo the edit of the step's output: WHY". Text typed and not saved outlives the details.
 //   Every text from the back end (the output, why, step names, messages) is shown as text.
+// options.actions.chat / send / stop (the chat in an agent's details, loop n5). None of the three changes the
+//   setup, so all work in 3D too (everything that does change it stays look-only there).
+//   chat: optional (sessionID, { limit }) => Promise of the feed of GET /api/chat (section 3: { session, agent, busy,
+//   items[{ kind, time, text | name + status, cut, pending }], truncated, more, warning }). Without it the view
+//   fetches `/api/chat?session=ID&limit=N` itself (options.chatUrl names another path; options.chatDemo adds
+//   `&demo=1`; the web page sets it with ?demo). Only the agent whose details are open is read: every 1.5 s while
+//   its session is busy, once when it is not (and once more after it stops being busy), never while
+//   document.hidden or with the details closed, one request at a time. A failed read shows one quiet line and tries
+//   again on the next tick. The session shown is the newest of agents[].sessions (the orchestrator: the root
+//   session, snapshot root.id), with a small way to step to the others; with none, one quiet line and nothing else.
+//   The session id is sent exactly as the snapshot gives it.
+//   send: optional (sessionID, text, { steer }) => Promise of { ok: true } or { ok: false, error }. With it, a text
+//   box shows in the chat when the session is busy (sent with steer: true) or when the agent is the orchestrator
+//   and its session is idle (steer: false, a plain prompt). Enter sends, Shift+Enter is a newline, empty is
+//   refused, at most 4,000 characters (over it is refused and said), no second send while one is out, the box
+//   clears only on ok and an error shows as one line and keeps the text (a typed text is kept per session). No
+//   answer within 15 s: "Not confirmed as sent..." and the text stays.
+//   stop: optional (sessionID) => Promise of { ok: true } or { ok: false, error }. With it, Stop shows while the
+//   session is busy; it asks once ("Stop this agent?", Stop / Keep going) before it calls, then says the result.
+//   Without send and stop (the web page: it has neither) the chat is a read-only transcript: no box, no Stop.
+//   The chat, oldest first: `reasoning` quieter than `text` (italic, muted, a rule at the left), `tool` as its name
+//   and state only (never its input or output), `user` marked (and "waiting" while `pending`), `note` as the one
+//   word "note", a `cut` item and a `truncated` or `more` feed saying so quietly, following the newest line unless
+//   the user has scrolled up, a caret that blinks only while the session is busy and not with reduced motion. Every
+//   word reaches the page as text: no markup, link, image or markdown is ever made from it. agents[].activity (the
+//   tool it runs, "thinking", "replying") shows as one line under the agent's name in the details, nowhere else.
 // options.actions.team: optional (request) => Promise. { op: "add", lead, members, text? } → { team },
 //   { op: "members", id, members }, { op: "text", id, text } and { op: "remove", id }, each but add with an
 //   optional expect (the group's rev). structure.teams is [{ id, lead, members, text, rev }] (the user's word is group). Members sit evenly on one circle round

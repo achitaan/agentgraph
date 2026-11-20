@@ -7297,7 +7297,10 @@
       // aria-keyshortcuts but D and Escape), the timers the view set meanwhile (the pause after typing among them) and the
       // page hidden. In 2D the drive writes to every action; in 3D and in both morphs only reads are asked. ----
       const viewSource = [...document.scripts].find(script => script.textContent.includes('function call(fn, request)')).textContent;
-      const actionNames = [...new Set([...viewSource.matchAll(/action\('(\w+)'\)/g), ...viewSource.matchAll(/options\.actions\.(\w+)/g)].map(m => m[1]))];
+      // n5: chat, send and stop are the chat's own host actions: they change nothing in the setup, so the 3D rule does not
+      // apply to them (the chat checks below drive them in 2D and in 3D); every other action is swept as before.
+      const CHAT_ACTIONS = ['chat', 'send', 'stop'];
+      const actionNames = [...new Set([...viewSource.matchAll(/action\('(\w+)'\)/g), ...viewSource.matchAll(/options\.actions\.(\w+)/g)].map(m => m[1]))].filter(name => !CHAT_ACTIONS.includes(name));
       const sweepData = () => {
         const data = pathFixture();
         data.structure.flows.push({ id: 'f2', path: ['impl-openai', 'oracle'], text: 'Ask.', source: 'drawn' });
@@ -7391,7 +7394,7 @@
       }
       const writesOf = asked => asked.filter(call => call.op !== 'read');
       await test('n105 item 16a (general sweep, the drive in 2D): app.js asks every action only through call(), the sweep has a fake for each, and its drive writes to every action in 2D', async () => {
-        const bound = [...viewSource.matchAll(/(\w+) = (?:action\('\w+'\)|options\.actions && typeof options\.actions\.\w+)/g)].map(m => m[1]);
+        const bound = [...viewSource.matchAll(/(\w+) = (?:action\('(\w+)'\)|options\.actions && typeof options\.actions\.(\w+))/g)].filter(m => !CHAT_ACTIONS.includes(m[2] || m[3])).map(m => m[1]);
         const direct = bound.filter(name => new RegExp('\\b' + name + '\\s*\\(').test(viewSource)).concat(/options\.actions(\.\w+|\[[^\]]+\])\s*\(/.test(viewSource) ? ['options.actions'] : []);
         assert(actionNames.length >= 7 && bound.length === actionNames.length && !direct.length, 'an action is asked other than through call(): ' + direct.join(', ') + ' (actions ' + actionNames.join(', ') + '; bound ' + bound.join(', ') + ')');
         const missing = actionNames.filter(action => !['roster', 'skillfile', 'team', 'skills', 'flow', 'run', 'output'].includes(action));
@@ -8250,6 +8253,426 @@
       }
     });
     // ==== MCP lane (n126): end ====
+    // ==== Chat lane (n5): start (an agent's chat in its details: thinking live, steer and stop where the host gives them, a transcript otherwise) ====
+    const CHAT_ITEMS = [
+      { kind: 'user', time: 1, text: 'Fix the build', pending: false },
+      { kind: 'reasoning', time: 2, text: 'Thinking about the build first' },
+      { kind: 'tool', time: 3, name: 'bash', status: 'running', text: 'SECRET TOOL OUTPUT' },
+      { kind: 'text', time: 4, text: 'I am on it now' },
+      { kind: 'note', time: 5, text: 'compacted: a long hidden note' },
+      { kind: 'user', time: 6, text: 'And be quick', pending: true }
+    ];
+    const chatFeed = (session, items = CHAT_ITEMS, extra = {}) => ({ session, agent: 'x', busy: false, items: items.map(item => ({ ...item })), truncated: false, more: false, warning: '', ...extra });
+    function chatFixture() {
+      const data = fixture();
+      const by = name => data.agents.find(item => item.name === name);
+      data.root = { agent: 'orchestrator', id: 'ses_root' };
+      by('orchestrator').sessions = [{ id: 'ses_old_root', title: 'Earlier', busy: false, model: 'm', cost: 0 }, { id: 'ses_root', title: 'Root', busy: false, model: 'm', cost: 0 }];
+      by('impl-openai').sessions = [{ id: 'ses_work', title: 'Work', busy: true, model: 'm', cost: 0 }, { id: 'ses_older', title: 'Older work', busy: false, model: 'm', cost: 0 }];
+      by('impl-openai').activity = { kind: 'tool', tool: 'bash', text: '', time: 1 };
+      by('impl-claude').sessions = [{ id: 'ses_done', title: 'Done', busy: false, model: 'm', cost: 0 }];
+      by('impl-hard').sessions = [];
+      return data;
+    }
+    // A clock the view reads its poll timer from: timers wait until the check fires them.
+    function chatClock() {
+      let next = 0; const timers = new Map();
+      return { setTimeout: (fn, ms) => { timers.set(++next, { fn, ms }); return next; }, clearTimeout: id => { timers.delete(id); },
+        polls: () => [...timers.values()].filter(item => item.ms < 15000).length,
+        fire() { const due = [...timers.entries()].filter(([, item]) => item.ms < 15000); due.forEach(([id, item]) => { timers.delete(id); item.fn(); }); return due.length; } };
+    }
+    // A host's chat, send and stop (each as asked), with the feeds it answers, one gate to hold reads and replies to set.
+    function chatHost(feeds, config = {}) {
+      const calls = { chat: [], send: [], stop: [] }; let flying = 0, most = 0;
+      const host = { calls, feeds, hold: null, fail: false, sendReply: { ok: true }, stopReply: { ok: true }, flying: () => flying, most: () => most, holdSend: null, holdStop: null };
+      host.actions = {};
+      if (config.chat !== false) host.actions.chat = async (id, opts) => {
+        calls.chat.push([id, opts]); flying++; most = Math.max(most, flying);
+        try { if (host.hold) await host.hold.promise; if (host.fail) throw new Error('no read'); return JSON.parse(JSON.stringify(host.feeds[id] || chatFeed(id))); } finally { flying--; }
+      };
+      if (config.send !== false) host.actions.send = async (id, text, opts) => { calls.send.push([id, text, opts]); if (host.holdSend) await host.holdSend.promise; return host.sendReply; };
+      if (config.stop !== false) host.actions.stop = async id => { calls.stop.push([id]); if (host.holdStop) await host.holdStop.promise; return host.stopReply; };
+      return host;
+    }
+    const chatUntil = async (condition, ms = 3000) => { const end = performance.now() + ms; while (!condition() && performance.now() < end) await sleep(15); return condition(); };
+    const chatOf = root => root.querySelector('.ag-detail .ag-chat');
+    const chatKinds = root => [...chatOf(root).querySelectorAll('.ag-chat-item')].map(item => item.dataset.kind);
+    const chatBox = root => chatOf(root)?.querySelector('textarea');
+    const chatStopButton = root => chatOf(root)?.querySelector('[data-chat-stop]');
+    const chatSaid = root => [...(chatOf(root)?.querySelectorAll('.ag-chat-status, .ag-chat-result') || [])].map(item => item.textContent).filter(Boolean).join(' | ');
+    const chatGreen = value => {
+      const m = /rgba?\((\d+), (\d+), (\d+)(?:, ([\d.]+))?\)/.exec(value); if (!m || (m[4] !== undefined && Number(m[4]) === 0)) return false;
+      const [r, g, b] = [m[1], m[2], m[3]].map(Number); return g > r + 8 && g > b + 8;
+    };
+    async function chatOpen(root, name, ready = true) {
+      open(root, name); await settle();
+      if (ready) assert(await chatUntil(() => chatOf(root)?.dataset.state === 'ready'), 'the chat of ' + name + ' did not load: ' + chatSaid(root));
+    }
+    const chatSend = (root, text, extra = {}) => { const box = chatBox(root); box.focus(); typeIn(box, text); const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...extra }); box.dispatchEvent(event); return event; };
+    const chatMount = (host, clock, extra = {}) => ({ actions: host.actions, clock, ...extra });
+
+    await test('chat: each kind shows in order, thinking apart from speech, a tool as its name and state, the user\'s pending words marked, a note as one quiet word; in monospace, in the details only', async () => {
+      const data = chatFixture(), host = chatHost({ ses_work: chatFeed('ses_work', CHAT_ITEMS, { busy: true }) }), clock = chatClock();
+      await using(data, async root => {
+        await chatOpen(root, 'impl-openai');
+        assert(JSON.stringify(chatKinds(root)) === JSON.stringify(['user', 'reasoning', 'tool', 'text', 'note', 'user']), 'the items are not shown oldest first: ' + chatKinds(root));
+        const items = [...chatOf(root).querySelectorAll('.ag-chat-item')], by = kind => items.find(item => item.dataset.kind === kind);
+        assert(by('tool').textContent.replace('› ', '') === 'bash · running' && !/SECRET/.test(chatOf(root).textContent), 'a tool shows more than its name and state: ' + by('tool').textContent);
+        assert(by('note').textContent === 'note', 'a note is not one quiet word: ' + by('note').textContent);
+        const pending = items[5], sent = items[0];
+        assert(pending.dataset.pending === 'true' && /waiting/.test(pending.textContent) && !sent.dataset.pending && !/waiting/.test(sent.textContent), 'a pending message is not marked apart');
+        const quiet = getComputedStyle(by('reasoning')), loud = getComputedStyle(by('text'));
+        assert(quiet.color !== loud.color && quiet.fontStyle === 'italic' && loud.fontStyle !== 'italic', 'thinking is not styled apart from speech (' + quiet.color + ' / ' + loud.color + ')');
+        const ink = c => (c.match(/\d+/g) || []).slice(0, 3).map(Number).reduce((a, b) => a + b, 0);
+        assert(root.dataset.agScheme === 'light' ? ink(quiet.color) > ink(loud.color) : ink(quiet.color) < ink(loud.color), 'thinking is not quieter than speech');
+        assert(/monospace/.test(getComputedStyle(chatOf(root)).fontFamily) && parseFloat(loud.fontSize) >= 11, 'the chat is not monospace at 11 px or more');
+        const line = root.querySelector('.ag-detail-activity');
+        assert(line && line.textContent === 'running bash' && root.querySelector('.ag-detail-title').nextElementSibling === line, 'the activity line is not under the name: ' + line?.textContent);
+        assert(!/running bash|Thinking about|Fix the build/.test(root.querySelector('.ag-drawing').textContent + root.querySelector('.ag-nodes').textContent), 'chat or activity text leaked into the graph area');
+        assert(host.calls.chat[0][0] === 'ses_work' && Number.isInteger(host.calls.chat[0][1].limit) && host.calls.chat[0][1].limit > 0, 'the read was not chat(sessionID, { limit }): ' + JSON.stringify(host.calls.chat[0]));
+      }, chatMount(host, clock));
+    });
+
+    await test('chat: a feed that was cut says so quietly (a cut item, truncated, more) and nothing is said when it was not', async () => {
+      const data = chatFixture(), host = chatHost({ ses_work: chatFeed('ses_work', [{ kind: 'text', time: 1, text: 'Long words', cut: true }, { kind: 'reasoning', time: 2, text: 'Long thought', cut: true }], { busy: true, truncated: true, more: true }), ses_done: chatFeed('ses_done', [{ kind: 'text', time: 1, text: 'All said' }]) }), clock = chatClock();
+      await using(data, async root => {
+        await chatOpen(root, 'impl-openai');
+        const items = [...chatOf(root).querySelectorAll('.ag-chat-item')];
+        assert(items.every(item => item.querySelector('.ag-chat-cut')), 'a cut item does not say so');
+        assert(chatOf(root).querySelector('.ag-chat-edge') && /Older chat/.test(chatOf(root).querySelector('.ag-chat-edge').textContent) && /cut/.test(chatOf(root).querySelector('.ag-chat-edge').textContent), 'a truncated or longer feed does not say so');
+        root.querySelector('.ag-close').click(); await settle();
+        await chatOpen(root, 'impl-claude');
+        assert(!chatOf(root).querySelector('.ag-chat-cut, .ag-chat-edge'), 'a whole feed says it was cut');
+      }, chatMount(host, clock));
+    });
+
+    await test('chat: polls every 1.5 s while the session is busy, reads once when it is not, only for the open agent, never while the page is hidden or the panel closed, and never two reads at once', async () => {
+      const data = chatFixture(), host = chatHost({ ses_work: chatFeed('ses_work', CHAT_ITEMS, { busy: true }) }), clock = chatClock();
+      const hidden = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
+      await using(data, async root => {
+        assert(!host.calls.chat.length, 'a chat was read with no details open');
+        await chatOpen(root, 'impl-openai');
+        assert(host.calls.chat.length === 1 && clock.polls() === 1, 'a busy session did not wait for its next read (' + host.calls.chat.length + ' reads, ' + clock.polls() + ' timers)');
+        const pollMs = []; const was = clock.setTimeout; clock.setTimeout = (fn, ms) => { pollMs.push(ms); return was(fn, ms); };
+        clock.fire(); await settled();
+        assert(host.calls.chat.length === 2 && pollMs.includes(1500), 'the next tick did not read again, every 1.5 s: ' + JSON.stringify(pollMs));
+        assert(host.calls.chat.every(call => call[0] === 'ses_work'), 'another agent\'s chat was read');
+        // Hidden: no read, and none waits; shown again: one read.
+        Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+        try {
+          clock.fire(); await settled();
+          assert(host.calls.chat.length === 2 && clock.polls() === 0, 'a hidden page read the chat or kept a timer');
+        } finally { delete document.hidden; Object.defineProperty(Document.prototype, 'hidden', hidden); }
+        document.dispatchEvent(new Event('visibilitychange')); await settled();
+        assert(host.calls.chat.length === 3, 'the chat was not read when the page showed again');
+        // One in flight: a held read, ticks meanwhile.
+        host.hold = deferred(); clock.fire(); await settled();
+        const held = host.calls.chat.length; clock.fire(); clock.fire(); await settled();
+        assert(host.calls.chat.length === held && host.most() === 1, 'a second read started while one was out (' + host.calls.chat.length + ' reads, ' + host.most() + ' at once)');
+        host.hold.resolve(); host.hold = null; await settled();
+        // Closed: nothing more is read.
+        root.querySelector('.ag-close').click(); await settled();
+        const closed = host.calls.chat.length; clock.fire(); await settled();
+        assert(host.calls.chat.length === closed && clock.polls() === 0, 'the chat was read with the details closed');
+        // Idle: once, then nothing waits.
+        await chatOpen(root, 'impl-claude');
+        const before = host.calls.chat.length;
+        assert(host.calls.chat[before - 1][0] === 'ses_done' && clock.polls() === 0, 'an idle session did not read just once (' + clock.polls() + ' timers)');
+        clock.fire(); await settled();
+        assert(host.calls.chat.length === before, 'an idle session was read again');
+      }, chatMount(host, clock));
+    });
+
+    await test('chat: a failed read shows one quiet line and tries again on the next tick', async () => {
+      const data = chatFixture(), host = chatHost({ ses_work: chatFeed('ses_work', CHAT_ITEMS, { busy: true }) }), clock = chatClock();
+      host.fail = true;
+      await using(data, async root => {
+        open(root, 'impl-openai'); await settle();
+        assert(await chatUntil(() => chatOf(root)?.dataset.state === 'error'), 'a failed read is not shown: ' + chatSaid(root));
+        assert(chatOf(root).querySelectorAll('.ag-chat-status').length === 1 && /Could not read/.test(chatSaid(root)) && clock.polls() === 1, 'one quiet line, and a retry, were expected: ' + chatSaid(root));
+        assert(host.calls.chat.length === 1, 'the read was repeated at once');
+        host.fail = false; clock.fire();
+        assert(await chatUntil(() => chatOf(root)?.dataset.state === 'ready' && chatKinds(root).length === 6), 'the next tick did not recover');
+        assert(chatSaid(root) === '' && host.calls.chat.length === 2, 'the failure line stayed: ' + chatSaid(root));
+        // A reply that is not a feed is a failed read too.
+        host.feeds.ses_work = { items: 'nope' }; clock.fire(); await chatUntil(() => chatOf(root)?.dataset.state === 'error');
+        assert(chatOf(root).dataset.state === 'error', 'a reply that is not a feed was shown');
+      }, chatMount(host, clock));
+    });
+
+    await test('chat: follows the newest line unless the user has scrolled up, and does not move the details or lose the typing when the snapshot changes', async () => {
+      const many = n => Array.from({ length: n }, (_, i) => ({ kind: 'text', time: i + 1, text: 'Line ' + (i + 1) + ' ' + 'word '.repeat(10) }));
+      const data = chatFixture(), host = chatHost({ ses_work: chatFeed('ses_work', many(40), { busy: true }) }), clock = chatClock();
+      await using(data, async (root, app) => {
+        await chatOpen(root, 'impl-openai');
+        const log = chatOf(root).querySelector('.ag-chat-log'), bottom = () => log.scrollHeight - log.scrollTop - log.clientHeight;
+        assert(log.scrollHeight > log.clientHeight + 100 && bottom() <= 2, 'the log does not start at the newest line (' + bottom() + ')');
+        host.feeds.ses_work = chatFeed('ses_work', many(45), { busy: true }); clock.fire(); await chatUntil(() => log.querySelectorAll('.ag-chat-item').length === 45); await settle();
+        assert(bottom() <= 2, 'the log did not follow a new line (' + bottom() + ')');
+        log.scrollTop = 40; log.dispatchEvent(new Event('scroll')); await settle();
+        host.feeds.ses_work = chatFeed('ses_work', many(50), { busy: true }); clock.fire(); await chatUntil(() => log.querySelectorAll('.ag-chat-item').length === 50); await settle();
+        assert(Math.abs(log.scrollTop - 40) <= 2, 'the log moved though the user had scrolled up (' + log.scrollTop + ')');
+        // A snapshot that changes (a rebuild of the details) keeps the log where it was and the typed words.
+        const box = chatBox(root); box.focus(); typeIn(box, 'half a thought');
+        data.agents.find(item => item.name === 'impl-claude').model = 'Another model'; await app.refresh(); await settled();
+        assert(chatBox(root)?.value === 'half a thought' && document.activeElement === chatBox(root), 'a snapshot took the typing or the focus');
+        assert(Math.abs(chatOf(root).querySelector('.ag-chat-log').scrollTop - 40) <= 2, 'a snapshot moved the log');
+        // Back at the bottom, it follows again.
+        const again = chatOf(root).querySelector('.ag-chat-log'); again.scrollTop = again.scrollHeight; again.dispatchEvent(new Event('scroll')); await settle();
+        host.feeds.ses_work = chatFeed('ses_work', many(52), { busy: true }); clock.fire(); await chatUntil(() => again.querySelectorAll('.ag-chat-item').length === 52); await settle();
+        assert(again.scrollHeight - again.scrollTop - again.clientHeight <= 2, 'the log did not follow again at the bottom');
+      }, chatMount(host, clock));
+    });
+
+    await test('chat: with several sessions the newest shows with a small way to step to the others; the orchestrator opens on its root session; with none there is one quiet line and nothing else', async () => {
+      const data = chatFixture();
+      const host = chatHost({ ses_work: chatFeed('ses_work', [{ kind: 'text', time: 1, text: 'newest session words' }], { busy: true }), ses_older: chatFeed('ses_older', [{ kind: 'text', time: 1, text: 'older session words' }]),
+        ses_root: chatFeed('ses_root', [{ kind: 'text', time: 1, text: 'root words' }]), ses_old_root: chatFeed('ses_old_root', [{ kind: 'text', time: 1, text: 'earlier root words' }]) }), clock = chatClock();
+      await using(data, async root => {
+        await chatOpen(root, 'impl-openai');
+        assert(/newest session/.test(chatOf(root).textContent) && /1 of 2/.test(chatOf(root).textContent), 'the newest session does not show first');
+        chatOf(root).querySelector('[data-chat-step="older"]').click();
+        assert(await chatUntil(() => /older session words/.test(chatOf(root).textContent)), 'stepping to the older session did not show it');
+        assert(host.calls.chat.at(-1)[0] === 'ses_older' && /2 of 2/.test(chatOf(root).textContent) && !chatBox(root) && !chatStopButton(root), 'the older (finished) session shows controls or was not read');
+        const reads = host.calls.chat.length; clock.fire(); await settled();
+        assert(host.calls.chat.length === reads, 'a finished older session is polled');
+        chatOf(root).querySelector('[data-chat-step="newer"]').click();
+        assert(await chatUntil(() => /newest session/.test(chatOf(root).textContent)), 'stepping back did not show the newest');
+        root.querySelector('.ag-close').click(); await settle();
+        await chatOpen(root, 'orchestrator');
+        assert(/root words/.test(chatOf(root).textContent) && host.calls.chat.at(-1)[0] === 'ses_root', 'the orchestrator did not open on its root session');
+        // One session: no way to step.
+        root.querySelector('.ag-close').click(); await settle();
+        await chatOpen(root, 'impl-claude');
+        assert(!chatOf(root).querySelector('[data-chat-step]') || !chatOf(root).querySelector('.ag-chat-sessions')?.isConnected, 'a single session shows stepping');
+        // No session: one line, no read, no controls.
+        root.querySelector('.ag-close').click(); await settle();
+        const before = host.calls.chat.length;
+        await chatOpen(root, 'impl-hard', false);
+        const chat = chatOf(root);
+        assert(host.calls.chat.length === before && /No session/.test(chat.textContent) && chat.querySelector('.ag-chat-status') && !chat.querySelector('textarea, button, .ag-chat-log'), 'a session-less agent shows more than one quiet line: ' + chat.textContent);
+      }, chatMount(host, clock));
+    });
+
+    await test('chat: the box shows only where the host gives send and the session takes it (busy: steer; the orchestrator idle: a prompt), Stop only where the host gives stop and the session is busy, and a finished agent is a read-only transcript', async () => {
+      const seen = async (config, name) => {
+        const data = chatFixture(); data.agents.find(item => item.name === 'orchestrator').sessions[1].busy = name === 'orchestrator busy';
+        const host = chatHost({}, config), clock = chatClock(); let out = null;
+        await using(data, async root => { await chatOpen(root, name.replace(' busy', '')); out = { box: !!chatBox(root), stop: !!chatStopButton(root), dead: [...chatOf(root).querySelectorAll('textarea, button')].filter(item => item.hidden || !item.getClientRects().length).length, mode: chatOf(root).querySelector('[data-mode]')?.dataset.mode }; }, chatMount(host, clock));
+        return out;
+      };
+      const both = {}, send = { stop: false }, stop = { send: false }, none = { send: false, stop: false };
+      let got;
+      got = await seen(both, 'impl-openai'); assert(got.box && got.stop && got.mode === 'steer', 'a busy agent with both actions shows ' + JSON.stringify(got));
+      got = await seen(both, 'impl-claude'); assert(!got.box && !got.stop, 'a finished agent shows controls: ' + JSON.stringify(got));
+      got = await seen(both, 'orchestrator'); assert(got.box && !got.stop && got.mode === 'prompt', 'the idle orchestrator should show the box and no Stop: ' + JSON.stringify(got));
+      got = await seen(both, 'orchestrator busy'); assert(got.box && got.stop && got.mode === 'steer', 'the busy orchestrator should show both: ' + JSON.stringify(got));
+      got = await seen(send, 'impl-openai'); assert(got.box && !got.stop, 'send only: ' + JSON.stringify(got));
+      got = await seen(stop, 'impl-openai'); assert(!got.box && got.stop, 'stop only: ' + JSON.stringify(got));
+      got = await seen(none, 'impl-openai'); assert(!got.box && !got.stop, 'a host without send and stop shows controls: ' + JSON.stringify(got));
+      got = await seen(none, 'orchestrator'); assert(!got.box && !got.stop, 'a host without send shows the orchestrator\'s box: ' + JSON.stringify(got));
+      assert(got.dead === 0, 'a dead control shows');
+    });
+
+    await test('chat: the box sends on Enter (steer on a busy agent, a plain prompt to the idle orchestrator), Shift+Enter is a newline, empty and over 4,000 characters are refused, one send at a time, it clears only on ok and an error keeps the text', async () => {
+      const data = chatFixture(), host = chatHost({ ses_work: chatFeed('ses_work', CHAT_ITEMS, { busy: true }) }), clock = chatClock();
+      await using(data, async root => {
+        await chatOpen(root, 'impl-openai');
+        // Shift+Enter: a newline, nothing sent.
+        const soft = chatSend(root, 'one', { shiftKey: true });
+        assert(!soft.defaultPrevented && !host.calls.send.length, 'Shift+Enter sent or was stopped from making a newline');
+        // Empty and blank.
+        chatSend(root, '   \n '); await settled();
+        assert(!host.calls.send.length && /Write a message/.test(chatSaid(root)), 'an empty message was sent or not refused plainly: ' + chatSaid(root));
+        // The limit.
+        chatSend(root, 'x'.repeat(4001)); await settled();
+        assert(!host.calls.send.length && /Too long/.test(chatOf(root).textContent) && chatBox(root).value.length === 4001, 'a message over 4,000 characters was sent or the text was lost');
+        // An error keeps the text, shown as one line.
+        host.sendReply = { ok: false, error: 'The session is gone' };
+        chatSend(root, 'steer it'); await settled();
+        assert(host.calls.send.length === 1 && host.calls.send[0][0] === 'ses_work' && host.calls.send[0][1] === 'steer it' && host.calls.send[0][2].steer === true, 'the send was not (session, text, { steer: true }): ' + JSON.stringify(host.calls.send));
+        assert(chatBox(root).value === 'steer it' && /The session is gone/.test(chatSaid(root)) && chatOf(root).querySelectorAll('.ag-chat-result').length === 1, 'an error cleared the text or was not said: ' + chatSaid(root));
+        // A send out blocks another; ok clears.
+        host.sendReply = { ok: true }; host.holdSend = deferred();
+        chatSend(root, 'steer it'); chatSend(root, 'steer it'); chatBox(root).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); chatOf(root).querySelector('[data-chat-send]').click(); await settled();
+        assert(host.calls.send.length === 2 && chatBox(root).value === 'steer it', 'a second send went while one was out, or the text cleared early (' + host.calls.send.length + ')');
+        const reads = host.calls.chat.length;
+        host.holdSend.resolve(); host.holdSend = null; await settled();
+        assert(chatBox(root).value === '' && host.calls.chat.length > reads, 'ok did not clear the box and read the chat');
+        // The Send button sends too.
+        typeIn(chatBox(root), 'again'); chatOf(root).querySelector('[data-chat-send]').click(); await settled();
+        assert(host.calls.send.length === 3 && host.calls.send[2][1] === 'again', 'the Send button did not send');
+        // Exactly 4,000 goes.
+        chatSend(root, 'y'.repeat(4000)); await settled();
+        assert(host.calls.send.length === 4 && host.calls.send[3][1].length === 4000, 'a message of 4,000 characters was refused');
+        // The idle orchestrator: a plain prompt.
+        root.querySelector('.ag-close').click(); await settle();
+        await chatOpen(root, 'orchestrator');
+        chatSend(root, 'hello orchestrator'); await settled();
+        assert(host.calls.send.length === 5 && host.calls.send[4][0] === 'ses_root' && host.calls.send[4][2].steer === false, 'the orchestrator\'s prompt was not steer:false: ' + JSON.stringify(host.calls.send[4]));
+      }, chatMount(host, clock));
+    });
+
+    await test('chat: a typed message is kept per session while the user looks elsewhere, and a send that is not answered says so and keeps the text', async () => {
+      const data = chatFixture(), host = chatHost({ ses_work: chatFeed('ses_work', CHAT_ITEMS, { busy: true }) }), clock = chatClock();
+      host.actions.send = async () => { throw new Error('the host fell over'); };
+      await using(data, async root => {
+        await chatOpen(root, 'impl-openai');
+        typeIn(chatBox(root), 'draft for work');
+        root.querySelector('.ag-close').click(); await settle();
+        await chatOpen(root, 'impl-claude');
+        assert(!chatBox(root), 'a finished agent shows the box');
+        root.querySelector('.ag-close').click(); await settle();
+        await chatOpen(root, 'impl-openai');
+        assert(chatBox(root).value === 'draft for work', 'the typed words were lost on the way (' + chatBox(root).value + ')');
+        chatSend(root, 'draft for work'); await settled();
+        assert(chatBox(root).value === 'draft for work' && /fell over/.test(chatSaid(root)), 'a failing send lost the text or did not say why: ' + chatSaid(root));
+      }, chatMount(host, clock));
+    });
+
+    await test('chat: Stop asks once first (Keep going goes back), then stops once and shows the result; an error is said plainly and Stop stays', async () => {
+      const data = chatFixture(), host = chatHost({ ses_work: chatFeed('ses_work', CHAT_ITEMS, { busy: true }) }), clock = chatClock();
+      await using(data, async (root, app) => {
+        await chatOpen(root, 'impl-openai');
+        chatStopButton(root).click(); await settle();
+        assert(!host.calls.stop.length && /Stop this agent\?/.test(chatOf(root).textContent) && chatOf(root).querySelector('[data-chat-stop-yes]'), 'Stop did not ask first');
+        chatOf(root).querySelector('[data-chat-stop-no]').click(); await settle();
+        assert(!host.calls.stop.length && chatStopButton(root) && !chatOf(root).querySelector('[data-chat-stop-yes]'), '"Keep going" did not go back');
+        host.stopReply = { ok: false, error: 'Nothing to stop here' };
+        chatStopButton(root).click(); await settle(); chatOf(root).querySelector('[data-chat-stop-yes]').click(); await settled();
+        assert(host.calls.stop.length === 1 && host.calls.stop[0][0] === 'ses_work' && /Nothing to stop here/.test(chatSaid(root)) && chatStopButton(root), 'a refused stop was not said or Stop did not stay: ' + chatSaid(root));
+        host.stopReply = { ok: true }; host.holdStop = deferred();
+        chatStopButton(root).click(); await settle(); const yes = chatOf(root).querySelector('[data-chat-stop-yes]'); yes.click(); yes.click(); await settled();
+        assert(host.calls.stop.length === 2 && /Stopping/.test(chatOf(root).textContent), 'a second stop went while one was out');
+        host.holdStop.resolve(); host.holdStop = null; await settled();
+        assert(/Stop sent/.test(chatSaid(root)) && host.calls.stop.length === 2, 'the result of the stop was not shown: ' + chatSaid(root));
+        // Once the session is no longer busy Stop is gone, and the transcript stays.
+        data.agents.find(item => item.name === 'impl-openai').sessions[0].busy = false; data.agents.find(item => item.name === 'impl-openai').busy = 0;
+        host.feeds.ses_work = chatFeed('ses_work', CHAT_ITEMS, { busy: false }); await app.refresh(); await settled();
+        assert(!chatStopButton(root) && !chatBox(root) && chatKinds(root).length === 6, 'a finished agent still shows controls, or lost its transcript');
+      }, chatMount(host, clock));
+    });
+
+    await test('chat: the web page (no chat, send or stop from a host) reads /api/chat itself, with demo=1 in the demo, only for the open agent, and shows a read-only transcript with no controls', async () => {
+      const urls = [], realFetch = window.fetch, data = chatFixture();
+      window.fetch = async url => { urls.push(String(url)); return { ok: true, json: async () => chatFeed('ses_work', CHAT_ITEMS, { busy: false }) }; };
+      try {
+        for (const demo of [false, true]) {
+          urls.length = 0;
+          await using(data, async root => {
+            assert(!urls.length, 'the chat was read with nothing open');
+            open(root, 'impl-openai'); await settle();
+            assert(await chatUntil(() => chatOf(root)?.dataset.state === 'ready'), 'the page did not read the chat');
+            assert(urls.length === 1 && urls[0] === '/api/chat?session=ses_work&limit=' + new URL(urls[0], location.href).searchParams.get('limit') + (demo ? '&demo=1' : ''), 'the page read ' + urls.join(' '));
+            assert(!chatBox(root) && !chatStopButton(root) && !chatOf(root).querySelector('button[data-chat-send], [data-chat-stop-yes]'), 'the web page shows controls');
+            assert(chatKinds(root).length === 6, 'the transcript is not shown');
+          }, { chatUrl: '/api/chat', chatDemo: demo });
+        }
+        // Default URL, and a session id sent exactly as given.
+        urls.length = 0; const odd = chatFixture(); odd.agents.find(item => item.name === 'impl-openai').sessions = [{ id: 'ses a/b?c&d=1', title: 'Odd', busy: false, model: 'm', cost: 0 }];
+        await using(odd, async root => { open(root, 'impl-openai'); await settle(); await chatUntil(() => urls.length > 0);
+          assert(urls[0].startsWith('/api/chat?session=' + encodeURIComponent('ses a/b?c&d=1')) && !/demo/.test(urls[0]), 'the id was not sent exactly (' + urls[0] + ')'); });
+        // A page that cannot read says one quiet line.
+        window.fetch = async () => ({ ok: false, status: 500, json: async () => ({}) });
+        await using(data, async root => { open(root, 'impl-openai'); await settle(); assert(await chatUntil(() => chatOf(root)?.dataset.state === 'error'), 'a failing page read is not said'); assert(/Could not read/.test(chatSaid(root)), chatSaid(root)); });
+      } finally { window.fetch = realFetch; }
+    });
+
+    await test('chat: 3D reads, sends and stops while everything that changes the setup stays refused', async () => {
+      const data = chatFixture(), host = chatHost({ ses_work: chatFeed('ses_work', CHAT_ITEMS, { busy: true }) }), clock = chatClock(), spies = mcpSpies();
+      await using(data, async root => {
+        await chatOpen(root, 'impl-openai');
+        viewportOf(root).focus({ preventScroll: true }); press(viewportOf(root), 'd');
+        assert(await chatUntil(() => root.dataset.agView === '3d' && root.dataset.agBlend === '1'), '3D did not show'); await settled();
+        assert(chatOf(root) && chatBox(root) && chatStopButton(root), 'the chat controls are gone in 3D');
+        const reads = host.calls.chat.length; clock.fire(); await settled();
+        assert(host.calls.chat.length > reads, 'the chat is not read in 3D');
+        const typed = new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: 'x', inputType: 'insertText' }); chatBox(root).dispatchEvent(typed);
+        assert(!typed.defaultPrevented, 'typing in the chat box is refused in 3D');
+        const sent = chatSend(root, 'steer in 3D'); await settled();
+        assert(sent.defaultPrevented && host.calls.send.length === 1 && host.calls.send[0][1] === 'steer in 3D' && host.calls.send[0][2].steer === true && chatBox(root).value === '', 'send does not work in 3D (' + JSON.stringify(host.calls.send) + ')');
+        chatStopButton(root).click(); await settle(); chatOf(root).querySelector('[data-chat-stop-yes]').click(); await settled();
+        assert(host.calls.stop.length === 1 && /Stop sent/.test(chatSaid(root)), 'stop does not work in 3D: ' + chatSaid(root));
+        assert(root.dataset.agView === '3d' && !/3D is for looking/.test(chatSaid(root)), 'the chat was met with the look-only line');
+        // The rest stays look-only: no setup control works, no setup write was asked.
+        const rest = [...root.querySelectorAll('.ag-detail button, .ag-detail textarea, .ag-detail input')].filter(item => !item.closest('.ag-chat') && !item.closest('.ag-close') && item.getClientRects().length);
+        rest.forEach(item => { item.click(); });
+        await settled();
+        assert(!spies.calls.length && root.dataset.agView === '3d', 'a setup write was asked in 3D: ' + spies.calls);
+      }, { actions: { ...spies.actions, ...host.actions }, clock });
+    });
+
+    await test('chat: feed text is only ever text: no element, link, image or script is made from markup, a javascript: link, markdown or ANSI text', async () => {
+      const nasty = ['<img src=x onerror="window.__chatPwned=1">', '<a href="javascript:window.__chatPwned=1">click</a>', '[link](javascript:window.__chatPwned=1)', 'javascript:window.__chatPwned=1', '\u001b[31mred\u001b[0m \u001b]8;;http://evil\u0007link\u001b]8;;\u0007', '<scr' + 'ipt>window.__chatPwned=1</scr' + 'ipt>', '**bold** _it_ `code`', 'https://example.com/auto'];
+      const items = nasty.flatMap((text, i) => [{ kind: 'text', time: 2 * i + 1, text }, { kind: 'reasoning', time: 2 * i + 2, text }, { kind: 'user', time: 99 + i, text }]);
+      items.push({ kind: 'tool', time: 200, name: '<img src=x onerror=window.__chatPwned=1>', status: 'javascript:window.__chatPwned=1' });
+      const data = chatFixture(), host = chatHost({ ses_work: chatFeed('ses_work', items, { busy: true, warning: '<img src=x onerror=window.__chatPwned=1>' }) }), clock = chatClock();
+      delete window.__chatPwned;
+      await using(data, async root => {
+        await chatOpen(root, 'impl-openai');
+        const log = chatOf(root);
+        assert(!log.querySelector('img, a, script, iframe, svg, b, i, code, em, strong, [onerror], [href], [src]'), 'markup became elements: ' + log.querySelector('img, a, script, b, code')?.outerHTML);
+        assert(log.textContent.includes('<img src=x onerror="window.__chatPwned=1">') && log.textContent.includes('[link](javascript:window.__chatPwned=1)') && log.textContent.includes('\u001b[31mred'), 'the text was changed on the way');
+        assert(log.textContent.includes('https://example.com/auto') && !log.querySelector('[href]'), 'a URL became a link');
+        await sleep(100); assert(window.__chatPwned === undefined, 'a script ran');
+        [...log.querySelectorAll('*')].forEach(node => [...node.attributes].forEach(attr => assert(!/^on/i.test(attr.name) && !/javascript:/i.test(attr.value), 'a feed value reached an attribute: ' + attr.name + '=' + attr.value)));
+        assert([...log.querySelectorAll('.ag-chat-log *')].every(node => node.tagName === 'DIV' || node.tagName === 'SPAN'), 'an element other than a div or span was made');
+      }, chatMount(host, clock));
+    });
+
+    await test('chat: light and dark, at 1400, 620 and 420 px: the chat reads in monospace at 11 px or more, nothing green, nothing clipped sideways, and the box and Stop fit', async () => {
+      const data = chatFixture(), host = chatHost({ ses_work: chatFeed('ses_work', [...CHAT_ITEMS, { kind: 'text', time: 9, text: 'A very long unbroken line ' + 'abcdefghij'.repeat(30) }], { busy: true }) }), clock = chatClock();
+      for (const scheme of ['light', 'dark']) for (const width of [1400, 620, 420]) {
+        await using(data, async root => {
+          await resizeTo(root, width, 800);
+          await chatOpen(root, 'impl-openai');
+          const detail = root.querySelector('.ag-detail'), box = detail.getBoundingClientRect(), scroll = root.querySelector('.ag-detail-scroll');
+          const parts = [...chatOf(root).querySelectorAll('*')];
+          assert(parts.length > 12 && chatBox(root) && chatStopButton(root), 'the chat is not drawn at ' + scheme + ' ' + width);
+          parts.forEach(item => {
+            const style = getComputedStyle(item);
+            if (item.textContent.trim() || item.matches('textarea, button')) { assert(parseFloat(style.fontSize) >= 11, item.className + ' under 11 px at ' + scheme + ' ' + width); assert(/monospace/.test(style.fontFamily), item.className + ' is not monospace at ' + scheme + ' ' + width); }
+            ['color', 'backgroundColor', 'borderTopColor', 'borderLeftColor'].forEach(key => assert(!chatGreen(style[key]), item.className + ' is green (' + key + ' ' + style[key] + ') at ' + scheme + ' ' + width));
+            if (item.getClientRects().length) { const r = item.getBoundingClientRect(); assert(r.left >= box.left - 1 && r.right <= box.right + 1, item.className + ' is clipped sideways at ' + scheme + ' ' + width); }
+          });
+          assert(scroll.scrollWidth <= scroll.clientWidth + 1, 'the details scroll sideways at ' + scheme + ' ' + width);
+        }, { scheme, actions: host.actions, clock });
+      }
+    });
+
+    await test('chat: the caret moves only while the agent works, and not with reduced motion; the stylesheet turns it off for prefers-reduced-motion', async () => {
+      const data = chatFixture(), host = chatHost({ ses_work: chatFeed('ses_work', CHAT_ITEMS, { busy: true }), ses_done: chatFeed('ses_done', CHAT_ITEMS) }), clock = chatClock();
+      await using(data, async root => {
+        await chatOpen(root, 'impl-openai');
+        const caret = chatOf(root).querySelector('.ag-chat-caret'), full = getComputedStyle(caret).animationName;
+        assert(caret && full !== 'none', 'no caret moves while the agent works (' + full + ')');
+        root.querySelector('.ag-close').click(); await settle();
+        await chatOpen(root, 'impl-claude');
+        assert(!chatOf(root).querySelector('.ag-chat-caret'), 'a caret shows on a finished agent');
+      }, { ...chatMount(host, clock), motion: 'full' });
+      await using(data, async root => {
+        await chatOpen(root, 'impl-openai');
+        const caret = chatOf(root).querySelector('.ag-chat-caret');
+        assert(caret && getComputedStyle(caret).animationName === 'none', 'the caret moves with motion off');
+      }, chatMount(host, clock));
+      const rules = []; [...document.styleSheets].forEach(sheet => { try { [...sheet.cssRules].forEach(rule => { if (rule.media && /prefers-reduced-motion:\s*reduce/.test(rule.conditionText || rule.media.mediaText)) rules.push(...[...rule.cssRules].map(item => item.cssText)); }); } catch (_) { /* cross-origin */ } });
+      assert(rules.some(text => /ag-chat-caret/.test(text) && /animation(-name)?:\s*[^;]*\bnone\b/.test(text)), 'the stylesheet does not stop the caret for prefers-reduced-motion');
+    });
+
+    await test('chat: nothing is asked of the host but reads, sends and stops, only through the chat code, and the session id goes exactly as the snapshot gives it', async () => {
+      const source = [...document.scripts].find(script => script.textContent.includes('function call(fn, request)')).textContent;
+      const names = ['chatAction', 'sendAction', 'stopAction'];
+      names.forEach(name => { const uses = [...source.matchAll(new RegExp('\\b' + name + '\\(', 'g'))].length; assert(uses === 1, name + ' is called in ' + uses + ' places, not the one chat function'); });
+      assert(!/innerHTML|insertAdjacentHTML|outerHTML/.test(source.slice(source.indexOf('A chat on every agent (loop n5)'), source.indexOf('function renderDetail('))), 'the chat code builds markup');
+      const data = chatFixture(), id = 'ses_ÿ 1/%20&?', host = chatHost({}), clock = chatClock();
+      data.agents.find(item => item.name === 'impl-openai').sessions = [{ id, title: 'Odd', busy: true, model: 'm', cost: 0 }];
+      host.feeds[id] = chatFeed(id, CHAT_ITEMS, { busy: true });
+      await using(data, async root => {
+        await chatOpen(root, 'impl-openai'); chatSend(root, 'hi'); await settled(); chatStopButton(root).click(); await settle(); chatOf(root).querySelector('[data-chat-stop-yes]').click(); await settled();
+        assert(host.calls.chat[0][0] === id && host.calls.send[0][0] === id && host.calls.stop[0][0] === id, 'the id was changed: ' + JSON.stringify([host.calls.chat[0][0], host.calls.send[0][0], host.calls.stop[0][0]]));
+      }, chatMount(host, clock));
+    });
+    // ==== Chat lane (n5): end ====
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
   })().catch(error => { document.getElementById('results').textContent = 'RESULT: FAIL ' + error.stack; });
 </script>
