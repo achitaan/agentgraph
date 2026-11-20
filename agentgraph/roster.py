@@ -20,8 +20,7 @@ from . import agentfiles, skillset, sources
 from . import structure as structure_module
 from . import teams as teams_module
 from .skillset import BACKUPS, CONFIG, MAP, SkillsetError
-from .snapshot_json import (FLOW_FILES_LIMIT, FLOW_ID, FLOWS_FOLDER, STRUCTURE_DIR, TEAMS_FOLDER, flow_fields, read_flow,
-                            read_settings)
+from .snapshot_json import FLOW_FILES_LIMIT, FLOW_ID, FLOWS_FOLDER, STRUCTURE_DIR, TEAMS_FOLDER, read_flow, read_settings
 
 RESTART = skillset.RESTART
 
@@ -897,11 +896,8 @@ def _structure_removal(root, root_fd, name, with_file):
         return []
     changes = []
     for file, data in _listing(root_fd, FLOWS_FOLDER):
-        flow = flow_fields(data)
-        if flow is not None and name in flow["path"]:
-            if flow["command"] and flow["name"]:  # its command file is outside this record: never left behind
-                raise RosterError(f"flow {file[:-3]} through {name} has the command /{flow['name']}; turn it off first "
-                                  f"(agentgraph flow command {file[:-3]} --off), then remove {name}. Nothing was changed")
+        flow = read_flow(data)
+        if flow is not None and name in flow[0]:
             changes.append({"folder": FLOWS_FOLDER, "name": file, "before": data, "after": None})
     groups = _listing(root_fd, TEAMS_FOLDER)
     if groups:
