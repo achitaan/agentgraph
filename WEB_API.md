@@ -172,7 +172,7 @@ Rules:
 //   text field or the instruction box (they edit the text there), or on any control in the details panel.
 //   Only the user's own lines can be deleted: the hub's lines to its agents, the council's lines to its
 //   seats and the loops and lines drawn from a live task graph cannot, and Delete on them or on a node
-//   changes nothing and asks nothing (deleting a node is a later addition). Without actions.flow it does
+//   changes nothing and asks nothing (deleting an agent is options.actions.roster's, below). Without actions.flow it does
 //   nothing. A remove that fails keeps the flow, opens its details and shows the message as the error
 //   line beside Remove. Ctrl/Cmd+Z puts a removed flow back with its path and its newest instruction (an
 //   edit still being saved when Delete was pressed included) as an { op: "add" } request; the back end
@@ -235,7 +235,44 @@ Rules:
 //   applies after OpenCode restarts, plus one line per warning; on failure the row reverts and the
 //   message shows as a line. Folds keep their open state and the panel its scroll across refreshes. An
 //   agent that is not editable (a council seat, a hub outside the roster) shows skills_reason as one
-//   line. Without skills, every agent's skills are read-only and no reason is shown.
+//   line. Without skills, every agent's skills are read-only and no reason is shown. A skill change's line
+//   says where it went ("Changed in every preset that lists A and in SKILLS.md.", or "in A's agent file."
+//   for an added agent) followed by the back end's message; a removed row stays in place, struck and inert,
+//   for 1 s or until the pointer leaves the list; undo puts the skill back at its old place in the list;
+//   an error line wraps and is scrolled into view.
+// options.actions.roster: optional (request) => Promise. Contract n84: { op: "add", name, template?:
+//   "verifier", copy_of?, model? }, { op: "remove", name } (resolves with { record, message }) and
+//   { op: "restore", record }. Shown only when the snapshot's roster.editable is true (else the hub's
+//   details give roster.why). With it: a "+" glyph on the canvas (aria-label "Add an agent", key N)
+//   opens a menu: Blank agent (model roster.models[0]), Verifier, or a copy of any agent. The new circle
+//   follows the pointer and is dropped by a click or a release (Escape cancels); it settles at the
+//   nearest free spot beside what it would cover. From the keyboard it is placed at once at a free spot.
+//   On the drop the view asks { op: "add" } under the first free name (verifier-2, impl-claude-2,
+//   agent-1), keeps the dropped place, opens the details with the name selected (Alt+arrows move it,
+//   Enter renames it) and shows the reply's message as the success line (the view never says when it
+//   applies by itself). Rename is not in the contract: for an added agent on no flow or group it is
+//   { op: "add", copy_of } under the new name, then { op: "remove" } of the old one. An agent with
+//   added: true draws no line at all (not even the hub's spoke) until it is on a flow or a group, has a
+//   busy session or a task-graph step. Delete rule: Delete removes, in this order, the focused flow,
+//   group line or agent, else the picked flow, else the picked group line, else the lone armed agent,
+//   else the open flow's details, else the open agent's details; nothing while a path of two or more
+//   steps is pending or focus is in a text field. Backspace removes the newest pending step, else a flow
+//   or a group line, never an agent. The hub, the council and its seats are never removed (removable
+//   false shows the reason). Removing an agent says the back end's message; Ctrl/Cmd+Z sends
+//   { op: "restore", record } and brings back its flows and its place. Focus stays in the view after any
+//   delete, so Ctrl/Cmd+Z works straight after a mouse delete.
+// options.actions.skillfile: optional (request) => Promise. { op: "read", id } → { text, description },
+//   { op: "write", id, text } → { record }, { op: "create", id, description, text, assign? },
+//   { op: "delete", id } → { record } and { op: "restore", record }. A skill's name in an agent's
+//   details opens its text in an editor (Save, Delete, undo for each); a skill with editable false shows
+//   its text read-only with why. "New skill" makes one and gives it to the agent in one request.
+// options.actions.team: optional (request) => Promise. { op: "add", lead, members, text? } → { team },
+//   { op: "members", id, members }, { op: "text", id, text } and { op: "remove", id }. structure.teams
+//   is [{ id, lead, members, text }] (the user's word is group). Members sit evenly on one circle round
+//   their lead, move with it, and have one broad soft line each to the lead (no hub spoke, not dotted,
+//   no text). Delete on a picked group line takes that member out; a new group opens with its
+//   instruction focused and selected. Flow and group instructions save after a 700 ms pause in typing
+//   and on pagehide; the state reads "Saving" or "Saved", never asks the user to save.
 // options.motion: "full" (default) or "none" for a still picture (tests, screenshots). The system's
 //   reduced-motion setting is always honoured.
 // options.scheme: "auto" (default; follows a data-color-scheme on an ancestor or the document element,
@@ -252,6 +289,8 @@ window.AgentGraph.mount(root, options)
 - It keeps everything inside `root`: no writes to `document.body`, no global listeners that outlive `destroy()`, no globals other than `window.AgentGraph`.
 - All of its CSS is in `agentgraph/web/style.css`, and every selector is scoped under the class `agentgraph` (which `mount` puts on `root`), so it cannot restyle a host application. No external fonts, images or scripts.
 - It never uses `innerHTML` (or anything else that parses markup) with text from the document.
+- Loops, defined once (`loopStart(path)` in `app.js`): a path whose last agent appears earlier in it, at index `i` with at least two steps after it, closes a loop from `i` to the end; a path that ends at its first agent (`i = 0`) is a full loop. `A, A` (a loop on one agent) is not this kind of loop and is drawn as before. The loop part is drawn as one closed, fully curved ring in the dotted dash `.5 5.5` (`data-step="loop"`; the flow carries `data-loop` `full`, `part`, `self` or `none`); the lead-in (`A → B` of `A, B, C, B`) stays solid and straight. Dotted means loop: no other drawn flow step is dashed. A full loop's agents (other than the hub, a seat, a group member or an agent already on another loop's circle, which stay where they are) move onto an even circle in path order, in one transition under 300 ms (none with reduced motion); dragging one moves the circle; removing the loop or undoing it puts every agent back exactly.
+- Picking lines: every flow, loop and group line has an invisible band 16 screen px wide at any zoom (`vector-effect: non-scaling-stroke`); where bands overlap the line nearest the pointer takes the press, the right-click and the hover. A click picks the whole flow or loop; hover marks all of it and fades the other lines. The cursor is a hand on anything that can be picked and a grab hand on anything that can be moved. Lines bend round a third agent's circle or name only when the straight line would cross it. Nothing in the graph can be selected as text; the camera keeps the graph clear of the usage figures, the status line and the compact sheet; wheel zoom stops before names go under 8 px.
 - Drawn flows (`structure.flows`): a forward step is a straight line with an arrowhead, a step back to an agent already on the path a curved arc; steps of different flows on one pair are offset, and a pair that already has something drawn on it (a hub spoke, a task-graph work line, escalation or review loop) gets its flow steps beside that, never on top of it or hidden by it. Every step has a wide invisible hit area above the graph's own lines and loops. A flow is still at rest. A new flow draws in once (about 300 ms); a refused one disappears and the first agent shakes once. No text is added to the graph.
 - `index.html` loads `style.css` and `app.js` and calls `AgentGraph.mount(document.getElementById("root"), { fetchSnapshot: () => fetch("/api/snapshot" + location.search).then(r => r.json()), actions: { flow, skills } })`, where `flow` posts its request to `/api/structure/flow` and `skills` to `/api/skills`; with `?demo` it passes no `actions`.
 - The desktop plugin bundles the same `app.js` and `style.css` and passes a `fetchSnapshot` that asks its main process for the document, and an `actions.flow` that asks its main process (Ipc method `flow`, input `{op, id, path, text}` as strings, the path's names joined by single spaces) to run `python3 -P -m agentgraph.structure flow add|text|remove ... --json` without a shell, with the instruction on stdin (`--text-file -`), and an `actions.skills` that asks its main process (Ipc method `skills`, input `{op, agent, skill}` as strings, `op` one of `add`, `remove`, `all` and `skill` `""` for `all`) to run `python3 -P -m agentgraph.skillset add|remove AGENT SKILL --json` or `all AGENT --json` without a shell; a name that is not a plain agent or skill name (one starting with `-` included) is refused before anything runs. No `actions` when its `demo` option is set.
