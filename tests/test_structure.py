@@ -68,7 +68,7 @@ class Loader(unittest.TestCase):
         write_flow(self.root, "mine", data)
         shape = snapshot_json.load_structure(self.root)
         flow = {"id": "mine", "path": ["researcher", "impl-claude", "reviewer"],
-                "text": "First line.\n\npath: not -> a setting\n\tTabbed."}
+                "text": "First line.\n\npath: not -> a setting\n\tTabbed.", "name": None, "command": None}
         self.assertEqual(shape["flows"], [flow])
         self.assertEqual(snapshot_json.read_flow(data), (flow["path"], flow["text"]))
         self.assertEqual(structure.flow_file(flow["path"], flow["text"]), data)
@@ -139,7 +139,7 @@ class Loader(unittest.TestCase):
         doc = snapshot_json.snapshot_document(demo_snapshot(1000), "demo", structure=snapshot_json.load_structure(self.root))
         self.assertEqual(sorted(doc["structure"]), ["flows", "source", "teams"])
         self.assertEqual(doc["structure"]["flows"], [{"id": "impl-openai-verifier-impl-openai", "path": ["impl-openai", "verifier", "impl-openai"],
-                                                      "text": LOOP, "source": "drawn"}])
+                                                      "text": LOOP, "name": None, "command": None, "source": "drawn"}])
         self.assertTrue(all("checks" not in agent for agent in doc["agents"]))
         self.assertNotIn("checks", snapshot_json.SETTING_KEYS)
 
@@ -225,7 +225,7 @@ class Command(unittest.TestCase):
         added = json.loads(out)
         self.assertEqual(added["flow"], {"id": "researcher-impl-claude-reviewer", "path": ["researcher", "impl-claude", "reviewer"],
                                          "text": "researcher's work goes to impl-claude, then impl-claude's work goes to reviewer.",
-                                         "source": "drawn"})
+                                         "name": None, "command": None, "source": "drawn"})
         self.assertEqual([flow["id"] for flow in added["flows"]], ["impl-openai-verifier-impl-openai", "researcher-impl-claude-reviewer"])
         code, out, _ = self.run_cli("flow", "text", "researcher-impl-claude-reviewer", "--text-file", "-", stdin="Mine.\n")
         self.assertEqual((code, self.flows()[1]["text"]), (0, "Mine.\n"))
@@ -847,7 +847,7 @@ class Endpoint(unittest.TestCase):
     def test_each_op(self):
         status, body, _ = self.post(ADD)
         flow = {"id": "impl-openai-verifier-impl-openai", "path": ADD["path"], "source": "drawn",
-                "text": structure.flow_text(ADD["path"], HUB)}
+                "text": structure.flow_text(ADD["path"], HUB), "name": None, "command": None}
         self.assertEqual((status, body), (200, {"flow": flow, "flows": [flow]}))
         status, body, _ = self.post({"op": "text", "id": flow["id"], "text": "Edited ✓\n\tby hand."}, {"Origin": None})
         edited = {**flow, "text": "Edited ✓\n\tby hand."}

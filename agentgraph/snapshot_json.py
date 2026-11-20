@@ -182,6 +182,7 @@ TEAMS_FOLDER = "teams"  # inside the structure folder: one file per team (agentg
 FLOW_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
 FLOW_TEXT_LIMIT = 2000
 FLOW_FILES_LIMIT = 200
+FLOW_NAME = re.compile(r"[a-z0-9][a-z0-9-]{1,31}")  # a path's name: also its command's name (`/NAME`)
 
 
 def seat_lead(shape: dict, name: str) -> str:
@@ -258,10 +259,12 @@ def flow_refusal(shape: dict, path: list[str]) -> str:
     return ""
 
 
-def read_flow(data: bytes) -> tuple[list[str], str] | None:
-    """A flow file: `path: A -> B -> C` (settings lines at the top), a blank
-    line, then the instruction, verbatim (one final newline dropped). None when
-    the file has no path line, is not UTF-8 or is too large."""
+def flow_fields(data: bytes) -> dict | None:
+    """A flow file: `path: A -> B -> C`, then optionally `name: NAME` and
+    `command: on` (settings lines at the top), a blank line, then the
+    instruction, verbatim (one final newline dropped). {"path", "text", "name"
+    (the line's value, "" without one), "command" (True for `command: on`)}, or
+    None when the file has no path line, is not UTF-8 or is too large."""
     if len(data) > 4 * FLOW_TEXT_LIMIT + 4096:
         return None
     try:
@@ -270,19 +273,34 @@ def read_flow(data: bytes) -> tuple[list[str], str] | None:
         return None
     head, sep, body = text.partition("\n\n")
     path: list[str] = []
+    name, command = "", False
     for line in head.split("\n"):
         key, colon, value = line.partition(":")
-        if colon and key.strip().lower() == "path":
+        key = key.strip().lower()
+        if colon and key == "path":
             path = [name.strip() for name in value.split("->")]
+        elif colon and key == "name":
+            name = value.strip()
+        elif colon and key == "command":
+            command = value.strip().lower() == "on"
     if not path or not all(path):
         return None
-    return path, body[:-1] if body.endswith("\n") else body
+    return {"path": path, "text": body[:-1] if body.endswith("\n") else body, "name": name, "command": command}
+
+
+def read_flow(data: bytes) -> tuple[list[str], str] | None:
+    """(path, instruction) of a flow file (see `flow_fields`), or None."""
+    fields = flow_fields(data)
+    return (fields["path"], fields["text"]) if fields is not None else None
 
 
 def load_flows(root: Path, shape: dict) -> None:
-    """Read `flows/` into shape["flows"] ({"id", "path", "text"}, in id order);
-    a file that cannot be read or whose path is no longer valid is skipped
-    with a warning, and so is a second loop of one agent on itself. Adding
+    """Read `flows/` into shape["flows"] ({"id", "path", "text", "name",
+    "command"}, in id order; `name` the path's name or None, `command` the
+    name when its command is on, else None); a file that cannot be read or
+    whose path is no longer valid is skipped with a warning, and so is a second
+    loop of one agent on itself. A name that is not valid or that an earlier
+    flow already has is dropped with a warning (and with it the command). Adding
     stops at FLOW_FILES_LIMIT files; files beyond it (put there by hand) are
     named in a warning, never dropped silently."""
     shape["flows"] = []
@@ -299,17 +317,18 @@ def load_flows(root: Path, shape: dict) -> None:
                                  f"ignored: {', '.join(path.stem for path in files[FLOW_FILES_LIMIT:][:5])}"
                                  + (" and more" if len(files) > FLOW_FILES_LIMIT + 5 else ""))
     looped: dict[str, str] = {}
+    named: dict[str, str] = {}
     for path in files[:FLOW_FILES_LIMIT]:
         if path.is_symlink() or not path.is_file():
             continue
         try:
-            flow = read_flow(path.read_bytes())
+            fields = flow_fields(path.read_bytes())
         except OSError:
             continue
-        if flow is None:
+        if fields is None:
             shape["warnings"].append(f"structure: flow {path.stem} ignored: it has no readable path line")
             continue
-        names, text = flow
+        names, text = fields["path"], fields["text"]
         names = [seat_lead(shape, name) or name for name in names]  # a seat stands for its council
         reason = flow_refusal(shape, names)
         if reason:
@@ -321,7 +340,22 @@ def load_flows(root: Path, shape: dict) -> None:
                                          f"in flow {looped[names[0]]}")
                 continue
             looped[names[0]] = path.stem
-        shape["flows"].append({"id": path.stem, "path": names, "text": text})
+        name = fields["name"] or None
+        if name is not None and not FLOW_NAME.fullmatch(name):
+            shape["warnings"].append(f"structure: flow {path.stem}: its name {name[:40]!r} is not a valid name "
+                                     "(2 to 32 lowercase letters, digits and '-'); it was left out")
+            name = None
+        elif name is not None and name in named:
+            shape["warnings"].append(f"structure: flow {path.stem}: flow {named[name]} already has the name {name}; "
+                                     "it was left out")
+            name = None
+        if name is not None:
+            named[name] = path.stem
+        elif fields["command"]:
+            shape["warnings"].append(f"structure: flow {path.stem}: its command is on but it has no name; "
+                                     "the command was left out")
+        shape["flows"].append({"id": path.stem, "path": names, "text": text, "name": name,
+                               "command": name if name is not None and fields["command"] else None})
 
 
 def load_structure(directory: Path | None = None) -> dict | None:
@@ -434,7 +468,7 @@ class _Shape:
         return [dict(team, members=list(team["members"])) for team in (self.structure.get("teams", []) if self.structure else [])]
 
     def flows(self) -> list[dict]:
-        """The drawn flows: {"id", "path", "text", "source": "drawn"}."""
+        """The drawn flows: {"id", "path", "text", "name", "command", "source": "drawn"}."""
         return [{**flow, "source": "drawn"} for flow in (self.structure.get("flows", []) if self.structure else [])]
 
     @property
@@ -537,6 +571,24 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
 _LEDGER_HOMES = {"ultra-fast": "memory-o2"}
 
 
+def ledger_home(home_root: Path | None = None, config_dir: Path | None = None,
+                config_path: Path | None = None) -> Path | None:
+    """The ledger folder of the active preset (`memory-<preset>`, else `memory`) under `home_root` (default: the
+    orchestration folder); None when there is none."""
+    root = Path(home_root) if home_root is not None else ORCHESTRATION_GRAPH_DIR.parent.parent
+    preset = ""
+    try:
+        path = Path(config_path) if config_path is not None else Path(config_dir or CONFIG_DIR) / "oh-my-opencode-slim.json"
+        config = json.loads(path.read_text())
+        preset = str(config.get("preset") or "")
+    except Exception:  # noqa: BLE001
+        pass
+    home = root / _LEDGER_HOMES.get(preset, f"memory-{preset}")
+    if not preset or "/" in preset or not home.is_dir():
+        home = root / "memory"
+    return home if home.is_dir() else None
+
+
 def learning_document(home_root: Path | None = None, config_dir: Path | None = None,
                       config_path: Path | None = None) -> dict | None:
     """What the ledger has stored for the active preset: the user's notes in
@@ -544,18 +596,8 @@ def learning_document(home_root: Path | None = None, config_dir: Path | None = N
     over recorded runs. None when there is no ledger to read."""
     try:
         from . import ledger
-        root = Path(home_root) if home_root is not None else ORCHESTRATION_GRAPH_DIR.parent.parent
-        preset = ""
-        try:
-            path = Path(config_path) if config_path is not None else Path(config_dir or CONFIG_DIR) / "oh-my-opencode-slim.json"
-            config = json.loads(path.read_text())
-            preset = str(config.get("preset") or "")
-        except Exception:  # noqa: BLE001
-            pass
-        home = root / _LEDGER_HOMES.get(preset, f"memory-{preset}")
-        if not preset or "/" in preset or not home.is_dir():
-            home = root / "memory"
-        if not home.is_dir():
+        home = ledger_home(home_root, config_dir, config_path)
+        if home is None:
             return None
         report = ledger.signals(home, None, all_items=True)
         notes = sorted(report["feedback"], key=lambda item: item.get("time", 0), reverse=True)
@@ -619,6 +661,10 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
     if source == "live":
         from . import roster, skillfiles, skillset  # each imports this module
         document["learning"] = _json_safe(learning_document())
+        from . import flowrun  # flowrun imports this module
+        from .sources import DB_PATH
+        flowrun.annotate(document, structure_dir=None, ledger=ledger_home(),
+                         graph_paths=[graph.path for graph in snapshot.graphs], db_path=DB_PATH)
         document["skills"] = skills_document()
         skillset.annotate(document)
         roster.annotate(document)

@@ -211,6 +211,55 @@ FLOW_START_TYPES = ("implement", "design", "research", "decision")
 _CHAIN_BUDGET = 20000  # search steps per starting node; a graph needing more is reported, never passed silently
 
 
+def _chain_index(graph: TaskGraph, seats=None):
+    """(nodes by id, who each node stands for (a seat for its council), the nodes that follow each node)."""
+    by_id = {node.id: node for node in graph.nodes}
+    prefixes = {lead: prefix for lead, prefix in (seats or {}).items() if isinstance(prefix, str) and prefix}
+    runs = {node.id: next((lead for lead, prefix in prefixes.items() if node.agent != lead and node.agent.startswith(prefix)),
+                          node.agent) for node in graph.nodes}  # who a node stands for: a seat for its council
+    followers: dict[str, list] = {}
+    for node in graph.nodes:
+        targets = list(node.depends_on) + (list(node.feedback_to) if node.type == "gate" else [])
+        for target in dict.fromkeys(targets):
+            followers.setdefault(target, []).append(node)
+    return by_id, runs, followers
+
+
+def _walk_chain(working: list[str], start, index):
+    """Follow `working` (a flow's agents, the hub dropped) from node `start`: (the chain, {agent: node id}, when
+    it is complete, else None; the furthest step reached and the chain there; whether the search ran out)."""
+    by_id, runs, followers = index
+    budget = [_CHAIN_BUDGET]
+    best: list = [1, (start.id, {working[0]: start.id})]  # furthest step reached, and the chain there
+
+    def walk(step: int, current: str, chain: dict[str, str]):
+        if step == len(working):
+            return chain
+        if step > best[0]:
+            best[:] = [step, (current, dict(chain))]
+        budget[0] -= 1
+        if budget[0] < 0:
+            return None
+        agent = working[step]
+        if agent in chain:  # a return
+            node = by_id[current]
+            return walk(step + 1, chain[agent], chain) if node.type == "gate" and chain[agent] in node.feedback_to else None
+        for follower in followers.get(current, []):
+            if runs[follower.id] == agent and follower.id not in chain.values():
+                found = walk(step + 1, follower.id, {**chain, agent: follower.id})
+                if found is not None:
+                    return found
+        return None
+
+    found = walk(1, start.id, {working[0]: start.id})
+    return found, best, budget[0] < 0
+
+
+def _checked_flows(flows, hubs):
+    # A loop of one agent on itself adds no rule: a task graph cannot show it. It is printed with the others.
+    return [flow for flow in flows if not is_self_loop(flow["path"]) and len(flow_steps(flow["path"], hubs)[0]) >= 2]
+
+
 def flow_problems(graph: TaskGraph, flows, hubs=frozenset(), seats=None) -> list[str]:
     """Drawn flows (the `flows` folder of the structure) that the graph does not
     follow. A flow applies to work that starts at its first agent (the second
@@ -224,19 +273,11 @@ def flow_problems(graph: TaskGraph, flows, hubs=frozenset(), seats=None) -> list
     prefix}, the structure's) makes a node run by a seat count as its
     council's. One problem per starting node without a complete chain, naming
     the first missing step."""
-    # A loop of one agent on itself adds no rule: a task graph cannot show it. It is printed with the others.
-    flows = [flow for flow in flows if not is_self_loop(flow["path"]) and len(flow_steps(flow["path"], hubs)[0]) >= 2]
+    flows = _checked_flows(flows, hubs)
     if not flows:
         return []
-    by_id = {node.id: node for node in graph.nodes}
-    prefixes = {lead: prefix for lead, prefix in (seats or {}).items() if isinstance(prefix, str) and prefix}
-    runs = {node.id: next((lead for lead, prefix in prefixes.items() if node.agent != lead and node.agent.startswith(prefix)),
-                          node.agent) for node in graph.nodes}  # who a node stands for: a seat for its council
-    followers: dict[str, list] = {}
-    for node in graph.nodes:
-        targets = list(node.depends_on) + (list(node.feedback_to) if node.type == "gate" else [])
-        for target in dict.fromkeys(targets):
-            followers.setdefault(target, []).append(node)
+    index = _chain_index(graph, seats)
+    by_id, runs, _ = index
     problems: list[str] = []
     for flow in flows:
         working, _ = flow_steps(flow["path"], hubs)
@@ -244,32 +285,11 @@ def flow_problems(graph: TaskGraph, flows, hubs=frozenset(), seats=None) -> list
         for start in graph.nodes:
             if runs[start.id] != working[0] or start.type not in FLOW_START_TYPES or start.status == "passed":
                 continue
-            budget = [_CHAIN_BUDGET]
-            best: list = [0, None]  # furthest step reached, and the chain there
-
-            def walk(step: int, current: str, chain: dict[str, str]) -> bool:
-                if step == len(working):
-                    return True
-                if step > best[0]:
-                    best[:] = [step, (current, dict(chain))]
-                budget[0] -= 1
-                if budget[0] < 0:
-                    return False
-                agent = working[step]
-                if agent in chain:  # a return
-                    node = by_id[current]
-                    return node.type == "gate" and chain[agent] in node.feedback_to and walk(step + 1, chain[agent], chain)
-                for follower in followers.get(current, []):
-                    if runs[follower.id] == agent and follower.id not in chain.values():
-                        if walk(step + 1, follower.id, {**chain, agent: follower.id}):
-                            return True
-                return False
-
-            best[:] = [1, (start.id, {working[0]: start.id})]
-            if walk(1, start.id, {working[0]: start.id}):
+            found, best, ran_out = _walk_chain(working, start, index)
+            if found is not None:
                 continue
             step, (current, chain) = best
-            if budget[0] < 0:
+            if ran_out:
                 problems.append(f"{start.id} ({start.agent}): its chain is too tangled to check: flow {label}")
                 continue
             agent = working[step]
@@ -280,6 +300,23 @@ def flow_problems(graph: TaskGraph, flows, hubs=frozenset(), seats=None) -> list
             else:
                 problems.append(f"{start.id} ({start.agent}) is not followed by {agent}{where}: flow {label}")
     return problems
+
+
+def flow_chains(graph: TaskGraph, flow: dict, hubs=frozenset(), seats=None) -> list[dict[str, str]]:
+    """`flow_problems` turned round: the chains ({agent: node id}) along which the graph followed `flow`, one per
+    node of its first agent (of a FLOW_START_TYPES type, whatever its status) that has the whole rest of the path
+    after it. Empty for a flow `check` does not enforce (a loop of one agent on itself, or one agent and the hub)."""
+    if not _checked_flows([flow], hubs):
+        return []
+    working, _ = flow_steps(flow["path"], hubs)
+    index = _chain_index(graph, seats)
+    chains = []
+    for start in graph.nodes:
+        if index[1][start.id] == working[0] and start.type in FLOW_START_TYPES:
+            found, _, _ = _walk_chain(working, start, index)
+            if found is not None:
+                chains.append(found)
+    return chains
 
 
 def print_flows(flows) -> None:
