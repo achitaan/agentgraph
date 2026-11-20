@@ -21,7 +21,9 @@ is also the command `/NAME` (agentgraph.flowcommands writes its file).
 unless a text is given), `flow text ID` replaces its instruction, `flow name ID
 [NAME]` names it (no NAME: clears the name), `flow command ID --on|--off` turns
 its command on or off, `flow prompt ID --goal-file F` prints the message that
-runs it on a goal (agentgraph.flowrun) and `flow remove ID` deletes it (and the
+runs it on a goal (agentgraph.flowrun), `flow scaffold P --task T` writes the
+task graph that message describes to `.opencode/graph/T.json` (never over a
+file) and `flow remove ID` deletes it (and the
 `flows/` folder once it is empty; its command file goes with it). Every write
 replaces a whole file atomically under a lock, inside `flows/` only, and never
 through a symlink. A council seat stands for its council. Exits 0 on success,
@@ -625,9 +627,53 @@ def flow_prompt(flow_id, goal, directory: Path | None = None, *, expect: str | N
         _expect_seen(expect, flow["rev"], f"flow {flow_id}")
     hubs = hub_names(shape)
     # The other drawn paths `check` will hold a run of this one to, and the check nodes that keep its graph finite,
-    # named in the message (flowrun.binding).
-    others, checks = flowrun.binding(flow, shape["flows"], hubs, shape["seats"])
-    return flowrun.run_message(flow, goal, hubs, others=others, checks=checks)
+    # named in the message (flowrun.binding); then the groups whose rule that graph would break (binding_groups).
+    others, checks, nodes = flowrun._closure(flow, shape["flows"], hubs, shape["seats"])
+    groups, _ = flowrun.binding_groups(nodes, shape.get("teams", []), shape["seats"])
+    return flowrun.run_message(flow, goal, hubs, others=others, checks=checks, groups=groups)
+
+
+def flow_scaffold(path_ref, task, directory: Path | None = None, *, graph_dir: Path | None = None,
+                  now: float | None = None) -> tuple[Path, dict]:
+    """Write the task graph the run message's words make for the drawn path `path_ref` (a flow id, else a path's
+    name) to `<graph_dir>/<task>.json` (flowrun.scaffold: every binding path, check node and group included; goals,
+    done_when and the objective's text left empty). `graph_dir` None: the nearest `.opencode/graph` from the working
+    directory, else `./.opencode/graph` (made). Never over an existing file. Returns (the path, the graph)."""
+    from . import names, sources  # sources is heavy; read lazily
+    if not isinstance(task, str) or not names.FLOW_ID.fullmatch(task):
+        raise StructureError("the task name is 1 to 80 lowercase letters, numbers and '-', starting with a letter or a "
+                             "number: the graph file is <task>.json")
+    if not isinstance(path_ref, str):
+        raise StructureError("give a flow id or a path's name")
+    shape = _shape(Path(directory) if directory is not None else STRUCTURE_DIR)
+    flow = next((flow for flow in shape["flows"] if flow["id"] == path_ref), None) \
+        or next((flow for flow in shape["flows"] if flow["name"] == path_ref), None)
+    if flow is None:
+        raise StructureError(f"there is no flow or path named {path_ref[:80]!r}")
+    hubs = hub_names(shape)
+    graph = flowrun.scaffold(flow, shape["flows"], task, hubs, shape["seats"], shape.get("teams", []), now)
+    if graph_dir is None:
+        graph_dir = sources.find_graph_dir(Path.cwd()) or Path.cwd() / ".opencode" / "graph"
+    graph_dir = Path(graph_dir)
+    graph_dir.mkdir(parents=True, exist_ok=True)
+    target = graph_dir / f"{task}.json"
+    temporary = graph_dir / f".{task}.{secrets.token_hex(6)}.tmp"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o644)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(graph, indent=2) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, target, follow_symlinks=False)  # never over a file that is there
+        except FileExistsError:
+            raise StructureError(f"{target} already exists; it was left unchanged (pick another --task)") from None
+    finally:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+    return target, graph
 
 
 def flows_with_stats(shape: dict | None, *, ledger: Path | None, graph_paths=(), db_path: Path | None = None) -> list[dict]:
@@ -740,11 +786,17 @@ def main(argv: list[str] | None = None) -> int:
     prompt.add_argument("--goal-file", metavar="F", required=True, help="the goal from file F, or - for standard input")
     remove = actions.add_parser("remove", help="remove flow ID (and its command file)")
     remove.add_argument("id", metavar="ID")
-    subparsers = [listed, grouped, flow, add, text, name, command, prompt, remove]
+    scaffold = actions.add_parser("scaffold", help="write the task graph for the path P (a flow id or a path's name) "
+                                                   "to .opencode/graph/T.json, goals and checks left for you to fill")
+    scaffold.add_argument("id", metavar="P")
+    scaffold.add_argument("--task", metavar="T", required=True, help="the task's name: the file is T.json")
+    scaffold.add_argument("--dir", type=Path, metavar="DIR", help="the graph folder (default: the nearest "
+                                                                  ".opencode/graph, else ./.opencode/graph)")
+    subparsers = [listed, grouped, flow, add, text, name, command, prompt, remove, scaffold]
     for parser_ in subparsers:
         parser_.add_argument("--structure", type=Path, metavar="DIR", default=argparse.SUPPRESS,
                              help="structure folder (default: the orchestration's own)")
-    for parser_ in (add, text, name, command, prompt, remove):
+    for parser_ in (add, text, name, command, prompt, remove, scaffold):
         parser_.add_argument("--json", action="store_true", help="print the answer as JSON")
     for parser_ in (add, text, name, command, remove):
         parser_.add_argument("--commands", type=Path, metavar="DIR",
@@ -792,6 +844,14 @@ def main(argv: list[str] | None = None) -> int:
             if result["name"]:
                 extra["applies"] = flowcommands.applies(result["name"], args.on)
             extra["live"] = flowcommands.LIVE
+        elif action == "scaffold":
+            target, graph = flow_scaffold(args.id, args.task, args.structure, graph_dir=args.dir)
+            if args.json:
+                print(json.dumps({"path": str(target), "graph": graph}))
+            else:
+                print(f"wrote {target}: {len(graph['nodes'])} nodes; fill the empty goal, done_when and text, then "
+                      f"run agentgraph check --task {args.task}")
+            return 0
         elif action == "prompt":
             if (args.id is None) == (args.name is None):
                 raise StructureError("give a flow id or --name NAME, one of them")
