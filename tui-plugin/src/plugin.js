@@ -632,6 +632,12 @@ export function createPlugin(host) {
         rows.root = typeof result.root === "string" ? result.root : null;
         rows.session = typeof result.session === "string" ? result.session : null;
         if (Array.isArray(result.flows) && runKeyWanted) runKeyWanted(result.flows.length > 0); // a list's layout, not the orbit's
+        if (Array.isArray(result.flows)) {
+          // debug log only, when they change (real-host.py --live-paths waits on a path's new rev after a refresh)
+          const revs = result.flows.map((f) => `${f.id}@${f.rev || "-"}`).join(" ");
+          if (revs && revs !== rows.revs) report("paths", revs);
+          rows.revs = revs;
+        }
       },
     };
     const toast = (message, variant = "info") => {
@@ -806,7 +812,8 @@ export function createPlugin(host) {
             }
             // flow.rev (when the snapshot has one) is the version the chooser showed: `--expect` refuses a path
             // that changed since (ids are reused: a removed and redrawn path can get the same id)
-            return runFlowPrompt({ spawn: host.spawn, path: host.path, env: host.env, home: options.home, python: options.python }, flow.id, goal, flow.rev).then((made) => {
+            const onSpawn = (argv) => report("action", "flow prompt: " + argv.join(" ")); // debug log only
+            return runFlowPrompt({ spawn: host.spawn, path: host.path, env: host.env, home: options.home, python: options.python, onSpawn }, flow.id, goal, flow.rev).then((made) => {
               if (made && made.stale) {
                 report("action", `stale ${flow.id} ${flow.rev}`);
                 keptGoal = { id: flow.id, goal };

@@ -442,12 +442,17 @@ checks the list check itself on built-in screens (run by `test/run.mjs`). `--pat
 `AGENTGRAPH_TUI_DEMO=paths` demo, requires the 4 rows at rest with the paths row and `r run`, presses `r` and requires
 the host's chooser with the sample paths and their stats, Enter and requires the goal prompt, then Escape: it stops
 before any goal, so nothing is sent and no back end runs. `--live-paths` (alone, never with `--session`) uses a live
-snapshot instead of the demo: it copies `agentgraph/` and `structure/` into `SCRATCH/live-orch`, adds two named
-paths there with `agentgraph flow add ... --structure <scratch> --commands <scratch>` (the real structure and
-commands folders are not touched), and starts the app with `AGENTGRAPH_TUI_HOME=<scratch>` and
-`AGENTGRAPH_TUI_NOSEND=1`. It requires both in the debug log before any key, the `2 paths` row, the chooser listing
-both, the goal prompt; types a goal, presses Enter, and requires the plugin to log the run message for the chosen
-path with the length `flow prompt` returns when the script runs it, and nothing sent.
+snapshot instead of the demo: it puts a clean copy of the committed toolkit (`git archive HEAD`, not the working
+folder) in `SCRATCH/live-orch`, adds two named paths there with `agentgraph flow add ... --structure <scratch>
+--commands <scratch>` (the real structure and commands folders are not touched), and starts the app with
+`AGENTGRAPH_TUI_HOME=<scratch>` and `AGENTGRAPH_TUI_NOSEND=1`. It requires both in the debug log before any key, the
+`2 paths` row, the panel's revs equal to the back end's, the chooser listing both; a goal and Enter must run
+`flow prompt <id> --goal-file - --expect <rev>` and log the message's length as the script's own `flow prompt` gives
+it. Then the stale step: `r`, and while the chooser is open the script changes that path's text with `flow text`;
+Enter, a goal, Enter must give the refusal, no message, the toast, a refresh to the new rev; `r` again must offer the
+goal typed, and Enter must run it with `--expect <new rev>`. Nothing is sent. With `AGENTGRAPH_TUI_DEBUG` the plugin
+logs each `flow prompt` command line (`action: flow prompt: ...`, the goal goes on standard input), a refusal
+(`action: stale <id> <rev>`) and the paths' revs when they change (`paths: <id>@<rev> ...`, `-` for none).
 
 Every wait in the script is on an event (a line on screen, a line in the debug log) with a 60 s ceiling (`--wait`,
 `--settle`), not a fixed sleep: under load (load average 70 to 230) a dialog or a view switch took longer than the

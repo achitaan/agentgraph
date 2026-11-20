@@ -47,14 +47,18 @@ The list (what the panel opens on):
                     is sent, no back end runs (the demo never sends anyway), and the plugin's debug log must show
                     `action: choose` and no `action: send`, `run` or `open`. Not with --demo, --dialog, --open,
                     --gcheck, --fullscreen or --view3d.
-    --live-paths    a live snapshot, not the demo: copies agentgraph/ and structure/ into SCRATCH/live-orch, adds two
-                    named paths there (`agentgraph flow add ... --structure <scratch> --commands <scratch>`), and starts
-                    the app with AGENTGRAPH_TUI_HOME=<scratch> (the plugin's snapshot and `flow prompt` run there) and
-                    AGENTGRAPH_TUI_NOSEND=1 (`r` stops after the run message). Requires the plugin's debug log to say
-                    both before any key, the `2 paths` row, the chooser listing both, `Goal for deep-change`; types a
-                    goal and presses Enter, and requires `action: prompt explorer-oracle-impl-claude N chars for
-                    <session>, not sent` with N the length `flow prompt` returns when this script runs it. Nothing is
-                    sent. Alone, and never with --session.
+    --live-paths    a live snapshot, not the demo: a clean copy of the committed toolkit (`git archive HEAD`) in
+                    SCRATCH/live-orch with no paths, two named paths added there (`agentgraph flow add ... --structure
+                    <scratch> --commands <scratch>`), and the app started with AGENTGRAPH_TUI_HOME=<scratch> (the
+                    plugin's snapshot and `flow prompt` run there) and AGENTGRAPH_TUI_NOSEND=1 (`r` stops after the
+                    run message). Requires the debug log to say both before any key, the `2 paths` row, the panel's
+                    revs equal to the back end's (16 hex digits each), the chooser listing both; a goal, Enter: the
+                    panel ran `flow prompt explorer-oracle-impl-claude --goal-file - --expect <rev>` and logged the
+                    message's length as `flow prompt` gives it here. Then stale: `r`, the path's text changed by
+                    `flow text` from this process while the chooser is open, Enter, a goal, Enter: requires the
+                    refusal (`action: stale ID REV`), no message, the toast (`changed since you ...`, `Press r
+                    again`), a refresh to the new rev; `r` again: the goal offered in the prompt, Enter: `--expect
+                    <new rev>` and the message. Nothing is sent. Alone, and never with --session.
     --selftest      check list_report on built-in screens and exit (no app, no pyte).
 
 The orbit (the full-panel scene):
@@ -79,6 +83,7 @@ The `g` key (orbit or list):
 """
 import argparse
 import fcntl
+import json
 import os
 import pty
 import re
@@ -687,43 +692,65 @@ LIVE_PATHS = [  # (name, agents): the two named paths of --live-paths' scratch s
     ("deep-change", ["explorer", "oracle", "impl-claude"]),
 ]
 LIVE_GOAL = "Tune a new blue cache"  # no panel key in it (s m r g q f d), should a keystroke ever reach the panel
+LIVE_STALE_GOAL = "Tune the blue cache"  # the same: typed once, then offered again after the refusal
 
 
 def scratch_orchestration():
-    """--live-paths: a scratch orchestration folder (SCRATCH/live-orch) with copies of agentgraph/ and structure/ and
-    two named paths added there by `agentgraph flow add` (--structure and --commands point into the scratch folder,
-    so neither the real structure folder nor the real commands folder is touched). -> (folder, python)"""
+    """--live-paths: a scratch orchestration folder (SCRATCH/live-orch) holding a clean copy of the committed toolkit
+    (`git archive HEAD`, so edits in progress in the working folder are not run) with its own structure/ and no
+    paths, then two named paths added there by `agentgraph flow add` (--structure and --commands point into the
+    scratch folder, so neither the real structure folder nor the real commands folder is touched). -> folder"""
     import shutil
     root = os.path.join(SCRATCH, "live-orch")
     shutil.rmtree(root, ignore_errors=True)
-    skip = shutil.ignore_patterns("__pycache__", "*.pyc")
-    shutil.copytree(os.path.join(ORCHESTRATION, "agentgraph"), os.path.join(root, "agentgraph"), ignore=skip)
-    shutil.copytree(os.path.join(ORCHESTRATION, "structure"), os.path.join(root, "structure"), ignore=skip)
+    os.makedirs(root)
+    tar = subprocess.run(["git", "-C", ORCHESTRATION, "archive", "--format=tar", "HEAD"], check=True, capture_output=True).stdout
+    subprocess.run(["tar", "-x", "-C", root], input=tar, check=True)
     flows = os.path.join(root, "structure", "flows")
     if os.path.isdir(flows):
         shutil.rmtree(flows)
-    env = dict(os.environ, PYTHONPATH=root)
     for name, agents in LIVE_PATHS:
-        subprocess.run([sys.executable, "-P", "-m", "agentgraph.structure", "flow", "add", *agents, "--name", name,
-                        "--structure", os.path.join(root, "structure"), "--commands", os.path.join(root, "commands")],
-                       env=env, cwd=root, check=True, stdout=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+        backend(root, "flow", "add", *agents, "--name", name, *scratch_dirs(root))
     return root
+
+
+def scratch_dirs(root):
+    return ["--structure", os.path.join(root, "structure"), "--commands", os.path.join(root, "commands")]
+
+
+def backend(root, *argv, stdin=b""):
+    """Run `agentgraph structure ARGV` from the scratch copy. -> (exit code, stdout, stderr)"""
+    done = subprocess.run([sys.executable, "-P", "-m", "agentgraph.structure", *argv], input=stdin,
+                          env=dict(os.environ, PYTHONPATH=root), cwd=root, capture_output=True, timeout=60)
+    return done.returncode, done.stdout.decode().rstrip(), done.stderr.decode().strip()
+
+
+def scratch_revs(root):
+    """{flow id: rev} as the scratch back end reports them now."""
+    code, out, err = backend(root, "flows", "--json", "--structure", os.path.join(root, "structure"))
+    return {f["id"]: f.get("rev") for f in json.loads(out)["flows"]} if code == 0 else {}
 
 
 def flow_prompt(root, flow_id, goal):
     """The run message as the plugin gets it: `python -P -m agentgraph.structure flow prompt ID --goal-file -`."""
-    done = subprocess.run([sys.executable, "-P", "-m", "agentgraph.structure", "flow", "prompt", flow_id, "--goal-file", "-"],
-                          input=goal.encode(), env=dict(os.environ, PYTHONPATH=root), cwd=root, capture_output=True, timeout=60)
-    return done.returncode, done.stdout.decode().rstrip(), done.stderr.decode().strip()
+    return backend(root, "flow", "prompt", flow_id, "--goal-file", "-", stdin=goal.encode())
+
+
+def logged(prefix):
+    """The debug log's lines that start (after the time) with `prefix`."""
+    return [l.split(" ", 1)[1] for l in debug_lines() if " " in l and l.split(" ", 1)[1].startswith(prefix)]
 
 
 def drive_live_paths(term, lines, root, session):
-    """--live-paths: the list at rest from a live snapshot of the scratch folder, `r`, the chooser with its two named
-    paths, Enter, the goal typed, Enter: the plugin gets the run message from `flow prompt` and, with
-    AGENTGRAPH_TUI_NOSEND, stops before the send. -> (problems, facts, screens)"""
+    """--live-paths: the list at rest from a live snapshot of the scratch folder; `r`, the chooser with its two named
+    paths and their revs, Enter, a goal, Enter: the plugin runs `flow prompt ... --expect REV` and, with
+    AGENTGRAPH_TUI_NOSEND, stops before the send. Then stale for real: `r`, and while the chooser shows the path its
+    text is changed by the back end from this process; Enter, a goal, Enter: refused, nothing sent, a refresh to the
+    new rev, the toast; `r` again offers the typed goal, Enter runs it with the new rev. -> (problems, facts, screens)"""
     problems, facts, screens = [], [], []
     labels = [f"{name}  {' → '.join(agents)}" for name, agents in LIVE_PATHS]
-    modes = [l.split(" ", 1)[1] for l in debug_lines() if " mode: " in l]
+    flow_id, first = "explorer-oracle-impl-claude", "deep-change"  # neither has run: the snapshot's order, by id
+    modes = logged("mode: ")
     facts += modes
     if not any("nosend" in m for m in modes) or not any(f"home {root}" in m for m in modes):
         return ["live paths: the plugin did not log nosend and the scratch home: not pressing r"], facts, screens
@@ -736,50 +763,115 @@ def drive_live_paths(term, lines, root, session):
         problems.append("live paths: no `2 paths` row (the live snapshot of the scratch folder)")
     if not rows or not re.search(r"\br run\b", rows[-1]):
         problems.append("live paths: no `r run` in the key line")
+    revs = scratch_revs(root)
+    seen = logged("paths: ")
+    facts.append(f"back end revs: {revs}; the panel's: {seen[-1] if seen else 'none'}")
+    want = " ".join(f"{i}@{r}" for i, r in sorted(revs.items()))
+    if len(revs) != 2 or not all(re.fullmatch(r"[0-9a-f]{16}", r or "") for r in revs.values()):
+        problems.append(f"live paths: the scratch back end does not give two paths each with a 16-hex rev: {revs}")
+    elif not seen or seen[-1] != f"paths: {want}":
+        problems.append(f"live paths: the panel's snapshot does not carry the back end's revs ({want})")
     if problems:
         return problems, facts, screens
-    term.write(b"r")
-    term.wait_for(lambda ls: any("Run a path" in l for l in ls) and all(any(x in l for l in ls) for x in labels), CEILING)
-    chooser = term.lines()
-    screens.append(("after r", chooser))
-    for label in labels:
-        if not any(label in l for l in chooser):
-            problems.append(f"live paths: `{label}` is not in the chooser")
-    first = "deep-change"  # neither has run: the snapshot's order, by id (explorer-… before impl-…)
-    term.write(b"\r")
-    if not term.wait_for(lambda ls: any(f"Goal for {first}" in l for l in ls), CEILING):
-        problems.append(f"live paths: no `Goal for {first}` prompt after Enter")
-        term.write(b"\x1b")
-        return problems, facts, screens + [("after Enter", term.lines())]
-    for ch in LIVE_GOAL:
-        term.write(ch.encode())
-        term.pump(0.05)
-    typed = term.wait_for(lambda ls: any(LIVE_GOAL in l for l in ls) and any(f"Goal for {first}" in l for l in ls), CEILING)
-    screens.append(("goal typed", term.lines()))
-    if not typed:
-        problems.append("live paths: the goal is not in the prompt; not pressing Enter")
-        term.write(b"\x1b")
-        return problems, facts, screens
-    term.write(b"\r")
-    term.wait_log(lambda log: any(" action: prompt " in l or " run:" in l for l in log), CEILING)
-    term.wait_for(lambda ls: any("Not sent" in l for l in ls), CEILING / 2)
-    screens.append(("Enter in the goal prompt", term.lines()))
-    actions = [l.split(" ", 1)[1] for l in debug_lines() if "action:" in l or " run:" in l]
-    facts += actions
-    flow_id = "explorer-oracle-impl-claude"
-    made = [a for a in actions if a.startswith(f"action: prompt {flow_id} ") and a.endswith(f"for {session}, not sent")]
-    if not made:
-        problems.append(f"live paths: the plugin did not log `action: prompt {flow_id} N chars for {session}, not sent`")
-    if any(re.match(r"action: (send|open|stop)\b", a) for a in actions):
-        problems.append("live paths: " + "; ".join(a for a in actions if re.match(r"action: (send|open|stop)\b", a)))
+
+    def choose(label):
+        """r, and the chooser with both paths. -> True when it showed"""
+        term.write(b"r")
+        if not term.wait_for(lambda ls: any("Run a path" in l for l in ls) and all(any(x in l for l in ls) for x in labels), CEILING):
+            problems.append(f"live paths ({label}): the chooser with both paths did not show")
+            return False
+        screens.append((f"{label}: after r", term.lines()))
+        return True
+
+    def goal_step(goal, label, typed=True):
+        term.write(b"\r")
+        if not term.wait_for(lambda ls: any(f"Goal for {first}" in l for l in ls), CEILING):
+            problems.append(f"live paths ({label}): no `Goal for {first}` prompt after Enter")
+            term.write(b"\x1b")
+            return False
+        if typed:
+            for ch in goal:
+                term.write(ch.encode())
+                term.pump(0.05)
+        shown = term.wait_for(lambda ls: any(goal in l for l in ls) and any(f"Goal for {first}" in l for l in ls), CEILING)
+        screens.append((f"{label}: goal {'typed' if typed else 'offered'}", term.lines()))
+        if not shown:
+            problems.append(f"live paths ({label}): the goal is not in the prompt{'' if typed else ' (not offered again)'}; not pressing Enter")
+            term.write(b"\x1b")
+            return False
+        term.write(b"\r")
+        return True
+
+    def prompts():
+        return logged(f"action: prompt {flow_id} ")
+
+    # 1. the panel passes the rev it shows and gets the message
+    old = revs[flow_id]
+    if choose("first") and goal_step(LIVE_GOAL, "first"):
+        term.wait_log(lambda log: len(prompts()) >= 1 or any(" run:" in l for l in log), CEILING)
+        screens.append(("first: Enter in the goal prompt", term.lines()))
+    made = [a for a in prompts() if a.endswith(f"for {session}, not sent")]
+    argv = logged("action: flow prompt: ")
+    facts += argv
+    if not argv or not argv[-1].endswith(f" -P -m agentgraph.structure flow prompt {flow_id} --goal-file - --expect {old}"):
+        problems.append(f"live paths: the panel did not run `flow prompt {flow_id} --goal-file - --expect {old}`")
     code, text, err = flow_prompt(root, flow_id, LIVE_GOAL)
-    facts.append(f"flow prompt {flow_id} (the same command, run here): exit {code}, {len(text)} chars"
-                 + (f", stderr {err}" if err else ""))
-    facts += ["  > " + line for line in text.splitlines()[:3]]
+    facts.append(f"flow prompt {flow_id} (the same command, run here): exit {code}, {len(text)} chars" + (f", stderr {err}" if err else ""))
+    facts += ["  > " + line for line in text.splitlines()[:2]]
     if code != 0 or LIVE_GOAL not in text:
         problems.append("live paths: `flow prompt` did not return a message with the goal")
-    elif made and f" {len(text)} chars " not in made[-1]:
-        problems.append(f"live paths: the plugin's message length ({made[-1]}) is not {len(text)}")
+    elif not made or f" {len(text)} chars " not in made[-1]:
+        problems.append(f"live paths: the plugin did not log `action: prompt {flow_id} {len(text)} chars for {session}, not sent`")
+    if problems:
+        return problems, facts, screens
+
+    # 2. stale for real: the path changes under the open chooser
+    term.wait_for(lambda ls: not any("Not sent" in l for l in ls), CEILING)  # the first toast gone
+    if not choose("stale"):
+        return problems, facts, screens
+    code, out, err = backend(root, "flow", "text", flow_id, "--text-file", "-", *scratch_dirs(root),
+                             stdin=b"explorer maps the code; oracle decides; impl-claude builds it (changed under the chooser).\n")
+    new = scratch_revs(root).get(flow_id)
+    facts.append(f"changed {flow_id} under the chooser: exit {code}{', ' + err if err else ''}; rev {old} -> {new}")
+    if code != 0 or not new or new == old:
+        problems.append("live paths: the back end did not change the path's rev")
+        term.write(b"\x1b")
+        return problems, facts, screens
+    if not goal_step(LIVE_STALE_GOAL, "stale"):
+        return problems, facts, screens
+    term.wait_log(lambda log: any(f"action: stale {flow_id} {old}" in l for l in log), CEILING)
+    toast = term.wait_for(lambda ls: any("changed since you" in l for l in ls) and any("Press r again" in l for l in ls), CEILING)
+    screens.append(("stale: Enter in the goal prompt", term.lines()))
+    refreshed = term.wait_log(lambda log: any(l.split(" ", 1)[-1].startswith("paths: ") and f"{flow_id}@{new}" in l for l in log), CEILING)
+    stale = logged(f"action: stale {flow_id} ")
+    argv = logged("action: flow prompt: ")
+    facts += stale + argv[-1:] + [l for l in logged("paths: ")][-1:]
+    if not stale or stale[-1] != f"action: stale {flow_id} {old}":
+        problems.append(f"live paths: the plugin did not log `action: stale {flow_id} {old}` (the refusal not recognised)")
+    if len(prompts()) != 1:
+        problems.append("live paths: a run message was made for the stale path")
+    if not toast:
+        problems.append("live paths: no toast saying the path changed and to press r again")
+    if not refreshed:
+        problems.append(f"live paths: the panel did not refresh to {flow_id}@{new}")
+    if problems:
+        return problems, facts, screens
+    term.wait_for(lambda ls: not any("changed since you" in l for l in ls), CEILING)
+
+    # 3. r again: the typed goal is offered; Enter runs it with the new rev
+    if choose("again") and goal_step(LIVE_STALE_GOAL, "again", typed=False):
+        term.wait_log(lambda log: len(prompts()) >= 2 or len(logged(f"action: stale {flow_id} ")) >= 2, CEILING)
+        screens.append(("again: Enter in the goal prompt", term.lines()))
+    argv = logged("action: flow prompt: ")
+    facts += argv[-1:] + prompts()[-1:]
+    if not argv or not argv[-1].endswith(f" flow prompt {flow_id} --goal-file - --expect {new}"):
+        problems.append(f"live paths: the second run did not pass the new rev (--expect {new})")
+    code, text, err = flow_prompt(root, flow_id, LIVE_STALE_GOAL)
+    if len(prompts()) != 2 or code != 0 or not prompts()[-1].startswith(f"action: prompt {flow_id} {len(text)} chars for {session}"):
+        problems.append(f"live paths: the second run did not make the run message ({len(text)} chars)")
+    actions = logged("action: ")
+    if any(re.match(r"action: (send|open|stop)\b", a) for a in actions):
+        problems.append("live paths: " + "; ".join(a for a in actions if re.match(r"action: (send|open|stop)\b", a)))
     return problems, facts, screens
 
 

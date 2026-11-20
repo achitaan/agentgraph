@@ -2920,7 +2920,7 @@ if [ "$3" = "agentgraph.structure" ]; then
   prev=""
   for a in "$@"; do [ "$prev" = "--expect" ] && expect="$a"; prev="$a"; done
   if [ "$6" = "stale" ] && [ -n "$expect" ] && [ "$expect" != "r2" ]; then
-    echo "agentgraph structure: flow stale changed since you opened it; reload and try again" >&2; exit 1
+    echo "agentgraph structure: flow stale changed since you opened it; reload and try again (rev now r2)" >&2; exit 1
   fi
   case "$6" in
     broken) echo "agentgraph structure: no flow broken" >&2; exit 1;;
@@ -2945,6 +2945,7 @@ case "$sid" in
   ses_pslow) flows="$(flow slow null null)";;
   ses_pbusy) flows="$(flow solo null null)";;
   ses_prev) flows="$(flow solo null null 3f9a2c1d)";;
+  ses_prev16) flows="$(flow solo null null 9b3f17e5dc59312d),$(flow other null null)";;
   ses_pbadrev) flows="$(flow solo null null -x)";;
   ses_ptwo) flows="$(flow stale null null r1),$(flow solo '"other"' null)";;
   ses_pstale) echo x >> "${path.join(tmp, "stale-snapshots.log")}"; flows="$(flow stale null null r1)";;
@@ -3193,6 +3194,39 @@ test("paths: the chosen path's rev from the snapshot is passed as --expect REV t
     assert.deepEqual(p.flowCalls(), ["-P -m agentgraph.structure flow prompt solo --goal-file - --expect 3f9a2c1d|a goal"]);
   } finally {
     p.done();
+  }
+});
+
+test("paths: a rev as the back end makes it (16 hex digits) goes to --expect unchanged; a path without rev in the same snapshot gets no --expect; the debug log has each command line and the paths' revs", async () => {
+  const log = path.join(tmp, "debug-prev16.log");
+  fs.writeFileSync(log, "");
+  process.env.AGENTGRAPH_TUI_DEBUG = log;
+  const picks = ["solo", "other"];
+  try {
+    const p = await pathsPanel("ses_prev16", { answers: { select: () => picks.shift(), prompt: "a goal" } });
+    try {
+      await waitFor(() => p.key("r"), 2000, "r key");
+      for (let i = 1; i <= 2; i += 1) {
+        await waitFor(() => p.key("r").enabled(), 3000, "r on");
+        p.key("r").run();
+        await waitFor(() => sends(p.calls).length === i && p.key("r").enabled(), 5000, "sent " + i);
+      }
+      assert.deepEqual(p.flowCalls(), [
+        "-P -m agentgraph.structure flow prompt solo --goal-file - --expect 9b3f17e5dc59312d|a goal",
+        "-P -m agentgraph.structure flow prompt other --goal-file -|a goal",
+      ]);
+      const lines = fs.readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => l.replace(/^\S+ /, ""));
+      assert.deepEqual(lines.filter((l) => l.startsWith("action: flow prompt:")), [
+        `action: flow prompt: ${pathsPython} -P -m agentgraph.structure flow prompt solo --goal-file - --expect 9b3f17e5dc59312d`,
+        `action: flow prompt: ${pathsPython} -P -m agentgraph.structure flow prompt other --goal-file -`,
+      ]);
+      const revs = lines.filter((l) => l.startsWith("paths: "));
+      assert.ok(revs.length >= 1 && revs.every((l) => l === "paths: solo@9b3f17e5dc59312d other@-"), revs.join(" / "));
+    } finally {
+      p.done();
+    }
+  } finally {
+    delete process.env.AGENTGRAPH_TUI_DEBUG;
   }
 });
 

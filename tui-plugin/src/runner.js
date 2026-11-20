@@ -221,6 +221,7 @@ const STALE = /changed since you opened it/;
 
 // deps: { spawn, path, env, home, python, timeoutMs?, structure? } (structure: a structure folder, for tests)
 // -> {text} | {error} | {error, stale: true} (`--expect rev` refused: the path changed since the snapshot showed it).
+// deps.onSpawn(argv), when given, is told the command line before it runs (the goal goes on standard input).
 export function runFlowPrompt(deps, id, goal, rev) {
   const timeoutMs = deps.timeoutMs || FLOW_PROMPT_TIMEOUT_MS;
   const fail = (message) => ({ error: oneLine(message) });
@@ -282,6 +283,7 @@ export function runFlowPrompt(deps, id, goal, rev) {
       }
     };
     try {
+      if (typeof deps.onSpawn === "function") deps.onSpawn([deps.python, ...args]);
       child = deps.spawn(deps.python, args, { cwd: deps.home, env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, shell: false });
     } catch (error) {
       done({ error });
