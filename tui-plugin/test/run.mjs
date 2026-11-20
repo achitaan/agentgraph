@@ -41,87 +41,462 @@ const keep = (doc) => (allDocs.push(doc), doc);
 // "left" at the left edge, "right" at the right edge of a line `w` columns wide.
 const pad = (left, right, w = 37) => left + " ".repeat(w - R.displayWidth(left) - R.displayWidth(right)) + right;
 
-test("demo document at width 37", () => {
-  assert.deepEqual(text(keep(demo), 37), [
-    pad("◉ orchestrator ⠋", "4/11"),
-    "━━━━━━━━━━━━━────────────────────────",
-    "$6.57  12.0k↑ 70.9k↓",
-    "",
-    "! impl-claude stuck ↻5",
-    "! reviewer stuck",
-    "↩ impl-open… sent back ↻3 by reviewer",
-    "",
-    pad("⠋ impl-claude ↻5", "$1.35"),
-    "  Apply the limiter in the middlewar…",
-    pad("⠙ designer", "$0.09"),
-    "  429 error page and retry-after mes…",
-    "",
-    "○ council fable astra carbon",
-    "○ oracle oracle-lite",
-    "○ impl-openai impl-hard",
-    "○ reviewer",
-    "○ explorer researcher",
+const DM_demoWorn = () => DM.demoDocument(demo, 60000); // DM is imported further down; called only when tests run
+// The demo at the moment it was generated, so the elapsed times are fixed.
+const NOW = demo.generated * 1000;
+const KEYS = [["↑↓", "select"], ["⏎", "open"], ["s", "stop"], ["m", "message"], ["g", "graph"], ["q", "close"]];
+const listText = (doc, width = 37, extra = {}) => R.toText(R.render(doc, Object.assign({ width, frame: 0, now: NOW }, extra))).split("\n");
+const tonesOf = (line) => line.map((s) => [s.text, s.tone]);
+// a session `ago` seconds old at NOW
+const ses = (id, busy, ago, extra = {}) => Object.assign({ id, busy, created: demo.generated - ago, updated: demo.generated - 1, cost: 0.1 }, extra);
+const AS = (name, group, busy, sessions) => ({ name, group, busy, parent: "", sessions });
+
+test("list: the demo in the sidebar at 37: what needs you, the hub with the idle count, who works, progress, spend", () => {
+  assert.deepEqual(listText(keep(demo), 37), [
+    pad("! impl-claude stalled ↻5", "7m"),
+    pad("◉ orchestrator ⠋", "11 idle"),
+    pad("⠙ designer  429 error page and re…", "6m"),
+    "4/11  gate reviewer refuted",
+    "$6.57",
   ]);
 });
 
-test("demo document at width 24", () => {
-  assert.deepEqual(text(demo, 24), [
-    "◉ orchestrator ⠋    4/11",
-    "━━━━━━━━━───────────────",
-    "$6.57  12.0k↑ 70.9k↓",
-    "",
-    "! impl-claude stuck ↻5",
-    "! reviewer stuck",
-    "↩ im… sent back ↻3 by r…",
-    "",
-    "⠋ impl-claude ↻5   $1.35",
-    "  Apply the limiter in…",
-    "⠙ designer         $0.09",
-    "  429 error page and re…",
-    "",
-    "○ council fable astra",
-    "  carbon",
-    "○ oracle oracle-lite",
-    "○ impl-openai impl-hard",
-    "○ reviewer",
-    "○ explorer researcher",
+test("list: the demo in the panel at 56: a gutter with the cursor on the first row, and one dim key line", () => {
+  assert.deepEqual(listText(demo, 56, { cursor: true, keys: KEYS }), [
+    "›" + pad("! impl-claude stalled ↻5  Apply the limiter in the…", "7m", 55),
+    " " + pad("◉ orchestrator ⠋  Add per-user rate limiting", "11 idle", 55),
+    " " + pad("⠙ designer  429 error page and retry-after message", "6m", 55),
+    " ━━━━────── 4/11  add-rate-limit  gate reviewer refuted",
+    " $6.57",
+    " ↑↓ select  ⏎ open  s stop  m message  g graph  q close",
   ]);
+  // the cursor follows `selected`; an unknown key selects the first row
+  const L = R.layout(demo, { width: 56, now: NOW, cursor: true, selected: "agent:designer" });
+  assert.equal(L.selected, "agent:designer");
+  assert.deepEqual(L.lines.map((l) => l[0].text), [" ", " ", "›", " ", " "]);
+  assert.equal(R.layout(demo, { width: 56, now: NOW, cursor: true, selected: "agent:nobody" }).selected, "stalled:impl-claude");
 });
 
-test("demo tones", () => {
-  const lines = R.render(demo, { width: 37, frame: 0 });
-  const tone = (row, t) => (lines[row].find((s) => s.text === t) || {}).tone;
-  assert.equal(tone(0, "◉"), "accent");
-  assert.equal(tone(0, "⠋"), "accent");
-  assert.equal(tone(0, "orchestrator"), "plain");
-  assert.equal(tone(0, "4"), "plain");
-  assert.equal(tone(0, "/11"), "muted");
-  assert.equal(tone(1, "━".repeat(13)), "accent");
-  assert.equal(tone(1, "─".repeat(24)), "muted");
-  assert.equal(tone(2, "$6.57"), "plain");
-  assert.equal(tone(2, "12.0"), "plain");
-  assert.equal(tone(2, "k"), "muted");
-  assert.equal(tone(2, "↑"), "muted");
-  assert.equal(tone(4, "! impl-claude stuck ↻5"), "danger");
-  assert.equal(tone(5, "! reviewer stuck"), "danger");
-  assert.equal(tone(6, "↩ impl-open… sent back ↻3 by reviewer"), "accent");
-  assert.equal(tone(8, "⠋"), "accent");
-  assert.equal(tone(8, "impl-claude"), "plain");
-  assert.equal(tone(8, " ↻5"), "accent");
-  assert.equal(tone(8, "$1.35"), "muted");
-  assert.equal(tone(9, "Apply the limiter in the middlewar…"), "muted");
-  assert.equal(tone(13, "○ council fable astra carbon"), "muted");
+test("list: demo tones; never a tone outside the four", () => {
+  const lines = R.render(demo, { width: 56, frame: 0, now: NOW, cursor: true, keys: KEYS });
+  assert.deepEqual(tonesOf(lines[0]), [
+    ["›", "accent"], ["!", "danger"], [" ", "plain"], ["impl-claude", "plain"], [" stalled", "danger"], [" ↻5", "accent"],
+    ["  ", "plain"], ["Apply the limiter in the…", "muted"], ["  ", "plain"], ["7m", "muted"],
+  ]);
+  assert.deepEqual(tonesOf(lines[1]).filter(([t]) => t.trim()), [["◉", "accent"], ["orchestrator", "plain"], ["⠋", "accent"], ["Add per-user rate limiting", "muted"], ["11 idle", "muted"]]);
+  assert.deepEqual(tonesOf(lines[2]).filter(([t]) => t.trim()), [["⠙", "accent"], ["designer", "plain"], ["429 error page and retry-after message", "muted"], ["6m", "muted"]]);
+  assert.deepEqual(tonesOf(lines[3]).filter(([t]) => t.trim()), [
+    ["━━━━", "accent"], ["──────", "muted"], ["4", "plain"], ["/11", "muted"], ["add-rate-limit", "muted"], ["gate ", "muted"], ["reviewer", "plain"], [" refuted", "accent"], // its work is being redone
+  ]);
+  assert.deepEqual(tonesOf(lines[5]).filter(([t]) => t.trim()), [["↑↓ select  ⏎ open  s stop  m message  g graph  q close", "muted"]]);
   for (const line of lines) for (const s of line) assert.ok(R.TONES.includes(s.tone), s.tone);
   assert.ok(!R.TONES.includes("success") && !R.TONES.includes("green"));
 });
 
-test("spinners: hub and each working agent, offset by index, advancing with frame", () => {
-  assert.equal(text(demo, 37, 1)[0], "◉ orchestrator ⠙                 4/11");
-  assert.equal(text(demo, 37, 1)[8].slice(0, 2), "⠙ ");
-  assert.equal(text(demo, 37, 1)[10].slice(0, 2), "⠹ ");
-  assert.equal(text(demo, 37, 9)[10].slice(0, 2), "⠋ ");
-  assert.equal(text(demo, 37, 10)[0].slice(0, 16), "◉ orchestrator ⠋");
+test("spinners: the hub and each working row, offset by row, advancing with frame", () => {
+  assert.equal(listText(demo, 37, { frame: 1 })[1].slice(0, 16), "◉ orchestrator ⠙");
+  assert.equal(listText(demo, 37, { frame: 1 })[2].slice(0, 2), "⠹ ");
+  assert.equal(listText(demo, 37, { frame: 9 })[2].slice(0, 2), "⠋ ");
+  assert.equal(listText(demo, 37, { frame: 10 })[1].slice(0, 16), "◉ orchestrator ⠋");
   assert.equal(R.isAnimated(demo), true);
+});
+
+test("sections in order: needs you, the hub, working, progress, spend, keys; empty ones left out; no blank rows", () => {
+  const doc = keep(D(
+    [A("orchestrator", "hub", 1), AS("w", "build", 1, [ses("s_w", true, 120)]), A("x", "build"), AS("v", "verify", 1, [ses("s_v", true, 60)])],
+    G({ progress: { passed: 1, total: 4 }, nodes: [{ id: "n1", agent: "v", status: "blocked", attempts: 1, goal: "Check it" }] }),
+    "orchestrator",
+    { totals: T(1.5, 500, 20) },
+  ));
+  const lines = listText(doc, 56, { cursor: true, keys: KEYS });
+  assert.deepEqual(lines.map((l) => l.slice(0, 3)), ["›! ", " ◉ ", " ⠙ ", " ━━", " $1", " ↑↓"]);
+  assert.ok(lines[0].includes("v blocked") && lines[2].includes("w"), lines.join("\n"));
+  assert.ok(lines.every((l) => l.trim() !== ""), "no blank rows");
+  // hub only: the hub row alone
+  assert.deepEqual(listText(keep(D([A("orchestrator", "hub")]))), ["◉ orchestrator"]);
+  // hub, progress and spend
+  assert.deepEqual(listText(keep(D([A("orchestrator", "hub", 1)], G({ progress: { passed: 3, total: 8 } }), "orchestrator", { totals: T(1.5, 500, 20) }))), [
+    "◉ orchestrator ⠋", "━━━━────── 3/8", "$1.50",
+  ]);
+});
+
+test("idle agents are a count on the hub's row, never a list", () => {
+  const doc = keep(D([
+    A("orchestrator", "hub"), A("explorer", "understand"), A("oracle", "decide"), A("council", "council"), A("councillor-fable", "council", 0, "council"),
+    A("impl-openai", "build"), A("reviewer", "verify"), A("odd", "elsewhere"), AS("busy", "build", 1, [ses("s_b", true, 30)]),
+  ]));
+  const lines = listText(doc, 56);
+  assert.equal(lines[0], pad("◉ orchestrator", "7 idle", 56));
+  for (const name of ["explorer", "oracle", "council", "fable", "impl-openai", "reviewer", "odd"]) assert.ok(!lines.some((l) => l.includes(name)), name);
+  assert.ok(lines[1].startsWith("⠙ busy"));
+  // nothing idle: no count
+  assert.deepEqual(listText(keep(D([A("orchestrator", "hub"), AS("w", "build", 1, [ses("s_w", true, 5)])]))), ["◉ orchestrator", pad("⠙ w", "5s")]);
+});
+
+test("hub is the root's agent, even when another hub agent is listed; a hub-less document uses root", () => {
+  const doc = keep(D([AS("orchestrator", "hub", 1, [ses("s_o", true, 90)]), A("lead", "hub", 0), A("reviewer", "verify")], null, "lead"));
+  assert.deepEqual(listText(doc), [pad("◉ lead", "1 idle"), pad("⠙ orchestrator", "1m")]);
+  const none = keep(D([A("explorer", "understand")], null, "orchestrator", { root: { agent: "orchestrator", busy: true } }));
+  assert.deepEqual(listText(none), [pad("◉ orchestrator ⠋", "1 idle")]);
+  assert.equal(R.isAnimated(none), true);
+  // the root's title next to the hub when there is room
+  const titled = keep(D([A("orchestrator", "hub")], null, "orchestrator", { root: { agent: "orchestrator", title: "Add rate limiting" } }));
+  assert.deepEqual(listText(titled, 56), ["◉ orchestrator  Add rate limiting"]);
+});
+
+test("spend row: dollars, then the context; tokens in and out are not shown", () => {
+  const spend = (totals, root = { agent: "orchestrator" }) => text(D([A("orchestrator", "hub")], null, "orchestrator", { totals, root }))[1];
+  assert.equal(spend(T(431.4, 2100000, 310000)), "$431.40");
+  assert.equal(spend(T(431.4, 2100000, 310000), { agent: "orchestrator", context: 124000 }), "$431.40  ctx 124k");
+  assert.equal(spend(T(431.4, 2100000, 310000), { agent: "orchestrator", context: null }), "$431.40");
+  assert.equal(spend(T(0, 0, 0)), "$0.00");
+  assert.equal(spend(T(0.999, 999, 1000)), "$1.00");
+  assert.equal(spend(T(5, 12400, 310000), { agent: "orchestrator", context: 950 }), "$5.00  ctx 950");
+  // no totals: the context alone; neither: no row
+  assert.equal(spend(undefined, { agent: "orchestrator", context: 950 }), "ctx 950");
+  assert.deepEqual(text(D([A("orchestrator", "hub")], null, "orchestrator", { totals: undefined })), ["◉ orchestrator"]);
+  assert.ok(!text(demo).some((l) => l.includes("ctx") || l.includes("↑") || l.includes("↓")));
+  const spans = R.render(D([A("orchestrator", "hub")], null, "orchestrator", { totals: T(1, 12400, 950), root: { agent: "orchestrator", context: 124000 } }))[1];
+  assert.deepEqual(tonesOf(spans), [["$1.00", "plain"], ["  ", "plain"], ["ctx ", "muted"], ["124", "plain"], ["k", "muted"]]);
+});
+
+// root.wear (WEB_API.md): the context bar on the spend row
+const W = (extra = {}) => Object.assign({
+  context: 124000, window: 1000000, window_known: true, compact_at: 250000, summaries: 0, turns: 10,
+  turns_since_summary: 10, history: [124000], per_turn: { start: null, recent: null }, level: "long",
+}, extra);
+const wearDoc = (wear, root = {}) => D([A("orchestrator", "hub")], null, "orchestrator", {
+  totals: T(6.57, 12000, 70900), root: Object.assign({ agent: "orchestrator", context: 124000, wear }, root),
+});
+const wearLines = (wear, width = 37, root) => text(wearDoc(wear, root), width);
+const barSpans = (wear, width = 37) => R.render(wearDoc(wear), { width })[1].filter((s) => /^[━─]+$/.test(s.text));
+
+test("wear: an 8-cell bar to compact_at, then the number, after ctx", () => {
+  // 124k of 250k: 49.6% -> 4 of 8 cells
+  assert.equal(wearLines(W())[1], "$6.57  ctx ━━━━──── 124k");
+  assert.deepEqual(barSpans(W()).map((s) => [s.text, s.tone]), [["━━━━", "muted"], ["────", "muted"]]);
+  // compact_at null: the full bar is the window. 600k of 1M = 60% -> 5 cells
+  assert.equal(wearLines(W({ context: 600000, compact_at: null }))[1], "$6.57  ctx ━━━━━─── 600k");
+  // wear.context wins over root.context; a tiny context still shows one cell; never full below 100%
+  assert.equal(wearLines(W({ context: 1000 }))[1], "$6.57  ctx ━─────── 1.0k");
+  assert.equal(wearLines(W({ context: 249000 }))[1], "$6.57  ctx ━━━━━━━─ 249k");
+  assert.equal(wearLines(W({ context: 300000 }))[1], "$6.57  ctx ━━━━━━━━ 300k");
+  const spans = R.render(wearDoc(W()), { width: 37 })[1];
+  assert.deepEqual(tonesOf(spans.slice(-3)), [[" ", "plain"], ["124", "plain"], ["k", "muted"]]);
+});
+
+test("wear: bar tone muted below 60%, accent from 60%, danger from 85%, never another tone", () => {
+  const fill = (context, extra = {}) => barSpans(W(Object.assign({ context }, extra)))[0].tone;
+  assert.equal(fill(149999), "muted"); // 59.99%
+  assert.equal(fill(150000), "accent"); // 60%
+  assert.equal(fill(212499), "accent"); // 84.99%
+  assert.equal(fill(212500), "danger"); // 85%
+  assert.equal(fill(400000), "danger");
+  assert.equal(fill(850000, { compact_at: null }), "danger");
+  assert.equal(R.wearTone(0.59), "muted");
+  assert.equal(R.wearTone(0.6), "accent");
+  assert.equal(R.wearTone(0.85), "danger");
+  for (const share of [0, 0.3, 0.6, 0.7, 0.85, 1, 2]) assert.ok(["muted", "accent", "danger"].includes(R.wearTone(share)));
+  assert.equal(barSpans(W({ context: 212500 }))[1].tone, "muted");
+});
+
+test("wear: one dot per summary, at most five, then the count; worn adds no row of its own", () => {
+  assert.equal(wearLines(W({ summaries: 2 }))[1], "$6.57  ctx ━━━━──── 124k ••2");
+  assert.equal(wearLines(W({ summaries: 5 }), 60)[1], "$6.57  ctx ━━━━──── 124k •••••5");
+  assert.equal(wearLines(W({ summaries: 12 }), 60)[1], "$6.57  ctx ━━━━──── 124k •••••12");
+  assert.equal(wearLines(W({ summaries: 0 }), 60)[1], "$6.57  ctx ━━━━──── 124k");
+  const dots = R.render(wearDoc(W({ summaries: 2 })), { width: 60 })[1].pop();
+  assert.deepEqual([dots.text, dots.tone], ["••2", "muted"]);
+  assert.deepEqual(wearLines(W({ summaries: 4, level: "worn" }), 60), ["◉ orchestrator", "$6.57  ctx ━━━━──── 124k ••••4"]);
+});
+
+test("wear: null or absent wear: ctx and the number; no window: the number alone", () => {
+  assert.equal(text(wearDoc(null))[1], "$6.57  ctx 124k");
+  const absent = wearDoc(undefined);
+  delete absent.root.wear;
+  assert.deepEqual(R.render(wearDoc(null))[1], R.render(absent)[1]);
+  assert.equal(wearLines(W({ window: null, compact_at: null }))[1], "$6.57  ctx 124k");
+  assert.equal(wearLines(W({ context: null }), 37, { context: null })[1], "$6.57");
+});
+
+test("wear: too narrow drops the dots first, then the bar, then ctx", () => {
+  const w = W({ summaries: 7 });
+  assert.equal(wearLines(w, 31)[1], "$6.57  ctx ━━━━──── 124k •••••7");
+  assert.equal(wearLines(w, 30)[1], "$6.57  ctx ━━━━──── 124k");
+  assert.equal(wearLines(w, 24)[1], "$6.57  ctx ━━━━──── 124k");
+  assert.equal(wearLines(w, 23)[1], "$6.57  ctx 124k");
+  assert.equal(wearLines(w, 15)[1], "$6.57  ctx 124k");
+  assert.equal(wearLines(w, 14)[1], "$6.57");
+  for (let width = 8; width <= 70; width += 1) {
+    for (const line of wearLines(W({ summaries: 9, level: "worn" }), width)) assert.ok(R.displayWidth(line) <= width, `${width}: ${line}`);
+  }
+});
+
+test("formatTokens, formatDollars and formatElapsed at the boundaries", () => {
+  const cases = [
+    [0, "0"], [7, "7"], [999, "999"], [1000, "1.0k"], [1049, "1.0k"], [1050, "1.1k"], [9999, "10.0k"], [12400, "12.4k"],
+    [99949, "99.9k"], [99999, "100k"], [310000, "310k"], [999499, "999k"], [999999, "1.0M"], [1000000, "1.0M"],
+    [2100000, "2.1M"], [99999999, "100M"], [-5, "0"], [NaN, "0"],
+  ];
+  for (const [n, s] of cases) assert.equal(R.formatTokens(n), s, String(n));
+  assert.equal(R.formatDollars(0), "$0.00");
+  assert.equal(R.formatDollars(431.4), "$431.40");
+  assert.equal(R.formatDollars(0.004), "$0.00");
+  assert.equal(R.formatDollars(undefined), "$0.00");
+  const el = [[0, "0s"], [59999, "59s"], [60000, "1m"], [3599999, "59m"], [3600000, "1h"], [3900000, "1h5m"], [36000000, "10h"], [172799999, "47h"], [172800000, "2d"], [-5, "0s"], [NaN, "0s"]];
+  for (const [ms, s] of el) assert.equal(R.formatElapsed(ms), s, String(ms));
+});
+
+test("right column: elapsed time and the idle count end at the right edge", () => {
+  for (const width of [37, 56, 80]) {
+    const lines = listText(demo, width);
+    for (const row of [0, 1, 2]) assert.equal(R.displayWidth(lines[row]), width, `${width}: ${lines[row]}`);
+    assert.ok(lines[0].endsWith(" 7m") && lines[1].endsWith(" 11 idle") && lines[2].endsWith(" 6m"));
+  }
+});
+
+test("progress row: a 10-cell bar, never full before done, never empty once started; the gate it is at", () => {
+  const bar = (passed, total, graph = {}) => text(D([A("orchestrator", "hub")], G(Object.assign({ progress: { passed, total } }, graph))), 56)[1];
+  assert.equal(bar(0, 5), "────────── 0/5");
+  assert.equal(bar(5, 5), "━━━━━━━━━━ 5/5  done");
+  assert.equal(bar(199, 200), "━━━━━━━━━─ 199/200");
+  assert.equal(bar(1, 200), "━───────── 1/200");
+  const gate = (status, extra = {}) => bar(2, 5, { nodes: [{ id: "a", type: "gate", agent: "reviewer", status: "passed" }, Object.assign({ id: "b", type: "gate", agent: "verifier", status }, extra)] });
+  assert.equal(gate("pending"), "━━━━────── 2/5  next gate verifier");
+  assert.equal(gate("running"), "━━━━────── 2/5  gate verifier checking");
+  assert.equal(gate("failed", { verdict: "refuted" }), "━━━━────── 2/5  gate verifier refuted");
+  assert.equal(gate("blocked"), "━━━━────── 2/5  gate verifier blocked");
+  const human = [{ id: "x", type: "implement", agent: "b", status: "running" }, { id: "h", type: "human", agent: "user", status: "pending", depends_on: ["x"] }];
+  assert.equal(bar(2, 5, { nodes: human }), "━━━━────── 2/5  next gate you");
+  // the task's name between, cut in the middle when it does not fit; it goes first, then the bar
+  assert.equal(bar(2, 5, { task: "add-rate-limit" }), "━━━━────── 2/5  add-rate-limit");
+  const long = { task: "add-per-user-rate-limiting-to-the-public-api", nodes: [{ id: "b", type: "gate", agent: "reviewer", status: "running" }] };
+  assert.equal(bar(2, 5, long), "━━━━────── 2/5  add-per-…lic-api  gate reviewer checking");
+  assert.equal(text(D([A("orchestrator", "hub")], G(Object.assign({ progress: { passed: 2, total: 5 } }, long))), 30)[1], "2/5  gate reviewer checking");
+  // no graph or no steps: no row
+  assert.deepEqual(text(D([A("orchestrator", "hub")], G({ progress: { passed: 0, total: 0 } }))), ["◉ orchestrator"]);
+});
+
+test("needs you: requests from the host, ready human gates, stuck loops, failed, blocked and stalled steps; text and tone", () => {
+  const agents = [A("orchestrator", "hub"), AS("a", "build", 1, [ses("s_a", true, 300)]), A("b", "build"), A("ev", "verify")];
+  const root = { agent: "orchestrator", id: "s_root" };
+  const one = (graph, requests) => R.render(D(agents, G(graph), "orchestrator", { root }), { width: 56, now: NOW, requests })[0];
+  const t = (line) => R.toText([line]);
+  assert.equal(t(one({}, [{ kind: "permission", session: "s_a" }])), pad("! a wants permission", "5m", 56));
+  assert.equal(one({}, [{ kind: "permission", session: "s_a" }])[0].tone, "danger");
+  assert.equal(t(one({}, [{ kind: "question", session: "s_root" }])), "? orchestrator asks you");
+  assert.equal(one({}, [{ kind: "question", session: "s_root" }])[0].tone, "accent");
+  assert.equal(t(one({}, [{ kind: "permission", session: "s_other", title: "Some session", count: 2 }])), "! Some session wants permission  2 requests");
+  assert.equal(t(one({ nodes: [{ id: "h", type: "human", agent: "user", status: "running", goal: "Approve the limits" }] })), "? you to decide  Approve the limits");
+  assert.equal(t(one({ nodes: [{ id: "n", type: "implement", agent: "b", status: "passed" }, { id: "h", type: "human", agent: "user", status: "pending", depends_on: ["n"], goal: "Approve" }] })), "? you to decide  Approve");
+  assert.equal(t(one({ work_loops: [{ agent: "a", rounds: 4, state: "stuck" }] })), pad("! a stuck ↻4", "5m", 56));
+  assert.equal(t(one({ nodes: [{ id: "n", agent: "b", status: "failed", attempts: 1, goal: "Build it" }] })), "! b failed  Build it");
+  assert.equal(t(one({ nodes: [{ id: "n", agent: "b", status: "blocked", attempts: 3 }] })), "! b blocked ↻3");
+  assert.equal(t(one({ nodes: [{ id: "n", agent: "a", status: "running", busy: true, stalled: true, attempts: 1, goal: "Wire it", started: demo.generated - 600 }] })), pad("! a stalled  Wire it", "10m", 56));
+  // not the user's: a pending human gate whose steps have not passed, a refuting gate, sent back, waiting, working
+  const calm = R.render(D(agents, G({
+    nodes: [{ id: "n", type: "implement", agent: "b", status: "running" }, { id: "h", type: "human", agent: "user", status: "pending", depends_on: ["n"] }, { id: "g", type: "gate", agent: "ev", status: "failed", verdict: "refuted" }],
+    loops: [{ worker: "b", evaluator: "ev", rounds: 3, state: "sent_back" }],
+    work_loops: [{ agent: "b", rounds: 2, state: "waiting" }, { agent: "a", rounds: 2, state: "working" }],
+  }), "orchestrator", { root }), { width: 56, now: NOW });
+  assert.ok(!calm.some((l) => /^[!?↩]/.test(R.toText([l]))), R.toText(calm));
+});
+
+test("needs you: most urgent first, one row per agent, never also among the working; at most 5 then +N more", () => {
+  const names = ["a1", "a2", "a3", "a4", "a5", "a6", "a7"];
+  const agents = [A("orchestrator", "hub"), ...names.map((n) => AS(n, "build", 1, [ses("s_" + n, true, 60)]))];
+  const doc = (k, requests) => keep(D(agents, G({ work_loops: names.slice(0, k).map((n, i) => ({ agent: n, rounds: 2 + i, state: "stuck" })) })));
+  const six = listText(doc(6), 37);
+  assert.deepEqual(six.slice(0, 6).map((l) => l.replace(/ +1m$/, "")), ["! a1 stuck ↻2", "! a2 stuck ↻3", "! a3 stuck ↻4", "! a4 stuck ↻5", "! a5 stuck ↻6", "! a6 stuck ↻7"]);
+  const seven = listText(doc(7), 37);
+  assert.equal(seven[5], "+2 more");
+  assert.equal(R.render(doc(7), { width: 37, now: NOW })[5][0].tone, "muted");
+  assert.ok(!seven.some((l) => /^⠙ a\d/.test(l)), "a flagged agent is not listed again as working");
+  // a request outranks a stuck loop, and the same agent gets one row
+  const both = listText(doc(1), 37, { requests: [{ kind: "permission", session: "s_a1" }, { kind: "question", session: "s_a2" }] });
+  assert.deepEqual(both.slice(0, 2).map((l) => l.replace(/ +1m$/, "")), ["! a1 wants permission ↻2", "? a2 asks you"]);
+  assert.ok(both[2].startsWith("◉ orchestrator"), both[2]);
+});
+
+test("names are cut in the middle, goals at their end; never past the width", () => {
+  const long = "impl-supercalifragilisticexpialidocious";
+  const doc = keep(D([A("orchestrator", "hub"), AS(long, "build", 1, [ses("s_l", true, 75, { title: "Apply the limiter in the middleware chain and update every route" })])], G({
+    work_loops: [{ agent: long, rounds: 12, state: "working" }],
+  })));
+  assert.deepEqual(listText(doc, 37).slice(1), [pad("⠙ impl-su…ocious ↻12  Apply the l…", "1m")]);
+  assert.deepEqual(listText(doc, 56).slice(1), [pad("⠙ impl-superc…alidocious ↻12  Apply the limiter in t…", "1m", 56)]);
+  assert.equal(R.truncateMiddle(long, 15), "impl-su…docious");
+  assert.equal(R.truncateMiddle(long, 7), "imp…ous");
+  assert.equal(R.truncateMiddle("abcdef", 6), "abcdef");
+  assert.equal(R.truncateMiddle("abcdefgh", 5), "ab…gh");
+  assert.equal(R.truncateMiddle("abcdefgh", 3), "ab…");
+  assert.equal(R.truncateMiddle("修复中间件链", 7), "修…件链");
+  assert.ok(R.displayWidth(R.truncateMiddle("修复中间件链", 7)) <= 7);
+});
+
+test("working: longest at it first; loop round from 2; the step's goal, else its session's title; elapsed", () => {
+  const doc = keep(D(
+    [
+      A("orchestrator", "hub", 1),
+      AS("w-new", "build", 1, [ses("s_new", true, 30, { title: "New session title" })]),
+      AS("w-old", "build", 1, [ses("s_old", true, 3600 * 2)]),
+      AS("w-loop", "verify", 1, [ses("s_loop", true, 400)]),
+      AS("sleeper", "build", 0, [ses("s_z", false, 9999)]),
+    ],
+    G({
+      nodes: [{ id: "1", agent: "w-old", status: "running", busy: true, goal: "Do the thing", started: demo.generated - 3900 }],
+      work_loops: [{ agent: "w-loop", rounds: 2, state: "working" }, { agent: "w-new", rounds: 1, state: "working" }],
+    }),
+  ));
+  assert.deepEqual(listText(doc, 56).slice(1), [
+    pad("⠙ w-old  Do the thing", "1h5m", 56),
+    pad("⠹ w-loop ↻2", "6m", 56),
+    pad("⠸ w-new  New session title", "30s", 56),
+  ]);
+  // more than 6: five, then +N more working
+  const many = keep(D([A("orchestrator", "hub"), ...Array.from({ length: 8 }, (_, i) => AS("w" + i, "build", 1, [ses("s" + i, true, 100 - i)]))]));
+  const rows = listText(many, 56);
+  assert.equal(rows.length, 7);
+  assert.equal(rows[6], "+3 more working");
+});
+
+test("wide characters and escape sequences in untrusted text", () => {
+  const doc = keep(D(
+    [A("orchestrator", "hub"), AS("evil\u001b[31mred\u0007", "build", 1, [ses("s_e", true, 10)])],
+    G({ nodes: [{ id: "n", agent: "evil\u001b[31mred\u0007", busy: true, status: "running", goal: "修复中间件链中的限流器问题并更新全部路由" }] }),
+  ));
+  const lines = listText(doc, 37);
+  assert.equal(lines[1], "⠙ evilred  修复中间件链中的限流…  10s");
+  assert.equal(R.displayWidth(lines[1]), 37);
+});
+
+test("at rest nothing moves: the same rows at every frame and any time later; no spinner, no elapsed time", () => {
+  const rest = keep(D(
+    [A("orchestrator", "hub", 0, "", 1.2), A("impl-openai", "build", 0, "", 0.4), A("reviewer", "verify")],
+    G({ progress: { passed: 11, total: 11 }, status: "passed", nodes: [{ id: "n", agent: "impl-openai", status: "passed", started: demo.generated - 900 }] }),
+    "orchestrator",
+    { totals: T(1.6, 10, 10), root: { agent: "orchestrator", id: "s_orchestrator", title: "Add rate limiting", busy: false } },
+  ));
+  assert.equal(R.isAnimated(rest), false);
+  const at = (frame, now) => R.toText(R.render(rest, { width: 56, frame, now, cursor: true, keys: KEYS }));
+  const first = at(0, NOW);
+  for (const [frame, now] of [[1, NOW], [7, NOW + 3000], [123, NOW + 3600000], [undefined, NOW + 86400000]]) assert.equal(at(frame, now), first);
+  assert.ok(!/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(first) && !/\b\d+[smhd]\b/.test(first), first);
+  assert.deepEqual(first.split("\n"), [
+    "›" + pad("◉ orchestrator  Add rate limiting", "2 idle", 55),
+    " ━━━━━━━━━━ 11/11  done",
+    " $1.60",
+    " ↑↓ select  ⏎ open  s stop  m message  g graph  q close",
+  ]);
+});
+
+test("list: the demo at 20, 24 and 37 columns; a name is cut only when nothing else can go", () => {
+  // the host gives the sidebar 37 columns and the panel at least 37 (panelWidth); 20 and 24 are for robustness
+  assert.deepEqual(listText(demo, 20), [
+    "! imp…ude stalled ↻5",
+    "◉ orchestrator ⠋",
+    pad("⠙ designer", "6m", 20),
+    "━━━━────── 4/11",
+    "$6.57",
+  ]);
+  assert.deepEqual(listText(demo, 24), [
+    "! impl-claude stalled ↻5",
+    "◉ orchestrator ⠋ 11 idle",
+    pad("⠙ designer", "6m", 24),
+    "4/11  reviewer refuted",
+    "$6.57",
+  ]);
+  assert.deepEqual(listText(demo, 37), [
+    pad("! impl-claude stalled ↻5", "7m"),
+    pad("◉ orchestrator ⠋", "11 idle"),
+    pad("⠙ designer  429 error page and re…", "6m"),
+    "4/11  gate reviewer refuted",
+    "$6.57",
+  ]);
+  assert.deepEqual(listText(demo, 37, { cursor: true, keys: KEYS }), [
+    "›" + pad("! impl-claude stalled ↻5", "7m", 36),
+    " " + pad("◉ orchestrator ⠋", "11 idle", 36),
+    " " + pad("⠙ designer  429 error page and r…", "6m", 36),
+    " 4/11  gate reviewer refuted",
+    " $6.57",
+    " ↑↓ select  ⏎ open  s stop  m message",
+  ]);
+  for (const width of [20, 24, 37]) {
+    for (const extra of [{}, { cursor: true, keys: KEYS }]) {
+      for (const line of R.render(demo, Object.assign({ width, now: NOW }, extra))) assert.ok(R.lineWidth(line) <= width, `${width}: ${R.toText([line])}`);
+    }
+  }
+});
+
+test("progress row: a refuted gate whose work is being redone is in the work tone; danger only for blocked, failed, or refuted with nobody on it", () => {
+  const row = (nodes) => R.render(D([A("orchestrator", "hub")], G({ progress: { passed: 2, total: 5 }, nodes })), { width: 56 })[1];
+  const gateTone = (line) => line.find((s) => s.text.startsWith(" ") && /refuted|blocked|failed|checking/.test(s.text)).tone;
+  const reworking = row([{ id: "w", type: "implement", agent: "b", status: "running" }, { id: "g", type: "gate", agent: "reviewer", status: "failed", verdict: "refuted", feedback_to: ["w"] }]);
+  assert.equal(R.toText([reworking]), "━━━━────── 2/5  gate reviewer refuted");
+  assert.equal(gateTone(reworking), "accent");
+  const returned = row([{ id: "w", type: "implement", agent: "b", status: "returned" }, { id: "g", type: "gate", agent: "reviewer", status: "failed", verdict: "refuted", depends_on: ["w"] }]);
+  assert.equal(gateTone(returned), "accent");
+  // the demo: impl-claude and designer redo the work the reviewer refuted
+  assert.equal(gateTone(R.render(demo, { width: 37, now: NOW })[3]), "accent");
+  const idle = row([{ id: "w", type: "implement", agent: "b", status: "pending" }, { id: "g", type: "gate", agent: "reviewer", status: "failed", verdict: "refuted", feedback_to: ["w"] }]);
+  assert.equal(gateTone(idle), "danger");
+  assert.equal(gateTone(row([{ id: "g", type: "gate", agent: "reviewer", status: "blocked" }])), "danger");
+  assert.equal(gateTone(row([{ id: "g", type: "gate", agent: "reviewer", status: "failed" }])), "danger");
+});
+
+test("progress row: the current gate is the one whose producer is running or returned, else the first gate not passed", () => {
+  const row = (nodes) => R.toText([R.render(D([A("orchestrator", "hub")], G({ progress: { passed: 2, total: 9 }, nodes })), { width: 56 })[1]]);
+  const nodes = [
+    { id: "a", type: "implement", agent: "x", status: "pending" },
+    { id: "g1", type: "gate", agent: "verifier", status: "pending", depends_on: ["a"], feedback_to: ["a"] },
+    { id: "b", type: "implement", agent: "y", status: "running" },
+    { id: "g2", type: "gate", agent: "reviewer", status: "pending", depends_on: ["b"], feedback_to: ["b"] },
+  ];
+  assert.equal(row(nodes), "━━──────── 2/9  next gate reviewer");
+  nodes[2].status = "returned";
+  assert.equal(row(nodes), "━━──────── 2/9  next gate reviewer");
+  nodes[2].status = "passed";
+  assert.equal(row(nodes), "━━──────── 2/9  next gate verifier", "nobody producing: the first gate not passed");
+  nodes[1].status = "passed";
+  assert.equal(row(nodes), "━━──────── 2/9  next gate reviewer");
+});
+
+test("rows: at most 8 at rest and at most 16 busy at 56 columns", () => {
+  const rest = JSON.parse(JSON.stringify(DM_demoWorn()));
+  for (const a of rest.agents) {
+    a.busy = 0;
+    for (const s of a.sessions) s.busy = false;
+  }
+  rest.root.busy = false;
+  rest.graph.nodes = rest.graph.nodes.map((n) => Object.assign(n, { status: "passed", busy: false, stalled: false }));
+  rest.graph.progress = { passed: 11, total: 11 };
+  rest.graph.work_loops = [];
+  rest.graph.loops = [];
+  const restLines = R.render(rest, { width: 56, now: NOW, cursor: true, keys: KEYS });
+  assert.ok(restLines.length <= 8, R.toText(restLines));
+  assert.equal(R.isAnimated(rest), false);
+  // busy: the demo, and a crowded document with many requests and workers
+  assert.ok(R.render(DM_demoWorn(), { width: 56, now: NOW, cursor: true, keys: KEYS }).length <= 16);
+  const names = Array.from({ length: 14 }, (_, i) => "agent-" + i);
+  const crowded = D([A("orchestrator", "hub", 1), ...names.map((n) => AS(n, "build", 1, [ses("s_" + n, true, 60)]))],
+    G({ progress: { passed: 3, total: 20 }, work_loops: names.slice(0, 7).map((n) => ({ agent: n, rounds: 3, state: "stuck" })) }), "orchestrator", { totals: T(9, 1, 1) });
+  const crowdedLines = R.render(crowded, { width: 56, now: NOW, cursor: true, keys: KEYS, requests: [{ kind: "question", session: "s_x" }] });
+  assert.ok(crowdedLines.length <= 16, crowdedLines.length + "\n" + R.toText(crowdedLines));
+});
+
+test("no line wider than the panel at 40, 56 and 80 columns (every document, cursor and keys on and off)", () => {
+  let checked = 0;
+  for (const doc of [...allDocs, demo, DM_demoWorn(), null]) {
+    for (const width of [40, 56, 80]) {
+      for (const extra of [{}, { cursor: true, keys: KEYS }, { requests: [{ kind: "permission", session: "s_a" }, { kind: "question", session: "x".repeat(90), title: "y".repeat(90) }] }]) {
+        for (const line of R.render(doc, Object.assign({ width, frame: 3, now: NOW }, extra))) {
+          assert.ok(R.lineWidth(line) <= width, `width ${width}: ${JSON.stringify(R.toText([line]))}`);
+          checked += 1;
+        }
+      }
+    }
+  }
+  assert.ok(checked > 300, String(checked));
 });
 
 test("nothing animates when nothing works", () => {
@@ -155,398 +530,6 @@ test("loading, error, empty", () => {
 test("Run block alone: idle hub, no graph, no totals", () => {
   assert.deepEqual(text(keep(D([A("orchestrator", "hub")]))), ["◉ orchestrator"]);
   assert.equal(R.render(D([A("orchestrator", "hub")]))[0][0].tone, "muted");
-});
-
-test("blocks are omitted when empty; the rest are separated by one blank line", () => {
-  const hubOnly = keep(D([A("orchestrator", "hub", 1)], G({ progress: { passed: 3, total: 8 } }), "orchestrator", { totals: T(1.5, 500, 20) }));
-  assert.deepEqual(text(hubOnly, 37, 0), [
-    pad("◉ orchestrator ⠋", "3/8"),
-    "━━━━━━━━━━━━━━───────────────────────",
-    "$1.50  500↑ 20↓",
-  ]);
-  // Run + Idle
-  assert.deepEqual(text(keep(D([A("orchestrator", "hub"), A("explorer", "understand")]))), ["◉ orchestrator", "", "○ explorer"]);
-  // Run + Working (nothing idle)
-  assert.deepEqual(text(keep(D([A("orchestrator", "hub"), A("w", "build", 1, "", 2)]))), [
-    "◉ orchestrator", "", pad("⠋ w", "$2.00"),
-  ]);
-  // Run + Needs you (nothing else)
-  assert.deepEqual(
-    text(keep(D([A("orchestrator", "hub"), A("w", "build")], G({ work_loops: [{ agent: "w", rounds: 1, state: "waiting", active: false }] })))),
-    ["◉ orchestrator", "", "? w waiting", "", "○ w"],
-  );
-  // all four
-  assert.deepEqual(
-    text(keep(D(
-      [A("orchestrator", "hub"), A("w", "build", 1, "", 1), A("v", "verify"), A("x", "build")],
-      G({ work_loops: [{ agent: "x", rounds: 1, state: "waiting", active: false }] }),
-    ))),
-    ["◉ orchestrator", "", "? x waiting", "", pad("⠋ w", "$1.00"), "", "○ x", "○ v"],
-  );
-});
-
-test("hub is the root's agent, even when another hub agent is listed; a hub-less document uses root", () => {
-  const doc = keep(D([A("orchestrator", "hub", 1, "", 3), A("lead", "hub", 0), A("reviewer", "verify")], null, "lead"));
-  assert.deepEqual(text(doc), ["◉ lead", "", pad("⠋ orchestrator", "$3.00"), "", "○ reviewer"]);
-  const none = keep(D([A("explorer", "understand")], null, "orchestrator", { root: { agent: "orchestrator", busy: true } }));
-  assert.deepEqual(text(none), ["◉ orchestrator ⠋", "", "○ explorer"]);
-  assert.equal(R.isAnimated(none), true);
-});
-
-test("spend line: dollars, tokens, units muted, context only when known", () => {
-  const spend = (totals, root = { agent: "orchestrator" }) =>
-    text(D([A("orchestrator", "hub")], null, "orchestrator", { totals, root }))[1];
-  assert.equal(spend(T(431.4, 2100000, 310000)), "$431.40  2.1M↑ 310k↓");
-  assert.equal(spend(T(431.4, 2100000, 310000), { agent: "orchestrator", context: 124000 }), "$431.40  2.1M↑ 310k↓  ctx 124k");
-  assert.equal(spend(T(431.4, 2100000, 310000), { agent: "orchestrator", context: null }), "$431.40  2.1M↑ 310k↓");
-  assert.equal(spend(T(0, 0, 0)), "$0.00  0↑ 0↓");
-  assert.equal(spend(T(0.999, 999, 1000)), "$1.00  999↑ 1.0k↓");
-  assert.equal(spend(T(1234.5, 999999, 1000000)), "$1234.50  1.0M↑ 1.0M↓");
-  assert.equal(spend(T(5, 12400, 99999)), "$5.00  12.4k↑ 100k↓");
-  assert.equal(spend(T(5, 12345678, 999499)), "$5.00  12.3M↑ 999k↓");
-  assert.equal(spend(T(5, 12400, 310000), { agent: "orchestrator", context: 950 }), "$5.00  12.4k↑ 310k↓  ctx 950");
-  // no totals at all: no spend line
-  assert.deepEqual(text(D([A("orchestrator", "hub")], null, "orchestrator", { totals: undefined })), ["◉ orchestrator"]);
-  // context never shown without the field
-  assert.ok(!text(demo).some((l) => l.includes("ctx")));
-  // spans: number plain, unit and arrow muted
-  const spans = R.render(D([A("orchestrator", "hub")], null, "orchestrator", { totals: T(1, 12400, 950), root: { agent: "orchestrator", context: 124000 } }))[1];
-  assert.deepEqual(spans.map((s) => [s.text, s.tone]), [
-    ["$1.00", "plain"], ["  ", "plain"], ["12.4", "plain"], ["k", "muted"], ["↑", "muted"], [" ", "plain"],
-    ["950", "plain"], ["↓", "muted"], ["  ", "plain"], ["ctx ", "muted"], ["124", "plain"], ["k", "muted"],
-  ]);
-});
-
-// root.wear (WEB_API.md): the context bar on the spend line
-const W = (extra = {}) => Object.assign({
-  context: 124000, window: 1000000, window_known: true, compact_at: 250000, summaries: 0, turns: 10,
-  turns_since_summary: 10, history: [124000], per_turn: { start: null, recent: null }, level: "long",
-}, extra);
-const wearDoc = (wear, root = {}) => D([A("orchestrator", "hub")], null, "orchestrator", {
-  totals: T(6.57, 12000, 70900), root: Object.assign({ agent: "orchestrator", context: 124000, wear }, root),
-});
-const wearLines = (wear, width = 37, root) => text(wearDoc(wear, root), width);
-const barSpans = (wear, width = 37) => R.render(wearDoc(wear), { width })[1].filter((s) => /^[━─]+$/.test(s.text));
-
-test("wear: an 8-cell bar to compact_at, then the number, in place of ctx", () => {
-  // 124k of 250k: 49.6% -> 4 of 8 cells
-  assert.equal(wearLines(W())[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k");
-  assert.deepEqual(barSpans(W()).map((s) => [s.text, s.tone]), [["━━━━", "muted"], ["────", "muted"]]);
-  // compact_at null: the full bar is the window. 600k of 1M = 60% -> 5 cells
-  assert.equal(wearLines(W({ context: 600000, compact_at: null }))[1], "$6.57  12.0k↑ 70.9k↓  ━━━━━─── 600k");
-  // wear.context wins over root.context; a tiny context still shows one cell; never full below 100%
-  assert.equal(wearLines(W({ context: 1000 }))[1], "$6.57  12.0k↑ 70.9k↓  ━─────── 1.0k");
-  assert.equal(wearLines(W({ context: 249000 }))[1], "$6.57  12.0k↑ 70.9k↓  ━━━━━━━─ 249k");
-  assert.equal(wearLines(W({ context: 300000 }))[1], "$6.57  12.0k↑ 70.9k↓  ━━━━━━━━ 300k");
-  // spans: the number as before (value plain, unit muted)
-  const spans = R.render(wearDoc(W()), { width: 37 })[1];
-  assert.deepEqual(spans.slice(-3).map((s) => [s.text, s.tone]), [[" ", "plain"], ["124", "plain"], ["k", "muted"]]);
-});
-
-test("wear: bar tone muted below 60%, accent from 60%, danger from 85%, never another tone", () => {
-  const fill = (context, extra = {}) => barSpans(W(Object.assign({ context }, extra)))[0].tone;
-  assert.equal(fill(149999), "muted"); // 59.99%
-  assert.equal(fill(150000), "accent"); // 60%
-  assert.equal(fill(212499), "accent"); // 84.99%
-  assert.equal(fill(212500), "danger"); // 85%
-  assert.equal(fill(400000), "danger");
-  assert.equal(fill(850000, { compact_at: null }), "danger");
-  assert.equal(R.wearTone(0.59), "muted");
-  assert.equal(R.wearTone(0.6), "accent");
-  assert.equal(R.wearTone(0.85), "danger");
-  for (const share of [0, 0.3, 0.6, 0.7, 0.85, 1, 2]) assert.ok(["muted", "accent", "danger"].includes(R.wearTone(share)));
-  // the empty part is always muted
-  assert.equal(barSpans(W({ context: 212500 }))[1].tone, "muted");
-});
-
-test("wear: one dot per summary, at most five, then the count", () => {
-  assert.equal(wearLines(W({ summaries: 2 }), 60)[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k ••2");
-  assert.equal(wearLines(W({ summaries: 5 }), 60)[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k •••••5");
-  assert.equal(wearLines(W({ summaries: 7 }), 60)[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k •••••7");
-  assert.equal(wearLines(W({ summaries: 12 }), 60)[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k •••••12");
-  // no summary: no dots and no count
-  assert.equal(wearLines(W({ summaries: 0 }), 60)[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k");
-  const dots = R.render(wearDoc(W({ summaries: 2 })), { width: 60 })[1].pop();
-  assert.deepEqual([dots.text, dots.tone], ["••2", "muted"]);
-});
-
-test("wear: worn adds one muted line 'summarized N times' under the spend line", () => {
-  const lines = wearLines(W({ summaries: 4, level: "worn" }), 60);
-  assert.equal(lines[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k ••••4");
-  assert.equal(lines[2], "summarized 4 times");
-  const spans = R.render(wearDoc(W({ summaries: 4, level: "worn" })), { width: 60 })[2];
-  assert.deepEqual(spans.map((s) => s.tone), ["muted"]);
-  // fresh and long: no such line
-  assert.equal(wearLines(W({ summaries: 1, level: "long" }), 60).length, 2);
-  assert.equal(wearLines(W({ summaries: 0, level: "fresh" }), 60).length, 2);
-  // it fits narrow widths too
-  assert.ok(wearLines(W({ summaries: 4, level: "worn" }), 12).every((l) => R.displayWidth(l) <= 12));
-});
-
-test("wear: null or absent wear draws the spend line exactly as before", () => {
-  const before = "$6.57  12.0k↑ 70.9k↓  ctx 124k";
-  assert.equal(text(wearDoc(null))[1], before);
-  const absent = wearDoc(undefined);
-  delete absent.root.wear;
-  assert.equal(text(absent)[1], before);
-  assert.deepEqual(R.render(wearDoc(null))[1], R.render(absent)[1]);
-  // wear without a usable window or compact_at: the number only
-  assert.equal(wearLines(W({ window: null, compact_at: null }))[1], "$6.57  12.0k↑ 70.9k↓  124k");
-  // wear and root without any context: no context part
-  assert.equal(wearLines(W({ context: null }), 37, { context: null })[1], "$6.57  12.0k↑ 70.9k↓");
-});
-
-test("wear: too narrow drops the dots first, then the bar, keeping the number", () => {
-  const w = W({ summaries: 7 });
-  assert.equal(wearLines(w, 42)[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k •••••7");
-  assert.equal(wearLines(w, 41)[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k");
-  assert.equal(wearLines(w, 35)[1], "$6.57  12.0k↑ 70.9k↓  ━━━━──── 124k");
-  assert.equal(wearLines(w, 34)[1], "$6.57  12.0k↑ 70.9k↓  124k");
-  assert.equal(wearLines(w, 26)[1], "$6.57  12.0k↑ 70.9k↓  124k");
-  // below that, the old rules: the context part goes, then single spaces
-  assert.equal(wearLines(w, 25)[1], "$6.57  12.0k↑ 70.9k↓");
-  for (let width = 8; width <= 70; width += 1) {
-    for (const line of wearLines(W({ summaries: 9, level: "worn" }), width)) assert.ok(R.displayWidth(line) <= width, `${width}: ${line}`);
-  }
-});
-
-test("formatTokens and formatDollars at the boundaries", () => {
-  const cases = [
-    [0, "0"], [7, "7"], [999, "999"], [1000, "1.0k"], [1049, "1.0k"], [1050, "1.1k"], [9999, "10.0k"], [12400, "12.4k"],
-    [99949, "99.9k"], [99999, "100k"], [310000, "310k"], [999499, "999k"], [999999, "1.0M"], [1000000, "1.0M"],
-    [2100000, "2.1M"], [99999999, "100M"], [-5, "0"], [NaN, "0"],
-  ];
-  for (const [n, s] of cases) assert.equal(R.formatTokens(n), s, String(n));
-  assert.equal(R.formatDollars(0), "$0.00");
-  assert.equal(R.formatDollars(431.4), "$431.40");
-  assert.equal(R.formatDollars(0.004), "$0.00");
-  assert.equal(R.formatDollars(undefined), "$0.00");
-});
-
-test("right alignment at width 37: run count and agent cost end at the right edge", () => {
-  const lines = text(demo, 37);
-  for (const row of [0, 8, 10]) assert.equal(R.displayWidth(lines[row]), 37, lines[row]);
-  assert.ok(lines[0].endsWith(" 4/11"));
-  assert.ok(lines[8].endsWith("$1.35"));
-  assert.equal(R.displayWidth(lines[1]), 37); // the bar spans the full width
-  const wide = text(keep(D([A("orchestrator", "hub", 1), A("w", "build", 1, "", 1234.5)], G({ progress: { passed: 10, total: 12 } }))), 37);
-  assert.equal(wide[0], "◉ orchestrator ⠋                10/12");
-  assert.equal(wide[1], "━".repeat(31) + "─".repeat(6));
-  assert.equal(wide[3], pad("⠋ w", "$1234.50"));
-});
-
-test("progress bar rounding: never full before done, never empty once started", () => {
-  const bar = (passed, total, width = 20) =>
-    text(D([A("orchestrator", "hub")], G({ progress: { passed, total } })), width)[1];
-  assert.equal(bar(0, 5), "─".repeat(20));
-  assert.equal(bar(5, 5), "━".repeat(20));
-  assert.equal(bar(199, 200), "━".repeat(19) + "─");
-  assert.equal(bar(1, 200), "━" + "─".repeat(19));
-});
-
-test("Needs you: each kind, text and tone", () => {
-  const agents = [A("orchestrator", "hub"), A("a", "build"), A("b", "build"), A("c", "build"), A("d", "build"), A("e", "build"), A("ev", "verify")];
-  const one = (graph) => text(D(agents, G(graph)));
-  assert.deepEqual(one({ work_loops: [{ agent: "a", rounds: 4, state: "stuck", active: false }] }).slice(2, 3), ["! a stuck ↻4"]);
-  assert.deepEqual(one({ work_loops: [{ agent: "a", rounds: 1, state: "stuck", active: false }] }).slice(2, 3), ["! a stuck"]);
-  assert.deepEqual(one({ nodes: [{ id: "n", agent: "b", status: "failed", attempts: 1 }] }).slice(2, 3), ["! b stuck"]);
-  assert.deepEqual(one({ nodes: [{ id: "n", agent: "b", status: "blocked", attempts: 3 }] }).slice(2, 3), ["! b stuck ↻3"]);
-  assert.deepEqual(one({ nodes: [{ id: "n", agent: "b", status: "running", busy: true, stalled: true, attempts: 1 }] }).slice(2, 3), ["! b stuck"]);
-  assert.deepEqual(
-    one({ loops: [{ worker: "c", evaluator: "ev", rounds: 3, state: "sent_back", active: true }] }).slice(2, 3),
-    ["↩ c sent back ↻3 by ev"],
-  );
-  assert.deepEqual(
-    one({ loops: [{ worker: "c", evaluator: "ev", rounds: 1, state: "sent_back", active: true }] }).slice(2, 3),
-    ["↩ c sent back by ev"],
-  );
-  assert.deepEqual(one({ work_loops: [{ agent: "d", rounds: 2, state: "waiting", active: false }] }).slice(2, 3), ["? d waiting"]);
-  // not urgent: working, checking, closed, passed
-  const calm = one({
-    nodes: [{ id: "n", agent: "e", status: "passed" }, { id: "m", agent: "d", status: "running", busy: true, stalled: false }],
-    loops: [{ worker: "c", evaluator: "ev", rounds: 2, state: "working", active: true }, { worker: "a", evaluator: "ev", rounds: 2, state: "closed", active: false }],
-    work_loops: [{ agent: "b", rounds: 2, state: "working", active: true }],
-  });
-  assert.ok(!calm.some((l) => l.startsWith("!") || l.startsWith("↩") || l.startsWith("?")), calm.join("|"));
-  // tones
-  const toned = R.render(D(agents, G({
-    work_loops: [{ agent: "a", rounds: 2, state: "stuck" }, { agent: "d", rounds: 2, state: "waiting" }],
-    loops: [{ worker: "c", evaluator: "ev", rounds: 2, state: "sent_back" }],
-  })), { width: 37 });
-  assert.deepEqual(toned.slice(2, 5).map((l) => [l[0].text, l[0].tone]), [
-    ["! a stuck ↻2", "danger"], ["↩ c sent back ↻2 by ev", "accent"], ["? d waiting", "plain"],
-  ]);
-});
-
-test("Needs you: most urgent first, one line per agent, unlisted agents skipped", () => {
-  const agents = [A("orchestrator", "hub"), A("w1", "build"), A("w2", "build"), A("w3", "build"), A("w4", "build"), A("w5", "build"), A("ev", "verify")];
-  const doc = keep(D(agents, G({
-    nodes: [
-      { id: "1", agent: "w2", status: "failed", attempts: 1 },
-      { id: "2", agent: "w2", status: "blocked", attempts: 1 }, // same agent again: no second line
-      { id: "3", agent: "ghost", status: "failed", attempts: 1 }, // not listed
-      { id: "4", agent: "user", status: "blocked", attempts: 1 }, // not listed
-    ],
-    work_loops: [
-      { agent: "w4", rounds: 2, state: "waiting", active: false },
-      { agent: "w1", rounds: 6, state: "stuck", active: false },
-      { agent: "w2", rounds: 3, state: "stuck", active: false }, // stuck loop outranks its failed nodes
-      { agent: "w5", rounds: 2, state: "waiting", active: false },
-      { agent: "ghost", rounds: 2, state: "stuck", active: false },
-    ],
-    loops: [
-      { worker: "w3", evaluator: "ev", rounds: 2, state: "sent_back", active: true },
-      { worker: "w4", evaluator: "ev", rounds: 2, state: "sent_back", active: true }, // w4 also waits: the sent-back line wins
-      { worker: "w5", evaluator: "ghost", rounds: 2, state: "sent_back", active: true }, // evaluator not listed
-    ],
-  })));
-  assert.deepEqual(text(doc).slice(1, 6), [
-    "",
-    "! w1 stuck ↻6",
-    "! w2 stuck ↻3",
-    "↩ w3 sent back ↻2 by ev",
-    "↩ w4 sent back ↻2 by ev",
-  ]);
-  assert.deepEqual(text(doc).slice(6, 9), ["? w5 waiting", "", "○ w1 w2 w3 w4 w5"]);
-});
-
-test("Needs you: at most 5 lines, then +N more", () => {
-  const names = ["a1", "a2", "a3", "a4", "a5", "a6", "a7"];
-  const agents = [A("orchestrator", "hub"), ...names.map((n) => A(n, "build"))];
-  const six = keep(D(agents, G({ work_loops: names.slice(0, 6).map((n, i) => ({ agent: n, rounds: 2 + i, state: "stuck" })) })));
-  assert.deepEqual(text(six).slice(0, 8), [
-    "◉ orchestrator", "", "! a1 stuck ↻2", "! a2 stuck ↻3", "! a3 stuck ↻4", "! a4 stuck ↻5", "! a5 stuck ↻6", "+1 more",
-  ]);
-  assert.equal(R.render(six)[7][0].tone, "muted");
-  const exactly = keep(D(agents, G({ work_loops: names.slice(0, 5).map((n) => ({ agent: n, rounds: 2, state: "stuck" })) })));
-  assert.ok(!text(exactly).some((l) => l.includes("more")));
-  assert.equal(text(exactly).filter((l) => l.startsWith("!")).length, 5);
-  const seven = keep(D(agents, G({ work_loops: names.map((n) => ({ agent: n, rounds: 2, state: "stuck" })) })));
-  assert.equal(text(seven)[7], "+2 more");
-});
-
-test("Needs you: long names shrink, never past the width", () => {
-  const long = "impl-supercalifragilisticexpialidocious";
-  const doc = keep(D([A("orchestrator", "hub"), A(long, "build"), A("reviewer-with-a-very-long-name", "verify")], G({
-    loops: [{ worker: long, evaluator: "reviewer-with-a-very-long-name", rounds: 12, state: "sent_back" }],
-    work_loops: [{ agent: "reviewer-with-a-very-long-name", rounds: 12, state: "stuck" }],
-  })));
-  assert.deepEqual(text(doc).slice(2, 4), ["! reviewer-with-a-very-lon… stuck ↻12", "↩ impl-su… sent back ↻12 by reviewer…"]);
-});
-
-test("Working: most expensive first, loop count from 2 rounds, goal only with a busy step", () => {
-  const doc = keep(D(
-    [A("orchestrator", "hub", 1, "", 9), A("w-cheap", "build", 1, "", 0.5), A("w-rich", "build", 2, "", 12.34), A("w-free", "verify", 1), A("sleeper", "build", 0, "", 99)],
-    G({
-      nodes: [
-        { id: "1", agent: "w-rich", status: "running", busy: true, goal: "Do the thing" },
-        { id: "2", agent: "w-cheap", status: "pending", busy: false, goal: "Not started" },
-        { id: "3", agent: "w-free", status: "running", busy: false, goal: "Running but quiet" },
-      ],
-      work_loops: [
-        { agent: "w-cheap", rounds: 2, state: "working", active: true },
-        { agent: "w-rich", rounds: 1, state: "working", active: true },
-      ],
-    }),
-  ));
-  assert.deepEqual(text(doc, 37, 0).slice(2, 9), [
-    pad("⠋ w-rich", "$12.34"),
-    "  Do the thing",
-    pad("⠙ w-cheap ↻2", "$0.50"),
-    pad("⠹ w-free", "$0.00"),
-    "  Running but quiet",
-    "",
-    "○ sleeper",
-  ]);
-});
-
-test("Working: long name and goal at width 20 and 37", () => {
-  const long = "impl-supercalifragilisticexpialidocious";
-  const doc = keep(D([A("orchestrator", "hub"), A(long, "build", 1, "", 1.25)], G({
-    nodes: [{ id: "n", agent: long, busy: true, status: "running", goal: "Apply the limiter in the middleware chain and update every route" }],
-    work_loops: [{ agent: long, rounds: 12, state: "working", active: true }],
-  })));
-  assert.deepEqual(text(doc, 37).slice(2, 4), [pad("⠋ impl-supercalifragilisti… ↻12", "$1.25"), "  Apply the limiter in the middlewar…"]);
-  assert.deepEqual(text(doc, 20).slice(2, 4), ["⠋ impl-su… ↻12 $1.25", "  Apply the limiter…"]);
-});
-
-test("Idle: group order, one line per group, hub and working agents left out", () => {
-  const doc = keep(D([
-    A("orchestrator", "hub"), A("explorer", "understand"), A("oracle", "decide"), A("council", "council"),
-    A("impl-openai", "build"), A("reviewer", "verify"), A("odd", "elsewhere"), A("busy", "build", 1, "", 0.1),
-  ]));
-  assert.deepEqual(text(doc).slice(4), [
-    "○ council", "○ oracle", "○ impl-openai", "○ reviewer", "○ explorer", "○ odd",
-  ]);
-});
-
-test("Idle: a council lead comes first, seats use their short names", () => {
-  const doc = keep(D([
-    A("orchestrator", "hub"), A("councillor-fable", "council", 0, "council"), A("councillor-astra", "council", 0, "council"),
-    A("council", "council"), A("councillor-carbon", "council", 0, "council"),
-  ]));
-  assert.deepEqual(text(doc).slice(2), ["○ council fable astra carbon"]);
-  // seats without a listed lead
-  assert.deepEqual(text(keep(D([A("orchestrator", "hub"), A("councillor-fable", "council", 0, "")]))).slice(2), ["○ fable"]);
-  // a working seat moves to Working with its short name; the rest stay idle
-  assert.deepEqual(
-    text(keep(D([A("orchestrator", "hub"), A("council", "council"), A("councillor-fable", "council", 1, "council", 0.2), A("councillor-astra", "council", 0, "council")]))).slice(2),
-    [pad("⠋ fable", "$0.20"), "", "○ council astra"],
-  );
-});
-
-test("Idle: wraps onto an indented line; truncates only as a last resort", () => {
-  const doc = keep(D([
-    A("orchestrator", "hub"),
-    ...["alpha-one", "beta-two", "gamma-three", "delta-four", "epsilon-five"].map((n) => A(n, "build")),
-    A("zz", "verify"),
-  ]));
-  assert.deepEqual(text(doc).slice(2), [
-    "○ alpha-one beta-two gamma-three",
-    "  delta-four epsilon-five",
-    "○ zz",
-  ]);
-  const fit = keep(D([A("orchestrator", "hub"), A("a".repeat(17), "build"), A("b".repeat(17), "build")]));
-  assert.deepEqual(text(fit).slice(2), ["○ " + "a".repeat(17) + " " + "b".repeat(17)]); // exactly 37
-  const over = keep(D([A("orchestrator", "hub"), A("a".repeat(17), "build"), A("b".repeat(18), "build")]));
-  assert.deepEqual(text(over).slice(2), ["○ " + "a".repeat(17), "  " + "b".repeat(18)]);
-  const huge = keep(D([A("orchestrator", "hub"), A("x".repeat(50), "build")]));
-  assert.deepEqual(text(huge).slice(2), ["○ " + "x".repeat(34) + "…"]);
-});
-
-test("wide characters and escape sequences in untrusted text", () => {
-  const doc = keep(D(
-    [A("orchestrator", "hub"), A("evil\u001b[31mred\u0007", "build", 1, "", 0.5)],
-    G({ nodes: [{ id: "n", agent: "evil\u001b[31mred\u0007", busy: true, status: "running", goal: "修复中间件链中的限流器问题并更新全部路由" }] }),
-  ));
-  const lines = text(doc);
-  assert.equal(lines[2], pad("⠋ evilred", "$0.50"));
-  assert.equal(lines[3], "  修复中间件链中的限流器问题并更新全…");
-  assert.equal(R.displayWidth(lines[3]), 37);
-});
-
-test("width 20 for a hand-made document", () => {
-  const doc = keep(D(
-    [A("orchestrator", "hub", 1), A("council", "council", 1, "", 3), A("councillor-carbon", "council", 0, "council"), A("impl-claude", "build", 1, "", 1.25)],
-    G({
-      progress: { passed: 2, total: 5 },
-      nodes: [{ id: "n", agent: "impl-claude", busy: true, status: "running", goal: "Apply the limiter" }],
-      work_loops: [{ agent: "impl-claude", nodes: ["n"], rounds: 2, state: "working", active: true }],
-    }),
-    "orchestrator",
-    { totals: T(1.5, 5200, 14100) },
-  ));
-  assert.deepEqual(text(doc, 20), [
-    "◉ orchestrator ⠋ 2/5",
-    "━━━━━━━━────────────",
-    "$1.50  5.2k↑ 14.1k↓",
-    "",
-    "⠋ council      $3.00",
-    "⠙ impl-cla… ↻2 $1.25",
-    "  Apply the limiter",
-    "",
-    "○ carbon",
-  ]);
 });
 
 test("every line fits its width (all documents, many widths)", () => {
@@ -864,10 +847,10 @@ sid=""
 for a in "$@"; do case "$a" in --session=*) sid="\${a#--session=}";; esac; done
 echo "$sid" >> "${pluginLog}"
 case "$sid" in
-  ses_slow) sleep 0.8; echo '{"version":1,"root":{"agent":"orchestrator"},"agents":[{"name":"orchestrator","group":"hub","busy":0,"parent":"","sessions":[]},{"name":"slowagent","group":"build","busy":0,"parent":"","sessions":[]}],"graph":null,"warnings":[]}';;
+  ses_slow) sleep 0.8; echo '{"version":1,"root":{"agent":"orchestrator","title":"slowagent"},"agents":[{"name":"orchestrator","group":"hub","busy":0,"parent":"","sessions":[]},{"name":"slowagent","group":"build","busy":0,"parent":"","sessions":[]}],"graph":null,"warnings":[]}';;
   ses_err) echo '{"version":1,"error":"no db"}'; exit 1;;
   ses_hang) echo $$ > "${hangPid}"; exec sleep 30;;
-  *) printf '{"version":1,"root":{"agent":"orchestrator"},"agents":[{"name":"orchestrator","group":"hub","busy":1,"parent":"","sessions":[]},{"name":"w-%s","group":"build","busy":0,"parent":"","sessions":[]}],"graph":null,"warnings":[]}\\n' "$sid";;
+  *) printf '{"version":1,"root":{"agent":"orchestrator","title":"t-%s"},"agents":[{"name":"orchestrator","group":"hub","busy":1,"parent":"","sessions":[]},{"name":"w-%s","group":"build","busy":0,"parent":"","sessions":[]}],"graph":null,"warnings":[]}\\n' "$sid" "$sid";;
 esac`);
 
 function nodeText(node) {
@@ -876,6 +859,8 @@ function nodeText(node) {
   return node.children.map(nodeText).join("");
 }
 const screen = (rootNode) => rootNode.children.map(nodeText);
+// The fake interpreter's document for session S has the root title "t-S", drawn on the hub row.
+const shows = (rootNode, title) => screen(rootNode).some((l) => l.includes(title));
 
 function makeHost(options = {}) {
   const claims = [];
@@ -930,10 +915,10 @@ test("plugin: renders normal, error and missing-session documents; follows sessi
   const view = state.claims[0].render(props);
   try {
     assert.deepEqual(screen(view), ["Loading"]);
-    await waitFor(() => screen(view).includes("○ w-ses_a"), 5000, "first snapshot");
-    assert.match(screen(view)[0], /^◉ orchestrator [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]$/);
+    await waitFor(() => shows(view, "t-ses_a"), 5000, "first snapshot");
+    assert.match(screen(view)[0], /^◉ orchestrator [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]  t-ses_a +1 idle$/);
     // the hub works: the spinner advances
-    const last = (l) => l[l.length - 1];
+    const last = (l) => l[15];
     const first = last(screen(view)[0]);
     await waitFor(() => last(screen(view)[0]) !== first, 2000, "spinner frame");
     // colours come from the theme; the accent is never the green one
@@ -953,11 +938,11 @@ test("plugin: renders normal, error and missing-session documents; follows sessi
     assert.deepEqual(screen(view), ["Loading"]);
     await waitFor(() => fs.readFileSync(pluginLog, "utf8").includes("ses_slow"), 3000, "slow fetch started");
     setSid("ses_b");
-    await waitFor(() => screen(view).includes("○ w-ses_b"), 5000, "ses_b snapshot");
+    await waitFor(() => shows(view, "t-ses_b"), 5000, "ses_b snapshot");
     await sleep(1200); // the slow process has finished by now
     assert.ok(fs.readFileSync(pluginLog, "utf8").includes("ses_slow"), "slow session was fetched");
     assert.ok(!screen(view).some((l) => l.includes("slowagent")), "late result was drawn: " + screen(view).join(" | "));
-    assert.ok(screen(view).includes("○ w-ses_b"));
+    assert.ok(shows(view, "t-ses_b"));
 
     // missing session
     setSid(undefined);
@@ -994,21 +979,21 @@ test("plugin: the frame timer runs only while the hub or any agent works", async
   const view = state.claims[0].render({ get sessionID() { return sid(); } });
   try {
     assert.equal(running(), 1, "only the poll timer before the first snapshot");
-    await waitFor(() => screen(view).includes("○ worker"), 5000, "idle snapshot");
+    await waitFor(() => screen(view).some((l) => /^◉ orchestrator +1 idle$/.test(l)), 5000, "idle snapshot");
     assert.equal(running(), 1, "nothing works: no frame timer");
     setSid("ses_worker"); // the hub is idle, a non-hub agent works
-    await waitFor(() => screen(view).some((l) => l.startsWith("⠋ worker")), 5000, "worker snapshot");
+    await waitFor(() => screen(view).some((l) => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] worker/.test(l)), 5000, "worker snapshot");
     assert.equal(running(), 2, "a non-hub agent works: frame timer runs");
     setSid("ses_idle"); // switching sessions stops it at once
     assert.equal(running(), 1, "session change stops the frame timer");
-    await waitFor(() => screen(view).includes("○ worker"), 5000, "idle snapshot again");
+    await waitFor(() => screen(view).some((l) => /^◉ orchestrator +1 idle$/.test(l)), 5000, "idle snapshot again");
     setSid("ses_hub");
     await waitFor(() => screen(view).some((l) => l.startsWith("◉ orchestrator ")), 5000, "hub snapshot");
     assert.equal(running(), 2, "the hub works: frame timer runs");
     setSid("ses_flip"); // worker busy on the first fetch, idle on the next poll
-    await waitFor(() => screen(view).some((l) => l.startsWith("⠋ worker")), 5000, "flip: busy");
+    await waitFor(() => screen(view).some((l) => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] worker/.test(l)), 5000, "flip: busy");
     assert.equal(running(), 2);
-    await waitFor(() => screen(view).includes("○ worker"), 5000, "flip: idle");
+    await waitFor(() => screen(view).some((l) => /^◉ orchestrator +1 idle$/.test(l)), 5000, "flip: idle");
     assert.equal(running(), 1, "work finished: frame timer stopped");
   } finally {
     stop();
@@ -1178,7 +1163,7 @@ test("panel: a failing host open does not throw into the host", () => {
 
 const demoPython = fakePython("panel-demo-python", `cat "${path.join(here, "fixtures", "demo.json")}"`);
 
-test("panel: other panel names render nothing; its own name draws the four-block view; width follows and is capped", async () => {
+test("panel: other panel names render nothing; its own name draws the list with a cursor and one key line; width follows and is capped", async () => {
   const { ctx, state, panelClaim } = makePanelHost({ python: demoPython });
   const stop = tui.setup(ctx);
   try {
@@ -1193,33 +1178,36 @@ test("panel: other panel names render nothing; its own name draws the four-block
     assert.deepEqual(screen(view), []);
     setName("agentgraph.graph");
     assert.deepEqual(screen(view), ["Loading"]);
-    await waitFor(() => screen(view).length > 5, 5000, "panel snapshot");
+    await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
+    // the demo: the stalled agent first (with the cursor), the hub and the idle count, who works, progress, spend, keys
     const widthOf = (i) => R.displayWidth(screen(view)[i]);
-    const barIndex = () => screen(view).findIndex((l) => /^[━─]+$/.test(l));
-    assert.match(screen(view)[0], /^◉ orchestrator .*\d+\/\d+$/);
-    assert.ok(barIndex() > 0, "progress bar");
-    assert.ok(screen(view).some((l) => l.trim() === ""), "blocks are separated by a blank line");
+    const hubIndex = () => screen(view).findIndex((l) => l.startsWith(" ◉ orchestrator"));
+    assert.match(screen(view)[0], /^›! impl-claude stalled ↻5  .* \d+[smhd]\w*$/);
+    assert.match(screen(view)[hubIndex()], / 11 idle$/);
+    assert.match(screen(view).at(-3), /4\/11  .*gate reviewer refuted$/);
+    assert.equal(screen(view).at(-1), " ↑↓ select  g graph  q close");
+    assert.ok(!screen(view).some((l) => l.trim() === ""), "no blank rows");
     assert.equal(widthOf(0), 80);
-    assert.equal(widthOf(barIndex()), 80);
+    assert.equal(widthOf(hubIndex()), 80);
     // wider panel, wider lines
     setWidth(100);
     assert.equal(widthOf(0), 100);
-    assert.equal(widthOf(barIndex()), 100);
+    assert.equal(widthOf(hubIndex()), 100);
     // the cap holds
     setWidth(300);
     assert.equal(widthOf(0), 100);
-    assert.equal(widthOf(barIndex()), 100);
     // never narrower than the sidebar
     setWidth(10);
     assert.equal(widthOf(0), 37);
     setWidth(undefined);
     assert.equal(widthOf(0), 37);
-    // at the sidebar's width, the same lines as the sidebar draws
+    // at the sidebar's width: the sidebar's rows, plus the gutter and the key line
     setWidth(37);
     const sidebarView = state.claims[0].render({ sessionID: "ses_p" });
-    await waitFor(() => screen(sidebarView).length > 5, 5000, "sidebar snapshot");
-    const spin = (l) => l.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, "*");
-    assert.deepEqual(screen(view).map(spin), screen(sidebarView).map(spin));
+    await waitFor(() => screen(sidebarView).length > 3, 5000, "sidebar snapshot");
+    assert.equal(screen(view).length, screen(sidebarView).length + 1);
+    assert.ok(screen(sidebarView).every((l) => !/^[› ]/.test(l) && R.displayWidth(l) <= 37), "the sidebar has no gutter");
+    assert.ok(screen(view).every((l) => /^[› ]/.test(l) && R.displayWidth(l) <= 37), "the panel has the gutter");
     // the name changes away: nothing is drawn
     setName("other.panel");
     assert.deepEqual(screen(view), []);
@@ -1237,13 +1225,13 @@ test("panel: the panel session is polled; closing it stops its timers; the sideb
   const stop = tui.setup(ctx);
   try {
     const sideView = state.claims[0].render({ sessionID: "ses_side" });
-    await waitFor(() => screen(sideView).includes("○ w-ses_side"), 5000, "sidebar snapshot");
+    await waitFor(() => shows(sideView, "t-ses_side"), 5000, "sidebar snapshot");
     const withSidebar = new Set(activeIntervals);
     globalThis.__agentgraphStub.cleanups.length = 0;
     const view = panelClaim().render(makePanel({ sessionID: "ses_panel" }));
     assert.equal(globalThis.__agentgraphStub.cleanups.length, 1, "registered a cleanup with the host");
     assert.ok([...activeIntervals].some((h) => !withSidebar.has(h)), "panel poll timer started");
-    await waitFor(() => screen(view).includes("○ w-ses_panel"), 5000, "panel snapshot");
+    await waitFor(() => shows(view, "t-ses_panel"), 5000, "panel snapshot");
     await sleep(2300);
     const log = () => fs.readFileSync(pluginLog, "utf8").trim().split("\n");
     assert.ok(log().filter((l) => l === "ses_panel").length >= 3, "panel polled: " + log().join(","));
@@ -1259,7 +1247,7 @@ test("panel: the panel session is polled; closing it stops its timers; the sideb
   }
 });
 
-test("panel: f toggles full screen, q closes, only while it is this plugin's panel", () => {
+test("panel: f toggles full screen, q closes, the list's up, down and return; only while it is this plugin's panel", () => {
   const { ctx, state, panelClaim } = makePanelHost();
   const stop = tui.setup(ctx);
   try {
@@ -1271,7 +1259,8 @@ test("panel: f toggles full screen, q closes, only while it is this plugin's pan
     assert.equal(layer.mode, undefined, "no mode: active only while the panel owns input");
     const f = layer.commands.find((c) => c.bind === "f");
     const q = layer.commands.find((c) => c.bind === "q");
-    assert.equal(layer.commands.length, 2);
+    // f and q, and the list's keys; no s or m: this host has no client.session to stop or message with
+    assert.deepEqual(layer.commands.map((c) => c.bind), ["f", "q", "up", "down", "return"]);
     assert.equal(f.enabled(), true);
     f.run();
     assert.equal(panel.calls.full, 1);
@@ -1291,6 +1280,277 @@ test("panel: f toggles full screen, q closes, only while it is this plugin's pan
     const m = state.layers.length - 1;
     assert.doesNotThrow(() => state.layers[m].commands.find((c) => c.bind === "f").run());
   } finally {
+    stop();
+  }
+});
+
+// The panel's list keys on the demo: a host with a router, a client and dialogs, each recorded.
+function makeActionHost({ router = true, client = true, dialog = true, answers = {} } = {}) {
+  const host = makePanelHost({ python: demoPython });
+  const calls = [];
+  if (router) host.ctx.ui.router = { navigate: (r) => calls.push(["navigate", r]) };
+  if (dialog) {
+    host.ctx.ui.dialog = {
+      confirm: async (o) => (calls.push(["confirm", o.title]), answers.confirm),
+      prompt: async (o) => (calls.push(["prompt", o.title]), answers.prompt),
+    };
+  }
+  if (client) {
+    host.ctx.client = {
+      session: {
+        interrupt: async (a) => {
+          calls.push(["interrupt", a]);
+          if (answers.fail) throw new Error(answers.fail);
+          return { data: { interrupted: answers.interrupted !== false } };
+        },
+        prompt: async (a) => (calls.push(["send", a]), { data: {} }),
+      },
+    };
+  }
+  const key = (bind) => {
+    const layer = host.state.layers.filter((l) => (l.commands || []).some((c) => c.bind === bind)).pop();
+    return layer ? layer.commands.find((c) => c.bind === bind) : undefined;
+  };
+  return Object.assign(host, { calls, key });
+}
+const cursorRow = (view) => screen(view).findIndex((l) => l.startsWith("›"));
+
+test("panel keys: up and down move the cursor through the rows that act, clamped; return opens the row's session", async () => {
+  const host = makeActionHost({ client: false, dialog: false });
+  const stop = tui.setup(host.ctx);
+  try {
+    const view = host.panelClaim().render(makePanel({ sessionID: "ses_keys", width: 80 }));
+    await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
+    const { key, calls } = host;
+    assert.deepEqual(screen(view).map((l) => l[0]), ["›", " ", " ", " ", " ", " "]); // stalled, hub, designer, progress, spend, keys
+    assert.equal(key("up").enabled(), true);
+    key("up").run();
+    assert.equal(cursorRow(view), 0, "clamped at the top");
+    key("down").run();
+    assert.equal(cursorRow(view), 1);
+    assert.ok(screen(view)[1].startsWith("›◉ orchestrator"));
+    key("down").run();
+    key("down").run();
+    key("down").run();
+    assert.equal(cursorRow(view), 2, "clamped at the last row that acts: the progress and spend rows are not selectable");
+    assert.equal(screen(view).at(-1), " ↑↓ select  ⏎ open  g graph  q close");
+    key("return").run();
+    assert.deepEqual(calls.at(-1), ["navigate", { type: "session", sessionID: "ses_h" }]);
+    key("up").run();
+    key("return").run();
+    assert.deepEqual(calls.at(-1), ["navigate", { type: "session", sessionID: "ses_root" }], "the hub row opens the root session");
+    key("up").run();
+    key("return").run();
+    assert.deepEqual(calls.at(-1), ["navigate", { type: "session", sessionID: "ses_g" }], "the stalled agent's session");
+    // a failing navigate is a toast, not a throw
+    host.ctx.ui.router.navigate = () => {
+      throw new Error("no route");
+    };
+    assert.doesNotThrow(() => key("return").run());
+    assert.match(host.state.toasts.at(-1).message, /Could not open impl-claude: no route/);
+    assert.equal(host.state.toasts.at(-1).variant, "error");
+    // the selection is remembered by row, not by position: a remount keeps it
+    key("down").run();
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    const again = host.panelClaim().render(makePanel({ sessionID: "ses_keys", width: 80 }));
+    await waitFor(() => screen(again).length > 3, 5000, "remounted snapshot");
+    assert.ok(screen(again)[1].startsWith("›◉ orchestrator"), screen(again).join("\n"));
+  } finally {
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    stop();
+  }
+});
+
+test("panel keys: without a router there is no return key action and no ⏎ in the key line", async () => {
+  const host = makeActionHost({ router: false, client: false, dialog: false });
+  const stop = tui.setup(host.ctx);
+  try {
+    const view = host.panelClaim().render(makePanel({ sessionID: "ses_norouter", width: 80 }));
+    await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
+    assert.equal(screen(view).at(-1), " ↑↓ select  g graph  q close");
+    assert.equal(host.key("return").enabled(), false);
+    assert.doesNotThrow(() => host.key("return").run());
+    assert.deepEqual(host.calls, []);
+  } finally {
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    stop();
+  }
+});
+
+test("panel keys: s confirms, then interrupts the working agent's session; m asks for text, then sends it as a steer", async () => {
+  const answers = { confirm: true, prompt: "  use the token bucket  " };
+  const host = makeActionHost({ answers });
+  const stop = tui.setup(host.ctx);
+  try {
+    const view = host.panelClaim().render(makePanel({ sessionID: "ses_act", width: 80 }));
+    await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
+    const { key, calls, state } = host;
+    assert.deepEqual(state.layers.filter((l) => (l.commands || []).some((c) => c.bind === "f")).pop().commands.map((c) => c.bind), ["f", "q", "up", "down", "return", "s", "m"]);
+    // the stalled impl-claude: it works, so s and m act on its running session
+    assert.equal(screen(view).at(-1), " ↑↓ select  ⏎ open  s stop  m message  g graph  q close");
+    assert.equal(key("s").enabled(), true);
+    key("s").run();
+    await waitFor(() => calls.some((c) => c[0] === "interrupt"), 2000, "interrupt");
+    assert.deepEqual(calls.slice(0, 2), [["confirm", "Stop impl-claude?"], ["interrupt", { sessionID: "ses_g" }]]);
+    await waitFor(() => state.toasts.length > 0, 2000, "toast");
+    assert.equal(state.toasts.at(-1).message, "Stopped impl-claude");
+    // declined: nothing is sent
+    answers.confirm = false;
+    calls.length = 0;
+    key("s").run();
+    await sleep(30);
+    assert.deepEqual(calls, [["confirm", "Stop impl-claude?"]]);
+    // the host says it was not running
+    answers.confirm = true;
+    answers.interrupted = false;
+    key("s").run();
+    await waitFor(() => state.toasts.at(-1).message === "impl-claude was not running", 2000, "not running");
+    // a failure is a toast
+    answers.fail = "session busy";
+    key("s").run();
+    await waitFor(() => /Could not stop impl-claude: session busy/.test(state.toasts.at(-1).message), 2000, "failure toast");
+    assert.equal(state.toasts.at(-1).variant, "error");
+    // m: the trimmed text, delivered as a steer into the running session
+    calls.length = 0;
+    key("m").run();
+    await waitFor(() => calls.some((c) => c[0] === "send"), 2000, "send");
+    assert.deepEqual(calls, [["prompt", "Message impl-claude"], ["send", { sessionID: "ses_g", text: "use the token bucket", delivery: "steer" }]]);
+    await waitFor(() => state.toasts.at(-1).message === "Sent to impl-claude", 2000, "sent toast");
+    // an empty or cancelled message sends nothing
+    for (const text of ["   ", undefined, null]) {
+      answers.prompt = text;
+      calls.length = 0;
+      key("m").run();
+      await sleep(30);
+      assert.deepEqual(calls, [["prompt", "Message impl-claude"]]);
+    }
+    // the hub row: the user's own session; nothing to stop or message
+    key("down").run();
+    assert.equal(screen(view).at(-1), " ↑↓ select  ⏎ open  g graph  q close");
+    assert.equal(key("s").enabled(), false);
+    assert.equal(key("m").enabled(), false);
+    calls.length = 0;
+    key("s").run();
+    key("m").run();
+    await sleep(30);
+    assert.deepEqual(calls, []);
+    // designer works: s acts on its session
+    key("down").run();
+    answers.fail = undefined;
+    answers.interrupted = true;
+    key("s").run();
+    await waitFor(() => calls.some((c) => c[0] === "interrupt"), 2000, "designer interrupt");
+    assert.deepEqual(calls.find((c) => c[0] === "interrupt"), ["interrupt", { sessionID: "ses_h" }]);
+  } finally {
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    stop();
+  }
+});
+
+test("panel keys: while a host dialog is open the list keys do nothing, and the Enter that closes the confirm does not also open", async () => {
+  const host = makeActionHost();
+  const mode = { v: "base" };
+  host.ctx.keymap.mode = { current: () => mode.v };
+  let resolveConfirm;
+  host.ctx.ui.dialog.confirm = (o) => (host.calls.push(["confirm", o.title]), new Promise((r) => (resolveConfirm = r)));
+  const stop = tui.setup(host.ctx);
+  try {
+    const view = host.panelClaim().render(makePanel({ sessionID: "ses_dialog", width: 80 }));
+    await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
+    const { key, calls } = host;
+    // any host dialog (the keymap is in "modal" mode): every list key is off and does nothing
+    mode.v = "modal";
+    for (const bind of ["up", "down", "return", "s", "m"]) {
+      assert.equal(key(bind).enabled(), false, bind + " enabled in a dialog");
+      key(bind).run();
+    }
+    await sleep(20);
+    assert.deepEqual(calls, []);
+    assert.equal(cursorRow(view), 0);
+    mode.v = "base";
+    // our own confirm: from `s` until a moment after it closes, the list keys do nothing
+    key("s").run();
+    await waitFor(() => calls.length === 1, 2000, "confirm shown");
+    for (const bind of ["up", "down", "return", "s", "m"]) assert.equal(key(bind).enabled(), false, bind + " enabled under the confirm");
+    key("down").run();
+    key("return").run();
+    assert.equal(cursorRow(view), 0, "down did not move the cursor under the dialog");
+    // Enter answers the confirm; the same key reaching the panel must not open anything
+    // The host dispatches that Enter in one go: the confirm resolves, its promise chain settles (microtasks), and the
+    // same key may then reach the panel before any timer runs. The list keys must still be off then.
+    resolveConfirm(false);
+    key("return").run(); // same tick, before the chain settles
+    for (let i = 0; i < 50; i += 1) await Promise.resolve(); // the chain settles; no timer has run yet
+    assert.equal(key("return").enabled(), false, "the list keys came back before a timer ran");
+    key("return").run(); // same macrotask, after the chain settled
+    assert.ok(!calls.some((c) => c[0] === "navigate"), JSON.stringify(calls));
+    // a moment later the keys work again
+    await sleep(30);
+    assert.equal(key("return").enabled(), true);
+    key("return").run();
+    assert.deepEqual(calls.at(-1), ["navigate", { type: "session", sessionID: "ses_g" }]);
+    // the message prompt blocks them the same way
+    let resolvePrompt;
+    host.ctx.ui.dialog.prompt = (o) => (calls.push(["prompt", o.title]), new Promise((r) => (resolvePrompt = r)));
+    key("m").run();
+    await waitFor(() => calls.at(-1)[0] === "prompt", 2000, "prompt shown");
+    assert.equal(key("down").enabled(), false);
+    resolvePrompt(undefined);
+    key("return").run();
+    assert.ok(calls.filter((c) => c[0] === "navigate").length === 1);
+  } finally {
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    stop();
+  }
+});
+
+test("real-host.py --selftest: the busy-list check passes the demo list and fails the orbit, a short list and a list without keys", async () => {
+  const script = path.join(here, "real-host.py");
+  const out = await new Promise((resolve) => {
+    const child = spawn(realPython, ["-P", script, "--selftest"], { stdio: ["ignore", "pipe", "pipe"] });
+    let text = "";
+    child.stdout.on("data", (d) => (text += d));
+    child.stderr.on("data", (d) => (text += d));
+    child.on("close", (code) => resolve({ code, text }));
+  });
+  assert.equal(out.code, 0, out.text);
+  assert.match(out.text, /selftest: \d+ cases, all as expected/);
+});
+
+test("panel: pending permission requests and questions from the host's data come first, and Enter opens their session", async () => {
+  const host = makeActionHost({ client: false, dialog: false });
+  const pending = { permission: { ses_h: [{ id: "p1" }, { id: "p2" }] }, form: { ses_root: [{ id: "f1" }], global: [{ id: "g" }] } };
+  const store = (kind) => ({
+    sessions: () => Object.keys(pending[kind]).filter((id) => pending[kind][id].length > 0),
+    list: (id) => pending[kind][id],
+  });
+  host.ctx.data = { session: { permission: store("permission"), form: store("form"), get: (id) => ({ title: "title of " + id }) } };
+  const stop = tui.setup(host.ctx);
+  try {
+    const view = host.panelClaim().render(makePanel({ sessionID: "ses_req", width: 80 }));
+    await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
+    const lines = screen(view);
+    assert.match(lines[0], /^›! designer wants permission  2 requests +\S+$/);
+    assert.match(lines[1], /^ \? orchestrator asks you  Add per-user rate limiting +\S+$/);
+    assert.ok(lines.includes(" ○ 11 idle"), "the hub's row is up there: the idle count has its own row\n" + lines.join("\n"));
+    assert.match(lines[2], /^ ! impl-claude stalled ↻5/);
+    assert.ok(!lines.some((l) => l.includes("global")), "the global form is not a session's");
+    assert.ok(!lines.some((l) => /^ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] designer/.test(l)), "designer is not also among the working");
+    host.key("return").run();
+    assert.deepEqual(host.calls.at(-1), ["navigate", { type: "session", sessionID: "ses_h" }]);
+    // a host without the data store: no requests, no error
+    const bare = makeActionHost({ client: false, dialog: false });
+    bare.ctx.data = { session: { permission: { sessions: () => { throw new Error("x"); } } } };
+    const stop2 = tui.setup(bare.ctx);
+    try {
+      const v2 = bare.panelClaim().render(makePanel({ sessionID: "ses_req2", width: 80 }));
+      await waitFor(() => screen(v2).length > 3, 5000, "bare snapshot");
+      assert.match(screen(v2)[0], /^›! impl-claude stalled/);
+    } finally {
+      stop2();
+    }
+  } finally {
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
     stop();
   }
 });
@@ -1344,7 +1604,7 @@ test("panel: after it closes, a late fetch is dropped and a re-run view does not
     // mounting it again starts it again
     globalThis.__agentgraphStub.cleanups.length = 0;
     const view2 = panelClaim().render(makePanel({ sessionID: "ses_again" }));
-    await waitFor(() => screen(view2).includes("○ w-ses_again"), 5000, "remounted snapshot");
+    await waitFor(() => shows(view2, "t-ses_again"), 5000, "remounted snapshot");
     assert.ok([...activeIntervals].some((h) => !base.has(h)), "remounted panel polls");
     for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
   } finally {
@@ -1352,15 +1612,20 @@ test("panel: after it closes, a late fetch is dropped and a re-run view does not
   }
 });
 
-test("panel: the panel shows no title, hint or key legend, and no green", async () => {
+test("panel: no title, banner or legend; the keys are one muted line at the bottom; no green", async () => {
   const { ctx, panelClaim } = makePanelHost();
   const stop = tui.setup(ctx);
   try {
     const view = panelClaim().render(makePanel({ sessionID: "ses_legend" }));
-    await waitFor(() => screen(view).includes("○ w-ses_legend"), 5000, "panel snapshot");
-    const all = screen(view).join("\n");
-    assert.ok(!/fullscreen|full screen|close|\bq\b|\bf\b|Agent graph|agentgraph/i.test(all), all);
-    const hub = view.children[0].children[0];
+    await waitFor(() => shows(view, "t-ses_legend"), 5000, "panel snapshot");
+    const lines = screen(view);
+    const all = lines.join("\n");
+    assert.ok(!/fullscreen|full screen|Agent graph|agentgraph|[┌┐└┘╭╮╰╯]/i.test(all), all);
+    assert.equal(lines.filter((l) => /\bq close\b/.test(l)).length, 1, all);
+    assert.equal(lines.at(-1), " g graph  q close"); // one row: nothing to select, no session to open on this host
+    const keyLine = view.children.at(-1);
+    assert.ok(keyLine.children.every((c) => nodeText(c) === " " || c.props.fg === "#888888"), "the key line is muted");
+    const hub = view.children[0].children.find((c) => nodeText(c) === "◉");
     assert.equal(hub.props.fg, "#d08040");
   } finally {
     stop();
@@ -1486,7 +1751,7 @@ test("colorProp: anything but a hex colour or an { r, g, b } gives the host's de
   const stop = tui.setup(ctx);
   try {
     const view = state.claims[0].render({ sessionID: "ses_named" });
-    await waitFor(() => screen(view).includes("○ w-ses_named"), 5000, "snapshot with named colours");
+    await waitFor(() => shows(view, "t-ses_named"), 5000, "snapshot with named colours");
     assert.match(screen(view)[0], /^◉ orchestrator/);
     assert.deepEqual(allFg(view), [], "no fg is set at all");
   } finally {
@@ -1502,12 +1767,12 @@ test("host theme: the sidebar and the panel draw the view with the real host's t
     const side = state.claims[0].render({ sessionID: "ses_theme" });
     const view = panelClaim().render(makePanel({ sessionID: "ses_theme" }));
     for (const v of [side, view]) {
-      await waitFor(() => screen(v).includes("○ w-ses_theme"), 5000, "snapshot with the host theme");
-      assert.match(screen(v)[0], /^◉ orchestrator/);
+      await waitFor(() => shows(v, "t-ses_theme"), 5000, "snapshot with the host theme");
+      assert.match(screen(v)[0], /^›?◉ orchestrator/);
       const fgs = allFg(v);
       assert.ok(fgs.length > 0);
       assert.ok(fgs.every((fg) => typeof fg === "string" && /^#[0-9a-f]{6}$/.test(fg)), "every fg is a hex string: " + fgs.join(","));
-      assert.equal(v.children[0].children[0].props.fg, "#f5a742", "the busy hub mark uses the accent");
+      assert.equal(v.children[0].children.find((c) => nodeText(c) === "◉").props.fg, "#f5a742", "the busy hub mark uses the accent");
       assert.ok(!fgs.some((fg) => P.isGreen(fg)), "no green");
     }
   } finally {
@@ -2223,6 +2488,8 @@ const sizePanel = (view, width, height) => {
   view.props.onSizeChange.call(view);
 };
 
+// `g` in the newest panel's view layer: the panel opens on the list, `g` shows the orbit.
+const pressG = (state) => state.layers.filter((l) => (l.commands || []).some((c) => c.bind === "g")).pop().commands.find((c) => c.bind === "g").run();
 // The orbit is on screen: the hub's glyph inside the canvas (the list has it only at the start of its first line).
 const isOrbit = (lines) => lines.length >= 22 && lines.slice(1).some((l) => l.indexOf("◉") > 4);
 // The 3D view: the near side of a ring in @, and 0s and 1s, inside the canvas rows (no braille ring there).
@@ -2231,7 +2498,7 @@ const has3D = (lines) => {
   return /@@/.test(body) && /[01]/.test(body) && !/[\u2801-\u28ff]/.test(body.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, ""));
 };
 
-test("panel scene: the orbit from 64x22 with a measured size, the list below it or when unknown; g switches; sidebar unchanged", async () => {
+test("panel scene: the panel opens on the list; g shows the orbit from 64x22 with a measured size; g switches back; sidebar unchanged", async () => {
   const { plugin, spawned, clockRef } = makeScenePlugin();
   const { ctx, state, panelClaim } = makePanelHost();
   const stop = plugin.setup(ctx);
@@ -2240,11 +2507,14 @@ test("panel scene: the orbit from 64x22 with a measured size, the list below it 
     const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
     await waitFor(() => screen(view).length > 5, 5000, "demo snapshot");
     // the size is not known yet: the list
-    assert.match(screen(view)[0], /^◉ orchestrator/);
+    assert.ok(screen(view).some((l) => l.startsWith(" ◉ orchestrator")));
     assert.ok(screen(view).length < 40 && !isOrbit(screen(view)), "the list while the height is unknown");
     const gLayer = () => state.layers.find((l) => (l.commands || []).some((c) => c.bind === "g"));
     assert.equal(gLayer(), undefined, "no g before there is an orbit to switch to");
+    // measured, room for the orbit: still the list (at most 16 rows), until g
     sizePanel(view, 120, 40);
+    assert.ok(!isOrbit(screen(view)) && screen(view).length <= 16, "the list by default\n" + screen(view).join("\n"));
+    gLayer().commands.find((c) => c.bind === "g").run();
     assert.equal(screen(view).length, 40);
     assert.ok(screen(view).every((l) => R.displayWidth(l) === 120));
     assert.ok(isOrbit(screen(view)), "the orbit");
@@ -2288,11 +2558,11 @@ test("panel scene: the orbit from 64x22 with a measured size, the list below it 
     assert.ok(isOrbit(screen(again)), "d again: 2D\n" + screen(again).join("\n"));
     // the sidebar draws the list, exactly as render() at 37 columns
     const side = state.claims[0].render({ sessionID: "ses_demo" });
-    await waitFor(() => screen(side).length > 5, 5000, "sidebar snapshot");
+    await waitFor(() => screen(side).length > 3, 5000, "sidebar snapshot");
     const spin = (l) => l.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, "*");
-    const doc = DM.demoDocument(demo, clockRef.t - 1795075000000); // the demo at the plugin's clock (d moved it on)
+    const doc = DM.demoDocument(demo, clockRef.t - 1795075000000, clockRef.t); // the demo at the plugin's clock (d moved it on)
     const shown = (l) => spin(l).trimEnd();
-    assert.deepEqual(screen(side).map(shown), R.toText(R.render(doc, { width: 37 })).split("\n").map(shown));
+    assert.deepEqual(screen(side).map(shown), R.toText(R.render(doc, { width: 37, now: clockRef.t })).split("\n").map(shown));
     assert.equal(spawned.n, 0, "demo mode spawns nothing");
   } finally {
     for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
@@ -2356,6 +2626,44 @@ test("panel scene: g always changes what is shown; too small as a side panel, it
     key("g").run();
     assert.ok(isOrbit(screen(view)), "g: the orbit");
     assert.equal(panel.calls.full, full, "g did not touch a full screen it did not enter");
+  } finally {
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    stop();
+  }
+});
+
+test("panel scene: f full screen shows the orbit, f back to a side panel the list; the list's keys are off while the orbit shows", async () => {
+  const { plugin } = makeScenePlugin({ screen: { width: 160, height: 45 } });
+  const { ctx, state, panelClaim } = makePanelHost();
+  ctx.ui.router = { navigate: () => {} };
+  const stop = plugin.setup(ctx);
+  globalThis.__agentgraphStub.cleanups.length = 0;
+  try {
+    const panel = fullscreenPanel();
+    const view = panelClaim().render(panel);
+    await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
+    sizePanel(view, 75, 39); // the side panel of a 130x40 terminal: room for the orbit, but the list is shown
+    assert.ok(!isOrbit(screen(view)) && screen(view).length <= 16, "the list in the side panel");
+    const key = (bind) => state.layers.filter((l) => (l.commands || []).some((c) => c.bind === bind)).pop().commands.find((c) => c.bind === bind);
+    assert.equal(key("down").enabled(), true);
+    key("f").run();
+    assert.equal(panel.presentation, "fullscreen");
+    sizePanel(view, 160, 45);
+    assert.ok(isOrbit(screen(view)), "f: the orbit, full screen");
+    assert.equal(key("down").enabled(), false, "no row keys on the orbit");
+    assert.equal(key("return").enabled(), false);
+    key("f").run();
+    assert.equal(panel.presentation, "panel");
+    sizePanel(view, 75, 39);
+    assert.ok(!isOrbit(screen(view)), "f again: the list");
+    assert.equal(key("down").enabled(), true);
+    // the host leaves full screen by its own key: the list, not the orbit in a side panel
+    key("f").run();
+    sizePanel(view, 160, 45);
+    assert.ok(isOrbit(screen(view)));
+    panel.presentation = "panel";
+    sizePanel(view, 75, 39);
+    assert.ok(!isOrbit(screen(view)), "the host's own key: the list");
   } finally {
     for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
     stop();
@@ -2442,14 +2750,15 @@ test("panel scene: dark or light from the theme's background; the group colours 
   // through the panel: every fg handed to the host is "#rrggbb", and the light palette is used on a light theme
   for (const [bg, table] of [[rgb(10, 10, 10), S.GROUP_COLORS.dark], [rgb(250, 250, 250), S.GROUP_COLORS.light]]) {
     const { plugin } = makeScenePlugin();
-    const { ctx, panelClaim } = makePanelHost();
+    const { ctx, state, panelClaim } = makePanelHost();
     ctx.theme = Object.assign(hostTheme(), { background: { base: bg } });
     const stop = plugin.setup(ctx);
     globalThis.__agentgraphStub.cleanups.length = 0;
     try {
       const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
-      await waitFor(() => screen(view).length > 5, 5000, "demo snapshot");
+      await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
       sizePanel(view, 120, 40);
+      pressG(state); // the panel opens on the list
       const fgs = allFg(view);
       assert.ok(fgs.length > 20);
       for (const fg of fgs) assert.match(fg, /^#[0-9a-f]{6}$/);
@@ -2474,8 +2783,9 @@ test("panel scene: frames at 100 ms while work moves; an unchanged frame is not 
   globalThis.__agentgraphStub.cleanups.length = 0;
   try {
     const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
-    await waitFor(() => screen(view).length > 5, 5000, "demo snapshot");
+    await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
     sizePanel(view, 120, 40);
+    pressG(state); // the panel opens on the list
     // the clock stands still: ticks compute the same frame and push nothing
     await sleep(150);
     const rendersStill = state.renders;

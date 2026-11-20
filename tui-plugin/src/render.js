@@ -1,9 +1,12 @@
 /*
  * Pure text rendering of an agentgraph snapshot document (WEB_API.md section 1) for a narrow terminal sidebar.
  *
- * render(snapshot, { width, frame, now }) -> Line[]
- *   Blocks, separated by one blank line, empty ones omitted: Run, Needs you, Working, Idle.
- *   Line = Span[] (an empty array is a blank line), Span = { text, tone }
+ * render(snapshot, { width, frame, now, requests, cursor, selected, keys }) -> Line[]  (layout() also returns the
+ * selectable rows)
+ *   Rows, most actionable first, no blank lines: what needs the user (requests, human gates, stuck or stalled
+ *   agents), the hub with the idle count, who works now, the task's progress in one row, spend and context in one
+ *   row, and (panel only) one dim row of keys. Empty sections are left out.
+ *   Line = Span[], Span = { text, tone }
  *   tone is one of TONES. No line is wider than `width` display columns.
  *
  * No OpenTUI or host imports: this module is shared by the plugin and the tests.
@@ -27,7 +30,7 @@ export const ELLIPSIS = "…";
 export const GROUP_ORDER = Object.freeze(["council", "decide", "build", "verify", "understand"]);
 
 const DEFAULT_WIDTH = 37;
-const NEEDS_MAX = 5;
+export const NEEDS_MAX = 5;
 
 // ---------------------------------------------------------------------------------------------------------------
 // Display width
@@ -304,95 +307,6 @@ function spinnerGlyph(frame, offset = 0) {
   return SPINNER[(((frame + offset) % SPINNER.length) + SPINNER.length) % SPINNER.length];
 }
 
-// Block 1: hub, progress, spend.
-function runBlock(doc, hub, width, frame) {
-  const working = hubWorking(doc, hub);
-  const rootName = isObject(doc.root) && typeof doc.root.agent === "string" ? doc.root.agent : "";
-  const name = clean(hub ? hub.name : rootName) || "?";
-  const graph = isObject(doc.graph) ? doc.graph : null;
-  const progress = graph && isObject(graph.progress) ? graph.progress : null;
-  const total = progress ? Math.max(0, Math.floor(Number(progress.total) || 0)) : 0;
-  const passed = progress ? Math.min(total, Math.max(0, Math.floor(Number(progress.passed) || 0))) : 0;
-  const lines = [];
-
-  // line 1
-  const count = total ? [sp(String(passed), "plain"), sp("/" + total, "muted")] : [];
-  const countW = total ? displayWidth(`${passed}/${total}`) : 0;
-  const tail = working ? 2 : 0; // " <spinner>"
-  let room = width - 2 - tail - (countW ? 1 + countW : 0);
-  let showCount = countW > 0;
-  if (showCount && room < 3) {
-    showCount = false;
-    room = width - 2 - tail;
-  }
-  const shown = truncate(name, Math.max(1, room));
-  const line = [sp(MARK_HUB, working ? "accent" : "muted"), sp(" ", "plain"), sp(shown, "plain")];
-  if (working) line.push(sp(" ", "plain"), sp(spinnerGlyph(frame), "accent"));
-  if (showCount) {
-    const gap = width - lineWidth(line) - countW;
-    line.push(sp(" ".repeat(Math.max(1, gap)), "plain"), ...count);
-  }
-  lines.push(line);
-
-  // line 2
-  if (total) {
-    let filled = Math.round((width * passed) / total);
-    if (passed > 0) filled = Math.max(1, filled);
-    if (passed < total) filled = Math.min(filled, width - 1);
-    const bar = [];
-    if (filled > 0) bar.push(sp(BAR_FULL.repeat(filled), "accent"));
-    if (width - filled > 0) bar.push(sp(BAR_EMPTY.repeat(width - filled), "muted"));
-    lines.push(bar);
-  }
-
-  // line 3
-  const totals = isObject(doc.totals) ? doc.totals : null;
-  if (totals) {
-    const cost = finiteNumber(totals.cost);
-    const tin = finiteNumber(totals.tokens_in);
-    const tout = finiteNumber(totals.tokens_out);
-    const root = isObject(doc.root) ? doc.root : null;
-    const wear = root && isObject(root.wear) ? root.wear : null;
-    const ctx = (wear ? finiteNumber(wear.context) : null) ?? (root ? finiteNumber(root.context) : null);
-    const parts = [];
-    if (cost !== null) parts.push([sp(formatDollars(cost), "plain")]);
-    const tokens = [];
-    if (tin !== null) tokens.push([...numberSpans(formatTokens(tin)), sp("↑", "muted")]);
-    if (tout !== null) tokens.push([...numberSpans(formatTokens(tout)), sp("↓", "muted")]);
-    const tokenSpans = [];
-    tokens.forEach((t, i) => tokenSpans.push(...(i ? [sp(" ", "plain")] : []), ...t));
-    if (tokenSpans.length) parts.push(tokenSpans);
-    const join = (items, sep) => {
-      const out = [];
-      items.forEach((p, i) => out.push(...(i ? [sp(sep, "plain")] : []), ...p));
-      return out;
-    };
-    // The context part, widest first: with `wear`, bar + number + summary dots, then without the dots, then the
-    // number alone; without `wear`, "ctx 124k" as before.
-    const ctxParts = ctx === null ? [] : wear ? wearParts(wear, ctx) : [[sp("ctx ", "muted"), ...numberSpans(formatTokens(ctx))]];
-    let spend = null;
-    for (const part of ctxParts) {
-      const candidate = join([...parts, part], "  ");
-      if (lineWidth(candidate) <= width) {
-        spend = candidate;
-        break;
-      }
-    }
-    if (!spend) {
-      const all = ctxParts.length ? [...parts, ctxParts[ctxParts.length - 1]] : parts;
-      spend = join(all, "  ");
-      if (lineWidth(spend) > width && ctx !== null) spend = join(all.slice(0, -1), "  ");
-      if (lineWidth(spend) > width) spend = join(all.slice(0, -1).length ? all.slice(0, -1) : all, " ");
-    }
-    if (spend.length) lines.push(spend);
-    if (wear && wear.level === "worn") {
-      const n = Math.max(0, Math.floor(Number(wear.summaries) || 0));
-      lines.push([sp(truncate(`summarized ${n} times`, width), "muted")]);
-    }
-  }
-  return lines;
-}
-
 export const WEAR_BAR_CELLS = 8;
 export const SUMMARY_DOT = "•";
 const SUMMARY_DOTS_MAX = 5;
@@ -505,122 +419,445 @@ function needsLine(entry, width) {
   return [sp(`${WAITING} ${name} waiting`, "plain")];
 }
 
-function needsBlock(doc, listed, width) {
-  const entries = needsEntries(doc, listed);
-  if (!entries.length) return [];
-  const lines = entries.slice(0, NEEDS_MAX).map((e) => needsLine(e, width));
-  if (entries.length > NEEDS_MAX) lines.push([sp(`+${entries.length - NEEDS_MAX} more`, "muted")]);
-  return lines;
+// ---------------------------------------------------------------------------------------------------------------
+// The list: what needs the user, who works now, the task's progress, spend and context, the keys.
+
+export const WORKING_MAX = 5;
+export const CURSOR = "›";
+export const QUESTION = "?";
+const MIN_WHAT = 12; // a goal narrower than this is left out
+const SECTION_GAP = "  ";
+
+// Cut `text` to at most `max` columns in the middle: "impl-supe…docious". Names are cut this way, so both ends stay.
+export function truncateMiddle(text, max) {
+  const value = String(text);
+  if (max <= 0) return "";
+  if (displayWidth(value) <= max) return value;
+  if (max <= 3) return truncate(value, max);
+  const chars = [...value];
+  const keep = max - 1;
+  const headMax = Math.ceil(keep / 2);
+  let head = "";
+  let used = 0;
+  for (const ch of chars) {
+    const w = charWidth(ch);
+    if (used + w > headMax) break;
+    head += ch;
+    used += w;
+  }
+  const tailMax = keep - used;
+  let tail = "";
+  let tailUsed = 0;
+  for (let i = chars.length - 1; i >= 0; i -= 1) {
+    const w = charWidth(chars[i]);
+    if (tailUsed + w > tailMax) break;
+    tail = chars[i] + tail;
+    tailUsed += w;
+  }
+  return head + ELLIPSIS + tail;
 }
 
-// Block 3: working agents, most expensive first, two lines each.
-function workingBlock(doc, hub, agents, width, frame) {
-  const graph = isObject(doc.graph) ? doc.graph : null;
-  const busy = agents
-    .filter((a) => a !== hub && busyCount(a) > 0)
-    .map((a, i) => ({ a, i, cost: agentCost(a) }))
-    .sort((x, y) => y.cost - x.cost || x.i - y.i);
-  const lines = [];
-  busy.forEach(({ a, cost }, index) => {
-    const raw = clean(a.group === "council" ? seatName(a.name) : a.name) || "?";
-    let n = 0;
-    for (const loop of list(graph && graph.work_loops)) if (isObject(loop) && loop.agent === a.name) n = Math.max(n, rounds(loop));
-    let loopText = n >= 2 ? ` ${LOOP_MARK}${n}` : "";
-    let costText = formatDollars(cost);
-    // "<glyph> <name><loop>" + gap + cost
-    let room = width - 2 - displayWidth(loopText) - 1 - displayWidth(costText);
-    if (room < 4 && loopText) {
-      loopText = "";
-      room = width - 2 - 1 - displayWidth(costText);
+// 42000 -> "42s", 960000 -> "16m", 3900000 -> "1h5m", 43200000 -> "12h", 2 days -> "2d"
+export function formatElapsed(ms) {
+  const s = Math.max(0, Math.floor(Number(ms) / 1000 || 0));
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m";
+  const h = Math.floor(m / 60);
+  if (h < 10) return h + "h" + (m % 60 ? (m % 60) + "m" : "");
+  if (h < 48) return h + "h";
+  return Math.floor(h / 24) + "d";
+}
+
+function epochMs(value) {
+  const n = finiteNumber(value);
+  if (n === null || n <= 0) return null;
+  return n < 1e11 ? n * 1000 : n; // seconds (the snapshot's unit) or milliseconds
+}
+
+function sessionsOf(agent) {
+  return list(agent && agent.sessions).filter((s) => isObject(s) && typeof s.id === "string" && s.id);
+}
+
+function newest(sessions) {
+  let best = null;
+  let bestAt = -Infinity;
+  for (const s of sessions) {
+    const at = epochMs(s.updated) ?? epochMs(s.created) ?? 0;
+    if (!best || at > bestAt) {
+      best = s;
+      bestAt = at;
     }
-    if (room < 2) {
-      costText = "";
-      room = width - 2 - displayWidth(loopText);
+  }
+  return best;
+}
+
+// The session Enter opens for an agent (its busy one, else its newest) and the one stop and message act on (busy only).
+function agentSessions(agent) {
+  const all = sessionsOf(agent);
+  const busy = newest(all.filter((s) => s.busy === true));
+  const open = busy || newest(all);
+  return { open: open ? open.id : null, busy: busy ? busy.id : null, busySession: busy };
+}
+
+function graphOf(doc) {
+  return isObject(doc.graph) ? doc.graph : null;
+}
+
+function busyNodeOf(graph, name) {
+  if (!graph) return null;
+  const nodes = list(graph.nodes).filter((n) => isObject(n) && n.agent === name);
+  return nodes.find((n) => n.busy === true) || nodes.find((n) => n.status === "running") || null;
+}
+
+function roundsOf(graph, name) {
+  let best = 0;
+  if (!graph) return best;
+  for (const loop of list(graph.work_loops)) if (isObject(loop) && loop.agent === name) best = Math.max(best, rounds(loop));
+  for (const loop of list(graph.loops)) if (isObject(loop) && loop.worker === name) best = Math.max(best, rounds(loop));
+  return best;
+}
+
+function displayName(agent) {
+  const name = clean(agent.name) || "?";
+  return agent.group === "council" ? seatName(name) : name;
+}
+
+// What an agent is on: its busy step's goal, else the title of its busy session.
+function whatOf(graph, agent, node) {
+  const goal = node ? clean(node.goal) : currentGoal(graph, agent.name);
+  if (goal) return goal;
+  const { busySession } = agentSessions(agent);
+  return busySession ? clean(busySession.title) : "";
+}
+
+function sinceOf(node, agent) {
+  const started = node ? epochMs(node.started) : null;
+  if (started !== null) return started;
+  const { busySession } = agentSessions(agent);
+  return busySession ? epochMs(busySession.created) : null;
+}
+
+// Requests the host knows about (`requests`: [{ kind: "permission" | "question", session, count?, title? }]), then
+// ready human gates, stuck loops, and failed, blocked or stalled steps. A gate that refuted is the review loop doing its
+// job: it is on the progress line, not here. One entry per agent, most urgent first.
+function needsItems(doc, agents, hub, requests) {
+  const graph = graphOf(doc);
+  const byName = new Map(agents.map((a) => [a.name, a]));
+  const bySession = new Map();
+  for (const a of agents) for (const s of sessionsOf(a)) bySession.set(s.id, a);
+  const rootId = isObject(doc.root) && typeof doc.root.id === "string" ? doc.root.id : null;
+  if (rootId && hub && !bySession.has(rootId)) bySession.set(rootId, hub);
+  const items = [];
+  const seen = new Set();
+  const push = (who, item) => {
+    if (seen.has(who)) return;
+    seen.add(who);
+    items.push(item);
+  };
+  const forAgent = (agent, rest) => {
+    const node = busyNodeOf(graph, agent.name);
+    const sessions = agentSessions(agent);
+    return Object.assign({
+      agent: agent.name, name: displayName(agent), hub: agent === hub, open: sessions.open, busy: agent !== hub ? sessions.busy : null,
+      what: whatOf(graph, agent, node), since: busyCount(agent) > 0 ? sinceOf(node, agent) : null, rounds: roundsOf(graph, agent.name),
+    }, rest);
+  };
+
+  for (const kind of ["permission", "question"]) {
+    for (const r of list(requests)) {
+      if (!isObject(r) || r.kind !== kind || typeof r.session !== "string" || !r.session) continue;
+      const agent = bySession.get(r.session);
+      const label = kind === "permission" ? "wants permission" : "asks you";
+      const mark = kind === "permission" ? ATTENTION : QUESTION;
+      const n = Math.max(1, Math.floor(Number(r.count) || 1));
+      const what = clean(r.what) || (n > 1 ? `${n} requests` : "");
+      if (agent) {
+        const rest = { key: `${kind}:${r.session}`, kind, mark, tone: kind === "permission" ? "danger" : "accent", label, open: r.session };
+        if (what) rest.what = what;
+        push(agent.name, forAgent(agent, rest));
+      } else {
+        push("session:" + r.session, {
+          key: `${kind}:${r.session}`, kind, mark, tone: kind === "permission" ? "danger" : "accent", agent: null, name: clean(r.title) || "a session",
+          label, what, open: r.session, busy: null, since: null, hub: false,
+        });
+      }
     }
-    const name = truncate(raw, Math.max(1, room));
-    const line = [sp(spinnerGlyph(frame, index), "accent"), sp(" ", "plain"), sp(name, "plain")];
-    if (loopText) line.push(sp(loopText, "accent"));
-    if (costText) {
-      const gap = width - lineWidth(line) - displayWidth(costText);
-      line.push(sp(" ".repeat(Math.max(1, gap)), "plain"), sp(costText, "muted"));
-    }
-    lines.push(line);
-    const goal = currentGoal(graph, a.name);
-    if (goal && width > 2) lines.push([sp("  ", "plain"), sp(truncate(goal, width - 2), "muted")]);
+  }
+  if (!graph) return items;
+  const statusOf = new Map(list(graph.nodes).filter(isObject).map((n) => [n.id, n.status]));
+  for (const node of list(graph.nodes)) {
+    if (!isObject(node) || node.type !== "human") continue;
+    const ready = node.status === "running" || (node.status === "pending" && list(node.depends_on).every((d) => statusOf.get(d) === "passed"));
+    if (!ready) continue;
+    push("human:" + node.id, {
+      key: `human:${node.id}`, kind: "human", mark: QUESTION, tone: "accent", agent: null, name: "you", label: "to decide",
+      what: clean(node.goal), open: rootId, busy: null, since: epochMs(node.started), hub: false,
+    });
+  }
+  for (const loop of list(graph.work_loops)) {
+    if (!isObject(loop) || loop.state !== "stuck" || !byName.has(loop.agent)) continue;
+    push(loop.agent, forAgent(byName.get(loop.agent), { key: `stuck:${loop.agent}`, kind: "stuck", mark: ATTENTION, tone: "danger", label: "stuck" }));
+  }
+  for (const node of list(graph.nodes)) {
+    if (!isObject(node) || !byName.has(node.agent)) continue;
+    const stalled = node.stalled === true;
+    if (!stalled && node.status !== "failed" && node.status !== "blocked") continue;
+    if (!stalled && node.type === "gate" && node.status === "failed") continue; // a refuting gate: the progress line
+    const label = stalled ? "stalled" : node.status;
+    const agent = byName.get(node.agent);
+    const attempts = Math.max(0, Math.floor(Number(node.attempts) || 0));
+    push(node.agent, forAgent(agent, {
+      key: `${label}:${node.agent}`, kind: label, mark: ATTENTION, tone: "danger", label, what: clean(node.goal) || whatOf(graph, agent, null),
+      rounds: Math.max(roundsOf(graph, node.agent), attempts),
+    }));
+  }
+  return items;
+}
+
+// One row: "<mark> <name><tail>  <what>          <right>". The name is cut in the middle, the goal at its end; the
+// goal goes when it would be narrower than MIN_WHAT, the right part when even the name does not fit.
+function composeRow(width, { head, name, nameTone = "plain", tail = [], what = "", right = "", rightTone = "muted" }) {
+  const headW = lineWidth(head);
+  const tailW = lineWidth(tail);
+  let rightText = right || "";
+  const room = () => width - headW - tailW - (rightText ? 1 + displayWidth(rightText) : 0);
+  const nameCap = Math.max(12, Math.floor(width * 0.4));
+  if (room() < Math.min(displayWidth(name), nameCap)) rightText = ""; // the name before the right part
+  const avail = Math.max(1, room());
+  const nameMax = Math.min(avail, nameCap);
+  const shown = truncateMiddle(name, nameMax);
+  const line = [...head, sp(shown, nameTone), ...tail];
+  const left = avail - displayWidth(shown);
+  if (what && left >= SECTION_GAP.length + MIN_WHAT) line.push(sp(SECTION_GAP, "plain"), sp(truncate(what, left - SECTION_GAP.length), "muted"));
+  if (rightText) {
+    const gap = width - lineWidth(line) - displayWidth(rightText);
+    line.push(sp(" ".repeat(Math.max(1, gap)), "plain"), sp(rightText, rightTone));
+  }
+  return line;
+}
+
+const elapsedText = (since, now) => (since !== null && since !== undefined && now !== null ? formatElapsed(now - since) : "");
+
+function needsRow(item, width, now) {
+  const loop = item.rounds >= 2 ? [sp(` ${LOOP_MARK}${item.rounds}`, "accent")] : [];
+  return composeRow(width, {
+    head: [sp(item.mark, item.tone), sp(" ", "plain")],
+    name: item.name,
+    tail: [sp(" " + item.label, item.tone), ...loop],
+    what: item.what,
+    right: elapsedText(item.since, now),
   });
-  return lines;
 }
 
-// Block 4: everything idle, one line per group.
-function idleBlock(agents, hub, width) {
-  const byGroup = new Map();
-  for (const agent of agents) {
-    if (agent === hub || busyCount(agent) > 0) continue;
-    const group = typeof agent.group === "string" && agent.group ? agent.group : "build";
-    if (!byGroup.has(group)) byGroup.set(group, []);
-    byGroup.get(group).push(agent);
-  }
-  const order = GROUP_ORDER.filter((g) => byGroup.has(g));
-  for (const g of byGroup.keys()) if (!order.includes(g)) order.push(g);
+function hubRow(doc, hub, idle, width, frame) {
+  const working = hubWorking(doc, hub);
+  const rootName = isObject(doc.root) && typeof doc.root.agent === "string" ? doc.root.agent : "";
+  const name = clean(hub ? hub.name : rootName) || "?";
+  const title = isObject(doc.root) ? clean(doc.root.title) : "";
+  return composeRow(width, {
+    head: [sp(MARK_HUB, working ? "accent" : "muted"), sp(" ", "plain")],
+    name,
+    tail: working ? [sp(" ", "plain"), sp(spinnerGlyph(frame), "accent")] : [],
+    what: title,
+    right: idle > 0 ? `${idle} idle` : "",
+  });
+}
 
-  const lines = [];
-  for (const group of order) {
-    let members = byGroup.get(group);
-    if (group === "council") {
-      const lead = members.find((a) => a.name === "council");
-      if (lead) members = [lead, ...members.filter((a) => a !== lead)];
-    }
-    const names = members.map((a) => clean(group === "council" ? seatName(a.name) : a.name) || "?");
-    let prefix = MARK_IDLE + " ";
-    let current = "";
-    const flush = () => {
-      lines.push([sp(prefix + current, "muted")]);
-      prefix = "  ";
-      current = "";
-    };
-    for (const raw of names) {
-      const name = truncate(raw, Math.max(1, width - 2));
-      if (current && displayWidth(prefix + current) + 1 + displayWidth(name) > width) flush();
-      current = current ? current + " " + name : name;
-    }
-    if (current) flush();
+function workingRow(item, width, frame, index, now) {
+  const loop = item.rounds >= 2 ? [sp(` ${LOOP_MARK}${item.rounds}`, "accent")] : [];
+  return composeRow(width, {
+    head: [sp(spinnerGlyph(frame, index + 1), "accent"), sp(" ", "plain")],
+    name: item.name,
+    tail: loop,
+    what: item.what,
+    right: elapsedText(item.since, now),
+  });
+}
+
+// The gate the task is at: among the gates (and human gates) that have not passed, the first whose producer (a node
+// it depends on or sends work back to) is running or returned; else the first, in the graph's order. A refuted gate
+// whose work is being redone is the review loop at work (the live tone); a gate that is blocked, failed, or refuted
+// with nobody on it is the danger tone. `label: false` leaves out the word "gate".
+function currentGate(graph) {
+  const nodes = list(graph.nodes).filter(isObject);
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const producing = (gate) => [...list(gate.depends_on), ...list(gate.feedback_to)].some((id) => {
+    const n = byId.get(id);
+    return !!n && (n.status === "running" || n.status === "returned" || n.busy === true);
+  });
+  const open = nodes.filter((n) => (n.type === "gate" || n.type === "human") && n.status !== "passed");
+  const gate = open.find(producing) || open[0] || null;
+  return gate ? { gate, reworked: producing(gate) } : null;
+}
+
+function gateSpans(graph, passed, total, label = true) {
+  if (graph.status === "passed" || (total > 0 && passed >= total)) return [sp("done", "muted")];
+  const found = currentGate(graph);
+  if (!found) return [];
+  const { gate, reworked } = found;
+  const who = gate.type === "human" ? "you" : clean(gate.agent) || "?";
+  const word = (text) => (label ? [sp(text, "muted")] : []);
+  if (gate.status === "failed" || gate.status === "blocked") {
+    const verdict = clean(gate.verdict) || gate.status;
+    const tone = gate.status === "failed" && verdict === "refuted" && reworked ? "accent" : "danger";
+    return [...word("gate "), sp(who, "plain"), sp(" " + verdict, tone)];
   }
-  return lines;
+  if (gate.status === "running" || gate.status === "returned" || gate.busy === true) return [...word("gate "), sp(who, "plain"), sp(" checking", "accent")];
+  return [...word("next gate "), sp(who, "plain")];
+}
+
+export const PROGRESS_BAR_CELLS = 10;
+
+function progressRow(doc, width) {
+  const graph = graphOf(doc);
+  const progress = graph && isObject(graph.progress) ? graph.progress : null;
+  const total = progress ? Math.max(0, Math.floor(Number(progress.total) || 0)) : 0;
+  if (!total) return null;
+  const passed = Math.min(total, Math.max(0, Math.floor(Number(progress.passed) || 0)));
+  let filled = Math.round((PROGRESS_BAR_CELLS * passed) / total);
+  if (passed > 0) filled = Math.max(1, filled);
+  if (passed < total) filled = Math.min(filled, PROGRESS_BAR_CELLS - 1);
+  const bar = [];
+  if (filled > 0) bar.push(sp(BAR_FULL.repeat(filled), "accent"));
+  if (PROGRESS_BAR_CELLS - filled > 0) bar.push(sp(BAR_EMPTY.repeat(PROGRESS_BAR_CELLS - filled), "muted"));
+  const count = [sp(String(passed), "plain"), sp("/" + total, "muted")];
+  const gate = gateSpans(graph, passed, total);
+  const task = clean(graph.task);
+  const join = (...parts) => {
+    const out = [];
+    for (const p of parts.filter((x) => x && x.length)) out.push(...(out.length ? [sp(SECTION_GAP, "plain")] : []), ...p);
+    return out;
+  };
+  const withBar = [...bar, sp(" ", "plain"), ...count];
+  const candidates = [];
+  if (task) {
+    const taskRoom = width - lineWidth(join(withBar, gate)) - SECTION_GAP.length;
+    if (taskRoom >= 8) candidates.push(join(withBar, [sp(truncateMiddle(task, taskRoom), "muted")], gate));
+  }
+  candidates.push(join(withBar, gate), join(count, gate), join(count, gateSpans(graph, passed, total, false)), withBar, count);
+  return candidates.find((c) => lineWidth(c) <= width) || count;
+}
+
+function costRow(doc, width) {
+  const totals = isObject(doc.totals) ? doc.totals : null;
+  const cost = totals ? finiteNumber(totals.cost) : null;
+  const root = isObject(doc.root) ? doc.root : null;
+  const wear = root && isObject(root.wear) ? root.wear : null;
+  const ctx = (wear ? finiteNumber(wear.context) : null) ?? (root ? finiteNumber(root.context) : null);
+  const money = cost !== null ? [sp(formatDollars(cost), "plain")] : [];
+  const label = sp("ctx ", "muted");
+  const ctxParts = ctx === null ? [] : wear ? wearParts(wear, ctx).map((p) => [label, ...p]) : [[label, ...numberSpans(formatTokens(ctx))]];
+  for (const part of ctxParts) {
+    const line = money.length ? [...money, sp(SECTION_GAP, "plain"), ...part] : part;
+    if (lineWidth(line) <= width) return line;
+  }
+  return money.length ? money : ctxParts.length ? ctxParts[ctxParts.length - 1] : null;
+}
+
+// The keys: [[key, label], ...] -> one muted line of the pairs that fit, in order.
+function keysRow(keys, width) {
+  let text = "";
+  for (const pair of list(keys)) {
+    if (!Array.isArray(pair) || pair.length < 2) continue;
+    const piece = `${pair[0]} ${pair[1]}`;
+    const next = text ? text + SECTION_GAP + piece : piece;
+    if (displayWidth(next) > width) break;
+    text = next;
+  }
+  return text ? [sp(text, "muted")] : null;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
 // Entry point
 
-export function render(snapshot, options = {}) {
+// layout(snapshot, { width, frame, now, requests, cursor, selected, keys }) -> { lines, items, selected }
+//   lines: the rows, each at most `width` columns. items: the rows that can be selected, in order, each
+//   { key, line, kind, agent, name, hub, open, busy }: `open` the session Enter opens, `busy` the running session stop
+//   and message act on (null for the hub and for agents that do not work). selected: the selected item's key (the
+//   first item's when `selected` names none). With `cursor` every row has a one-column gutter, `›` on the selected
+//   row; `keys` adds the dim key line ([[key, label], ...]).
+export function layout(snapshot, options = {}) {
   const width = Math.max(1, Math.floor(Number(options.width) || DEFAULT_WIDTH));
-  const now = Number(options.now);
+  const now = Number.isFinite(Number(options.now)) && options.now !== null && options.now !== undefined ? Number(options.now) : null;
   const frame = Number.isFinite(Number(options.frame))
     ? Math.floor(Number(options.frame))
-    : Number.isFinite(now) ? Math.floor(now / 120) : 0;
+    : now !== null ? Math.floor(now / 120) : 0;
   const finish = (lines) => lines.map((line) => clipLine(line, width));
+  const single = (line) => ({ lines: finish([line]), items: [], selected: null });
 
-  if (snapshot === undefined || snapshot === null) return finish([[sp("Loading", "muted")]]);
-  if (!isObject(snapshot)) return finish([[sp("Bad snapshot", "danger")]]);
+  if (snapshot === undefined || snapshot === null) return single([sp("Loading", "muted")]);
+  if (!isObject(snapshot)) return single([sp("Bad snapshot", "danger")]);
   if (snapshot.error !== undefined && snapshot.error !== null) {
-    return finish([[sp(truncate(clean(snapshot.error) || "unknown error", width), "danger")]]);
+    return single([sp(truncate(clean(snapshot.error) || "unknown error", width), "danger")]);
   }
-
   const agents = validAgents(snapshot);
-  if (!agents.length) return finish([[sp("No agents", "muted")]]);
-  const listed = new Set(agents.map((a) => a.name));
-  const hub = findHub(snapshot, agents);
+  if (!agents.length) return single([sp("No agents", "muted")]);
 
-  const lines = [];
-  const add = (block) => {
-    if (!block.length) return;
-    if (lines.length) lines.push([]);
-    lines.push(...block);
-  };
-  add(runBlock(snapshot, hub, width, frame));
-  add(needsBlock(snapshot, listed, width));
-  add(workingBlock(snapshot, hub, agents, width, frame));
-  add(idleBlock(agents, hub, width));
-  return finish(lines);
+  const cursor = options.cursor === true && width > 2;
+  const inner = cursor ? width - 1 : width;
+  const at = now ?? epochMs(snapshot.generated);
+  const graph = graphOf(snapshot);
+  const hub = findHub(snapshot, agents);
+  const rows = []; // { line, item? }
+
+  // 1. what needs the user
+  const needs = needsItems(snapshot, agents, hub, options.requests);
+  const shownNeeds = needs.length > NEEDS_MAX + 1 ? needs.slice(0, NEEDS_MAX) : needs;
+  for (const item of shownNeeds) rows.push({ line: needsRow(item, inner, at), item });
+  if (shownNeeds.length < needs.length) rows.push({ line: [sp(`+${needs.length - shownNeeds.length} more`, "muted")] });
+
+  // 2. who works now: the hub, then the others (longest at it first); idle agents are a count on the hub's row
+  const flagged = new Set(needs.map((n) => n.agent).filter(Boolean));
+  const working = agents
+    .filter((a) => a !== hub && busyCount(a) > 0 && !flagged.has(a.name))
+    .map((a, i) => {
+      const node = busyNodeOf(graph, a.name);
+      const sessions = agentSessions(a);
+      return {
+        key: `agent:${a.name}`, kind: "working", agent: a.name, name: displayName(a), hub: false, open: sessions.open, busy: sessions.busy,
+        what: whatOf(graph, a, node), since: sinceOf(node, a), rounds: roundsOf(graph, a.name), order: i,
+      };
+    })
+    .sort((x, y) => (x.since ?? Infinity) - (y.since ?? Infinity) || x.order - y.order);
+  const idle = agents.filter((a) => a !== hub && busyCount(a) <= 0 && !flagged.has(a.name)).length;
+  if (!flagged.has(hub ? hub.name : "")) {
+    const rootId = isObject(snapshot.root) && typeof snapshot.root.id === "string" ? snapshot.root.id : null;
+    const hubSessions = hub ? agentSessions(hub) : { open: null };
+    rows.push({
+      line: hubRow(snapshot, hub, idle, inner, frame),
+      item: { key: `agent:${hub ? hub.name : "hub"}`, kind: "hub", agent: hub ? hub.name : null, name: hub ? displayName(hub) : "hub", hub: true, open: rootId || hubSessions.open, busy: null },
+    });
+  }
+  const shownWorking = working.length > WORKING_MAX + 1 ? working.slice(0, WORKING_MAX) : working;
+  shownWorking.forEach((item, i) => rows.push({ line: workingRow(item, inner, frame, i, at), item }));
+  if (shownWorking.length < working.length) rows.push({ line: [sp(`+${working.length - shownWorking.length} more working`, "muted")] });
+  // the hub needs the user, so its row is up there without the idle count: the count gets a row of its own
+  if (hub && flagged.has(hub.name) && idle > 0) rows.push({ line: [sp(MARK_IDLE, "muted"), sp(` ${idle} idle`, "muted")] });
+
+  // 3. the task's progress, 4. spend and context, 5. the keys
+  const progress = progressRow(snapshot, inner);
+  if (progress) rows.push({ line: progress });
+  const cost = costRow(snapshot, inner);
+  if (cost && cost.length) rows.push({ line: cost });
+  const keys = options.keys ? keysRow(options.keys, inner) : null;
+  if (keys) rows.push({ line: keys });
+
+  const selectable = rows.filter((r) => r.item);
+  const selected = selectable.some((r) => r.item.key === options.selected) ? options.selected : selectable.length ? selectable[0].item.key : null;
+  const lines = rows.map((r) => (cursor ? [sp(r.item && r.item.key === selected ? CURSOR : " ", "accent"), ...r.line] : r.line));
+  const items = [];
+  rows.forEach((r, i) => {
+    if (!r.item) return;
+    const { key, kind, agent, name, hub: isHub, open, busy } = r.item;
+    items.push({ key, line: i, kind, agent, name, hub: !!isHub, open: open || null, busy: busy || null });
+  });
+  return { lines: finish(lines), items, selected };
+}
+
+// render(snapshot, options) -> the lines of layout().
+export function render(snapshot, options = {}) {
+  return layout(snapshot, options).lines;
 }
 
 // Plain text of the lines (tests, `node -e` previews).

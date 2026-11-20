@@ -23,13 +23,28 @@ exactly: OK"` in <scratch>/proj (about $0.004) and saves its id in session.txt.
 
 AGENTGRAPH_TUI_DEBUG=<file> is passed to the app: the plugin appends every error it swallows to that file.
 
-The orbit (the full-panel scene):
+The list (what the panel opens on):
     --demo          start the app with AGENTGRAPH_TUI_DEMO=1 (the plugin draws the saved demo document, moving,
-                    without Python), and require the 2D scene: the hub ring (the hub's glyph inside the canvas with
-                    braille dots round it and open cells beside it), at least 8 agent names over at least 6 rows on
-                    both sides of the hub, at least 3 group colours, the context chart, and two captures 1 s apart
-                    that differ. Without --demo, AGENTGRAPH_TUI_DEMO is removed from the app's environment.
-    --fullscreen    press `f` once the view shows (the panel's full-screen key), before the captures.
+                    without Python). Without --fullscreen or --expect-scene, require the busy list (see list_report):
+                    at most 16 rows, the hub row with its idle count, at least 2 rows of agents at work besides the
+                    hub (a spinner row, or a needs-you row with an elapsed time), at least one of them a spinner row, the progress row, the
+                    key line last, and two captures 1 s apart that differ (the spinners). Without --demo,
+                    AGENTGRAPH_TUI_DEMO is removed from the app's environment.
+    --dialog        only with --demo and without --session (refused otherwise, before anything starts): press `s` on the selected row (the stalled agent), require the host's
+                    confirm dialog, press the down arrow and Enter in it, and require that the cursor did not move and
+                    that the panel did not open a session (the plugin's debug log has no `action: open`). Enter answers
+                    the confirm: if it confirms, the plugin asks the host to interrupt the demo's made-up session id,
+                    which no real session has.
+    --open          without --demo (a real session, at rest the hub row is the only row): press Enter and require that
+                    the plugin asked the host to open the hub's session (the debug log: `action: open <session>`, the
+                    session this script opened) with no error, and that the session is still on screen.
+    --selftest      check list_report on built-in screens and exit (no app, no pyte).
+
+The orbit (the full-panel scene):
+    --fullscreen    press `f` once the view shows (the panel's full-screen key), before the captures. With --demo,
+                    require the 2D scene: the hub ring (the hub's glyph inside the canvas with braille dots round it
+                    and open cells beside it), at least 8 agent names over at least 6 rows on both sides of the hub,
+                    at least 3 group colours, the context chart, and two captures 1 s apart that differ.
     --expect-scene  require the scene without --demo (the hub ring).
     --view3d        after the 2D captures press `d` (the orbit's 2D/3D key), wait 1 s and capture the 3D view, then
                     again 1 s later. Requires (with --demo) at least 8 agent names, `@`, `0` and `1` inside the canvas
@@ -64,8 +79,7 @@ sys.path.insert(0, os.environ.get("PYTEPATH", os.path.join(SCRATCH, "pylib")))
 try:
     import pyte  # noqa: E402
 except ImportError:
-    print("pyte is missing: pip install --target <folder> pyte, then set PYTEPATH=<folder>", file=sys.stderr)
-    sys.exit(2)
+    pyte = None  # --selftest needs no terminal; everything else stops in main()
 
 HUB = "◉ orchestrator"
 TOAST = re.compile(r"Plugin failed|Open plugins|run opencode plugin update|Run /plugins")
@@ -392,6 +406,177 @@ def colour_runs(screen, found):
     return runs
 
 
+LIST_WORK = re.compile(r"^(?:[" + SPIN + r"] \S|◉ \S+ [" + SPIN + r"]|[!?] .* \d+(?:s|m|h|d|h\d+m)$)")
+LIST_KEYS = re.compile(r"\bg graph\b.*\bq close$")
+
+
+def list_rows(lines, found):
+    """-> the list's rows from the screen: the needs-you rows above the hub row (same column) and the view."""
+    row, col, view = found
+    above = []
+    r = row - 1
+    while r >= 0 and re.match(r"[!?↩] \S", lines[r][col:]):
+        above.insert(0, re.split(r"[┃│]", lines[r][col:col + 100])[0].rstrip())
+        r -= 1
+    return above + [v for v in view if v.strip()]
+
+
+def list_report(rows):
+    """-> (problems, facts) for the busy list of the demo: rows as list_rows gives them (no cursor gutter)."""
+    problems, facts = [], []
+    work = [r for r in rows if LIST_WORK.search(r) and not r.startswith(HUB)]  # the hub's own row does not count
+    hub = [r for r in rows if r.startswith(HUB)]
+    progress = [r for r in rows if re.search(r"\b\d+/\d+\b", r) and not r.startswith(HUB)]
+    facts.append(f"{len(rows)} rows, {len(work)} at work, hub {'yes' if hub else 'no'}, progress {'yes' if progress else 'no'}, "
+                 f"keys {'yes' if rows and LIST_KEYS.search(rows[-1]) else 'no'}")
+    if len(rows) > 16:
+        problems.append(f"{len(rows)} rows, more than 16")
+    if not hub or not re.search(r" \d+ idle$", hub[0]):
+        problems.append("no hub row with the idle count")
+    if len(work) < 2:
+        problems.append(f"{len(work)} rows of agents at work besides the hub, fewer than 2")
+    if not any(re.match(r"[" + SPIN + r"] \S", r) for r in work):
+        problems.append("no spinner row: no agent besides the hub is shown working")
+    if not progress:
+        problems.append("no progress row")
+    if not rows or not LIST_KEYS.search(rows[-1]):
+        problems.append("the key line is not last")
+    return problems, facts
+
+
+SELFTEST_LIST = [
+    "! impl-claude stalled ↻5  Apply the limiter in the middleware chain     7m",
+    "◉ orchestrator ⠴  Add per-user rate limiting                       11 idle",
+    "⠦ designer  429 error page and retry-after message                      6m",
+    "━━━━────── 4/11  add-rate-limit  gate reviewer refuted",
+    "$6.80  ctx ━─────── 34.7k •••3",
+    "↑↓ select  ⏎ open  s stop  m message  g graph  q close",
+]
+
+
+def refuse(demo, dialog, session_given):
+    """-> why these options must not run, or None. `--dialog` presses `s` (stop) on the selected row: only the demo's
+    made-up sessions may be there, so it needs --demo and refuses an explicit --session."""
+    if dialog and not demo:
+        return "--dialog presses s (stop) on the selected row: it runs only with --demo"
+    if dialog and session_given:
+        return "--dialog presses s (stop) on the selected row: not with --session"
+    return None
+
+
+def selftest():
+    """list_report and list_rows on built-in screens: the demo list passes; the orbit, a short list, a list without
+    keys and a list without the progress row fail."""
+    gutter = lambda rows: ["›" + rows[0]] + [" " + r for r in rows[1:]]
+    screen = [" " * 10 + l for l in gutter(SELFTEST_LIST)]
+    found = find_view(screen)
+    cases = [
+        ("the demo list from the screen", list_rows(screen, found) if found else [], True),
+        ("the demo list", SELFTEST_LIST, True),
+        ("the orbit", ["◉ orchestrator                                $6.57"] + ["      ⠤⠤⠤⠤  ⠒⠒ ⠉⠉"] * 30, False),
+        ("only the hub at work", [SELFTEST_LIST[1]] + SELFTEST_LIST[3:], False),
+        ("the hub and one other at work", SELFTEST_LIST[1:], False),
+        ("the hub and two needs-you rows, no spinner row",
+         [SELFTEST_LIST[0], "? designer asks you                                                    6m"] + [SELFTEST_LIST[1]] + SELFTEST_LIST[3:], False),
+        ("the hub, one spinner row and one needs-you row", SELFTEST_LIST, True),
+        ("no key line", SELFTEST_LIST[:-1], False),
+        ("no progress row", SELFTEST_LIST[:3] + SELFTEST_LIST[4:], False),
+        ("no idle count", [SELFTEST_LIST[0], "◉ orchestrator ⠴  Add per-user rate limiting"] + SELFTEST_LIST[2:], False),
+    ]
+    wrong = []
+    for name, rows, good in cases:
+        problems, _ = list_report(rows)
+        if (not problems) != good:
+            wrong.append(f"{name}: {'passed' if not problems else 'failed: ' + '; '.join(problems)}")
+    refusals = [((True, True, False), False), ((False, True, False), True), ((True, True, True), True),
+                ((False, True, True), True), ((False, False, True), False), ((True, False, False), False)]
+    for (demo, dialog, given), refused in refusals:
+        if (refuse(demo, dialog, given) is not None) != refused:
+            wrong.append(f"refuse(demo={demo}, dialog={dialog}, session={given}): {'refused' if not refused else 'allowed'}")
+    cases += refusals
+    for line in wrong:
+        print("selftest: WRONG " + line)
+    if wrong:
+        return 1
+    print(f"selftest: {len(cases)} cases, all as expected")
+    return 0
+
+
+def debug_lines():
+    try:
+        return open(DEBUG_LOG, encoding="utf8").read().splitlines() if DEBUG_LOG else []
+    except OSError:
+        return []
+
+
+def cursor_row(lines, found):
+    """-> the screen row of the list's cursor (`›` just left of the view's column), or None."""
+    _, col, _ = found
+    if col < 1:
+        return None
+    for r, line in enumerate(lines):
+        if len(line) > col and line[col - 1] == "›":
+            return r
+    return None
+
+
+def drive_dialog(term, found_lines):
+    """--dialog: `s` on the selected row, then down and Enter inside the host's confirm. -> (problems, facts, screens)"""
+    problems, facts, screens = [], [], []
+    found = find_view(found_lines)
+    before = cursor_row(found_lines, found) if found else None
+    opened_before = sum("action: open" in l for l in debug_lines())
+    term.write(b"s")
+    term.pump(1.5)
+    shown = term.lines()
+    screens.append(("after s", shown))
+    if not any("Stop impl-claude?" in l for l in shown):
+        problems.append("dialog: no `Stop impl-claude?` confirm on screen after s")
+    term.write(b"\x1b[B")  # down: the dialog has the keys, the panel's cursor must not move
+    term.pump(1.0)
+    under = term.lines()
+    screens.append(("down in the dialog", under))
+    term.write(b"\r")  # Enter answers the confirm, and must not also reach the panel
+    term.pump(2.0)
+    after = term.lines()
+    screens.append(("Enter in the dialog", after))
+    if any("Stop impl-claude?" in l for l in after):
+        problems.append("dialog: still open after Enter")
+    now = cursor_row(after, found) if found else None  # the column found before: a toast may cover the hub row now
+    facts.append(f"cursor row before {before}, after down and Enter {now}")
+    if before is None or now != before:
+        problems.append(f"dialog: the cursor moved ({before} -> {now})")
+    log = debug_lines()
+    opened = sum("action: open" in l for l in log)
+    facts += [l.split(" ", 1)[1] for l in log if "action:" in l][-4:]
+    if opened != opened_before:
+        problems.append("dialog: Enter in the confirm also opened a session")
+    return problems, facts, screens
+
+
+def drive_open(term, lines, session):
+    """--open: Enter on the hub row. -> (problems, facts, screen)"""
+    problems, facts = [], []
+    found = find_view(lines)
+    row = cursor_row(lines, found) if found else None
+    if found is None or row != found[0]:
+        problems.append(f"open: the cursor is not on the hub row (cursor {row}, hub {found[0] if found else None})")
+    term.write(b"\r")
+    term.pump(2.5)
+    after = term.lines()
+    log = debug_lines()
+    asked = [l for l in log if "action: open" in l]
+    facts += [l.split(" ", 1)[1] for l in asked]
+    if not any(l.endswith(f"action: open {session}") for l in asked):
+        problems.append(f"open: the plugin did not ask the host to open {session}")
+    errors = [l for l in log if " open:" in l]
+    if errors:
+        problems.append("open: " + errors[-1])
+    if not any("ctrl+p" in l or "commands" in l for l in after):
+        problems.append("open: the session is not on screen after Enter")
+    return problems, facts, after
+
+
 def drive(term, args):
     started = term.wait_for(lambda ls: any("ctrl+p" in l or "commands" in l for l in ls), 40)
     term.pump(4)  # let plugins load and the first sidebar snapshot arrive
@@ -431,6 +616,13 @@ def drive(term, args):
         seen3d = screen_colours(term.screen)
         term.pump(1.0)
         view3d = (first3, term.lines(), seen3d)
+    extra = None
+    if args.dialog and find_view(lines) is not None:
+        extra = ("dialog",) + drive_dialog(term, lines)
+    elif args.open and find_view(lines) is not None:
+        p, f, after = drive_open(term, lines, args.session_id)
+        extra = ("open", p, f, [("after Enter", after)])
+    args.extra = extra
     after_q = None
     if not args.no_graph and find_view(lines) is not None:
         # `q` is this plugin's close key while its panel has the keyboard
@@ -722,21 +914,37 @@ def main():
     parser.add_argument("--gcheck", action="store_true", help="press g twice and require the view to switch and come back")
     parser.add_argument("--pre", default="", help="keys before --gcheck's first capture: f, d, g, R (close and reopen)")
     parser.add_argument("--view3d", action="store_true", help="press d after the 2D captures and check the 3D view")
+    parser.add_argument("--dialog", action="store_true", help="with --demo: s, then down and Enter in the confirm; nothing leaks")
+    parser.add_argument("--open", action="store_true", help="without --demo: Enter on the hub row opens its session")
+    parser.add_argument("--selftest", action="store_true", help="check list_report on built-in screens and exit")
     args = parser.parse_args()
+    if args.selftest:
+        return selftest()
+    why = refuse(args.demo, args.dialog, any(a == "--session" or a.startswith("--session=") for a in sys.argv[1:]))
+    if why:
+        print("real-host.py: " + why, file=sys.stderr)
+        return 2
+    if pyte is None:
+        print("pyte is missing: pip install --target <folder> pyte, then set PYTEPATH=<folder>", file=sys.stderr)
+        return 2
     global DEMO, DEBUG_LOG
     DEMO = args.demo
     if args.gcheck and not DEBUG_LOG:
         DEBUG_LOG = os.path.join(SCRATCH, "gcheck-debug.log")
+    if (args.dialog or args.open) and not DEBUG_LOG:
+        DEBUG_LOG = os.path.join(SCRATCH, "actions-debug.log")
+    args.list_mode = args.demo and not args.fullscreen and not args.expect_scene and not args.view3d
     cols, rows = (int(n) for n in args.size.lower().split("x"))
     proj = os.path.join(SCRATCH, "proj")
     os.makedirs(SCRATCH, exist_ok=True)
     session = args.session or ensure_session(args.binary, proj)
+    args.session_id = session
 
-    label = f"{cols}x{rows}{'-nograph' if args.no_graph else ''}{'-demo' if args.demo else ''}{'-full' if args.fullscreen else ''}{'-3d' if args.view3d else ''}{'-g' + args.pre if args.gcheck else ''}"
+    label = f"{cols}x{rows}{'-nograph' if args.no_graph else ''}{'-demo' if args.demo else ''}{'-dialog' if args.dialog else ''}{'-open' if args.open else ''}{'-full' if args.fullscreen else ''}{'-3d' if args.view3d else ''}{'-g' + args.pre if args.gcheck else ''}"
     term = None
     try:
         term = Term([args.binary, "--standalone", "-s", session, proj], proj, cols, rows, os.path.join(SCRATCH, f"raw-{label}.bin"))
-        if DEBUG_LOG and args.gcheck:
+        if DEBUG_LOG and (args.gcheck or args.dialog or args.open):
             open(DEBUG_LOG, "w").close()
         term.start()
         if args.gcheck:
@@ -772,7 +980,22 @@ def main():
     differs = lines != second
     print(f"===== {label}: two captures 1 s apart {'differ' if differs else 'are the same'}"
           + (f" ({sum(a != b for a, b in zip(lines, second))} rows changed)" if differs else ""))
-    if args.demo or args.expect_scene:
+    if args.list_mode:
+        rows_l = list_rows(lines, found)
+        print(f"===== {label}: the list's rows")
+        for line in rows_l:
+            print(f"   |{line}")
+        problems, facts = list_report(rows_l)
+        for fact in facts:
+            print(f"   list: {fact}")
+        if scene_on:
+            problems.append("the orbit is on screen; the panel opens on the list")
+        if not differs:
+            problems.append("the screen did not change in 1 s (the spinners)")
+        if problems:
+            print(f"===== {label}: FAIL, list: " + "; ".join(problems))
+            return 1
+    elif args.demo or args.expect_scene:
         problems, facts = scene_report(lines, DEMO_NAMES if args.demo else DEMO_NAMES + ["orchestrator"], seen2d if args.demo else None)
         for fact in facts:
             print(f"   scene: {fact}")
@@ -795,6 +1018,22 @@ def main():
         if problems:
             print(f"===== {label}: FAIL, scene: " + "; ".join(problems))
             return 1
+    extra = getattr(args, "extra", None)
+    if args.dialog or args.open:
+        if extra is None:
+            print(f"===== {label}: FAIL, {'dialog' if args.dialog else 'open'}: no view to press keys in")
+            return 1
+        kind, p_extra, f_extra, screens = extra
+        for name, shot in screens:
+            print(f"===== {label}: {kind}: screen {name}")
+            for i, line in enumerate(shot):
+                print(f"{i:2d}|{line}")
+        for fact in f_extra:
+            print(f"   {kind}: {fact}")
+        if p_extra:
+            print(f"===== {label}: FAIL, " + "; ".join(p_extra))
+            return 1
+        print(f"===== {label}: {kind}: PASS")
     print(f"===== {label}: PASS, hub line and {len(rest)} more view lines")
     if after_q is not None:
         moved = find_view(after_q)

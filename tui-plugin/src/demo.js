@@ -4,7 +4,8 @@
  *
  * demoDocument(base, elapsedMs) is pure: the working agents' newest sessions cost a little more as time passes (so
  * the spend bars move), and the root gets a `wear` (the demo document has none) whose history grows turn by turn
- * and drops at each summary, so the context chart has something to draw. Nothing else changes.
+ * and drops at each summary, so the context chart has something to draw. With the clock given, every timestamp is moved
+ * so the document was generated now (the list shows how long each agent has been at its step). Nothing else changes.
  */
 import { errorDocument, errorMessage } from "./runner.js";
 
@@ -23,9 +24,26 @@ function contextAt(turn) {
   return Math.round(28000 + since * 9200 + 2500 * Math.sin(turn * 1.7));
 }
 
-export function demoDocument(base, elapsedMs) {
+const TIME_KEYS = new Set(["generated", "created", "updated", "started", "finished", "time"]);
+
+// Move every timestamp (seconds) by `delta` seconds, so the demo's steps started minutes ago, not on the day it was saved.
+function shiftTimes(value, delta) {
+  if (Array.isArray(value)) {
+    value.forEach((v) => shiftTimes(v, delta));
+  } else if (isObject(value)) {
+    for (const [key, v] of Object.entries(value)) {
+      if (TIME_KEYS.has(key) && typeof v === "number" && Number.isFinite(v) && v > 1e9) value[key] = v + delta;
+      else if (v && typeof v === "object") shiftTimes(v, delta);
+    }
+  }
+}
+
+// nowMs (optional): the clock; the document's times are moved so that `generated` is now.
+export function demoDocument(base, elapsedMs, nowMs) {
   const doc = JSON.parse(JSON.stringify(isObject(base) ? base : {}));
   const t = Math.max(0, Number(elapsedMs) || 0);
+  const now = Number(nowMs);
+  if (Number.isFinite(now) && now > 0 && typeof doc.generated === "number") shiftTimes(doc, now / 1000 - doc.generated);
   doc.source = "demo";
   let total = 0;
   for (const agent of Array.isArray(doc.agents) ? doc.agents : []) {
@@ -74,7 +92,8 @@ export function createDemoRunner({ fs, file, now }) {
       if (stopped) return errorDocument("The plugin stopped.");
       try {
         if (!base) base = JSON.parse(fs.readFileSync(file, "utf8"));
-        return demoDocument(base, clock() - start);
+        const at = clock();
+        return demoDocument(base, at - start, at);
       } catch (error) {
         return errorDocument("The demo document could not be read: " + errorMessage(error));
       }

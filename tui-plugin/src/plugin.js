@@ -10,14 +10,17 @@
  * width) and the command "agentgraph.graph" (slash /graph, alias /agents) that opens and closes it. Every host
  * function is feature-detected; a host without them gets the sidebar only.
  *
- * The panel draws the orbit (src/scene.js) when it has at least 64 columns and 22 rows, and the list otherwise; its
- * size is measured from the panel's own box (OpenTUI `onSizeChange`, `width`, `height`), because the documented
- * panel input has no height. `g` switches between the two while the panel owns input, and `d` between the orbit's
- * 2D view (the ring from above, braille dots) and its 3D view (a turning figure in depth characters).
+ * The panel opens on the list. It draws the orbit (src/scene.js) when asked: `g`, or `f` (full screen), and only when
+ * it has at least 64 columns and 22 rows; its size is measured from the panel's own box (OpenTUI `onSizeChange`,
+ * `width`, `height`), because the documented panel input has no height. `d` switches the orbit between its 2D view
+ * (the ring from above, braille dots) and its 3D view (a turning figure in depth characters). In the list, ↑/↓ select
+ * a row, Enter opens that row's session (`ui.router.navigate`), `s` stops a working agent (`client.session.interrupt`,
+ * after `ui.dialog.confirm`) and `m` sends it a message (`ui.dialog.prompt`, `client.session.prompt`); each key exists
+ * only when the host has the call it needs. Pending permission requests and questions come from `ctx.data`.
  *
  * AGENTGRAPH_TUI_DEMO=1 in the TUI's environment draws a moving demo document instead of running Python.
  */
-import { render, isAnimated, truncate as truncateText } from "./render.js";
+import { render, layout, isAnimated, truncate as truncateText } from "./render.js";
 import { scene, sceneFits, frameInterval, changeAt } from "./scene.js";
 import { createSnapshotRunner, errorDocument, errorMessage, oneLine } from "./runner.js";
 import { createDemoRunner, DEMO_INTERVAL_MS } from "./demo.js";
@@ -427,7 +430,49 @@ export function createPlugin(host) {
       return watcher;
     }
 
-    // `resolve(props)` -> { session, width }, or { hidden: true } to draw nothing.
+    // Pending permission requests and questions the host knows about: OpenCode 2.3's `data.session.permission` and
+    // `data.session.form` (reactive store reads, so the view draws again when they change). None on other hosts.
+    function hostRequests() {
+      const out = [];
+      try {
+        const store = ctx.data && ctx.data.session;
+        if (!store || typeof store !== "object") return out;
+        const titleOf = (id) => {
+          try {
+            const info = typeof store.get === "function" ? store.get(id) : undefined;
+            return info && typeof info.title === "string" ? info.title : undefined;
+          } catch (_) {
+            return undefined;
+          }
+        };
+        for (const [kind, source] of [["permission", store.permission], ["question", store.form]]) {
+          if (!source || typeof source.sessions !== "function") continue;
+          let ids = [];
+          try {
+            ids = source.sessions();
+          } catch (error) {
+            report("requests", error);
+            continue;
+          }
+          for (const id of Array.isArray(ids) ? ids : []) {
+            if (typeof id !== "string" || !id || id === "global") continue;
+            let count = 1;
+            try {
+              const pending = typeof source.list === "function" ? source.list(id) : undefined;
+              if (Array.isArray(pending)) count = Math.max(1, pending.length);
+            } catch (_) {
+              /* count unknown */
+            }
+            out.push({ kind, session: id, count, title: titleOf(id) });
+          }
+        }
+      } catch (error) {
+        report("requests", error);
+      }
+      return out;
+    }
+
+    // `resolve(props)` -> { session, width, list? }, or { hidden: true } to draw nothing.
     function makeView(watcher, resolve, props) {
       let tones = { plain: {}, muted: {}, accent: {}, danger: {} };
       let width = WIDTH;
@@ -448,15 +493,29 @@ export function createPlugin(host) {
           const sceneSize = ready && resolved.scene ? resolved.scene : null;
           watcher.setScene(!!sceneSize);
           if (sceneSize) {
+            if (resolved.list && typeof resolved.list.onLayout === "function") resolved.list.onLayout({ items: [], selected: null, scene: true });
             watcher.frame(); // a dependency: each tick that changed the frame draws again
             return resolved.painter.draw(snap, sceneSize, tones);
           }
           resolved.painter.forget();
         }
         let lines;
+        const listOptions = resolved.list || {};
         if (!session) lines = [[{ text: "No session", tone: "muted" }]];
         else if (!ready) lines = render(null, { width });
-        else lines = render(snap.doc, { width, frame: watcher.frame() });
+        else {
+          const requests = hostRequests();
+          const selected = typeof listOptions.selected === "function" ? listOptions.selected() : undefined;
+          const first = layout(snap.doc, { width, frame: watcher.frame(), now: clock(), requests, cursor: !!listOptions.cursor, selected });
+          let result = first;
+          if (typeof listOptions.keys === "function") {
+            const item = first.items.find((i) => i.key === first.selected) || null;
+            result = layout(snap.doc, { width, frame: watcher.frame(), now: clock(), requests, cursor: !!listOptions.cursor, selected, keys: listOptions.keys(item, first.items) });
+          }
+          if (typeof listOptions.onLayout === "function") listOptions.onLayout(result);
+          lines = result.lines;
+        }
+        if (!ready && typeof listOptions.onLayout === "function") listOptions.onLayout({ items: [], selected: null });
         return lines.map((line) => lineNode(line, tones));
       } catch (error) {
         // Never an empty view: draw the error as one line, and if even that fails, as plain uncoloured text.
@@ -492,8 +551,146 @@ export function createPlugin(host) {
       };
     }
 
-    // The view chosen with `g` in the panel, remembered while the app runs.
-    const [viewMode, setViewMode] = host.createSignal("scene");
+    // The view chosen with `g` in the panel, remembered while the app runs: "auto" (the list, or the orbit while `f`
+    // made the panel full screen), "scene" or "list".
+    const [viewMode, setViewMode] = host.createSignal("auto");
+    const [fullByF, setFullByF] = host.createSignal(false); // the user made the panel full screen with `f`
+    // The orbit is wanted after `g`, or while the panel is full screen by `f` (not once the host has made it a side
+    // panel again by its own key: then `presentation` says "panel").
+    const presentationOf = (p) => {
+      try {
+        return p ? p.presentation : undefined;
+      } catch (_) {
+        return undefined;
+      }
+    };
+    const wantScene = (p) => viewMode() === "scene" || (viewMode() === "auto" && fullByF() && presentationOf(p) !== "panel");
+
+    // The list's rows in the panel: the selected row's key (remembered while the app runs) and the rows last drawn.
+    const [selection, setSelection] = host.createSignal(null);
+    const rows = { items: [], selected: null, scene: false };
+    const has = (fn) => typeof fn === "function";
+    const canOpen = () => !!(ctx.ui && ctx.ui.router && has(ctx.ui.router.navigate));
+    const canStop = () => !!(ctx.client && ctx.client.session && has(ctx.client.session.interrupt) && ctx.ui && ctx.ui.dialog && has(ctx.ui.dialog.confirm));
+    const canMessage = () => !!(ctx.client && ctx.client.session && has(ctx.client.session.prompt) && ctx.ui && ctx.ui.dialog && has(ctx.ui.dialog.prompt));
+    // The key line for the selected row: only keys that do something there.
+    const keyPieces = (item, items) => {
+      const pieces = [];
+      if (Array.isArray(items) && items.length > 1) pieces.push(["↑↓", "select"]);
+      if (item && item.open && canOpen()) pieces.push(["⏎", "open"]);
+      if (item && item.busy && canStop()) pieces.push(["s", "stop"]);
+      if (item && item.busy && canMessage()) pieces.push(["m", "message"]);
+      pieces.push(["g", "graph"], ["q", "close"]);
+      return pieces;
+    };
+    const panelList = {
+      cursor: true,
+      selected: () => selection(),
+      keys: (item, items) => (ctx.keymap && has(ctx.keymap.layer) ? keyPieces(item, items) : []),
+      onLayout(result) {
+        rows.items = Array.isArray(result.items) ? result.items : [];
+        rows.selected = result.selected || null;
+        rows.scene = !!result.scene;
+      },
+    };
+    const toast = (message, variant = "info") => {
+      try {
+        if (ctx.ui && ctx.ui.toast && has(ctx.ui.toast.show)) ctx.ui.toast.show({ message, variant });
+      } catch (error) {
+        report("toast", error);
+      }
+    };
+    const selectedItem = () => rows.items.find((i) => i.key === rows.selected) || null;
+    // A dialog is open: the host's keymap is out of its "base" mode (OpenCode 2.3 pushes "modal" for every dialog,
+    // and layers without a mode, like the panel's, are then off), or one of ours (the stop confirm, the message prompt)
+    // has not closed yet. Ours stays "open" until a moment after it closes, so the key that closed it (Enter in the
+    // confirm) cannot also act on the list.
+    let ourDialogs = 0;
+    const hostMode = () => {
+      try {
+        const mode = ctx.keymap && ctx.keymap.mode;
+        return mode && typeof mode.current === "function" ? mode.current() : undefined;
+      } catch (_) {
+        return undefined;
+      }
+    };
+    const dialogOpen = () => ourDialogs > 0 || (hostMode() !== undefined && hostMode() !== "base");
+    const withDialog = (open) => {
+      ourDialogs += 1;
+      let done = false;
+      const close = () => {
+        if (done) return;
+        done = true;
+        setTimeout(() => {
+          ourDialogs = Math.max(0, ourDialogs - 1);
+        }, 0);
+      };
+      return Promise.resolve()
+        .then(open)
+        .then(
+          (value) => (close(), value),
+          (error) => {
+            close();
+            throw error;
+          },
+        );
+    };
+    const moveSelection = (step) => {
+      if (!rows.items.length) return;
+      const at = Math.max(0, rows.items.findIndex((i) => i.key === rows.selected));
+      const next = rows.items[Math.max(0, Math.min(rows.items.length - 1, at + step))];
+      if (next && next.key !== rows.selected) {
+        rows.selected = next.key;
+        setSelection(next.key);
+        requestRender();
+      }
+    };
+    // Enter: open the row's session (a request's session is where the host shows it to answer).
+    const openSelected = () => {
+      const item = selectedItem();
+      if (!item || !item.open || !canOpen()) return;
+      try {
+        report("action", `open ${item.open}`); // debug log only (real-host.py --open, --dialog)
+        ctx.ui.router.navigate({ type: "session", sessionID: item.open });
+      } catch (error) {
+        report("open", error);
+        toast(`Could not open ${item.name}: ${errorMessage(error)}`, "error");
+      }
+    };
+    // `s`: interrupt the working agent's running session, after a confirmation.
+    const stopSelected = () => {
+      const item = selectedItem();
+      if (!item || !item.busy || !canStop()) return;
+      const sessionID = item.busy;
+      withDialog(() => ctx.ui.dialog.confirm({ title: `Stop ${item.name}?`, message: `Interrupts its running session ${sessionID}.` }))
+        .then((ok) => {
+          report("action", `stop ${sessionID} confirm=${ok}`); // debug log only
+          if (ok !== true) return undefined;
+          return Promise.resolve(ctx.client.session.interrupt({ sessionID })).then((res) => {
+            const data = res && typeof res === "object" && res.data && typeof res.data === "object" ? res.data : res;
+            toast(data && data.interrupted === false ? `${item.name} was not running` : `Stopped ${item.name}`);
+          });
+        })
+        .catch((error) => {
+          report("stop", error);
+          toast(`Could not stop ${item.name}: ${errorMessage(error)}`, "error");
+        });
+    };
+    // `m`: send the working agent a message into its running session (delivered as a steer, during its turn).
+    const messageSelected = () => {
+      const item = selectedItem();
+      if (!item || !item.busy || !canMessage()) return;
+      const sessionID = item.busy;
+      withDialog(() => ctx.ui.dialog.prompt({ title: `Message ${item.name}`, placeholder: "Sent into its running session" }))
+        .then((text) => {
+          if (typeof text !== "string" || !text.trim()) return undefined;
+          return Promise.resolve(ctx.client.session.prompt({ sessionID, text: text.trim(), delivery: "steer" })).then(() => toast(`Sent to ${item.name}`));
+        })
+        .catch((error) => {
+          report("message", error);
+          toast(`Could not message ${item.name}: ${errorMessage(error)}`, "error");
+        });
+    };
     // The terminal's size, which is the panel's size in full screen; null when the host does not say.
     const screenSize = () => {
       try {
@@ -608,8 +805,8 @@ export function createPlugin(host) {
                 painter.setTones();
               }
               const known = size() || measuredSize(root);
-              const fits = !!known && viewMode() === "scene" && sceneFits(known.width, known.height);
-              return { session: sessionOf(p), width: panelWidth(p), scene: fits ? known : null, painter };
+              const fits = !!known && wantScene(p) && sceneFits(known.width, known.height);
+              return { session: sessionOf(p), width: panelWidth(p), scene: fits ? known : null, painter, list: panelList };
             },
             panel,
           ),
@@ -672,6 +869,7 @@ export function createPlugin(host) {
               let keys = { remove() {}, addViewKey() {}, sized() {} };
               try {
                 panelWatcher.reopen();
+                setFullByF(false); // the host opens a panel as a side panel
                 keys = panelKeys(panel);
                 if (typeof host.onCleanup === "function") {
                   host.onCleanup(() => {
@@ -736,7 +934,7 @@ export function createPlugin(host) {
       // `g` always changes what the panel shows, unless the orbit cannot fit even full screen.
       const switchView = (currentSize) => {
         const known = currentSize();
-        const orbitShown = viewMode() === "scene" && !!known && sceneFits(known.width, known.height);
+        const orbitShown = wantScene(panel) && !!known && sceneFits(known.width, known.height);
         if (orbitShown) {
           setViewMode("list");
           leaveFullscreen();
@@ -762,6 +960,7 @@ export function createPlugin(host) {
         unverified = false;
         if (!sceneFits(next.width, next.height)) leaveFullscreen();
       };
+      const onList = () => ours() && !rows.scene && rows.items.length > 0 && !dialogOpen();
       const act = (name) => () => {
         try {
           panel[name]();
@@ -777,10 +976,21 @@ export function createPlugin(host) {
             enabled: ours,
             run: () => {
               enteredFullscreen = false; // full screen is the user's now: `g` no longer leaves it
+              const told = typeof presentationOf(panel) === "string"; // the host says whether it is full screen
+              const before = told ? fullscreenNow() : fullByF();
               act("toggleFullscreen")();
+              setFullByF(!before); // full screen by `f` shows the orbit (when it fits); back to a side panel, the list
+              setViewMode("auto");
+              requestRender();
             },
           },
           { id: PANEL_NAME + ".close", bind: "q", enabled: ours, run: act("close") },
+          // the list's rows; nothing while the orbit shows
+          { id: PANEL_NAME + ".up", bind: "up", enabled: onList, run: () => onList() && moveSelection(-1) },
+          { id: PANEL_NAME + ".down", bind: "down", enabled: onList, run: () => onList() && moveSelection(1) },
+          { id: PANEL_NAME + ".open", bind: "return", enabled: () => onList() && canOpen(), run: () => onList() && openSelected() },
+          ...(canStop() ? [{ id: PANEL_NAME + ".stop", bind: "s", enabled: () => onList() && !!(selectedItem() || {}).busy, run: () => onList() && stopSelected() }] : []),
+          ...(canMessage() ? [{ id: PANEL_NAME + ".message", bind: "m", enabled: () => onList() && !!(selectedItem() || {}).busy, run: () => onList() && messageSelected() }] : []),
         ],
       }));
       const unregisters = [unregister];
