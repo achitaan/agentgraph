@@ -25,7 +25,9 @@
  * AGENTGRAPH_TUI_DEMO=paths draws it at rest with sample paths (src/demo.js). The demo never sends a path.
  */
 import { render, layout, isAnimated, truncate as truncateText, flowLabel, flowName, flowStatsText } from "./render.js";
-import { scene, sceneFits, frameInterval, changeAt } from "./scene.js";
+import {
+  scene, sceneFits, frameInterval, changeAt, orbitTurned, orbitReset, TURN_STEP, ELEVATION_STEP, DRAG_TURN_PER_CELL, DRAG_ELEVATION_PER_ROW,
+} from "./scene.js";
 import { createSnapshotRunner, errorDocument, errorMessage, oneLine, runFlowPrompt, GOAL_LIMIT } from "./runner.js";
 import { createDemoRunner, DEMO_INTERVAL_MS } from "./demo.js";
 
@@ -257,15 +259,17 @@ export function createPlugin(host) {
     return node;
   }
 
-  function lineNode(line, tones) {
-    if (!line.length) return element("text", { wrapMode: "none", fg: colorProp(tones.muted.fg) }, [" "]);
+  // `fixed`: an orbit line, never selected with the mouse (a press and a drag there turn the 3D view instead)
+  function lineNode(line, tones, fixed = false) {
+    const selectable = fixed ? false : undefined;
+    if (!line.length) return element("text", { wrapMode: "none", fg: colorProp(tones.muted.fg), selectable }, [" "]);
     return element(
       "box",
       { flexDirection: "row", width: "100%", flexShrink: 0 },
       line.map((span) => {
         const tone = tones[span.tone] || tones.plain;
         const own = span.color ? colorProp(span.color) : undefined; // the orbit's group colours
-        return element("text", { fg: own || colorProp(tone.fg), attributes: !own && tone.bold ? BOLD : undefined, wrapMode: "none", flexShrink: 0 }, [span.text]);
+        return element("text", { fg: own || colorProp(tone.fg), attributes: !own && tone.bold ? BOLD : undefined, wrapMode: "none", flexShrink: 0, selectable }, [span.text]);
       }),
     );
   }
@@ -862,6 +866,76 @@ export function createPlugin(host) {
       for (const w of watchers) if (w.retime) w.retime(); // the timer follows the camera's move
       requestRender();
     };
+    // The 3D camera turned by hand (scene.js orbitCamera): null until the first turn; remembered while the app runs.
+    // A turn holds the self-turn for RESUME_MS, which then goes on from the angle left.
+    const [orbit, setOrbit] = host.createSignal(null);
+    const turnBy = (dTurn, dElevation, why) => {
+      const next = orbitTurned(orbit(), clock(), dTurn, dElevation);
+      report("action", `${why} turn=${next.turn.toFixed(3)} elevation=${next.elevation.toFixed(3)}`); // debug log only (real-host.py --orbit)
+      setOrbit(next);
+      requestRender();
+    };
+    const resetOrbit = () => {
+      report("action", "orbit reset"); // debug log only
+      setOrbit(orbitReset(clock()));
+      requestRender();
+    };
+    // The mouse on the orbit (OpenTUI's onMouseDown, onMouseDrag and onMouseUp on the panel's root box; a press on
+    // any line of the scene bubbles up to it): a click switches 2D and 3D, as `d` does; a drag turns the 3D view (a
+    // column across 6 degrees round the upright axis, a row 12 degrees of elevation) and switches nothing. The list
+    // ignores the mouse, as before. OpenTUI sends a drag's motion to the line that was pressed, and a turn redraws
+    // (replaces) that line, after which its drags go nowhere; the line under the pointer still gets "over" with the
+    // button held (onMouseOver), which carries the drag on.
+    let press = null; // { x, y, lastX, lastY, dragged } from the left button's press on the orbit
+    const orbitShown = () => rows.scene && !dialogOpen();
+    const cell = (e, key) => Math.floor(Number(e && e[key]));
+    const sceneMouse = {
+      down(e) {
+        try {
+          press = null;
+          if (!e || Number(e.button) !== 0 || !orbitShown()) return;
+          const x = cell(e, "x");
+          const y = cell(e, "y");
+          if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+          press = { x, y, lastX: x, lastY: y, dragged: false };
+          report("mouse", `down ${x},${y}`); // debug log only (real-host.py --orbit)
+        } catch (error) {
+          report("mouse", error);
+        }
+      },
+      drag(e) {
+        try {
+          if (!press || !orbitShown() || Number(e && e.button) !== 0) return;
+          const x = cell(e, "x");
+          const y = cell(e, "y");
+          if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+          const dx = x - press.lastX;
+          const dy = y - press.lastY;
+          press.lastX = x;
+          press.lastY = y;
+          if (!dx && !dy) return;
+          press.dragged = true;
+          if (dimension().view === "3d") turnBy(-dx * DRAG_TURN_PER_CELL, dy * DRAG_ELEVATION_PER_ROW, `drag ${dx},${dy}`);
+        } catch (error) {
+          report("mouse", error);
+        }
+      },
+      up(e) {
+        try {
+          const p = press;
+          press = null;
+          if (!p || !orbitShown()) return;
+          const moved = cell(e, "x") !== p.x || cell(e, "y") !== p.y;
+          report("mouse", `up ${cell(e, "x")},${cell(e, "y")}${p.dragged || moved ? " (drag)" : " (click)"}`); // debug log only
+          if (!p.dragged && !moved) toggleDimension();
+        } catch (error) {
+          report("mouse", error);
+        }
+      },
+    };
+    // The keys named on the 3D view's bottom row while the panel has the turn layer (panelKeys binds them).
+    const ORBIT_KEYS = Object.freeze([["←→↑↓", "turn"], ["0", "reset"]]);
+    let orbitKeysOn = false;
     // The orbit's frames: rows are reused while their text and tones stay the same, and a tick whose frame equals
     // the last one drawn pushes nothing to the host.
     function createPainter(watcher) {
@@ -871,7 +945,8 @@ export function createPlugin(host) {
       let colors = sceneColors(ctx.theme, null);
       const viewOptions = () => {
         const d = dimension();
-        return { view: d.view, change: d.change, colors };
+        const o = orbit();
+        return Object.assign({ view: d.view, change: d.change, colors }, o ? { orbit: o } : {}, orbitKeysOn ? { keys: ORBIT_KEYS } : {});
       };
       const compute = (snap, size) =>
         scene(snap.doc, Object.assign(viewOptions(), { width: size.width, height: size.height, now: clock(), previous: snap.previous ? { doc: snap.previous, at: snap.at } : undefined }));
@@ -884,7 +959,7 @@ export function createPlugin(host) {
         const lines = compute(snap, lastSize);
         const key = lines.map(lineKey).join("\n");
         if (key === drawn) return false;
-        prepared = { doc: snap.doc, width: lastSize.width, height: lastSize.height, lines };
+        prepared = { doc: snap.doc, width: lastSize.width, height: lastSize.height, lines, dimension: dimension(), orbit: orbit() };
         return true;
       };
       return {
@@ -892,11 +967,12 @@ export function createPlugin(host) {
           lastSize = size;
           colors = sceneColors(ctx.theme, tones);
           let lines;
-          if (prepared && prepared.doc === snap.doc && prepared.width === size.width && prepared.height === size.height) lines = prepared.lines;
+          const same = prepared && prepared.doc === snap.doc && prepared.width === size.width && prepared.height === size.height;
+          if (same && prepared.dimension === dimension() && prepared.orbit === orbit()) lines = prepared.lines;
           else lines = compute(snap, size);
           prepared = null;
           const keys = lines.map(lineKey);
-          const next = lines.map((line, i) => (rows[i] && rows[i].key === keys[i] ? rows[i] : { key: keys[i], node: lineNode(line, tones) }));
+          const next = lines.map((line, i) => (rows[i] && rows[i].key === keys[i] ? rows[i] : { key: keys[i], node: lineNode(line, tones, true) }));
           rows = next;
           drawn = keys.join("\n");
           return rows.map((r) => r.node);
@@ -942,6 +1018,10 @@ export function createPlugin(host) {
           flexDirection: "column",
           overflow: "hidden",
           onSizeChange: measure,
+          onMouseDown: sceneMouse.down,
+          onMouseDrag: sceneMouse.drag,
+          onMouseUp: sceneMouse.up,
+          onMouseOver: sceneMouse.drag,
         });
         let themeRef = ctx.theme;
         host.insert(root, () =>
@@ -1111,6 +1191,8 @@ export function createPlugin(host) {
         if (!sceneFits(next.width, next.height)) leaveFullscreen();
       };
       const onList = () => ours() && !rows.scene && rows.items.length > 0 && !dialogOpen();
+      // the 3D orbit shows: the arrow keys turn it (left and right in the turn layer, up and down in the layer above)
+      const turning = () => ours() && rows.scene && dimension().view === "3d" && !dialogOpen();
       const act = (name) => () => {
         try {
           panel[name]();
@@ -1135,9 +1217,9 @@ export function createPlugin(host) {
             },
           },
           { id: PANEL_NAME + ".close", bind: "q", enabled: ours, run: act("close") },
-          // the list's rows; nothing while the orbit shows
-          { id: PANEL_NAME + ".up", bind: "up", enabled: onList, run: () => onList() && moveSelection(-1) },
-          { id: PANEL_NAME + ".down", bind: "down", enabled: onList, run: () => onList() && moveSelection(1) },
+          // the list's rows; on the 3D orbit the elevation (turning(), below); nothing on the 2D orbit
+          { id: PANEL_NAME + ".up", bind: "up", enabled: () => onList() || turning(), run: () => (onList() ? moveSelection(-1) : turning() && turnBy(0, ELEVATION_STEP, "key up")) },
+          { id: PANEL_NAME + ".down", bind: "down", enabled: () => onList() || turning(), run: () => (onList() ? moveSelection(1) : turning() && turnBy(0, -ELEVATION_STEP, "key down")) },
           { id: PANEL_NAME + ".open", bind: "return", enabled: () => onList() && canOpen(), run: () => onList() && openSelected() },
           ...(canStop() ? [{ id: PANEL_NAME + ".stop", bind: "s", enabled: () => onList() && !!(selectedItem() || {}).busy, run: () => onList() && stopSelected() }] : []),
           ...(canMessage() ? [{ id: PANEL_NAME + ".message", bind: "m", enabled: () => onList() && !!(selectedItem() || {}).busy, run: () => onList() && messageSelected() }] : []),
@@ -1174,6 +1256,25 @@ export function createPlugin(host) {
           );
         } catch (error) {
           report("view key", error);
+        }
+        // the 3D view turned by hand: left and right round the upright axis in a layer of their own, on only while
+        // the 3D orbit shows, with `0` back to the start (up and down, the elevation, share the list's commands)
+        try {
+          const turnKey = (name, bind, dTurn, dElevation) => ({
+            id: PANEL_NAME + ".turn-" + name, bind, enabled: turning, run: () => turning() && turnBy(dTurn, dElevation, "key " + bind),
+          });
+          unregisters.push(
+            ctx.keymap.layer(() => ({
+              commands: [
+                turnKey("left", "left", TURN_STEP, 0),
+                turnKey("right", "right", -TURN_STEP, 0),
+                { id: PANEL_NAME + ".turn-reset", bind: "0", enabled: turning, run: () => turning() && resetOrbit() },
+              ],
+            })),
+          );
+          orbitKeysOn = true;
+        } catch (error) {
+          report("turn keys", error);
         }
       };
       // `r` (run a path): registered while the list's snapshot has a path, unregistered when the paths go: no

@@ -2967,6 +2967,166 @@ test("orbit: the keys line: in 3D only, muted, on the canvas's bottom row, withi
   assert.equal(spots(leaving), spots(steady), "the change back starts from the orbit's camera");
 });
 
+// The newest panel's command with `id`.
+const commandOf = (state, id) => state.layers.flatMap((l) => l.commands || []).filter((c) => c.id === id).pop();
+
+test("orbit panel: in 3D the arrow keys turn it and 0 resets, only on the 3D orbit; the keys line shows only in 3D; an unchanged frame is not pushed", async () => {
+  const { plugin, clockRef } = makeScenePlugin();
+  const { ctx, state, panelClaim } = makePanelHost();
+  ctx.ui.router = { navigate: () => {} };
+  const stop = plugin.setup(ctx);
+  globalThis.__agentgraphStub.cleanups.length = 0;
+  try {
+    const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
+    await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
+    sizePanel(view, 120, 40);
+    const left = commandOf(state, "agentgraph.graph.turn-left");
+    const right = commandOf(state, "agentgraph.graph.turn-right");
+    const reset = commandOf(state, "agentgraph.graph.turn-reset");
+    const up = commandOf(state, "agentgraph.graph.up");
+    const down = commandOf(state, "agentgraph.graph.down");
+    assert.deepEqual([left.bind, right.bind, reset.bind, up.bind, down.bind], ["left", "right", "0", "up", "down"]);
+    const turnLayer = state.layers.find((l) => (l.commands || []).includes(left));
+    assert.deepEqual(turnLayer.commands.map((c) => c.bind), ["left", "right", "0"]);
+    assert.equal(turnLayer.mode, undefined, "no mode: only while the panel owns input");
+    // the list: the arrows move the cursor, left, right and 0 are off
+    assert.equal(up.enabled(), true);
+    assert.equal([left, right, reset].some((c) => c.enabled()), false, "off on the list");
+    assert.ok(!screen(view).some((l) => l.includes("reset")), "no keys line on the list");
+    // the 2D orbit: every turn key off, no keys line
+    pressG(state);
+    assert.ok(isOrbit(screen(view)));
+    assert.equal([left, right, reset, up, down].some((c) => c.enabled()), false, "off on the 2D orbit");
+    assert.ok(!screen(view).some((l) => l.includes("reset")), "no keys line in 2D");
+    // 3D: on, and named on the keys line, which fits
+    commandOf(state, "agentgraph.graph.dimension").run();
+    clockRef.t += S.CHANGE_MS + 50;
+    await waitFor(() => has3D(screen(view)), 3000, "3D");
+    assert.equal([left, right, reset, up, down].every((c) => c.enabled()), true, "on on the 3D orbit");
+    const keysRow = screen(view).find((l) => l.includes("reset"));
+    assert.ok(keysRow && keysRow.startsWith("←→↑↓ turn  0 reset"), "the keys line\n" + screen(view).join("\n"));
+    // a turn: drawn at once, held (the clock moves, the frame does not), then the self-turn goes on
+    const before = screen(view).join("\n");
+    left.run();
+    const turned = screen(view).join("\n");
+    assert.notEqual(turned, before, "left: drawn at once");
+    clockRef.t += 1000;
+    await sleep(400);
+    const rendersHeld = state.renders;
+    await sleep(400);
+    // the demo works, so its spinners and 0/1 streams move with the clock; the clock stands: nothing is pushed
+    assert.equal(state.renders, rendersHeld, "an unchanged frame is not pushed");
+    const names = (t) => ringNames.map((n) => t.split("\n").findIndex((l) => countWord([l], n) === 1) + ":" + t.split("\n").map((l) => l.search(new RegExp(`(?<![\\w-])${n}(?![\\w-])`))).find((c) => c >= 0)).join(" ");
+    assert.equal(names(screen(view).join("\n")), names(turned), "held: the names stand while the clock moves");
+    clockRef.t += S.RESUME_MS + 3000;
+    await waitFor(() => names(screen(view).join("\n")) !== names(turned), 3000, "the self-turn goes on");
+    // right turns back; up and down change the elevation, and the frame
+    const r1 = screen(view).join("\n");
+    right.run();
+    assert.notEqual(screen(view).join("\n"), r1);
+    const e1 = screen(view).join("\n");
+    up.run();
+    up.run();
+    assert.notEqual(screen(view).join("\n"), e1, "up: another elevation");
+    down.run();
+    down.run();
+    const beforeReset = screen(view).join("\n");
+    reset.run(); // turn 0 at ELEVATION_3D: elsewhere than the turned camera
+    assert.notEqual(names(screen(view).join("\n")), names(beforeReset), "0: back to the start");
+    // a dialog open: off
+    ctx.keymap.mode = { current: () => "modal" };
+    assert.equal([left, right, reset, up, down].some((c) => c.enabled()), false, "off under a host dialog");
+    ctx.keymap.mode = { current: () => "base" };
+    // back to the list: up and down move the cursor again
+    commandOf(state, "agentgraph.graph.view").run();
+    assert.ok(!isOrbit(screen(view)));
+    assert.equal([left, right, reset].some((c) => c.enabled()), false);
+    assert.equal(up.enabled(), true);
+  } finally {
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    stop();
+  }
+});
+
+test("orbit panel: a click on the orbit switches 2D and 3D, a drag turns the 3D view and switches nothing; the list ignores the mouse", async () => {
+  const { plugin, clockRef } = makeScenePlugin();
+  const { ctx, state, panelClaim } = makePanelHost();
+  const stop = plugin.setup(ctx);
+  globalThis.__agentgraphStub.cleanups.length = 0;
+  try {
+    const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
+    await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
+    sizePanel(view, 120, 40);
+    const p = view.props;
+    for (const k of ["onMouseDown", "onMouseDrag", "onMouseUp", "onMouseOver"]) assert.equal(typeof p[k], "function", k);
+    const click = (x, y) => {
+      p.onMouseDown({ type: "down", button: 0, x, y });
+      p.onMouseUp({ type: "up", button: 0, x, y });
+    };
+    // the list: a click does nothing, its text can still be selected
+    const list = screen(view).join("\n");
+    click(10, 2);
+    assert.equal(screen(view).join("\n"), list);
+    assert.ok(!isOrbit(screen(view)));
+    const listText = view.children.flatMap((row) => (row.tag === "text" ? [row] : row.children));
+    assert.ok(listText.every((t) => t.props.selectable === undefined), "list text keeps the host's selection");
+    pressG(state);
+    assert.ok(isOrbit(screen(view)) && !has3D(screen(view)));
+    // scene text is not selectable: a press and a drag there turn the view instead of selecting
+    const sceneTexts = view.children.flatMap((row) => (row.tag === "text" ? [row] : row.children));
+    assert.ok(sceneTexts.length > 40 && sceneTexts.every((t) => t.props.selectable === false));
+    // a click: 3D (the camera moves over CHANGE_MS)
+    click(60, 18);
+    clockRef.t += S.CHANGE_MS + 50;
+    await waitFor(() => has3D(screen(view)), 3000, "a click: 3D");
+    // the right button, or a press that is not on the orbit, does nothing
+    p.onMouseDown({ type: "down", button: 2, x: 60, y: 18 });
+    p.onMouseUp({ type: "up", button: 2, x: 60, y: 18 });
+    assert.ok(has3D(screen(view)));
+    // a drag: turns, held, and no switch on release; the line under the pointer carries it on ("over")
+    const before = screen(view).join("\n");
+    p.onMouseDown({ type: "down", button: 0, x: 60, y: 18 });
+    p.onMouseDrag({ type: "drag", button: 0, x: 61, y: 18 });
+    const one = screen(view).join("\n");
+    assert.notEqual(one, before, "a drag turns at once");
+    p.onMouseDrag({ type: "drag", button: 0, x: 61, y: 18 }); // no motion: nothing
+    assert.equal(screen(view).join("\n"), one);
+    p.onMouseOver({ type: "over", button: 0, x: 64, y: 18 });
+    assert.notEqual(screen(view).join("\n"), one, "over with the button held turns on");
+    p.onMouseOver({ type: "over", button: 0, x: 64, y: 20 }); // down: the elevation
+    p.onMouseUp({ type: "up", button: 0, x: 64, y: 20 });
+    clockRef.t += S.CHANGE_MS + 50;
+    await sleep(300);
+    assert.ok(has3D(screen(view)), "a drag switches nothing");
+    // plain motion (no button) after the release turns nothing
+    const still = screen(view).join("\n");
+    p.onMouseOver({ type: "over", button: 3, x: 80, y: 25 });
+    p.onMouseDrag({ type: "drag", button: 0, x: 90, y: 25 });
+    assert.equal(screen(view).join("\n"), still, "no press, no turn");
+    // a click: back to 2D
+    click(60, 18);
+    clockRef.t += S.CHANGE_MS + 50;
+    await waitFor(() => !has3D(screen(view)) && isOrbit(screen(view)), 3000, "a click: 2D");
+    // a drag on the 2D orbit turns nothing and switches nothing
+    p.onMouseDown({ type: "down", button: 0, x: 60, y: 18 });
+    p.onMouseDrag({ type: "drag", button: 0, x: 70, y: 18 });
+    p.onMouseUp({ type: "up", button: 0, x: 70, y: 18 });
+    clockRef.t += S.CHANGE_MS + 50;
+    await sleep(300);
+    assert.ok(!has3D(screen(view)) && isOrbit(screen(view)));
+    // bad events are ignored
+    assert.doesNotThrow(() => {
+      p.onMouseDown(undefined);
+      p.onMouseDown({ button: 0, x: "a", y: null });
+      p.onMouseDrag(null);
+      p.onMouseUp({});
+    });
+  } finally {
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    stop();
+  }
+});
+
 // orbit lane (n104): end of the block.
 
 // ---------------------------------------------------------------------------------------------------------------
