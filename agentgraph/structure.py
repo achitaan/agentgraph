@@ -438,7 +438,7 @@ def set_flow_text(flow_id, text, directory: Path | None = None, *, commands_dir:
                     hubs = hub_names(shape)
                     wanted = flowcommands.render({**flow, "text": text}, hubs)
                     with flowcommands.Folder(commands_dir, create=True) as folder:
-                        there = flowcommands.check_unchanged(folder, flow["command"], flowcommands.render(flow, hubs))
+                        there = flowcommands.check_unchanged(folder, flow["command"], flowcommands.written(flow, hubs))
                         before = _bytes(flows_fd, found)
                         _write(flows_fd, found + ".md", data, new=False)
                         try:
@@ -476,7 +476,7 @@ def set_flow_name(flow_id, name, directory: Path | None = None, *, commands_dir:
             wanted = flowcommands.render({**flow, "name": name}, hubs)
             with flowcommands.Folder(commands_dir, create=True) as folder:
                 there = flowcommands.check_free(folder, name, wanted)
-                old = flowcommands.check_unchanged(folder, flow["command"], flowcommands.render(flow, hubs),
+                old = flowcommands.check_unchanged(folder, flow["command"], flowcommands.written(flow, hubs),
                                                    leave_foreign=True)
                 if there is None:
                     folder.write(name, wanted, None)
@@ -512,9 +512,11 @@ def set_flow_command(flow_id, on, directory: Path | None = None, *, commands_dir
                                          "NAME): the command is /NAME")
                 wanted = flowcommands.render(flow, hubs)
                 with flowcommands.Folder(commands_dir, create=True) as folder:
-                    there = flowcommands.check_free(folder, flow["name"], wanted)
-                    if there is None:
-                        folder.write(flow["name"], wanted, None)
+                    # A file this flow's command was, written by an earlier version, is written in the current shape.
+                    there = flowcommands.check_free(folder, flow["name"],
+                                                    flowcommands.written(flow, hubs) if flow["command"] else wanted)
+                    if there != wanted:
+                        folder.write(flow["name"], wanted, there)
                     if not flow["command"]:
                         try:
                             _write(flows_fd, found + ".md", flow_file(flow["path"], flow["text"], flow["name"], True),
@@ -525,7 +527,7 @@ def set_flow_command(flow_id, on, directory: Path | None = None, *, commands_dir
                             raise
             elif flow["command"]:
                 with flowcommands.Folder(commands_dir, create=False) as folder:
-                    old = flowcommands.check_unchanged(folder, flow["command"], flowcommands.render(flow, hubs),
+                    old = flowcommands.check_unchanged(folder, flow["command"], flowcommands.written(flow, hubs),
                                                        leave_foreign=True)
                     _write(flows_fd, found + ".md", flow_file(flow["path"], flow["text"], flow["name"], False),
                            new=False)
@@ -536,9 +538,9 @@ def set_flow_command(flow_id, on, directory: Path | None = None, *, commands_dir
         return _flow(root, found)
 
 
-def _unreadable_command(shape: dict, flow_id: str, data: bytes) -> tuple[str, bytes] | None:
+def _unreadable_command(shape: dict, flow_id: str, data: bytes) -> tuple[str, tuple[bytes, ...]] | None:
     """For a flow file that cannot be read as a flow (an agent on its path is gone, say): (its command's name, the
-    bytes its command file had when it was written), when its lines say its command is on, its name is valid and
+    bytes its command file had when it was written, by this version or an earlier one: `flowcommands.written`), when its lines say its command is on, its name is valid and
     no readable flow holds that name; else None. Its command file goes with it only while it is exactly those bytes."""
     fields = flow_fields(data)
     if fields is None or not fields["command"] or not FLOW_NAME.fullmatch(fields["name"]):
@@ -547,8 +549,8 @@ def _unreadable_command(shape: dict, flow_id: str, data: bytes) -> tuple[str, by
         return None  # the name is another path's now: its command file is that path's
     path = [seat_lead(shape, name) or name for name in fields["path"]]
     try:
-        wanted = flowcommands.render({"id": flow_id, "path": path, "text": fields["text"], "name": fields["name"]},
-                                     hub_names(shape))
+        wanted = flowcommands.written({"id": flow_id, "path": path, "text": fields["text"], "name": fields["name"]},
+                                      hub_names(shape))
     except flowcommands.CommandError:
         return None
     return fields["name"], wanted
@@ -576,13 +578,13 @@ def remove_flow(flow_id, directory: Path | None = None, *, commands_dir: Path | 
             if flow is not None and flow["command"]:
                 with flowcommands.Folder(commands_dir, create=False) as folder:
                     old = flowcommands.check_unchanged(folder, flow["command"],
-                                                       flowcommands.render(flow, hub_names(shape)), leave_foreign=True)
+                                                       flowcommands.written(flow, hub_names(shape)), leave_foreign=True)
                     if old is not None:
                         folder.write(flow["command"], None, old)
             elif flow is None and (command := _unreadable_command(shape, found, data)) is not None:
                 with flowcommands.Folder(commands_dir, create=False) as folder:
                     there = folder.read(command[0])
-                    if there is not None and there == command[1]:
+                    if there is not None and there in command[1]:
                         folder.write(command[0], None, there)
             os.unlink(found + ".md", dir_fd=flows_fd)
             empty = not os.listdir(flows_fd)
@@ -596,25 +598,36 @@ def remove_flow(flow_id, directory: Path | None = None, *, commands_dir: Path | 
         return flow
 
 
-def flow_prompt(flow_id, goal, directory: Path | None = None, *, expect: str | None = None) -> str:
+def flow_prompt(flow_id, goal, directory: Path | None = None, *, expect: str | None = None,
+                name: str | None = None) -> str:
     """The run message for a flow and a goal (read-only). Given `expect`, refused (StaleError) when the flow's rev
-    is another: the view would run a path it is not showing."""
+    is another: the view would run a path it is not showing. `name`: the path of that name instead of `flow_id`
+    (None): what a path command's body says to run, since a flow's name is its command's."""
     try:
         flowrun.clean_goal(goal)
     except flowrun.RunError as exc:
         raise StructureError(str(exc)) from None
-    if not isinstance(flow_id, str):
-        raise StructureError("the flow id must be text")
     shape = _shape(Path(directory) if directory is not None else STRUCTURE_DIR)
-    flow = next((flow for flow in shape["flows"] if flow["id"] == flow_id), None)
+    if name is not None:
+        if flow_id is not None or not isinstance(name, str):
+            raise StructureError("give a flow id or a path's name, not both")
+        flow = next((flow for flow in shape["flows"] if flow["name"] == name), None)
+        if flow is None:
+            raise StructureError(f"there is no path named {name[:80]!r}")
+        flow_id = flow["id"]
+    elif not isinstance(flow_id, str):
+        raise StructureError("the flow id must be text")
+    else:
+        flow = next((flow for flow in shape["flows"] if flow["id"] == flow_id), None)
     if flow is None:
         raise StructureError(f"there is no flow {flow_id[:80]!r}")
     if expect is not None:
         _expect_seen(expect, flow["rev"], f"flow {flow_id}")
     hubs = hub_names(shape)
-    # The other drawn paths `check` will hold a run of this one to, named in the message (flowrun.binding_flows).
-    others = flowrun.binding_flows(flow, shape["flows"], hubs, shape["seats"])
-    return flowrun.run_message(flow, goal, hubs, others=others)
+    # The other drawn paths `check` will hold a run of this one to, and the check nodes that keep its graph finite,
+    # named in the message (flowrun.binding).
+    others, checks = flowrun.binding(flow, shape["flows"], hubs, shape["seats"])
+    return flowrun.run_message(flow, goal, hubs, others=others, checks=checks)
 
 
 def flows_with_stats(shape: dict | None, *, ledger: Path | None, graph_paths=(), db_path: Path | None = None) -> list[dict]:
@@ -720,8 +733,10 @@ def main(argv: list[str] | None = None) -> int:
     switch = command.add_mutually_exclusive_group(required=True)
     switch.add_argument("--on", dest="on", action="store_true", help="write NAME.md into the commands folder")
     switch.add_argument("--off", dest="on", action="store_false", help="remove it")
-    prompt = actions.add_parser("prompt", help="print the message that runs flow ID on a goal")
-    prompt.add_argument("id", metavar="ID")
+    prompt = actions.add_parser("prompt", help="print the message that runs flow ID (or the path named NAME) on a goal")
+    prompt.add_argument("id", metavar="ID", nargs="?")
+    prompt.add_argument("--name", metavar="NAME", help="the path named NAME instead of flow ID (what a path command "
+                        "says to run)")
     prompt.add_argument("--goal-file", metavar="F", required=True, help="the goal from file F, or - for standard input")
     remove = actions.add_parser("remove", help="remove flow ID (and its command file)")
     remove.add_argument("id", metavar="ID")
@@ -778,8 +793,10 @@ def main(argv: list[str] | None = None) -> int:
                 extra["applies"] = flowcommands.applies(result["name"], args.on)
             extra["live"] = flowcommands.LIVE
         elif action == "prompt":
+            if (args.id is None) == (args.name is None):
+                raise StructureError("give a flow id or --name NAME, one of them")
             text_ = flow_prompt(args.id, _read_text(args.goal_file, flowrun.GOAL_LIMIT, "the goal"), args.structure,
-                                expect=expect)
+                                expect=expect, name=args.name)
             if args.json:
                 print(json.dumps({"text": text_}))
             else:

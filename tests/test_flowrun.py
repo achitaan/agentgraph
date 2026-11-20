@@ -694,7 +694,11 @@ class OtherPaths(Scratch):
 
     STRAIGHT = ["researcher", "impl-openai"]
     SENTENCE = "Every other drawn path applies too, to each node of its first agent."
-    HEADING = "These apply here; follow each from its first agent's node, by the same rule:"
+    # Review n8 r6, major ruling: the heading says from which nodes each listed path is followed (all of its first
+    # agent's nodes of the types a path applies to), and the check-node lines end a cycle.
+    HEADING = ("These apply too; follow each from every implement, design, research or decision node of its first "
+               "agent, by the same rule:")
+    CHECKS = "Make these check nodes, or each starts a path again without end:"
 
     def message(self, flow_id):
         return structure.flow_prompt(flow_id, "write hello.txt", self.root)
@@ -739,15 +743,20 @@ class OtherPaths(Scratch):
         listed = text.split(self.HEADING + "\n", 1)[1].split("\n\n", 1)[0].splitlines()
         self.assertEqual(len(listed), 4)
         self.assertEqual([line.split(":")[0][2:] for line in listed[:3]], sorted(ids)[:3])
-        self.assertEqual(listed[3], "- and 1 more: run `agentgraph structure flows`")
+        self.assertEqual(listed[3], f"- and 1 more, by id: {sorted(ids)[3]}")  # review n8 r6, minor 2
 
-    def bound(self, flow, others):
+    def bound(self, flow, others, checks=()):
         own = flowrun.TEMPLATE_FIXED + sum(len(agent) + flowrun.STEP_SHARE for agent in flow["path"]) \
             + len(flow["name"] or flow["id"])
         shown = others[:flowrun.OTHERS_SHOWN]
         return own + (flowrun.OTHERS_FIXED + sum(len(other["name"] or other["id"]) + flowrun.OTHER_SHARE
                                                  + sum(len(agent) + flowrun.ARROW_SHARE for agent in other["path"])
-                                                 for other in shown) if others else 0)
+                                                 for other in shown)
+                      + sum(len(other["id"]) + flowrun.MORE_SHARE for other in others[flowrun.OTHERS_SHOWN:])
+                      + sum(len(agent) + len(made_by["name"] or made_by["id"])
+                            + len("this path" if again is None else again["name"] or again["id"]) + flowrun.CHECK_SHARE
+                            for agent, made_by, again in checks)
+                      if others else 0)
 
     def test_the_other_paths_are_counted_like_steps_and_capped(self):
         hubs = frozenset({"orchestrator"})
@@ -758,26 +767,64 @@ class OtherPaths(Scratch):
         self.assertLess(flowrun.template_size(flow, hubs), 1500)  # no other paths: the old rule holds
         long_other = {"path": [twelve[index % 13] for index in range(20)], "name": None}
         others = [{**long_other, "id": str(index) * 80} for index in range(5)]
+        # Review n8 r6: the heading names the node types (major) and the paths past the cap are named by id (minor
+        # 2), so the bound is restated: 2,889 for three shown and nothing more; a further path adds its id and 2, a
+        # check node its agent, the two paths' names or ids and 42.
         for count in (1, 2, 3, 5):
             with self.subTest(count=count):
                 size = flowrun.template_size(flow, hubs, others=others[:count])
                 self.assertLessEqual(size, self.bound(flow, others[:count]))
-                self.assertLess(size, 2809)
+                self.assertLess(size, 2889 + (count - 3) * (80 + 2) if count > 3 else 2889)
         self.assertEqual(flowrun.template_size(flow, hubs, others=others[:5]) - flowrun.template_size(
-            flow, hubs, others=others[:3]), len("\n- and 2 more: run `agentgraph structure flows`"))
-        self.assertLessEqual(len(self.HEADING) + len("\n- and 99 more: run `agentgraph structure flows`") + 2,
+            flow, hubs, others=others[:3]), len("\n- and 2 more, by id: " + "3" * 80 + ", " + "4" * 80))
+        checks = [(twelve[0], others[0], None), (twelve[1], others[1], others[2])]
+        size = flowrun.template_size(flow, hubs, others=others[:5], checks=checks)
+        self.assertLessEqual(size, self.bound(flow, others[:5], checks))
+        self.assertLessEqual(len(self.HEADING) + len("\n- and 9999 more, by id: ") + len("\n" + self.CHECKS) + 2,
                              flowrun.OTHERS_FIXED)
 
-    def from_message(self, text):
+    WORK = ("implement", "design", "research", "decision")  # the types the heading names
+
+    def listed(self, text):
+        """[(how the message calls it, its agents or None for one named by id only)], and the check-node lines as
+        {(agent, how the path that adds it is called)}."""
+        if self.HEADING not in text:
+            return [], set()
+        part = text.split(self.HEADING + "\n", 1)[1].split("\n\n", 1)[0]
+        others, checks, in_checks = [], set(), False
+        for line in part.splitlines():
+            if line == self.CHECKS:
+                in_checks = True
+            elif in_checks:
+                found = re.fullmatch(r"- (\S+), added for (\S+): it would start (.+) again", line)
+                self.assertIsNotNone(found, line)
+                checks.add(found.group(1, 2))
+            elif line.startswith("- and "):
+                found = re.fullmatch(r"- and (\d+) more, by id: (.+)", line)
+                self.assertIsNotNone(found, line)
+                ids = found.group(2).split(", ")
+                self.assertEqual(len(ids), int(found.group(1)))
+                others += [(flow_id, None) for flow_id in ids]
+            else:
+                called, steps = line[2:].split(": ", 1)
+                others.append((called, steps.split(" → ")))
+        return others, checks
+
+    def from_message(self, text, flows=(), skip=()):
         """The task graph the message's words describe: its numbered steps under its rule, then each listed other
-        path followed from its first agent's node under the same rule (a step to an agent new on that path is a
-        node depending on the current node; a return makes the current node a gate whose feedback_to names that
-        agent's node on that path, which becomes the current node)."""
+        path (one named by id only is read from `flows`, as `agentgraph structure flows` shows it) followed from
+        every implement, design, research or decision node of its first agent under the same rule, until nothing
+        new comes: a step to an agent new on that path is a node depending on the current node (a check node when
+        the message says so, else a worker's implement node, as the proof's orchestrator made impl-openai's); a
+        return makes the current node a gate whose feedback_to names that agent's node on that path, which becomes
+        the current node. `skip`: listed paths to leave out (to show each one is needed)."""
         import tests.test_review4 as review4  # it imports this module
         self.assertIn(review4.RunMessageAgainstCheck.RULE, text.replace("\n", " "))
-        nodes, node_of = [], {}
+        nodes = []
+        others, checks = self.listed(text)
+        by_id = {flow["id"]: flow for flow in flows}
 
-        def follow(agents, first=None):
+        def follow(agents, first=None, called=None):
             chain, current = ({agents[0]: first}, first) if first else ({}, None)
             for agent in agents[1:] if first else agents:
                 if agent in chain:  # a return
@@ -787,21 +834,90 @@ class OtherPaths(Scratch):
                     current = chain[agent]
                     continue
                 node_id = f"n{len(nodes)}"
-                # A worker's node (implement, as the proof's orchestrator made impl-openai's) unless a return
-                # makes it a gate: the type every drawn path applies to.
-                nodes.append(structure_tests.node(node_id, "implement", agent,
-                                                  status="running" if not nodes else "pending",
+                kind = "check" if (agent, called) in checks else "implement"
+                nodes.append(structure_tests.node(node_id, kind, agent, status="running" if not nodes else "pending",
                                                   depends_on=[current] if current else []))
-                node_of.setdefault(agent, node_id)
                 chain[agent], current = node_id, node_id
 
         steps = re.findall(r"^\d+\. (\S+)( \(return\)| \(the hub: you\))?$", text, re.M)
         follow([agent for agent, mark in steps if mark != " (the hub: you)"])
-        if self.HEADING in text:
-            for line in text.split(self.HEADING + "\n", 1)[1].split("\n\n", 1)[0].splitlines():
-                agents = [agent for agent in line.split(": ", 1)[1].split(" → ") if agent != "orchestrator"]
-                follow(agents, node_of[agents[0]])
+        done, changed = set(), True
+        while changed:
+            changed = False
+            for called, agents in others:
+                if called in skip:
+                    continue
+                if agents is None:
+                    agents = by_id[called]["path"]
+                agents = [agent for agent in agents if agent != "orchestrator"]  # the hub: no node
+                for item in list(nodes):
+                    if item["agent"] == agents[0] and item["type"] in self.WORK and (called, item["id"]) not in done:
+                        done.add((called, item["id"]))
+                        follow(agents, item["id"], called)
+                        changed = True
+                self.assertLess(len(nodes), 200, "the message's words never end: " + text)
         return check.graph_from_raw(structure_tests.graph(nodes), Path("/nonexistent/.opencode/graph/run.json"))
+
+    def passes(self, flow_id, skip=()):
+        """`check`'s problems with every drawn path, for the graph built from the message's words."""
+        shape = snapshot_json.load_structure(self.root)
+        hubs = snapshot_json.hub_names(shape)
+        built = self.from_message(self.message(flow_id), shape["flows"], skip)
+        return check.validate(built) + check.flow_problems(built, shape["flows"], hubs, shape["seats"])
+
+    def each_is_needed(self, flow_id):
+        """Every listed path is needed: the graph built without it fails `check`."""
+        others, _ = self.listed(self.message(flow_id))
+        for called, _ in others:
+            with self.subTest(left_out=called):
+                self.assertNotEqual(self.passes(flow_id, skip={called}), [])
+        return [called for called, _ in others]
+
+    def test_a_path_that_binds_through_a_listed_one_is_listed_too(self):
+        # Review n8 r6 (major): P = A→B with Q = B→C and R = C→D drawn. Following Q adds a C node and R applies to it.
+        run = structure.add_flow(["researcher", "impl-openai"], None, self.root)[0]
+        q = structure.add_flow(["impl-openai", "designer"], None, self.root)[0]
+        r = structure.add_flow(["designer", "reviewer"], None, self.root)[0]
+        self.assertEqual(self.passes(run["id"]), [])
+        self.assertEqual(self.each_is_needed(run["id"]), [q["id"], r["id"]])
+
+    def test_a_cycle_ends_with_a_check_node_the_message_names(self):
+        # P = A→B with Q = B→A: Q adds an A node, and as a worker's node P would apply to it again, without end. A
+        # finite graph passes (that A node a check node: no path applies to it); the message's words lead to it.
+        run = structure.add_flow(["researcher", "impl-openai"], None, self.root)[0]
+        q = structure.add_flow(["impl-openai", "researcher"], None, self.root)[0]
+        text = self.message(run["id"])
+        self.assertIn(f"{self.CHECKS}\n- researcher, added for {q['id']}: it would start this path again\n", text)
+        self.assertEqual(self.passes(run["id"]), [])
+        self.assertEqual(self.each_is_needed(run["id"]), [q["id"]])
+        # Without the check-node line (the old list), the A node Q adds is a worker's, and this path applies to it.
+        shape = snapshot_json.load_structure(self.root)
+        old = self.from_message(text.replace(f"{self.CHECKS}\n", "").replace(
+            f"- researcher, added for {q['id']}: it would start this path again\n", ""), shape["flows"])
+        problems = check.flow_problems(old, shape["flows"], snapshot_json.hub_names(shape), shape["seats"])
+        self.assertEqual([problem.split(": flow ")[1] for problem in problems], ["researcher → impl-openai"])
+
+    def test_a_cycle_between_two_listed_paths_names_both(self):
+        run = structure.add_flow(["researcher", "impl-openai"], None, self.root)[0]
+        q = structure.add_flow(["impl-openai", "designer"], None, self.root)[0]
+        r = structure.add_flow(["designer", "impl-openai"], None, self.root)[0]
+        text = self.message(run["id"])
+        self.assertIn(f"- impl-openai, added for {r['id']}: it would start {q['id']} again", text)
+        self.assertEqual(self.passes(run["id"]), [])
+        self.assertEqual(self.each_is_needed(run["id"]), [q["id"], r["id"]])
+
+    def test_no_listed_path_is_needless(self):
+        # The proof's pair, a mix of the shapes above and paths that never bind: each listed path is needed.
+        self.add_loop()
+        run = structure.add_flow(["researcher", "impl-openai", "reviewer"], None, self.root)[0]
+        for other in (["impl-openai", "designer"], ["designer", "researcher"], ["reviewer", "impl-claude"],
+                      ["impl-claude", "verifier", "impl-claude"], ["verifier", "designer"],
+                      ["impl-openai", "reviewer"]):  # already followed by the path itself: never listed
+            structure.add_flow(other, None, self.root)
+        self.assertEqual(self.passes(run["id"]), [])
+        listed = self.each_is_needed(run["id"])
+        self.assertNotIn("impl-openai-reviewer", listed)
+        self.assertGreaterEqual(len(listed), 4)
 
     def test_a_graph_built_from_the_message_passes_check_with_both_paths_drawn(self):
         # As in the proof (n101): a straight path into impl-openai, and the loop impl-openai → verifier → impl-openai.
