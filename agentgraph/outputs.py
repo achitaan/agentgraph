@@ -53,6 +53,7 @@ import time
 import unicodedata
 
 from . import agentfiles, skillset
+from .handedits import AGENT_NAME, OUTPUT_NAME
 from .contract import _contains, _path_parts
 from .sources import MAX_GRAPH_BYTES, ORCHESTRATION_GRAPH_DIR, find_graph_dir, graph_files, read_graph_text
 
@@ -67,6 +68,9 @@ MAX_EVENTS = 2000  # contract.GRAPH_LIMITS["events"]
 RECORD_LIMIT = 8 * 1024 * 1024
 RECORD_PATH = re.compile(r"\d{4}-\d{2}-\d{2}-outputs/edit-[0-9a-f]{12}/record\.json")
 EVENT_NOTE = "edited by hand"
+LOG_PATH_LIMIT = 1024  # characters of an edit-log line's `path`
+LOG_GRAPH_LIMIT = 4096  # ... and of its `graph`
+LOG_FIELD_LIMIT = LOG_GRAPH_LIMIT  # no field of an edit-log line is longer than this (task, step, output: 200)
 _LOCK = threading.Lock()  # one writer at a time inside a process; flock on the graph folder across processes
 _HOOK = None  # tests only: called as _HOOK(stage) at the points where another writer could step in
 
@@ -970,6 +974,14 @@ def _load_record(record, backups) -> dict:
         data["graph_before"] = base64.b64decode(data["graph_before"], validate=True)
     except ValueError:
         raise OutputError("invalid undo record: the earlier graph is not base64") from None
+    earlier = data["graph_before"]
+    try:
+        nodes = json.loads(earlier.decode("utf-8")).get("nodes") if len(earlier) <= MAX_GRAPH_BYTES else None
+    except (UnicodeDecodeError, ValueError, RecursionError, AttributeError):
+        nodes = None
+    if not isinstance(nodes, list):
+        raise OutputError("invalid undo record: the earlier graph is not a graph file (JSON with a `nodes` list, at "
+                          f"most {MAX_GRAPH_BYTES} bytes); nothing was restored")
     return data
 
 
@@ -1068,8 +1080,17 @@ def write_output(task, node_id, artifact_id, text, *, dirs, home, backups, expec
 
 
 def _new_entry(graph_path, task, node, node_id, artifact_id, before, after, old_text, new_text, now, edit_id):
-    return {"time": now, "id": edit_id, "task": task, "graph": _graph_key(graph_path), "node": node_id,
-            "agent": str(node.get("agent", "")), "artifact": artifact_id, "from_revision": before["revision"],
+    """The edit's log line. What a graph says reaches the log only as a plain name: an `agent` that is not one is
+    logged as "" (under no agent); a task, step or output name or a path that cannot be held to the log's bounds
+    refuses the edit (before anything is written)."""
+    graph = _graph_key(graph_path)
+    if not all(isinstance(name, str) and OUTPUT_NAME.fullmatch(name) for name in (task, node_id, artifact_id)) \
+            or len(after["path"]) > LOG_PATH_LIMIT or len(graph) > LOG_GRAPH_LIMIT:
+        raise OutputError("the edit cannot be logged (a name or path is too long or not a plain name); nothing was "
+                          "written")
+    agent = node.get("agent")
+    return {"time": now, "id": edit_id, "task": task, "graph": graph, "node": node_id,
+            "agent": agent if isinstance(agent, str) and AGENT_NAME.fullmatch(agent) else "", "artifact": artifact_id, "from_revision": before["revision"],
             "revision": after["revision"], "path": after["path"], "chars_before": len(old_text),
             "chars_after": len(new_text), "lines_added": None, "lines_removed": None, "undone": False}
 

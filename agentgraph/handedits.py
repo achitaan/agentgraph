@@ -34,6 +34,11 @@ LOG = "edits.jsonl"
 LOG_READ = 8 * 1024 * 1024
 RECORD_READ = 8 * 1024 * 1024
 _FOLDER = re.compile(r"(?:text)-([a-z][a-z0-9_-]{0,63})-[0-9a-f]{12}")
+# What the log may carry of what a graph file or a log line says; anything else is not an agent or a task here.
+# AGENT_NAME is the agents folder's rule; OUTPUT_NAME is the Desktop's rule for the request fields (task, step,
+# output: no whitespace or control character, no leading "-", at most 200 characters).
+AGENT_NAME = re.compile(r"[a-z][a-z0-9_-]{0,63}")
+OUTPUT_NAME = re.compile(r"[^\s\-\x00-\x1f\x7f][^\s\x00-\x1f\x7f]{0,199}")
 _DAY = re.compile(r"\d{4}-\d{2}-\d{2}-agent-files")
 
 
@@ -71,7 +76,8 @@ def _saved(item: dict, backups: Path | None) -> bool:
 
 
 def output_edits(home: Path, since: float, backups: Path | None = None) -> dict[str, list[dict]]:
-    """{agent: [{"time", "task", "lines"}]} of the log's edits at or after `since` that were not undone. With
+    """{agent: [{"time", "task", "lines"}]} of the log's edits at or after `since` that were not undone. An edit
+    whose agent or task is not a plain name (AGENT_NAME, OUTPUT_NAME) is under no agent and is not counted. With
     `backups`, a line whose save never reached the graph (see `_saved`) is not an edit."""
     try:
         raw = _tail(Path(home) / LOG, LOG_READ)
@@ -84,8 +90,9 @@ def output_edits(home: Path, since: float, backups: Path | None = None) -> dict[
         except ValueError:
             continue
         if not (isinstance(item, dict) and _number(item.get("time")) and item["time"] >= since
-                and item.get("undone") is not True and isinstance(item.get("agent"), str) and item["agent"]
-                and isinstance(item.get("task"), str) and _saved(item, backups)):
+                and item.get("undone") is not True and isinstance(item.get("agent"), str) and AGENT_NAME.fullmatch(item["agent"])
+                and isinstance(item.get("task"), str) and OUTPUT_NAME.fullmatch(item["task"])
+                and _saved(item, backups)):
             continue
         lines = sum(item[key] for key in ("lines_added", "lines_removed") if type(item.get(key)) is int)
         found.setdefault(item["agent"], []).append({"time": item["time"], "task": item["task"], "lines": lines})
