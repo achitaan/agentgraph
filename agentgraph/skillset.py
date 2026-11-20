@@ -22,7 +22,9 @@ from .snapshot_json import skills_document
 CONFIG = sources.CONFIG_DIR / "oh-my-opencode-slim.json"
 MAP = Path(__file__).resolve().parent.parent / "SKILLS.md"
 BACKUPS = sources.CONFIG_DIR / "backups"
-PROFILES = sources.CONFIG_DIR / "skills/personal-orchestrator/references/task-profiles.md"
+# The task profiles (which skills each agent's brief starts from), the toolkit's own copy beside SKILLS.md: the
+# toolkit reads nothing from inside an installed skill, which can be removed.
+PROFILES = Path(__file__).resolve().parent.parent / "task-profiles.md"
 AGENTS_DIR = sources.CONFIG_DIR / "agents"  # OpenCode's agents folder: added agents keep their skills in their file
 RESTART = "OpenCode reads this file when it starts; the change applies after a restart."
 SEAT_REASON = ("Council seats are model calls defined in the council's own table; "
@@ -610,13 +612,14 @@ def _file_change(op, agent, skill, info, *, agents_dir, backups, skills_dir, che
     catalogue = _catalogue(skills_dir) if op != "all" else []
     if op != "all" and (skill == "*" or skill not in catalogue):
         raise SkillsetError(f"skill {skill!r} is not installed")
-    old = agentfiles.skills_of(info["parsed"]["permissions"])
-    if op == "all":
-        new = ["*"]
-    elif op == "add":
-        new = old if "*" in old or skill in old else [*old, skill]
-    else:
-        new = [name for name in (catalogue if "*" in old else old) if name != skill]
+
+    def new(old):  # from the skills the file has as it is written (agentfiles.set_skills), never an earlier read
+        if op == "all":
+            return ["*"]
+        if op == "add":
+            return old if "*" in old or skill in old else [*old, skill]
+        return [name for name in (catalogue if "*" in old else old) if name != skill]
+
     shown, record, changed = agentfiles.set_skills(agent, new, agents_dir=agents_dir, backups=backups, check=check)
     return {"agent": agent, "preset": "agent file", "skills": shown["skills"], "editable": True,
             "differing_presets": [], "changed": changed, "changed_presets": [], "warnings": [],
@@ -635,7 +638,10 @@ def _change(op, agent, skill, *, config, presets, map_path, backups, profiles, s
     structure = Path(structure) if structure is not None else roster.STRUCTURE_DIR
     info = _file_agent(_parse(_read(config, "config")[0]), agent, agents_dir)
     if info is not None:
-        with roster.expecting(agent, expect, config=config, map_path=map_path, structure=structure) as check:
+        # The skill is checked as installed under the preset file's lock, which a skill's deletion holds too
+        # (skillfiles.delete), so it cannot be deleted between the check and the write.
+        with roster.expecting(agent, expect, config=config, map_path=map_path, structure=structure) as check, \
+                _locked(config, map_path, wrap=False):
             return _file_change(op, agent, skill, info, agents_dir=agents_dir, backups=backups, skills_dir=skills_dir,
                                 check=check)
     with _locked(config, map_path) as dirs:

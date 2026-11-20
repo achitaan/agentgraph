@@ -881,11 +881,19 @@ def set_text(name, text, *, agents_dir=AGENTS_DIR, backups=BACKUPS, check=None):
 
 def set_skills(name, skills, *, agents_dir=AGENTS_DIR, backups=BACKUPS, check=None):
     """Give an added agent exactly these skills ("*" alone: every skill; `check`: see `_change`, e.g. from
-    `roster.expecting`). Returns (shown, record, changed)."""
-    for skill in skills:
-        if skill != "*":
-            skillset._name(skill, "skill")
-    return _change(name, lambda parsed: {"permissions": with_skills(parsed["permissions"], skills)},
+    `roster.expecting`). `skills` may also be a function of the skills the file has now, called with them as read
+    under the agents folder's lock, so a change worked out from them never loses one made in between. Returns
+    (shown, record, changed)."""
+    def checked(names):
+        for skill in names:
+            if skill != "*":
+                skillset._name(skill, "skill")
+        return names
+
+    if not callable(skills):
+        checked(skills)
+    return _change(name, lambda parsed: {"permissions": with_skills(parsed["permissions"], checked(
+        skills(skills_of(parsed["permissions"])) if callable(skills) else skills))},
                    agents_dir=agents_dir, backups=backups, check=check)
 
 

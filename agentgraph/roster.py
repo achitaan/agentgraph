@@ -1331,34 +1331,38 @@ def add_agent(name, *, model=None, variant=None, description=None, prompt=None, 
     if skills is not None:
         skills = _names(skills, "skill")
     agentfiles.check_name(name)
-    obj = skillset._parse(skillset._read(config, "config")[0])
-    _check_new_name(obj, name, list(obj["presets"]), agents_dir)
-    # An agent file turned off by hand (`NAME.md.disabled`) still holds its name.
-    try:
-        held = sorted(entry for entry in os.listdir(agents_dir) if entry.startswith(name + ".md."))
-    except FileNotFoundError:
-        held = []
-    except OSError as exc:
-        raise RosterError(f"cannot read the agents folder: {exc}") from exc
-    if held:
-        raise RosterError(f"{name!r} is already an agent file in the agents folder ({', '.join(held)})")
-    text_description, text_model, rules, text, notes = _plan_added(
-        obj, name, model=model, variant=variant, description=description, prompt=prompt, skills=skills,
-        read_only=read_only, copy_of=copy_of, template=template, agents_dir=agents_dir,
-        installed=set(skillset._catalogue(skills_dir)) if skills else set())
-    # The final model, whatever it came from (a copy's source, a variant): the shape OpenCode reads.
-    if not isinstance(text_model, str) or not agentfiles.MODEL.fullmatch(text_model):
-        raise RosterError("model must be provider/model (optionally #variant), with no spaces or quotes")
-    text_description = agentfiles._clean_text(text_description, "description", agentfiles.MAX_DESCRIPTION, single=True)
-    # The structure file starts with the description when the source has no settings: a description that reads
-    # as a setting (`seats: impl-`) would become one.
-    if read_settings((text_description + "\n").encode("utf-8"))[0]:
-        raise RosterError("the description may not start like a structure setting (pool:, escalates_to: or seats:)")
-    data = agentfiles.render(text_description, text_model, rules,
-                             "" if not text.strip() else  # a blank agent's instruction starts empty
-                             agentfiles._clean_text(text, "the instruction", agentfiles.MAX_TEXT, single=False))
     root = Path(structure) if structure is not None else STRUCTURE_DIR
-    with _structure_locked(root) as root_fd:
+    # Everything that decides whether the name is free and the skills are installed is read under the locks
+    # the writers of the presets, the agents folder's names (an add holds them while it writes) and the skills
+    # (a skill's deletion holds the preset file's) take, so nothing can take the name or the skill between.
+    with _structure_locked(root) as root_fd, skillset._locked(config, map_path, wrap=False):
+        obj = skillset._parse(skillset._read(config, "config")[0])
+        _check_new_name(obj, name, list(obj["presets"]), agents_dir)
+        # An agent file turned off by hand (`NAME.md.disabled`) still holds its name.
+        try:
+            held = sorted(entry for entry in os.listdir(agents_dir) if entry.startswith(name + ".md."))
+        except FileNotFoundError:
+            held = []
+        except OSError as exc:
+            raise RosterError(f"cannot read the agents folder: {exc}") from exc
+        if held:
+            raise RosterError(f"{name!r} is already an agent file in the agents folder ({', '.join(held)})")
+        text_description, text_model, rules, text, notes = _plan_added(
+            obj, name, model=model, variant=variant, description=description, prompt=prompt, skills=skills,
+            read_only=read_only, copy_of=copy_of, template=template, agents_dir=agents_dir,
+            installed=set(skillset._catalogue(skills_dir)) if skills else set())
+        # The final model, whatever it came from (a copy's source, a variant): the shape OpenCode reads.
+        if not isinstance(text_model, str) or not agentfiles.MODEL.fullmatch(text_model):
+            raise RosterError("model must be provider/model (optionally #variant), with no spaces or quotes")
+        text_description = agentfiles._clean_text(text_description, "description", agentfiles.MAX_DESCRIPTION,
+                                                  single=True)
+        # The structure file starts with the description when the source has no settings: a description that reads
+        # as a setting (`seats: impl-`) would become one.
+        if read_settings((text_description + "\n").encode("utf-8"))[0]:
+            raise RosterError("the description may not start like a structure setting (pool:, escalates_to: or seats:)")
+        data = agentfiles.render(text_description, text_model, rules,
+                                 "" if not text.strip() else  # a blank agent's instruction starts empty
+                                 agentfiles._clean_text(text, "the instruction", agentfiles.MAX_TEXT, single=False))
         file = _agent_file(root_fd, name, copy_of, agentfiles.parse(data)["description"])
         changes = [file] if file else []
         failed = []
@@ -1599,10 +1603,11 @@ def _naming(root_fd, name, skip):
     return found
 
 
-def _restore_added(record, *, backups, root, agents_dir, commands_dir=None, config=CONFIG):
+def _restore_added(record, *, backups, root, agents_dir, commands_dir=None, config=CONFIG, map_path=MAP):
     kind, name, data = agentfiles.load_record(record, backups)
     if kind == "rename":
-        return _restore_rename(name, data, root=root, agents_dir=agents_dir, commands_dir=commands_dir, config=config)
+        return _restore_rename(name, data, root=root, agents_dir=agents_dir, commands_dir=commands_dir, config=config,
+                               map_path=map_path)
     if kind == "text":
         return {"agent": name, "kind": "added", "action": "restored the instruction",
                 **agentfiles.restore_text(record, agents_dir=agents_dir, backups=backups)}
@@ -1612,13 +1617,14 @@ def _restore_added(record, *, backups, root, agents_dir, commands_dir=None, conf
     if file is None or not agentfiles.is_added(file) or agentfiles.parse(file) is None:
         raise RosterError("invalid undo record: the file is not an added agent's")
     removed = _decode(data)
-    # The name may have become taken or forbidden since the removal (a preset agent, a displayName...).
-    obj = skillset._parse(skillset._read(config, "config")[0])
-    try:
-        _check_new_name(obj, name, list(obj["presets"]), agents_dir)
-    except RosterError as exc:
-        raise RosterError(f"the name is taken: {exc}; nothing was restored") from None
-    with _structure_locked(root) as root_fd:
+    # The name may have become taken or forbidden since the removal (a preset agent, a displayName...): checked
+    # under the locks every writer of the presets and of the agents folder's names takes (as rename_agent does).
+    with _structure_locked(root) as root_fd, skillset._locked(config, map_path, wrap=False):
+        obj = skillset._parse(skillset._read(config, "config")[0])
+        try:
+            _check_new_name(obj, name, list(obj["presets"]), agents_dir)
+        except RosterError as exc:
+            raise RosterError(f"the name is taken: {exc}; nothing was restored") from None
         with agentfiles._folder(agents_dir, create=True) as fd:
             taken = agentfiles._taken(fd, name)
         if taken:
@@ -1654,7 +1660,7 @@ def restore_agent(record, *, config=CONFIG, map_path=MAP, backups=BACKUPS, struc
     root = Path(structure) if structure is not None else STRUCTURE_DIR
     if isinstance(record, str) and "-agent-files" + os.sep in record:
         return _restore_added(record, backups=backups, root=root, agents_dir=agents_dir, commands_dir=commands_dir,
-                              config=config)
+                              config=config, map_path=map_path)
     path = _record_path(record, backups)
     data = _load_record(path)
     _check_record(data)
@@ -1939,7 +1945,7 @@ def _decode_rename(data):
     return changes, commands
 
 
-def _restore_rename(name, data, *, root, agents_dir, commands_dir, config):
+def _restore_rename(name, data, *, root, agents_dir, commands_dir, config, map_path=MAP):
     """Give a renamed agent its old name back from the rename's record: everything the rename changed, byte for
     byte, refused (nothing changed) when any of it was changed since or the old name now belongs to another agent
     (it passes a new agent's name checks again)."""
@@ -1951,12 +1957,13 @@ def _restore_rename(name, data, *, root, agents_dir, commands_dir, config):
     if file is None or not agentfiles.is_added(file) or agentfiles.parse(file) is None:
         raise RosterError("invalid undo record: the file is not an added agent's")
     renamed, commands = _decode_rename(data)
-    obj = skillset._parse(skillset._read(config, "config")[0])
-    try:
-        _check_new_name(obj, name, list(obj["presets"]), agents_dir)
-    except RosterError as exc:
-        raise RosterError(f"the old name is taken: {exc}; nothing was restored") from None
-    with _structure_locked(root) as root_fd:
+    # The old name is checked under the locks every writer of the presets and of the agents folder's names takes.
+    with _structure_locked(root) as root_fd, skillset._locked(config, map_path, wrap=False):
+        obj = skillset._parse(skillset._read(config, "config")[0])
+        try:
+            _check_new_name(obj, name, list(obj["presets"]), agents_dir)
+        except RosterError as exc:
+            raise RosterError(f"the old name is taken: {exc}; nothing was restored") from None
         with agentfiles._folder(agents_dir) as fd:
             current, taken = agentfiles._read_at(fd, to + ".md"), agentfiles._taken(fd, name)
         if current != file:

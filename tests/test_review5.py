@@ -8,11 +8,12 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
 
-from agentgraph import agentfiles, flowrun, roster, skillset, snapshot_json, structure
+from agentgraph import agentfiles, flowrun, roster, skillfiles, skillset, snapshot_json, structure
 from tests.test_agentfiles import Base
 from tests.test_flowrun import graph_raw
 from tests.test_structure import make_structure
@@ -145,3 +146,123 @@ class ExpectShape(Base):
         self.assertEqual(self.snapshot(), before)
         self.assertTrue(agentfiles.expect_ok(None))
         self.assertTrue(agentfiles.expect_ok(agentfiles.rev(b"x")))
+
+
+class LockedChecks(Base):
+    """n99 r5: every check that decides a write is made under the lock that protects it. Each test plants, just
+    before the writer takes its locks (or, for the skills, while it holds them, from another thread), what the
+    check must see; the write is refused or comes out consistent, never both."""
+
+    def plant_before_locks(self, plant):
+        real = roster._structure_locked
+        done = []
+
+        def wrapper(root):
+            if not done:
+                done.append(True)
+                plant()
+            return real(root)
+
+        return patch.object(roster, "_structure_locked", wrapper), done
+
+    def preset_agent(self, name):
+        with skillset._locked(self.config, self.map):
+            obj = json.loads(self.config.read_text())
+            obj["presets"][obj["preset"]][name] = {"model": "openai/gpt-5"}
+            self.config.write_text(json.dumps(obj, indent=2) + "\n")
+
+    def fresh_skill(self, id="fresh-skill"):
+        skillfiles.create(id, "A fresh skill", "Body\n", skills=self.skills)
+        return id
+
+    def delete_skill(self, id):
+        # wildcards_hold False: an agent with every skill ('*', the orchestrator) does not hold it
+        return skillfiles.delete(id, skills=self.skills, backups=self.backups, config=self.config,
+                                 agents_dir=self.agents, wildcards_hold=False)
+
+    def test_an_added_agents_restore_catches_its_name_taken_before_the_write(self):
+        self.add("xavier", template="verifier")
+        record = roster.remove_agent("xavier", **self.paths)["record"]
+        planting, done = self.plant_before_locks(lambda: self.preset_agent("xavier"))
+        with planting, self.assertRaisesRegex(skillset.SkillsetError, "the name is taken.*already exists in preset"):
+            roster.restore_agent(record, **self.paths)
+        self.assertTrue(done)
+        self.assertFalse((self.agents / "xavier.md").exists())
+
+    def test_a_rename_undo_catches_the_old_name_taken_before_the_write(self):
+        self.add("xavier", template="verifier")
+        record = roster.rename_agent("xavier", "yusuf", **self.paths)["record"]
+        planting, done = self.plant_before_locks(lambda: self.preset_agent("xavier"))
+        with planting, self.assertRaisesRegex(skillset.SkillsetError, "the old name is taken.*already exists"):
+            roster.restore_agent(record, **self.paths)
+        self.assertTrue(done)
+        self.assertTrue((self.agents / "yusuf.md").is_file())
+        self.assertFalse((self.agents / "xavier.md").exists())
+
+    def test_an_add_catches_its_name_taken_before_the_write(self):
+        planting, done = self.plant_before_locks(lambda: self.preset_agent("xavier"))
+        with planting, self.assertRaisesRegex(skillset.SkillsetError, "already exists in preset"):
+            self.add("xavier", template="verifier")
+        self.assertTrue(done)
+        self.assertFalse((self.agents / "xavier.md").exists())
+
+    def test_an_add_catches_its_skill_deleted_before_the_write(self):
+        skill = self.fresh_skill()
+        planting, done = self.plant_before_locks(lambda: self.delete_skill(skill))
+        with planting, self.assertRaisesRegex(skillset.SkillsetError, "not installed"):
+            self.add("xavier", template="verifier", skills=[skill])
+        self.assertTrue(done)
+        self.assertFalse((self.agents / "xavier.md").exists())
+
+    def during_the_write(self, other):
+        """Run `other` in another thread as soon as the skills change opens the agents folder to write, and give
+        it a second to finish first (it cannot when the change holds the lock it needs). Returns its outcome."""
+        real = agentfiles._folder
+        outcome = {}
+
+        def run():
+            try:
+                outcome["result"] = other()
+            except Exception as exc:  # noqa: BLE001 - the outcome is what is asserted
+                outcome["error"] = exc
+
+        thread = threading.Thread(target=run)
+
+        @contextlib.contextmanager
+        def wrapper(*args, **kwargs):
+            if not thread.is_alive() and not outcome:
+                thread.start()
+                thread.join(1.0)
+            with real(*args, **kwargs) as fd:
+                yield fd
+
+        return patch.object(agentfiles, "_folder", wrapper), thread, outcome
+
+    def skills_of(self, name):
+        return roster.read_agent(name, agents_dir=self.agents, config=self.config, map_path=self.map,
+                                 structure=self.structure)["skills"]
+
+    def give(self, name, skill):
+        return skillset.add(name, skill, config=self.config, map_path=self.map, backups=self.backups,
+                            skills_dir=self.skills, agents_dir=self.agents, structure=self.structure)
+
+    def test_a_skill_given_to_an_added_agent_is_never_deleted_under_it(self):
+        self.add("xavier", template="verifier")
+        skill = self.fresh_skill()
+        patching, thread, outcome = self.during_the_write(lambda: self.delete_skill(skill))
+        with patching:
+            self.give("xavier", skill)
+        thread.join(30)
+        gone = not (self.skills / skill).exists()
+        self.assertFalse(gone and skill in self.skills_of("xavier"),
+                         "the skill was deleted while the change gave it to xavier")
+        self.assertRegex(str(outcome.get("error", "")), "still used by agents: xavier")  # it waited, then saw xavier
+
+    def test_two_skill_changes_to_one_added_agent_never_lose_one(self):
+        self.add("xavier", template="verifier")
+        patching, thread, outcome = self.during_the_write(lambda: self.give("xavier", "engineering-delivery"))
+        with patching:
+            self.give("xavier", "code-assurance")
+        thread.join(30)
+        self.assertNotIn("error", outcome)
+        self.assertLessEqual({"code-assurance", "engineering-delivery"}, set(self.skills_of("xavier")))
