@@ -287,9 +287,11 @@
 .agentgraph[data-ag-motion="full"] .ag-hub:not([data-busy="0"]) .ag-sun-glow { animation: ag-sun-swell 2.4s ease-in-out infinite alternate; transform-box: fill-box; transform-origin: center; }
 @keyframes ag-sun-swell { from { transform: scale(1); } to { transform: scale(1.22); } }
 @media (prefers-reduced-motion: reduce) { .agentgraph .ag-sun-glow { animation: none !important; } }
-/* The moons' ring round their planet (3D only): thinner and fainter than a group's ring. */
-.agentgraph .ag-moon-ring { fill: none; stroke: var(--ag-edge); stroke-width: .8; vector-effect: non-scaling-stroke; opacity: .34; stroke-dasharray: 1 3; }
-.agentgraph .ag-moon-ring[data-side="far"] { opacity: .14; }
+/* The moons' orbits round their planet (3D only), one ring for each moon: thinner and fainter than a group's ring. */
+.agentgraph .ag-moon-ring { fill: none; stroke: var(--ag-muted); stroke-width: 1.2; vector-effect: non-scaling-stroke; opacity: .48; stroke-dasharray: 2 3; }
+.agentgraph .ag-moon-ring[data-side="far"] { opacity: .22; }
+/* A moon's name drawn again above its parent's disc and its siblings' (3D only). */
+.agentgraph .ag-moon-name { pointer-events: none; }
 /* The sun (n119). At rest a ball lit from the upper left, still. Fired up (the hub at work): flame spikes and a glow in
    the warm end of the palette (the hub's accent, the build orange, a pale yellow core); a spike's base is 2:1 or more
    against the page in both schemes. Under every line, ring, agent and name; no pointer. Reduced motion: short still

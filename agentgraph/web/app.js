@@ -11,11 +11,12 @@
   const DETAIL_WIDTH = 340; // the details panel beside a wide graph (style.css: .ag-details-open .ag-network margin)
   const READABLE = 11 / 12; // agent names are 12 px: the automatic view never shows them under 11 px; it pans instead
   // The sun and its moons (n119), one model with the terminal (tui-plugin): a moon's lap round its planet, the tilt of the
-  // moons' ring, the gap kept between moons and their planet at rest size, how far (in ring radii) a moon's depth is
-  // from its planet's at the nearest and farthest point of its ring, the least share of its size the 3D figure gives up
-  // for its moons' rings at rest size (a canvas too small for both gets smaller rings); the flare's glow (its outer edge in hub radii;
+  // moons' orbit planes, how much wider each next moon's orbit is (MOON_GROW, a share of the first's), the gap kept between moons and their planet at rest size, how far (in ring radii) a moon's depth is
+  // from its planet's at the nearest and farthest point of its orbit, the least share of its size the 3D figure keeps
+  // for its moons' orbits at rest size (n118 ruling 4: .5 with one ring, .75 with each moon's own orbit, the outer ones wider and
+  // turned about the vertical: a canvas too small for both gets smaller orbits); the flare's glow (its outer edge in hub radii;
   // swelling to 1.03 it stays inside the spikes' 1.6) and how long the flare takes to die down.
-  const MOON_LAP_MS = 24000, MOON_TILT = 1.1, MOON_GAP = 3, MOON_DEPTH = .1, MOON_ROOM = .5, FLARE_GLOW = 1.5, FLARE_DYING_MS = 700;
+  const MOON_LAP_MS = 24000, MOON_TILT = 1.1, MOON_GROW = .14, MOON_CLEAR = 8, MOON_DISC = .55, MOON_PICK = 12, MOON_LABEL = 13, MOON_DEPTH = .1, MOON_ROOM = .97, MOON_FLOOR = .86, FLARE_GLOW = 1.5, FLARE_DYING_MS = 700;
   let instance = 0;
   // The bottom sheet's height the user dragged to, per positions key, while the page is open (n103 item 7).
   const sheetShares = new Map();
@@ -4474,8 +4475,9 @@
         ring(1).place.forEach((point, name) => points.set(name, point));
         return { key: group.key, ring };
       });
-      // The moons (n119): the agents under another agent (agents[].parent) round their planet on one small ring of
-      // their own, in their 2D seats' order, evenly spaced from the first one's 2D bearing.
+      // The moons (n119, n118 ruling 4): the agents under another agent (agents[].parent) round their planet, each on
+      // an orbit of its own: moons ordered by name, i = 0 .. n-1; the plane the single ring had, turned about the vertical axis
+      // through the planet by 360 i / n degrees; the radius times 1 + .14 i; the phase 360 i / n degrees at time 0.
       const moons = new Map();
       positions.forEach((p, name) => {
         if (!orbitIsMoon(name, p)) return;
@@ -4483,13 +4485,17 @@
         moons.get(p.parent).push(name);
       });
       moons.forEach((names, lead) => {
-        const l = base.get(lead), bearing = name => { const b = base.get(name); return Math.atan2(-(b.y - l.y), b.x - l.x); };
-        names.sort((a, b) => bearing(a) - bearing(b));
+        names.sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
         // The ring's plane: across the planet's way round the sun, and out from the sun tilted MOON_TILT up from the
         // figure's plane (seen from above, it is narrow toward and away from the sun, where the canvas is short).
         const q = points.get(lead) || [1, 0, 0], h = Math.hypot(q[0], q[1]) || 1;
         const axes = [[-q[1] / h, q[0] / h, 0], [q[0] / h * Math.cos(MOON_TILT), q[1] / h * Math.cos(MOON_TILT), Math.sin(MOON_TILT)]];
-        moons.set(lead, { names, start: bearing(names[0]), radius: orbitMoonRadius(lead, names), axes });
+        const orbits = names.map((name, i) => {
+          const t = 2 * Math.PI * i / names.length, c = Math.cos(t), s = Math.sin(t);
+          return { name, grow: 1 + MOON_GROW * i, phase: t, axes: axes.map(v => [v[0] * c - v[1] * s, v[0] * s + v[1] * c, v[2]]) };
+        });
+        const rest = orbitMoonRadius(lead, names);
+        moons.set(lead, { names, radius: rest, rest, orbits });
       });
       // The sun at the middle of the canvas the details leave, the rings as wide as the 2D view's agents are from it,
       // narrower where anything drawn round an agent would leave that canvas at some turn or elevation (orbitFit).
@@ -4502,44 +4508,22 @@
     }
     // A moon: an agent whose snapshot names a parent (not the hub) drawn round it (a seat, not a group's member).
     function orbitIsMoon(name, p) { return !!p.parent && p.parent !== hubName && name !== hubName && !!orbit.base?.has(p.parent) && orbit.base.has(name) && shownAgents.get(name)?.parent === p.parent; }
-    // The moons' ring radius (drawing units): the smallest at which no moon's circle or name overlaps another moon's or
-    // its planet's, at rest size, the ring seen face on, at every phase of its turn (sampled every degree, MOON_GAP kept).
+    // A moon's radius in 3D (drawing units): MOON_DISC of its 2D radius (a planet's is its own).
+    function orbitDisc(name) { const r = orbit.base?.get(name)?.r ?? positions.get(name)?.r ?? 0; return orbitIsMoon(name, positions.get(name) || {}) ? r * MOON_DISC : r; }
+    // The innermost orbit's radius (drawing units; n118 ruling 5): the planet's radius + the largest moon's 3D radius +
+    // MOON_CLEAR, so seen face on a moon's disc clears the planet's by MOON_CLEAR. The others are wider (MOON_GROW).
     function orbitMoonRadius(lead, names) {
-      const shapes = name => {
-        const p = positions.get(name), list = [{ r: Number(p.r) || 0 }], drop = name !== lead ? orbitMoonDrop(p) : 0;
-        if (Number.isFinite(p.labelLeft) && Number.isFinite(p.labelTop)) list.push({ left: p.labelLeft, right: p.labelRight, top: p.labelTop + drop, bottom: p.labelBottom + drop });
-        return list;
-      };
-      const g = MOON_GAP, apart = (p, x, y, q) => {
-        if (p.r !== undefined && q.r !== undefined) return Math.hypot(x, y) >= p.r + q.r + g;
-        if (p.r !== undefined) return apart(q, -x, -y, p);
-        // p a box moved by (x, y); q a circle at the origin, or a box.
-        if (q.r !== undefined) return Math.hypot(Math.max(p.left + x, Math.min(0, p.right + x)), Math.max(p.top + y, Math.min(0, p.bottom + y))) >= q.r + g;
-        return p.left + x >= q.right + g || q.left >= p.right + x + g || p.top + y >= q.bottom + g || q.top >= p.bottom + y + g;
-      };
-      const clash = (a, ax, ay, b, bx, by) => a.some(p => b.some(q => !apart(p, ax - bx, ay - by, q)));
-      const planet = shapes(lead), own = names.map(shapes), n = names.length, steps = 360;
-      const fits = R => {
-        for (let s = 0; s < steps; s++) {
-          const at = own.map((_, j) => { const a = s * 2 * Math.PI / steps + j * 2 * Math.PI / n; return [R * Math.cos(a), -R * Math.sin(a)]; });
-          for (let j = 0; j < n; j++) {
-            if (clash(own[j], at[j][0], at[j][1], planet, 0, 0)) return false;
-            for (let k = j + 1; k < n; k++) if (clash(own[j], at[j][0], at[j][1], own[k], at[k][0], at[k][1])) return false;
-          }
-        }
-        return true;
-      };
-      let low = 0, high = 64;
-      while (!fits(high) && high < 4000) { low = high; high *= 1.5; }
-      for (let i = 0; i < 22; i++) { const mid = (low + high) / 2; if (fits(mid)) high = mid; else low = mid; }
-      return high;
+      return (Number(positions.get(lead)?.r) || 0) + Math.max(...names.map(orbitDisc)) + MOON_CLEAR;
     }
     // A moon's name is under its circle in 3D (as a planet's), whichever side 2D put it: how far it moves down.
-    function orbitMoonDrop(p) { return p.labelUp ? 2 * (Number(p.r) || 0) + 28 : 0; }
-    // A moon's place on its ring at `phase`, as a 3D direction (unit length) round its planet: the ring tilted MOON_TILT
-    // about the line across its planet's way (the group rings are tilted 0.6 rad or more about their own node lines).
-    function orbitMoonAt(ring, j, phase) { return orbitMoonDir(ring, ring.start + j * 2 * Math.PI / ring.names.length + phase); }
-    function orbitMoonDir(ring, a) { const [u, w] = ring.axes, c = Math.cos(a), s = Math.sin(a); return [u[0] * c + w[0] * s, u[1] * c + w[1] * s, u[2] * c + w[2] * s]; }
+    function orbitMoonDrop(p) { return p.labelUp ? 2 * (Number(p.r) || 0) + 8 + orbitMoonLabel() : 0; }
+    // A moon's name sits this far under its disc's centre past the disc's radius: 20 in 2D, MOON_LABEL in 3D (tight under the small disc), between in the morph.
+    function orbitMoonLabel() { return 20 - (20 - MOON_LABEL) * orbit.k; }
+    // A moon's place on its own orbit at `lap` (the clock's turn), as a 3D direction (unit length) round its planet: the
+    // plane tilted MOON_TILT about the line across its planet's way (the group rings are tilted 0.6 rad or more about their
+    // own node lines), turned about the vertical axis by the moon's share of a turn, the moon at its share of a turn ahead.
+    function orbitMoonAt(orb, lap) { return orbitMoonDir(orb, orb.phase + lap); }
+    function orbitMoonDir(orb, a) { const [u, w] = orb.axes, c = Math.cos(a), s = Math.sin(a); return [u[0] * c + w[0] * s, u[1] * c + w[1] * s, u[2] * c + w[2] * s]; }
     // A direction seen by the camera, without perspective: across, up the screen and depth (+ toward the camera).
     function orbitAim(v, turn, elevation) {
       const ct = Math.cos(turn), st = Math.sin(turn), ce = Math.cos(elevation), se = Math.sin(elevation);
@@ -4577,29 +4561,29 @@
       const views = [];
       for (let t = 0; t < 48; t++) for (let e = 0; e <= 12; e++) { const T = t * Math.PI / 24, E = e * Math.PI / 24; views.push([Math.cos(T), Math.sin(T), Math.cos(E), Math.sin(E)]); }
       // A planet's moons: what they take up round their own places (each at most .15 MOON_DEPTH larger than its
-      // planet), and, in each view, how far across and up their ring reaches (an ellipse: its two axes seen).
+      // planet), and, in each view, how far across and up each moon's orbit reaches (an ellipse: its two axes seen).
       const moonReach = new Map();
       moons?.forEach((ring, lead) => {
         const m = 1 + .15 * MOON_DEPTH, b = { left: 0, right: 0, top: 0, bottom: 0 };
-        ring.names.forEach(moon => { const e = extentOf({ ...positions.get(moon), labelUp: false }); b.left = Math.min(b.left, m * e.left); b.right = Math.max(b.right, m * e.right); b.top = Math.min(b.top, m * e.top); b.bottom = Math.max(b.bottom, m * e.bottom); });
-        moonReach.set(lead, { ...b, radius: ring.radius, axes: ring.axes });
+        ring.names.forEach(moon => { const q0 = positions.get(moon), d0 = orbitDisc(moon), e = { left: Math.min(-d0 - 10, q0.labelMin ?? -40), right: Math.max(d0 + 10, q0.labelMax ?? 40), top: -d0 - 10, bottom: d0 + MOON_LABEL + 5 }; b.left = Math.min(b.left, m * e.left); b.right = Math.max(b.right, m * e.right); b.top = Math.min(b.top, m * e.top); b.bottom = Math.max(b.bottom, m * e.bottom); });
+        moonReach.set(lead, { ...b, radius: ring.radius, orbits: ring.orbits });
       });
       const seen = new Map(leads.map(name => {
         const q = name === hubName ? null : points.get(name);
         if (!q) return [name, [{ x: 0, up: 0, size: 1.15 }]];
         return [name, views.map(([ct, st, ce, se]) => {
           const x = q[0] * ct + q[1] * st, y = -q[0] * st + q[1] * ct, up = y * se + q[2] * ce, d = -y * ce + q[2] * se, k = ORBIT_PERSPECTIVE / (ORBIT_PERSPECTIVE - d);
-          const axes = moonReach.get(name)?.axes, a = axes && orbitAim(axes[0], Math.atan2(st, ct), Math.atan2(se, ce)), c = axes && orbitAim(axes[1], Math.atan2(st, ct), Math.atan2(se, ce));
-          return { x: x * k, up: up * k, size: 1 + .3 * (d + 1) / 2, across: axes ? Math.hypot(a.x, c.x) : 0, high: axes ? Math.hypot(a.up, c.up) : 0 };
+          const reaches = (moonReach.get(name)?.orbits || []).map(({ axes, grow }) => { const a = orbitAim(axes[0], Math.atan2(st, ct), Math.atan2(se, ce)), c = orbitAim(axes[1], Math.atan2(st, ct), Math.atan2(se, ce)); return { across: grow * Math.hypot(a.x, c.x), high: grow * Math.hypot(a.up, c.up) }; });
+          return { x: x * k, up: up * k, size: 1 + .3 * (d + 1) / 2, reaches };
         })];
       }));
       const fits = (R, mu = 1) => {
         const shrink = Math.max(.6, R / wide);
         return leads.every(name => {
           const b = reach(name, shrink), o = moonReach.get(name);
-          return seen.get(name).every(({ x, up, size, across, high }) => {
+          return seen.get(name).every(({ x, up, size, reaches }) => {
             let { left, right, top, bottom } = b;
-            if (o) { const w = o.radius * mu * across, h = o.radius * mu * high; left = Math.min(left, -w + o.left); right = Math.max(right, w + o.right); top = Math.min(top, -h + o.top); bottom = Math.max(bottom, h + o.bottom); }
+            if (o) reaches.forEach(({ across, high }) => { const w = o.radius * mu * across, h = o.radius * mu * high; left = Math.min(left, -w + o.left); right = Math.max(right, w + o.right); top = Math.min(top, -h + o.top); bottom = Math.max(bottom, h + o.bottom); });
             return R * x + size * right <= room.right && R * x + size * left >= -room.left && -R * up + size * top >= -room.top && -R * up + size * bottom <= room.bottom;
           });
         });
@@ -4610,7 +4594,7 @@
         for (let i = 0; i < 24; i++) { const mid = (low + high) / 2; if (fits(mid, mu)) low = mid; else high = mid; }
         return low;
       };
-      // The moons' rings at rest size (n119) unless that leaves the figure under MOON_ROOM of the size it has with its
+      // The moons' orbits at rest size (n119) unless that leaves the figure under MOON_ROOM of the size it has with its
       // moons drawn at their planets: then their rings are as much smaller as that size needs (the moons may touch).
       const free = largest(1);
       if (!moons?.size) return { radius: Math.max(free, wide * .1), moonScale: 1 };
@@ -4618,7 +4602,9 @@
       if (free >= least) return { radius: Math.max(free, wide * .1), moonScale: 1 };
       let low = 0, high = 1;
       for (let i = 0; i < 16; i++) { const mid = (low + high) / 2; if (fits(least, mid)) low = mid; else high = mid; }
-      return { radius: Math.max(largest(low), wide * .1), moonScale: low };
+      // (never under MOON_FLOOR of the rest radius: the figure takes what is left, so the orbits stay readable)
+      const scale = Math.max(low, MOON_FLOOR);
+      return { radius: Math.max(largest(scale), wide * .1), moonScale: scale };
     }
     // The canvas changed size while 3D is shown (the details opened or closed, the pane resized): the figure is fitted
     // again into the new canvas (scheduleResize's part, after the 2D camera has been placed).
@@ -4655,13 +4641,13 @@
       const project = p => { const q = camera3d(p), fx = figure.hub.x + p[0] * figure.radius, fy = figure.hub.y - p[1] * figure.radius; return { x: fx + (q.x - fx) * e, y: fy + (q.y - fy) * e, depth: q.depth }; };
       orbit.depth.clear();
       positions.forEach((p, name) => {
-        if (!orbit.base.has(name)) orbit.base.set(name, { x: p.x, y: p.y });
+        if (!orbit.base.has(name)) orbit.base.set(name, { x: p.x, y: p.y, r: p.r });
         const point = risen.points.get(name);
         if (point) { full.set(name, camera3d(point)); return; }
         if (!(p.parent && orbit.base.has(p.parent))) full.set(name, { ...orbit.base.get(name), depth: 0 });
       });
       const moonOf = new Map();
-      figure.moons.forEach((ring, lead) => ring.names.forEach((name, j) => moonOf.set(name, { lead, ring, j })));
+      figure.moons.forEach((ring, lead) => ring.orbits.forEach(orb => moonOf.set(orb.name, { lead, ring, orb })));
       orbit.moonOf = moonOf;
       positions.forEach((p, name) => {
         if (full.has(name) || moonOf.has(name)) return;
@@ -4669,17 +4655,19 @@
         const lead = full.get(p.parent) || { ...orbit.base.get(p.parent), depth: 0 }, b = orbit.base.get(name), l = orbit.base.get(p.parent), size = (1 + .3 * (lead.depth + 1) / 2) * figure.shrink;
         full.set(name, { x: lead.x + (b.x - l.x) * size, y: lead.y + (b.y - l.y) * size, depth: lead.depth + 1e-4 });
       });
-      // A moon (n119): on its planet's ring at the moons' phase, the ring at rest size times its planet's size; its depth
+      // A moon (n119): on its own orbit round its planet at the moons' phase, the orbit's radius times its planet's size; its depth
       // its planet's, a little nearer on the near half of its ring and farther on the far half (MOON_DEPTH: it passes in
       // front of its planet and behind it, and is sized as a planet there).
-      moonOf.forEach(({ lead: name, ring, j }, moon) => {
+      moonOf.forEach(({ lead: name, ring, orb }, moon) => {
         const lead = full.get(name) || { ...orbit.base.get(name), depth: 0 }, size = 1 + .3 * (lead.depth + 1) / 2;
-        const o = orbitAim(orbitMoonAt(ring, j, orbit.moon), orbit.view.turn, orbit.view.elevation), R = ring.radius;
+        const o = orbitAim(orbitMoonAt(orb, orbit.moon), orbit.view.turn, orbit.view.elevation), R = ring.radius * orb.grow;
         full.set(moon, { x: lead.x + o.x * R * size, y: lead.y - o.up * R * size, depth: lead.depth + o.depth * MOON_DEPTH });
       });
       positions.forEach((p, name) => {
         const b = orbit.base.get(name), q = full.get(name);
         p.x = b.x + (q.x - b.x) * e; p.y = b.y + (q.y - b.y) * e;
+        // A moon's disc shrinks with the morph to MOON_DISC of its 2D radius (and grows back); a planet's is as it was.
+        if (moonOf.has(name)) p.r = b.r * (1 - (1 - MOON_DISC) * e);
         orbit.depth.set(name, { z: q.depth, s: 1 + e * .3 * (q.depth + 1) / 2, mix: e * orbitMix(q.depth) });
       });
       orbit.full = full;
@@ -4694,6 +4682,7 @@
     // it works, as in the terminal), its light.
     function orbitNode(node, name) {
       const d = orbit.shown && orbit.depth.get(name), label = node.querySelector(':scope > .ag-agent-name');
+      if (d && orbit.moonOf?.has(name)) orbitMoonBody(node, positions.get(name), d);
       const drop = d && orbit.moonOf?.has(name) ? orbitMoonDrop(positions.get(name)) : 0;
       if (drop) label?.setAttribute('transform', 'translate(0 ' + drop + ')'); else if (label?.hasAttribute('transform')) label.removeAttribute('transform');
       if (!d) { if (node.style.opacity) node.style.opacity = ''; return ''; }
@@ -4706,6 +4695,20 @@
       }
       orbitLight(node, name);
       return d.s > 1.0005 ? ' scale(' + d.s.toFixed(4) + ')' : '';
+    }
+    // A moon's disc and what scales with it (its ring, halo, inner dot, count and alert marks) at the radius it has now
+    // (renderNodes sets them from the 2D radius), its name under it at the same size as ever; the pick target (the halo)
+    // never under MOON_PICK px on screen.
+    function orbitMoonBody(node, p, d) {
+      const r = p.r, was = orbit.base.get(node.dataset.agent)?.r || r, k = r / was;
+      node.querySelector(':scope > .ag-core')?.setAttribute('r', r);
+      node.querySelector(':scope > .ag-ping')?.setAttribute('r', r);
+      node.querySelector(':scope > .ag-halo')?.setAttribute('r', Math.max(r + 8, MOON_PICK / ((camera.scale || 1) * d.s)).toFixed(2));
+      node.querySelector(':scope > .ag-spark')?.setAttribute('r', (4 * k).toFixed(2));
+      const mark = node.querySelector(':scope > .ag-alert'); if (mark) { mark.setAttribute('cx', -r * .72); mark.setAttribute('cy', -r * .72); }
+      node.querySelector(':scope > .ag-agent-name')?.setAttribute('y', p.labelUp ? -r - 8 : r + orbitMoonLabel());
+      const badge = node.querySelector(':scope > .ag-busy-count'), corner = (r + 10) * Math.SQRT1_2;
+      if (badge) { badge.setAttribute('x', corner); badge.setAttribute('y', -corner); }
     }
     // Nearer agents over farther ones (and their names): the node order follows depth, moved without losing focus.
     // Without depth (back in 2D) the order is the one 2D had (orbit.dom), any agent added meanwhile after it.
@@ -4741,38 +4744,65 @@
       [...orbitLayer.children].forEach(item => { if (item.classList.contains('ag-orbit-ring') && !shown.has(item.dataset.group)) item.remove(); });
       orbitMoonRings();
     }
-    // The moons' rings (n119): one thin line round each planet with moons, its far half (behind the planet) fainter,
-    // from its circle seen from straight above round the planet's 2D place to where the camera shows it, with the morph.
+    // The moons' orbits (n119, n118 ruling 4): one thin line for each moon round its planet, in the moon's own plane and at its
+    // own radius, its far half (behind the planet) fainter, from its circle seen from straight above round the planet's 2D
+    // place to where the camera shows it, with the morph.
     function orbitMoonRings() {
       const figure = orbitFigure(), e = orbit.k, shown = new Set();
       figure.moons.forEach((ring, lead) => {
         const q = orbit.full?.get(lead), b = orbit.base.get(lead);
         if (!q || !b) return;
-        shown.add(lead);
-        let view = [...orbitLayer.children].filter(item => item.dataset.moons === lead);
-        if (view.length !== 2) { view.forEach(item => item.remove()); view = ['near', 'far'].map(side => svg('path', { class: 'ag-moon-ring', 'data-moons': lead, 'data-side': side })); orbitLayer.append(...view); }
-        // Round the planet's 3D place at its size there, as its moons are (orbitProject).
-        const size = 1 + .3 * (q.depth + 1) / 2, R = ring.radius, parts = { near: '', far: '' }, steps = 72;
-        let last = null;
-        for (let i = 0; i <= steps; i++) {
-          const a = i / steps * 2 * Math.PI, v = orbitMoonDir(ring, a), o = orbitAim(v, orbit.view.turn, orbit.view.elevation);
-          const flatX = b.x + R * Math.cos(a), flatY = b.y - R * Math.sin(a), x = flatX + (q.x + o.x * R * size - flatX) * e, y = flatY + (q.y - o.up * R * size - flatY) * e;
-          const side = o.depth >= 0 ? 'near' : 'far', xy = x.toFixed(1) + ' ' + y.toFixed(1);
-          if (last && last.side === side) parts[side] += ' L ' + xy;
-          else { if (last) parts[last.side] += ' L ' + xy; parts[side] += ' M ' + (last ? last.xy : xy) + (last ? ' L ' + xy : ''); }
-          last = { side, xy };
-        }
-        view[0].setAttribute('d', parts.near.trim()); view[1].setAttribute('d', parts.far.trim());
-        view.forEach(item => { item.dataset.radius = R.toFixed(2); });
+        ring.orbits.forEach(orb => {
+          shown.add(orb.name);
+          let view = [...orbitLayer.children].filter(item => item.dataset.moon === orb.name);
+          if (view.length !== 2) { view.forEach(item => item.remove()); view = ['near', 'far'].map(side => svg('path', { class: 'ag-moon-ring', 'data-moons': lead, 'data-moon': orb.name, 'data-side': side })); orbitLayer.append(...view); }
+          // Round the planet's 3D place at its size there, as its moons are (orbitProject).
+          const size = 1 + .3 * (q.depth + 1) / 2, R = ring.radius * orb.grow, parts = { near: '', far: '' }, steps = 72;
+          let last = null;
+          for (let i = 0; i <= steps; i++) {
+            const a = i / steps * 2 * Math.PI, v = orbitMoonDir(orb, a), o = orbitAim(v, orbit.view.turn, orbit.view.elevation);
+            const flatX = b.x + R * Math.cos(a), flatY = b.y - R * Math.sin(a), x = flatX + (q.x + o.x * R * size - flatX) * e, y = flatY + (q.y - o.up * R * size - flatY) * e;
+            const side = o.depth >= 0 ? 'near' : 'far', xy = x.toFixed(1) + ' ' + y.toFixed(1);
+            if (last && last.side === side) parts[side] += ' L ' + xy;
+            else { if (last) parts[last.side] += ' L ' + xy; parts[side] += ' M ' + (last ? last.xy : xy) + (last ? ' L ' + xy : ''); }
+            last = { side, xy };
+          }
+          view[0].setAttribute('d', parts.near.trim()); view[1].setAttribute('d', parts.far.trim());
+          view.forEach(item => { item.dataset.radius = R.toFixed(2); item.dataset.rest = (ring.rest * orb.grow).toFixed(2); });
+        });
       });
-      [...orbitLayer.children].forEach(item => { if (item.classList.contains('ag-moon-ring') && !shown.has(item.dataset.moons)) item.remove(); });
+      [...orbitLayer.children].forEach(item => { if (item.classList.contains('ag-moon-ring') && !shown.has(item.dataset.moon)) item.remove(); });
     }
+    // A moon's name is drawn again above its parent's disc and its siblings' (n118 ruling 5): a <use> of the name, in
+    // the node layer just after the last of the family's nodes (so a planet nearer than all of them still covers it); the
+    // name in its own node stays (the one the page reads, measures and styles). The copy is the node's transform and
+    // opacity on the name's own, and takes no pointer events.
+    function orbitMoonNames() {
+      const uses = orbit.nameUses || (orbit.nameUses = new Map()), moonOf = orbit.moonOf, children = [...nodeLayer.children];
+      uses.forEach((use, name) => { if (!moonOf?.has(name) || !nodes.has(name)) { use.remove(); uses.delete(name); } });
+      if (!moonOf?.size) return;
+      const at = new Map(children.map((child, i) => [child.dataset?.agent, i]));
+      moonOf.forEach(({ lead }, name) => {
+        const node = nodes.get(name), label = node?.querySelector(':scope > .ag-agent-name');
+        if (!label || node.parentNode !== nodeLayer) return;
+        if (!label.id) label.id = uid + '-name-' + (orbit.nameId = (orbit.nameId || 0) + 1);
+        let use = uses.get(name);
+        if (!use) { use = svg('use', { class: 'ag-moon-name', 'aria-hidden': 'true', 'data-moon-name': name }); use.setAttribute('href', '#' + label.id); uses.set(name, use); }
+        use.setAttribute('transform', node.getAttribute('transform') || '');
+        use.style.opacity = node.style.opacity;
+        const family = [lead, ...moonOf.get(name).ring.names].filter(n => at.has(n)), top = nodes.get(family.reduce((m, n) => at.get(n) > at.get(m) ? n : m, name));
+        let before = use.previousElementSibling; while (before && before.classList.contains('ag-moon-name')) before = before.previousElementSibling;
+        if (use.parentNode !== nodeLayer || before !== top) nodeLayer.insertBefore(use, top.nextSibling);
+      });
+    }
+    function orbitMoonNamesClear() { orbit.nameUses?.forEach(use => use.remove()); orbit.nameUses = null; }
     function orbitDraw() {
       const started = performance.now();
       const project = orbitProject();
       skyDraw();
       nodes.forEach((_, name) => positionNode(name));
       orbitOrder(true);
+      orbitMoonNames();
       orbitRings(project);
       updateEdges();
       const wireFrom = flowAction && trail.length && !trailPending && positions.get(trail.at(-1));
@@ -4814,7 +4844,8 @@
     function orbitRestore(draw) {
       if (!orbit.shown) return;
       if (orbit.raf) { cancelAnimationFrame(orbit.raf); orbit.raf = 0; }
-      positions.forEach((p, name) => { const b = orbit.base.get(name); if (b) { p.x = b.x; p.y = b.y; } });
+      positions.forEach((p, name) => { const b = orbit.base.get(name); if (b) { p.x = b.x; p.y = b.y; p.r = b.r; } });
+      orbitMoonNamesClear();
       orbit.shown = false; orbit.k = 0; orbit.change = null; orbit.grab = null; orbit.depth.clear(); orbit.last = 0;
       if (trail.length && orbit.want === '2d') announce(); // not for 2D's moment inside 3D (a team change)
       const saved = orbit.saved, view = viewport.getBoundingClientRect(), settle = orbit.settle; orbit.settle = null;
@@ -4854,12 +4885,12 @@
       orbit.holding = true;
       let changed = false;
       try {
-        positions.forEach((p, name) => { const b = orbit.base.get(name); if (b) { p.x = b.x; p.y = b.y; } });
+        positions.forEach((p, name) => { const b = orbit.base.get(name); if (b) { p.x = b.x; p.y = b.y; p.r = b.r; } });
         fn(...args);
         stopLayout();
         const next = new Map();
-        positions.forEach((p, name) => next.set(name, { x: p.x, y: p.y }));
-        changed = next.size !== orbit.base.size || [...next].some(([name, b]) => { const was = orbit.base.get(name); return !was || Math.abs(was.x - b.x) > .01 || Math.abs(was.y - b.y) > .01; });
+        positions.forEach((p, name) => next.set(name, { x: p.x, y: p.y, r: p.r }));
+        changed = next.size !== orbit.base.size || [...next].some(([name, b]) => { const was = orbit.base.get(name); return !was || Math.abs(was.x - b.x) > .01 || Math.abs(was.y - b.y) > .01 || Math.abs(was.r - b.r) > .01; });
         orbit.base = next;
       } finally { orbit.holding = false; }
       if (changed) orbit.figure = null;
@@ -4883,7 +4914,7 @@
       if (!snapshot || !camera.initialized || !positions.size) { orbitWait(); return; }
       if (!orbit.shown) {
         stopLayout();
-        orbit.base = new Map(); positions.forEach((p, name) => orbit.base.set(name, { x: p.x, y: p.y }));
+        orbit.base = new Map(); positions.forEach((p, name) => orbit.base.set(name, { x: p.x, y: p.y, r: p.r }));
         orbit.saved = { x: camera.x, y: camera.y, scale: camera.scale, own: camera.own, moves: userMoves, touched: camera.touched, width: camera.width, height: camera.height, top: camera.top };
         orbit.figure = null; orbit.shown = true; orbit.k = 0; orbit.order = ''; orbit.dom = [...nodeLayer.children];
         if (trail.length) announce();

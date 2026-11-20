@@ -610,19 +610,28 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   field's density (a star per 9,000 px^2, a cell taken as 8 x 16 px) over a sky a quarter taller than the view
 //   above and below instead of wrapped rows; the depth mix continuous rather than six steps; the streak a line on
 //   the terminal's diagonal (one column, one row a step), not characters; the sun's glow and sphere shading.
-// Moons (n119; the same model as the terminal): an agent with agents[].parent (other than the hub) is a moon of its parent (today the
-//   council's seats). In 3D the parent sits on its group's ring like any planet and its moons sit on one small ring
-//   round it (path.ag-moon-ring in the rings' layer, data-moons = the parent, data-side near/far, data-radius), evenly
-//   spaced in their 2D seats' order, the ring tilted 1.1 rad up from the system's plane about the line across the
-//   parent's way round the sun (so it lies unlike the group's ring and is narrow toward and away from the sun), its
-//   radius the smallest at which, seen face on at rest size, no moon's circle or name comes within 3 of another
-//   moon's or the parent's at any phase (only a canvas where that would leave the figure under half its size gets
-//   smaller moon rings). They go round once in 24 s on the clock the system turns by, and stand still
-//   whenever it does (reduced motion, a hidden page, a press). A moon's name is under its circle in 3D; it is drawn
-//   at its parent's size there (its own circle smaller than a planet's), never under 11 px, nearer over farther. The
-//   fit counts each ring as seen from each sampled angle. In 2D nothing changes and nothing new moves; the morph takes
-//   each moon in a straight line from its 2D seat to its 3D place and back. A moon picks, opens its details, and keeps
-//   its spoke, pulses, loops, badges and paths, as before.
+// Moons (n119, n118 ruling 4; the same model as the terminal): an agent with agents[].parent (other than the hub) is a moon of its
+//   parent (today the council's seats). In 3D the parent sits on its group's ring like any planet and each of its moons
+//   goes round it on an orbit of its own (two path.ag-moon-ring in the rings' layer for each moon, data-moons = the
+//   parent, data-moon = the moon, data-side near/far, data-radius = that orbit's radius). Moons of a parent are ordered
+//   by name, i = 0 .. n-1: the first one's plane is the one ring's (tilted 1.1 rad up from the system's plane about the
+//   line across the parent's way round the sun, so it lies unlike the group's ring and is narrow toward and away from
+//   the sun), moon i's plane that one turned about the vertical axis through the parent by 360 i / n degrees (so no two
+//   moons share a plane); its radius r (1 + .14 i), r the parent's 3D radius + the largest moon's 3D radius + 8, so seen
+//   face on the moon's disc clears the parent's by 8 (data-rest is that radius); its place at time 0 360 i / n degrees
+//   along its orbit, all going round the same way. A moon's disc in the steady 3D frame is .55 of its 2D radius (its
+//   halo, ring, inner dot and marks with it; the size comes with the morph and ends exactly on each steady frame; 2D is
+//   unchanged); its name keeps its size (never under 11 px) and sits close under the small disc; its pick target is never
+//   under 12 px in radius. A canvas where the orbits at rest size would leave the figure under .97 of its size without
+//   moons (MOON_ROOM) gets smaller orbits, but never under .86 of rest (MOON_FLOOR; the figure takes what is left):
+//   at 1100 px and wider each orbit is at least .85 of its rest radius and the figure is within 3% of its size before
+//   the small moons. They go round once in 24 s on the clock the system turns by, and stand still at their time-0
+//   places whenever it does (reduced motion, a hidden page, a press). A moon's name is drawn again (use.ag-moon-name, no
+//   pointer events, aria-hidden) above its parent's disc and its siblings' at every point of the lap, planets nearer the
+//   viewer may still cover it; a moon's disc behind its parent is still drawn behind it. The fit counts each moon's
+//   orbit as seen from each sampled angle. In 2D nothing changes and nothing new moves; the morph takes each moon in a
+//   straight line from its 2D seat to its 3D place and back. A moon picks, opens its details, and keeps its spoke,
+//   pulses, loops, badges and paths, as before.
 // The sun (n119): the hub (hubName) is a ball lit from the upper left (g.ag-sun-ball: radial gradients #<uid>-ball-rest
 //   and -fire, colours --ag-ball-light/--ag-ball-dark/--ag-flare-core), in 2D and 3D, still at rest. While the hub
 //   works it flares: g.ag-flare, the stage's first child (under every line, ring, agent and name; aria-hidden, no
