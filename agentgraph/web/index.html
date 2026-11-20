@@ -33,8 +33,11 @@
       };
       const flow = post('/api/structure/flow', 'The flow could not be changed');
       const skills = post('/api/skills', 'The skills could not be changed');
+      const roster = post('/api/roster', 'The agents could not be changed');
+      const skillfile = post('/api/skillfile', 'The skill could not be changed');
+      const team = post('/api/structure/team', 'The group could not be changed');
       window.AgentGraph.mount(root, {
-        actions: params.has('demo') ? undefined : { flow, skills },
+        actions: params.has('demo') ? undefined : { flow, skills, roster, skillfile, team },
         fetchSnapshot: async () => {
           const response = await fetch('/api/snapshot' + query, { cache: 'no-store' });
           const body = await response.text();
