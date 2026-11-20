@@ -5137,7 +5137,7 @@
       }
       const stored = () => localStorage.getItem('agentgraph.positions.v1');
       // (item 4 first: the cheapest check, where the shards' split puts the busiest page)
-      await test('n105 item 4: everything drawn in 2D is drawn in 3D (agents, council seats, paths, loops as closed dotted rings, group lines, badges, spokes) with no new text; depth by size, dimming and order (nearer over farther); names upright and never under 11 px; the sky (ruling 4): an empty layer first in the drawing, hidden from screen readers, that never takes a click, adds no text and turns with the system at a quarter of its rate', async () => {
+      await test('n105 item 4: everything drawn in 2D is drawn in 3D (agents, council seats, paths, loops as closed dotted rings, group lines, badges, spokes) with no new text; depth by size, the terminal\'s mix toward the muted colour and order (nearer over farther); names upright and never under 11 px', async () => {
         const data = n105Data();
         data.structure.teams = [{ id: 't1', lead: 'reviewer', members: ['verifier'], text: '' }];
         Object.assign(data.agents.find(a => a.name === 'impl-openai'), { busy: 2, sessions: [{ id: 's1', title: 'A', busy: true, model: 'm', cost: 0 }, { id: 's2', title: 'B', busy: true, model: 'm', cost: 0 }] });
@@ -5151,8 +5151,7 @@
             edges: [...root.querySelectorAll('line[data-edge], path[data-edge]')].map(line => line.dataset.edge).sort(),
             text: [...root.querySelectorAll('.ag-drawing text')].map(item => item.textContent).filter(Boolean).sort()
           });
-          const flat = inventory(), skyBox = root.querySelector('.ag-drawing').firstElementChild, sky = skyBox?.querySelector('.ag-sky-turn');
-          assert(skyBox && skyBox.classList.contains('ag-sky') && sky && skyBox.children.length === 1 && !sky.getAttribute('transform'), 'no sky layer first in the drawing, or it is turned in 2D');
+          const flat = inventory();
           press(viewportOf(root), 'd'); await until(() => in3d(root)); assert(in3d(root), 'd did not switch to 3D');
           press(viewportOf(root), 'ArrowLeft'); press(viewportOf(root), 'ArrowLeft'); await frame(); await frame();
           assert(inventory() === flat, '3D does not draw what 2D draws: ' + flat.slice(0, 200) + ' / ' + inventory().slice(0, 200));
@@ -5169,35 +5168,18 @@
           }
           assert(root.querySelectorAll('.ag-orbit-ring').length === 10, 'not one ring (near and far halves) per group: ' + root.querySelectorAll('.ag-orbit-ring').length);
           const nodes = [...root.querySelectorAll('.ag-nodes > [data-agent]')], scaleOf = node => node.querySelector('.ag-core').getCTM().a / root.querySelector('.ag-drawing > g').getCTM().a;
-          const scales = nodes.map(scaleOf), opacities = nodes.map(node => Number(getComputedStyle(node).opacity));
+          const scales = nodes.map(scaleOf), resting = nodes.filter(node => node.dataset.busy === '0' && node.dataset.agent !== 'orchestrator'), mixes = resting.map(node => Number(node.querySelector(':scope > .ag-depth-mix')?.style.opacity ?? -1));
           assert(Math.max(...scales) / Math.min(...scales) > 1.12, 'no depth by size: ' + scales.map(s => s.toFixed(2)).join());
-          assert(Math.max(...opacities) - Math.min(...opacities) > .2 && opacities.every((o, i) => i === 0 || o >= opacities[i - 1] - 1e-3), 'no depth by dimming (farther fainter): ' + opacities.map(o => o.toFixed(2)).join());
+          assert(mixes.every(m => m >= 0 && m <= .72 + 1e-3) && Math.max(...mixes) - Math.min(...mixes) > .2 && mixes.every((m, i) => i === 0 || m <= mixes[i - 1] + 1e-3), 'no depth by the muted mix (the terminal\'s DEPTH_MIX, farther more muted): ' + mixes.map(m => m.toFixed(2)).join());
           assert(scales.every((s, i) => i === 0 || s >= scales[i - 1] - 1e-3), 'a farther agent is drawn over a nearer one: ' + nodes.map((node, i) => node.dataset.agent + ' ' + scales[i].toFixed(3)).join(', '));
           const labels = [...root.querySelectorAll('.ag-drawing .ag-agent-name')];
           assert(labels.every(label => { const m = label.getScreenCTM(); return Math.abs(m.b) < 1e-6 && Math.abs(m.c) < 1e-6 && m.a > 0 && m.d > 0; }), 'a name is not upright');
-          // The sky: empty, hidden from screen readers, no pointer; it turns with the system at a quarter of its rate.
-          assert(skyBox === root.querySelector('.ag-drawing').firstElementChild && skyBox.getAttribute('aria-hidden') === 'true' && !skyBox.textContent && skyBox.children.length === 1 && !sky.children.length && getComputedStyle(skyBox).pointerEvents === 'none' && getComputedStyle(sky).pointerEvents === 'none', 'the sky is not an empty layer first in the drawing that takes no pointer');
-          const skyTurn = () => { const m = /rotate\(([-\d.]+)/.exec(sky.getAttribute('transform') || ''); return m ? Number(m[1]) : 0; };
-          const sky0 = skyTurn(), turn0 = turnOf(root);
-          press(viewportOf(root), 'ArrowLeft'); await frame(); await frame();
-          const turned = (turnOf(root) - turn0) * 180 / Math.PI, skyTurned = skyTurn() - sky0;
-          assert(Math.abs(turned) > 5 && Math.abs(skyTurned - turned * .25) < .05, 'the sky does not turn with the system at a quarter of its rate: ' + skyTurned.toFixed(2) + ' for ' + turned.toFixed(2) + ' degrees');
-          // Something drawn in it later never takes a click: a probe over the whole canvas.
-          const probe = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-          ['x', 'y'].forEach(key => probe.setAttribute(key, '-5000')); ['width', 'height'].forEach(key => probe.setAttribute(key, '10000')); probe.setAttribute('fill', 'currentColor');
-          sky.append(probe);
-          try {
-            const view = viewportOf(root).getBoundingClientRect();
-            for (let y = view.top + 20; y < view.bottom; y += 60) for (let x = view.left + 20; x < view.right; x += 80) assert(document.elementFromPoint(x, y) !== probe, 'the sky took the pointer at ' + Math.round(x) + ', ' + Math.round(y));
-            const step = routeOf(root, 'p4').querySelector('.ag-route-step'), spot = pointsOf(step, 20).slice(4, 17).find(q => !document.elementFromPoint(q.x, q.y)?.closest('[data-agent]') && document.elementFromPoint(q.x, q.y)?.closest('[data-route]'));
-            if (spot) { const owner = document.elementFromPoint(spot.x, spot.y).closest('[data-route]').dataset.route; clickAt(root, spot); assert(picked(root, owner), 'with the sky drawn a click does not pick a line'); press(viewportOf(root), 'Escape'); }
-          } finally { probe.remove(); }
           for (let i = 0; i < 12; i++) press(viewportOf(root), '-');
           await frame();
           assert(nameSize(root) >= 11 - .01, 'names at ' + nameSize(root).toFixed(2) + ' px in 3D zoomed out');
         }, { motion: 'none' });
       });
-      await test('n105 item 1 (rulings 1, 2): one named control beside the others and the key d switch 2D and 3D in one morph of about 700 ms (the camera tips from straight above down to a side view at 0.32 rad while every agent travels without a jump or a fade from its 2D place to its 3D place, and back); going back restores the 2D view exactly (camera, every position, every line); the choice is kept across a reload and a host without storage does not fail', async () => {
+      await test('n105 item 1 (rulings 1, 2): one named control beside the others and the key d switch 2D and 3D in one morph of about 700 ms (the terminal\'s: the camera at the side view, 0.5 rad, while the rings rise out of the plane and every agent travels without a jump or a fade from its 2D place to its 3D place, and back); going back restores the 2D view exactly (camera, every position, every line); the choice is kept across a reload and a host without storage does not fail', async () => {
         const data = n105Data();
         await using(data, async root => {
           await settled();
@@ -5241,7 +5223,7 @@
           assert(root.dataset.agView === '3d' && button.getAttribute('aria-pressed') === 'true', 'd did not start the switch');
           const going = await morph(() => in3d(root));
           assert(in3d(root) && going.took > 560 && going.took < 1100, 'the morph took ' + Math.round(going.took) + ' ms, not about 700');
-          assert(going.track[1].tilt > 1.45 && Math.abs(going.track.at(-1).tilt - .32) < .005, 'the camera does not tip from straight above (' + going.track[1].tilt.toFixed(3) + ') to the side view at 0.32 rad (' + going.track.at(-1).tilt.toFixed(3) + ')');
+          assert(going.track.slice(1).every(s => Math.abs(s.tilt - .5) < .005), 'the camera is not at the side view (0.5 rad) through the morph: ' + going.track.map(s => s.tilt.toFixed(2)).join(' '));
           smooth(going.track, 'in');
           assert(pictureOf(root) !== flat, 'nothing moved during the switch');
           viewportOf(root).dispatchEvent(new WheelEvent('wheel', { deltaY: -240, bubbles: true, cancelable: true, clientX: 500, clientY: 400 }));
@@ -5295,7 +5277,7 @@
           assert(Math.abs(turnOf(root) - (turn1 + .48)) < .02, 'a drag starting on an agent did not turn: ' + turn1 + ' -> ' + turnOf(root));
           assert(stored() === null && camera() === cam0 && !root.dataset.agTrail && !detailOpen(root), 'a drag starting on an agent moved it, panned, picked or opened it');
           dragBy(root, emptySpot(root), 0, -2000); await frame();
-          assert(Math.abs(tiltOf(root) - .06) < .001, 'tilting up does not stop at the plane: ' + tiltOf(root));
+          assert(Math.abs(tiltOf(root)) < .001, 'tilting up does not stop at the plane: ' + tiltOf(root));
           dragBy(root, emptySpot(root), 0, 3000); await frame();
           assert(Math.abs(tiltOf(root) - Math.PI / 2) < .001, 'tilting down does not stop straight down: ' + tiltOf(root));
           const scale = () => root.querySelector('.ag-drawing > g').getCTM().a, s0 = scale();
@@ -5304,14 +5286,14 @@
           viewportOf(root).focus();
           const turn2 = turnOf(root), tilt2 = tiltOf(root);
           press(viewportOf(root), 'ArrowLeft'); press(viewportOf(root), 'ArrowDown'); await frame();
-          assert(Math.abs(turnOf(root) - turn2 - .2) < .001 && tiltOf(root) < tilt2 - .1, 'arrow keys do not turn the system: ' + turnOf(root) + ' ' + tiltOf(root));
+          assert(Math.abs(turnOf(root) - turn2 - Math.PI / 12) < .001 && Math.abs(tilt2 - tiltOf(root) - Math.PI / 24) < .001, 'arrow keys do not turn the system: ' + turnOf(root) + ' ' + tiltOf(root));
           press(viewportOf(root), 'r'); await frame();
-          assert(turnOf(root) === 0 && tiltOf(root) === .32, 'R does not reset the angle');
+          assert(turnOf(root) === 0 && tiltOf(root) === .5, 'R does not reset the angle');
           press(viewportOf(root), 'ArrowRight'); await frame();
           const empty = emptySpot(root);
           document.elementFromPoint(empty.x, empty.y).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, clientX: empty.x, clientY: empty.y }));
           await frame();
-          assert(turnOf(root) === 0 && tiltOf(root) === .32 && stored() === null, 'a double-click on empty space does not reset the angle (or moved agents)');
+          assert(turnOf(root) === 0 && tiltOf(root) === .5 && stored() === null, 'a double-click on empty space does not reset the angle (or moved agents)');
         }, { motion: 'none' });
         await using(n105Data(), async root => {
           await settle();
@@ -5487,6 +5469,146 @@
           assert(Number(root.dataset.agFrameMs) > 0 && Number(root.dataset.agFrameMs) < 16, 'a 3D frame takes ' + root.dataset.agFrameMs + ' ms');
         }, { actions: host.actions, motion: 'none' });
         window.n105Picks = counts;
+      });
+      await test('n105 item 7 (sky.md): the sky, 3D only and nothing of it in 2D: the same star field from the same seed (another view, another visit); a star per finished run (passed, not failed), at most 200; one shooting star per run finished while 3D is shown (0.9 s), 0.7 s apart, its star shown at its end, none on load, on entering 3D or for a failed run; the sky shifts as the terminal\'s (V = max(view, 2 PI x a third of the near side\'s movement) a full turn, the same after one); it takes no click or key and adds no text; the sun glows and swells only while it works, the agents are lit from it; reduced motion: no streak, swell or fade; no green, light an ink chart and dark warm white; a name over a speck keeps 4.5:1; the sky draws no frame of its own', async () => {
+        const data = n105Data(), flowOf = id => data.structure.flows.find(flow => flow.id === id);
+        const stats = (runs, passed) => ({ runs, passed, rounds: { avg: 1, max: 1 }, cost: { total: 0, avg: 0 }, last: null });
+        flowOf('p1').stats = stats(3, 3); flowOf('p2').stats = stats(2, 0); flowOf('p4').stats = stats(5, 4);
+        const skyOf = root => root.querySelector('.ag-drawing').firstElementChild;
+        const starsOf = root => [...skyOf(root).querySelectorAll('.ag-sky-tile > .ag-sky-star:not(.ag-sky-run)')].map(star => ['cx', 'cy', 'r', 'data-size'].map(key => star.getAttribute(key)).join(' ')).join('|');
+        const runsOf = root => [...skyOf(root).querySelectorAll('.ag-sky-tile > .ag-sky-run')];
+        const nothing = (root, when) => { const box = skyOf(root); assert(box.classList.contains('ag-sky') && box.children.length === 1 && !box.firstElementChild.children.length && !box.firstElementChild.getAttribute('transform') && !root.querySelector('.ag-sun-glow, .ag-sphere'), when + ': something of the sky is drawn in 2D'); };
+        const shiftOf = root => Number(/translate\(([-\d.]+)/.exec(skyOf(root).querySelector('.ag-sky-turn').getAttribute('transform') || '')?.[1] || 0);
+        const rgb = text => (text.match(/[\d.]+/g) || []).slice(0, 3).map(Number);
+        const lum = c => c.map(v => { v /= 255; return v <= .03928 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }).reduce((t, v, i) => t + v * [.2126, .7152, .0722][i], 0);
+        const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + .05) / (y + .05); };
+        const green = c => { const [r, g, b] = c.map(v => v / 255), hi = Math.max(r, g, b), lo = Math.min(r, g, b); if (hi - lo < .08) return false; const hue = hi === g ? 60 * ((b - r) / (hi - lo) + 2) : hi === r ? 60 * (((g - b) / (hi - lo) + 6) % 6) : 60 * ((r - g) / (hi - lo) + 4); return hue > 75 && hue < 165; };
+        const watch = root => { const seen = []; const observer = new MutationObserver(list => list.forEach(change => { change.addedNodes.forEach(item => { if (item.classList?.contains('ag-sky-streak')) seen.push({ item, at: performance.now(), gone: 0 }); }); change.removedNodes.forEach(item => { const s = seen.find(entry => entry.item === item); if (s) s.gone = performance.now(); }); })); observer.observe(skyOf(root), { childList: true, subtree: true }); seen.stop = () => observer.disconnect(); return seen; };
+        // Colours and the name's contrast with a speck right under it (no halo counted), for this scheme.
+        function looks(root, scheme) {
+          const bg = rgb(getComputedStyle(root).backgroundColor), name = nodeOf(root, 'verifier').querySelector('.ag-agent-name'), ink = rgb(getComputedStyle(name).fill);
+          const stars = [...skyOf(root).querySelectorAll('.ag-sky-star')], colours = [...stars, ...skyOf(root).querySelectorAll('stop')].map(item => rgb(item.tagName === 'stop' ? getComputedStyle(item).stopColor : getComputedStyle(item).fill));
+          assert(!colours.some(green), scheme + ': the sky has green in it');
+          const field = stars.find(star => !star.classList.contains('ag-sky-run')), speck = rgb(getComputedStyle(field).fill);
+          assert(scheme === 'dark' ? lum(speck) > lum(bg) + .3 : lum(speck) < lum(bg) - .3 && lum(speck) < .2, scheme + ': the specks are not ' + (scheme === 'dark' ? 'light on the dark' : 'ink on the light') + ' (' + speck + ' on ' + bg + ', ' + root.dataset.agScheme + ')');
+          let worst = Infinity, most = 0;
+          stars.forEach(star => { const alpha = Number(getComputedStyle(star).opacity), c = rgb(getComputedStyle(star).fill); most = Math.max(most, alpha); worst = Math.min(worst, ratio(ink, c.map((v, i) => v * alpha + bg[i] * (1 - alpha)))); });
+          assert(most <= .4 && worst >= 4.5, scheme + ': a speck (at most ' + most + ' opaque) under a name leaves ' + worst.toFixed(2) + ':1');
+          assert(rgb(getComputedStyle(name).stroke).join() === bg.join() && parseFloat(getComputedStyle(name).strokeWidth) >= 3.4, scheme + ': the names\' halo does not cover a speck');
+          window.n105Sky = { ...(window.n105Sky || {}), [scheme]: { maxOpacity: most, worst: Number(worst.toFixed(2)), plain: Number(ratio(ink, bg).toFixed(2)) } };
+        }
+        let first = '';
+        // Reduced motion (motion "none"), light.
+        await using(data, async (root, app) => {
+          await settled(); nothing(root, 'on load');
+          press(viewportOf(root), 'd'); await until(() => in3d(root), 300);
+          assert(in3d(root) && skyOf(root).style.opacity === '', 'with reduced motion the sky does not appear at once');
+          first = starsOf(root);
+          assert(first.split('|').length >= 20 && runsOf(root).length === 7, 'no star field, or ' + runsOf(root).length + ' run stars for 7 finished runs');
+          const box = skyOf(root);
+          assert(box.getAttribute('aria-hidden') === 'true' && !box.textContent && getComputedStyle(box).pointerEvents === 'none' && !box.querySelector('[tabindex], a, button'), 'the sky can be read, focused or pointed at');
+          const view = viewportOf(root).getBoundingClientRect();
+          [...box.querySelectorAll('.ag-sky-star')].forEach(star => { const r = star.getBoundingClientRect(), x = r.x + r.width / 2, y = r.y + r.height / 2; if (x < view.left || x > view.right || y < view.top || y > view.bottom) return; const hit = document.elementFromPoint(x, y); assert(!hit || !box.contains(hit), 'a star took the pointer'); });
+          looks(root, 'light');
+          // The sun glows (still: reduced motion) and every other agent is lit from it.
+          const glow = nodeOf(root, 'orchestrator').querySelector('.ag-sun-glow'), sun = centre(root, 'orchestrator');
+          assert(glow && !glow.getAnimations().length && !nodeOf(root, 'orchestrator').querySelector('.ag-sphere'), 'no glow on the sun, or it moves with reduced motion');
+          [...root.querySelectorAll('.ag-nodes > [data-agent]')].filter(node => node.dataset.agent !== 'orchestrator').forEach(node => {
+            const shade = node.querySelector('.ag-sphere'), at = centre(root, node.dataset.agent);
+            assert(shade, node.dataset.agent + ' is not shaded');
+            const lit = Number(/rotate\(([-\d.]+)/.exec(shade.getAttribute('transform'))[1]) - 135, toward = Math.atan2(sun.y - at.y, sun.x - at.x) * 180 / Math.PI, off = Math.abs(((lit - toward) % 360 + 540) % 360 - 180);
+            assert(off < 3, node.dataset.agent + ' is lit from ' + Math.round(off) + ' degrees off the sun');
+          });
+          // A run finishing with reduced motion: its star at once, no streak, no frame.
+          const seen = watch(root), frames = framesOf(root);
+          flowOf('p1').stats = stats(4, 4); await app.refresh(); await settled();
+          assert(runsOf(root).length === 8 && !runsOf(root).some(star => star.dataset.pending) && !seen.length, 'with reduced motion a finished run streaked or its star waited');
+          assert(framesOf(root) === frames, 'the sky drew a frame (' + (framesOf(root) - frames) + ')');
+          // At most 200 run stars.
+          flowOf('p5').stats = stats(260, 250); await app.refresh(); await settled();
+          assert(runsOf(root).length === 200 && !seen.length, 'run stars past the cap: ' + runsOf(root).length);
+          flowOf('p5').stats = null; await app.refresh(); await settled(); seen.stop();
+          press(viewportOf(root), 'd'); await until(() => in2d(root), 300); nothing(root, 'back in 2D');
+          press(viewportOf(root), 'd'); await until(() => in3d(root), 300);
+          assert(starsOf(root) === first, 'not the same sky on coming back');
+        }, { scheme: 'light' });
+        // Full motion, dark, the orchestrator working.
+        data.agents.find(agent => agent.name === 'orchestrator').busy = 1;
+        await using(data, async (root, app) => {
+          await settled();
+          const seen = watch(root);
+          press(viewportOf(root), 'd');
+          await until(() => Number(root.dataset.agBlend) > .2 && Number(root.dataset.agBlend) < .8, 600);
+          const fading = Number(skyOf(root).style.opacity);
+          assert(fading > 0 && fading < 1, 'the sky does not fade in with the morph (' + skyOf(root).style.opacity + ')');
+          await until(() => in3d(root));
+          assert(!seen.length && starsOf(root) === first, 'entering 3D replayed a streak, or another view has another sky');
+          looks(root, 'dark');
+          const glow = nodeOf(root, 'orchestrator').querySelector('.ag-sun-glow');
+          assert(glow.getAnimations().some(item => item.playState === 'running'), 'the sun does not swell while it works');
+          // A failed run: no star, no streak.
+          flowOf('p4').stats = stats(6, 4); await app.refresh(); await sleep(120);
+          assert(!seen.length && runsOf(root).length === 8, 'a failed run streaked or added a star');
+          // Two finishing at once: two streaks, spaced, each under a second, each star shown at its end.
+          flowOf('p1').stats = stats(5, 5); flowOf('p4').stats = stats(7, 5); await app.refresh();
+          assert(runsOf(root).length === 10 && runsOf(root).filter(star => star.dataset.pending).length === 2, 'the new stars do not wait for their streaks');
+          await until(() => seen.length >= 2 && seen.every(entry => entry.gone), 2600);
+          assert(seen.length === 2 && seen[1].at - seen[0].at >= 650, 'not two spaced streaks: ' + seen.map(entry => Math.round(entry.at)).join(', '));
+          assert(seen.every(entry => entry.gone && entry.gone - entry.at < 1000), 'a streak lasted a second or more');
+          await settle();
+          assert(!runsOf(root).some(star => star.dataset.pending) && !skyOf(root).querySelector('.ag-sky-streak'), 'a star is still hidden after its streak');
+          // Idle: the glow is still.
+          data.agents.find(agent => agent.name === 'orchestrator').busy = 0; await app.refresh(); await settled();
+          assert(!glow.getAnimations().length, 'the sun swells while idle');
+          // Parallax: one key step (15 degrees) shifts the sky 1/24 of its width V (at least the view's), less than the
+          // near agents move; a full turn (24 steps) brings it back.
+          const names = [...root.querySelectorAll('.ag-nodes > [data-agent]')].map(node => node.dataset.agent), before = names.map(name => centre(root, name).x), shift0 = shiftOf(root);
+          press(viewportOf(root), 'ArrowRight'); await frame(); await frame();
+          const moved = Math.max(...names.map((name, i) => Math.abs(centre(root, name).x - before[i]))), W = viewportOf(root).clientWidth, V = Math.max(W, ...[...skyOf(root).querySelectorAll('.ag-sky-tile > .ag-sky-star')].map(star => Number(star.getAttribute('cx'))));
+          let shifted = Math.abs(shiftOf(root) - shift0); if (shifted > V / 2) shifted = V - shifted;
+          assert(shifted >= W / 24 - 1 && shifted < moved, 'the sky moved ' + shifted.toFixed(1) + ' px for one step (the view is ' + W + ' px; the near agents moved ' + moved.toFixed(1) + ')');
+          for (let i = 0; i < 23; i++) press(viewportOf(root), 'ArrowRight');
+          await frame(); await frame();
+          const back = Math.abs(shiftOf(root) - shift0);
+          assert(Math.min(back, V - back) < .6, 'a full turn does not bring the sky back: ' + shift0 + ' -> ' + shiftOf(root));
+          seen.stop();
+          press(viewportOf(root), 'd'); await until(() => in2d(root)); nothing(root, 'back in 2D');
+        }, { motion: 'full', scheme: 'dark' });
+      });
+      await test('n105 item 8: nothing pressed during the 700 ms morph is lost (the terminal\'s open point): d or the control half way reverses the move, back to the 2D view exactly; three quick presses end in 3D; a click on an agent during the morph picks it', async () => {
+        const data = n105Data(), host = worldHost(data);
+        await using(data, async root => {
+          await settled();
+          await Promise.all(root.getAnimations({ subtree: true }).filter(item => item.effect?.getComputedTiming().iterations !== Infinity).map(item => item.finished.catch(() => {})));
+          const flat = pictureOf(root), button = root.querySelector('.ag-orbit-toggle'), blend = () => Number(root.dataset.agBlend);
+          // d, then d again a third of the way: the move turns round from where it is and ends in 2D, exactly.
+          viewportOf(root).focus(); press(viewportOf(root), 'd');
+          await until(() => blend() > .2, 600);
+          const turned = blend();
+          press(viewportOf(root), 'd');
+          assert(root.dataset.agView === '2d', 'the second d was lost');
+          await frame(); await frame();
+          assert(blend() < turned + .02, 'the move did not turn round (' + turned.toFixed(2) + ' -> ' + blend().toFixed(2) + ')');
+          await until(() => in2d(root), 1500);
+          assert(in2d(root) && pictureOf(root) === flat, 'after turning round the 2D view is not back exactly');
+          // The control, twice: the same.
+          button.click(); await until(() => blend() > .3, 600);
+          button.click();
+          assert(root.dataset.agView === '2d' && button.getAttribute('aria-pressed') === 'false', 'the second click on the control was lost');
+          await until(() => in2d(root), 1500);
+          assert(in2d(root) && pictureOf(root) === flat, 'after the control turned the move round the 2D view is not back exactly');
+          // Three quick presses: in, out, in; it ends in 3D.
+          press(viewportOf(root), 'd'); await sleep(90); press(viewportOf(root), 'd'); await sleep(90); press(viewportOf(root), 'd');
+          await until(() => in3d(root), 1500);
+          assert(in3d(root), 'three quick presses did not end in 3D (' + root.dataset.agView + ' ' + root.dataset.agBlend + ')');
+          // Back, then a click on an agent during the move in: it is picked.
+          press(viewportOf(root), 'd'); await until(() => in2d(root), 1500);
+          press(viewportOf(root), 'd'); await until(() => blend() > .3, 600);
+          tap(root, 'verifier');
+          assert(root.dataset.agTrail === 'verifier' && blend() < 1, 'a click on an agent during the morph was lost (' + root.dataset.agTrail + ', blend ' + root.dataset.agBlend + ')');
+          await until(() => in3d(root), 1500);
+          assert(in3d(root) && root.dataset.agTrail === 'verifier', 'the morph did not finish, or the pick was dropped');
+        }, { actions: host.actions, motion: 'full' });
       });
     }
     // ---- orbit lane (n105) ----
