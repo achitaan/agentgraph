@@ -348,7 +348,9 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   opens a menu: Blank agent (the view sends template "blank" and model roster.models[0], which replaces
 //   the back end's default model), Verifier, or a copy of any agent. The new circle
 //   follows the pointer and is dropped by a click or a release (Escape cancels); it settles at the
-//   nearest free spot beside what it would cover. From the keyboard it is placed at once at a free spot.
+//   nearest free spot beside what it would cover, clear of every circle and name; adding it moves no other
+//   agent (it keeps its place and takes none on the ring). From the keyboard it is placed at once at a free spot
+//   with room round it for Alt+arrows.
 //   On the drop the view asks { op: "add" } under the first free name (verifier-2, impl-claude-2,
 //   agent-1), keeps the dropped place, opens the details with the name selected (Alt+arrows move it,
 //   Enter renames it) and shows the reply's message as the success line (the view never says when it
@@ -423,6 +425,12 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 // Refit: opening or closing the details refits the graph into the space left (every circle and name clear of the
 //   sheet, the figures and the controls; names at 11 px or more, past that it pans), unless the user has panned or
 //   zoomed since the last fit: then their view stays. A change of the pane's own size or of arrangement refits.
+//   A change of layout (a loop drawn or removed, an agent added or removed, a keyboard nudge) never discards the
+//   user's pan or zoom; an automatic view stays put too when nothing but a loop's agents or a new agent moved (it
+//   pans only to bring them into view), else it is fitted again. A wide canvas the details leave taller than wide
+//   gets a taller oval, and with the compact sheet open the agents are laid out for the canvas above it (closing
+//   it puts them back), so everything fits there at 11 px or more where it can; where it cannot, the opened agent
+//   comes into view with the agents its paths join it to.
 // Zoom floor: wheel, Ctrl+wheel, pinch, the - key and Fit all stop where names are 11 px on screen (12 px names
 //   at scale 11/12). The background pans, like an agent drags, only once the pointer has moved more than 5 px.
 // A refused path keeps the reason as the tooltip of its first agent and of the newest agent (which shakes and
@@ -461,6 +469,9 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   rev on the thrown error.
 // options.motion: "full" (default) or "none" for a still picture (tests, screenshots). The system's
 //   reduced-motion setting is always honoured.
+// options.autofocus: true to give the canvas keyboard focus once the graph is first drawn (N, F and the arrows
+//   work without a click), unless something other than the page already has focus. index.html passes it; a host
+//   panel (the desktop plugin) does not, so the view never takes focus there.
 // options.scheme: "auto" (default; follows a data-color-scheme on an ancestor or the document element,
 //   else the system setting, live), "light" or "dark".
 // Returns { refresh(): Promise<void>, reset(): Promise<void>, destroy(): void }.
@@ -475,7 +486,7 @@ window.AgentGraph.mount(root, options)
 - It keeps everything inside `root`: no writes to `document.body`, no global listeners that outlive `destroy()`, no globals other than `window.AgentGraph`.
 - All of its CSS is in `agentgraph/web/style.css`, and every selector is scoped under the class `agentgraph` (which `mount` puts on `root`), so it cannot restyle a host application. No external fonts, images or scripts.
 - It never uses `innerHTML` (or anything else that parses markup) with text from the document.
-- Loops, defined once (`loopStart(path)` in `app.js`): a path whose last agent appears earlier in it, at index `i` with at least two steps after it, closes a loop from `i` to the end; a path that ends at its first agent (`i = 0`) is a full loop. `A, A` (a loop on one agent) is not this kind of loop and is drawn as before. The loop part is drawn as one closed, fully curved ring in the dotted dash `.5 5.5` (`data-step="loop"`; the flow carries `data-loop` `full`, `part`, `self` or `none`); the lead-in (`A → B` of `A, B, C, B`) stays solid and straight. Dotted means loop: no other drawn flow step is dashed. A full loop's agents (other than the hub, a seat, a group member or an agent already on another loop's circle, which stay where they are) move onto an even circle in path order, in one transition under 300 ms (none with reduced motion); dragging one moves the circle; removing the loop or undoing it puts every agent back exactly.
+- Loops, defined once (`loopStart(path)` in `app.js`): a path whose last agent appears earlier in it, at index `i` with at least two steps after it, closes a loop from `i` to the end; a path that ends at its first agent (`i = 0`) is a full loop. `A, A` (a loop on one agent) is not this kind of loop and is drawn as before. The loop part is drawn as one closed, fully curved ring in the dotted dash `.5 5.5` (`data-step="loop"`; the flow carries `data-loop` `full`, `part`, `self` or `none`); the lead-in (`A → B` of `A, B, C, B`) stays solid and straight. Dotted means loop: no other drawn flow step is dashed. A full loop's agents (other than the hub, a seat, a group member or an agent already on another loop's circle, which stay where they are) move onto an even circle in path order, in one transition under 300 ms (none with reduced motion); dragging one moves the circle; removing the loop or undoing it puts every agent back exactly. The circle goes in free space: its line and its moved agents keep clear of every circle and name not on it (the hub's name always), and of other loops (two loops meet only at an agent on both); an agent the user placed stays and the circle goes through it, unless that would run into something. No agent on no loop moves.
 - Picking lines: every flow, loop and group line has an invisible band 16 screen px wide at any zoom (`vector-effect: non-scaling-stroke`); where bands overlap the line nearest the pointer takes the press, the right-click and the hover. A click picks the whole flow or loop; hover marks all of it and fades the other lines. The cursor is a hand on anything that can be picked and a grab hand on anything that can be moved. Lines bend round a third agent's circle or name only when the straight line would cross it. Nothing in the graph can be selected as text; the camera keeps the graph clear of the usage figures, the status line and the compact sheet; wheel zoom stops before names go under 8 px.
 - Drawn flows (`structure.flows`): a forward step is a straight line with an arrowhead, a step back to an agent already on the path a curved arc; steps of different flows on one pair are offset, and a pair that already has something drawn on it (a hub spoke, a task-graph work line, escalation or review loop) gets its flow steps beside that, never on top of it or hidden by it. Every step has a wide invisible hit area above the graph's own lines and loops. A flow is still at rest. A new flow draws in once (about 300 ms); a refused one disappears and the first agent shakes once. No text is added to the graph.
 - `index.html` loads `style.css` and `app.js` and calls `AgentGraph.mount(document.getElementById("root"), { fetchSnapshot: () => fetch("/api/snapshot" + location.search).then(r => r.json()), actions: { flow, skills, roster, skillfile, team } })`, where each posts its request to its endpoint (`/api/structure/flow`, `/api/skills`, `/api/roster`, `/api/skillfile`, `/api/structure/team`) and rejects with the reply's `error` (and its `rev` on a 409); with `?demo` it passes no `actions`. The page passes no `run`: a path's details show "Copy run message" (it asks `flow` `{op: "prompt"}` and puts the text on the clipboard) instead of Run.
