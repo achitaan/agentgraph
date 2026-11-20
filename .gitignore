@@ -13,3 +13,5 @@ cost-settings.jsonl
 structure/flows/
 # Groups (teams) drawn in the agent graph: also each user's own.
 structure/teams/
+# Saved setups (agentgraph setup save): copies of each user's own presets and agent files.
+setups/

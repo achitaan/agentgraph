@@ -509,7 +509,7 @@ def _staged(path, text, mode):
     fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as handle:
-            handle.write(text.encode("utf-8"))
+            handle.write(text if isinstance(text, bytes) else text.encode("utf-8"))
             handle.flush()
             os.fchmod(handle.fileno(), mode)
             os.fsync(handle.fileno())
