@@ -587,7 +587,10 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   typing in the details and pressing their controls, a save queued behind one out, the pause after typing, leaving
 //   a box and the page hidden. The typing stays, marked not saved. At the switch to 3D what is typed is saved at
 //   once, in 2D; a save already out finishes and its answer is shown. Back in 2D the usual rules go on (the typing
-//   is saved, undo takes the steps made before). A step's output (Outputs in TASK) opens to read. The sky (3D only; nothing of it is drawn in 2D) is the drawing's
+//   is saved, undo takes the steps made before). Whatever happened in 3D (the details opened or closed, Fit, a
+//   resize, a snapshot), back in 2D an automatic view is the automatic view for the canvas it returns to, a view the
+//   user placed is where they left it, and neither counts as a move of the user's. A step's output (Outputs in TASK)
+//   opens to read. The sky (3D only; nothing of it is drawn in 2D) is the drawing's
 //   first child (svg.ag-sky: aria-hidden, no pointer events, no focus, no text) and fades in and out with the morph:
 //   a sparse field of specks from a fixed seed (the same sky every time; three sizes, at most .3 opaque; warm white
 //   on dark, an ink star chart on light; the terminal's seed 0x5ca1ab1e and hash32) that shifts, wrapping round,
