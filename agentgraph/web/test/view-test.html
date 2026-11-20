@@ -6100,9 +6100,11 @@
         A: [['explorer', 'oracle-lite', 'explorer'], ['researcher', 'designer', 'impl-claude', 'researcher'], ['reviewer', 'impl-hard', 'impl-openai', 'impl-hard'], ['oracle-lite', 'verifier', 'oracle-lite']],
         B: [['designer', 'oracle', 'designer'], ['impl-openai', 'verifier', 'reviewer', 'verifier'], ['designer', 'impl-claude', 'designer']]
       };
-      const n114Flows = set => N114_SETS[set].map((path, i) => ({ id: set.toLowerCase() + (i + 1), path: [...path] }));
+      const n114Flows = set => N114_SETS[set].map(path => ({ id: path.join('-'), path: [...path] })).sort((a, b) => a.id.localeCompare(b.id));
       const n114Data = (flows = []) => { const data = n103Data(flows); data.roster = { editable: true, models: ['test/model-a'] }; data.agents.forEach(a => { a.removable = a.name !== 'orchestrator' && a.name !== 'council' && a.parent !== 'council'; a.added = false; a.skills = []; a.skills_editable = true; }); return data; };
-      async function n114Draw(root, data, set) {
+      // Drawn with taps, one loop after another; the back end lists the flows by id (as the trial's snapshots did), so
+      // the next snapshot has them in that order.
+      async function n114Draw(root, data, set, app) {
         const problems = [];
         for (const path of N114_SETS[set]) {
           const count = data.structure.flows.length;
@@ -6110,6 +6112,7 @@
           tap(root, path.at(-1)); await settled(); await settleSheet(root);
           if (data.structure.flows.length !== count + 1) problems.push(set + ': drawing ' + path.join('>') + ' saved nothing');
           press(viewportOf(root), 'Escape'); await settleSheet(root);
+          data.structure.flows.sort((a, b) => a.id.localeCompare(b.id)); await app.refresh(); await settled(); await settleSheet(root);
         }
         return problems;
       }
@@ -6128,9 +6131,9 @@
         const problems = [], counts = {};
         for (const set of ['A', 'B']) {
           const data = n114Data(), host = worldHost(data);
-          await using(data, async root => {
+          await using(data, async (root, app) => {
             await resizeTo(root, 620, 800); await settle();
-            problems.push(...await n114Draw(root, data, set));
+            problems.push(...await n114Draw(root, data, set, app));
             for (const opened of ['impl-hard', 'orchestrator']) {
               context(nodeOf(root, opened), centre(root, opened)); await settled(); await settleSheet(root);
               const label = set + ', ' + opened + ' open', out = [...outsideVisible(root), ...n114RingsOut(root)];
@@ -6148,9 +6151,9 @@
         const problems = [], counts = {};
         for (const set of ['A', 'B']) {
           const data = n114Data(), host = worldHost(data);
-          await using(data, async root => {
+          await using(data, async (root, app) => {
             await resizeTo(root, 420, 800); await settle();
-            problems.push(...await n114Draw(root, data, set));
+            problems.push(...await n114Draw(root, data, set, app));
             problems.push(...[...outsideVisible(root), ...n114RingsOut(root)].map(line => set + ' closed: ' + line));
             context(nodeOf(root, 'impl-hard'), centre(root, 'impl-hard')); await settled(); await settleSheet(root);
             const viewport = viewportOf(root), stage = root.querySelector('.ag-drawing > g'), zoom = stage.getCTM().a;
@@ -6319,10 +6322,10 @@
         const cases = [[620, 800, 'A'], [620, 800, 'B'], [420, 800, 'A'], [420, 800, 'B'], [1400, 900, 'seat'], [620, 800, 'seat'], [1400, 900, 'hub']];
         for (const [width, height, set] of cases) {
           const seat = set === 'seat' || set === 'hub', flows = set === 'seat' ? [{ id: 'seat', path: ['fable', 'explorer', 'fable'] }] : set === 'hub' ? [{ id: 'hub', path: ['orchestrator', 'impl-claude', 'orchestrator'] }] : [], data = n114Data(flows), host = worldHost(data);
-          await using(data, async root => {
+          await using(data, async (root, app) => {
             await resizeTo(root, width, height); await settle();
             const stage0 = stageOf(root);
-            if (!seat) problems.push(...await n114Draw(root, data, set));
+            if (!seat) problems.push(...await n114Draw(root, data, set, app));
             // Nor does an agent the loops moved touch any circle or name not on its loop (the trial's m4).
             const moved = Object.keys(stage0).filter(name => !near(at(root, name), stage0[name]));
             problems.push(...loopProblems(root, data.structure.flows, moved, width + ' ' + set).filter(line => !/names at/.test(line)));
