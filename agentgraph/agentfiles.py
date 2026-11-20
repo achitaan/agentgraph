@@ -98,6 +98,44 @@ class AgentfilesError(skillset.SkillsetError):
     pass
 
 
+# No write from a stale view (contract n8 r4, stale-contract.md): every thing a view can change has a `rev`, a short
+# hash of the bytes it is stored as; a write given `expect` refuses (StaleError, status 409) when it is not the
+# current `rev`. `rev`, `StaleError` and `check_expect` are shared by every writer (flows, groups, skills too).
+STALE = "changed since you opened it; reload and try again"
+
+
+class StaleError(AgentfilesError):
+    """A write from a view that has not seen a later change: nothing was written; `rev` is the current one."""
+
+    def __init__(self, what, rev):
+        super().__init__(f"{what} {STALE}")
+        self.rev = rev
+
+
+def rev(*parts):
+    """The `rev` of a thing stored as these parts (bytes or text; None for a part that is absent): 16 hex digits of
+    a SHA-256 over the parts, each length-prefixed, so a part moving to the next one changes it."""
+    digest = hashlib.sha256()
+    for part in parts:
+        if part is None:
+            digest.update(b"-")
+            continue
+        data = part.encode("utf-8") if isinstance(part, str) else bytes(part)
+        digest.update(b"+%d:" % len(data))
+        digest.update(data)
+    return digest.hexdigest()[:16]
+
+
+def check_expect(expect, current, what):
+    """Refuse (StaleError) a write given `expect` when it is not `current`; no check when `expect` is None."""
+    if expect is None:
+        return
+    if not isinstance(expect, str):
+        raise AgentfilesError("expect must be text: the rev the view was showing")
+    if expect != current:
+        raise StaleError(what, current)
+
+
 # --- the file format ------------------------------------------------------------------------------
 
 
@@ -795,13 +833,16 @@ def _digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def _change(name, change, *, agents_dir, backups, kind="text"):
+def _change(name, change, *, agents_dir, backups, kind="text", check=None):
     """Apply `change(parsed) -> {"permissions"?, "text"?}` to an added agent's file (`rebuild`: every line the
-    toolkit did not write is kept), saving an undo record of the earlier bytes first. Returns (shown, record path,
-    changed)."""
+    toolkit did not write is kept), saving an undo record of the earlier bytes first. `check(data)`, when given, is
+    called with the bytes read (the write goes ahead only while they are still there) and may refuse. Returns
+    (shown, record path, changed)."""
     check_name(name)
     with _folder(agents_dir) as fd:
         data, parsed = _load(fd, name)
+        if check is not None:
+            check(data)
         after = rebuild(parsed, **change(parsed))
         if after == data:
             return _shown(name, parse(after)), None, False
@@ -816,20 +857,23 @@ def _change(name, change, *, agents_dir, backups, kind="text"):
     return _shown(name, parse(after)), record, True
 
 
-def set_text(name, text, *, agents_dir=AGENTS_DIR, backups=BACKUPS):
-    """Replace an added agent's instruction. Returns {"name", ..., "changed", "record"?, "message"}."""
+def set_text(name, text, *, agents_dir=AGENTS_DIR, backups=BACKUPS, check=None):
+    """Replace an added agent's instruction (`check`: see `_change`). Returns {"name", ..., "changed", "record"?,
+    "message"}."""
     text = _clean_text(text, "the instruction", MAX_TEXT, single=False)
-    shown, record, changed = _change(name, lambda parsed: {"text": text}, agents_dir=agents_dir, backups=backups)
+    shown, record, changed = _change(name, lambda parsed: {"text": text}, agents_dir=agents_dir, backups=backups,
+                                     check=check)
     return {**shown, "changed": changed, **({"record": record} if record else {}), "message": LIVE}
 
 
-def set_skills(name, skills, *, agents_dir=AGENTS_DIR, backups=BACKUPS):
-    """Give an added agent exactly these skills ("*" alone: every skill). Returns (shown, record, changed)."""
+def set_skills(name, skills, *, agents_dir=AGENTS_DIR, backups=BACKUPS, check=None):
+    """Give an added agent exactly these skills ("*" alone: every skill; `check`: see `_change`, e.g. from
+    `roster.expecting`). Returns (shown, record, changed)."""
     for skill in skills:
         if skill != "*":
             skillset._name(skill, "skill")
     return _change(name, lambda parsed: {"permissions": with_skills(parsed["permissions"], skills)},
-                   agents_dir=agents_dir, backups=backups)
+                   agents_dir=agents_dir, backups=backups, check=check)
 
 
 def restore_text(record, *, agents_dir=AGENTS_DIR, backups=BACKUPS):

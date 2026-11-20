@@ -892,6 +892,15 @@ def _listing(root_fd, folder):
         os.close(fd)
 
 
+def _command_refusal(file, flow, name):
+    """Why `name` cannot be removed while flow `file` through it has its command on, or "" (the same words for
+    the removal's refusal and the snapshot's `removable_reason`)."""
+    if not (flow is not None and name in flow["path"] and flow["command"] and flow["name"]):
+        return ""
+    return (f"flow {file[:-3]} through {name} has the command /{flow['name']}; turn it off first "
+            f"(agentgraph flow command {file[:-3]} --off), then remove {name}. Nothing was changed")
+
+
 def _structure_removal(root, root_fd, name, with_file):
     """The changes that take `name` out of the structure folder: every flow through it, the group it leads, its
     place in other groups (a group left with no member goes) and, `with_file`, its own file. Each change is
@@ -902,9 +911,8 @@ def _structure_removal(root, root_fd, name, with_file):
     for file, data in _listing(root_fd, FLOWS_FOLDER):
         flow = flow_fields(data)
         if flow is not None and name in flow["path"]:
-            if flow["command"] and flow["name"]:  # its command file is outside this record: never left behind
-                raise RosterError(f"flow {file[:-3]} through {name} has the command /{flow['name']}; turn it off first "
-                                  f"(agentgraph flow command {file[:-3]} --off), then remove {name}. Nothing was changed")
+            if _command_refusal(file, flow, name):  # its command file is outside this record: never left behind
+                raise RosterError(_command_refusal(file, flow, name))
             changes.append({"folder": FLOWS_FOLDER, "name": file, "before": data, "after": None})
     groups = _listing(root_fd, TEAMS_FOLDER)
     if groups:
@@ -1385,7 +1393,7 @@ def _removed(changes, name):
     return {"flows": flows, "teams": led, "memberships": member, "files": files}
 
 
-def _remove_added(name, *, backups, root, agents_dir):
+def _remove_added(name, *, backups, root, agents_dir, expect=None, config=CONFIG, map_path=MAP):
     """Delete an added agent's file with its flows, group and memberships, under one undo record."""
     with _structure_locked(root) as root_fd:
         with agentfiles._folder(agents_dir) as fd:
@@ -1394,6 +1402,7 @@ def _remove_added(name, *, backups, root, agents_dir):
             raise RosterError(f"there is no added agent {name!r}")
         if agentfiles.parse(data) is None:
             raise RosterError(agentfiles.HAND_CHANGED.format(name=f"{name}.md"))
+        _expect_agent(name, expect, data=data, root_fd=root_fd, config=config, map_path=map_path)
         changes = _structure_removal(root, root_fd, name, with_file=True)
         record = agentfiles.save_record(backups, "remove", name, {
             "version": 1, "op": "remove", "agent": name, "kind": "added", "file": agentfiles.b64(data),
@@ -1419,11 +1428,12 @@ def _remove_added(name, *, backups, root, agents_dir):
 
 
 def remove_agent(name, *, config=CONFIG, map_path=MAP, backups=BACKUPS, structure=None, schema=None,
-                 agents_dir=AGENTS_DIR):
+                 agents_dir=AGENTS_DIR, expect=None):
     """Remove an agent for real, as one undoable step, with every flow whose path includes it, the group it leads
     and its place in other groups. An added agent's file is deleted (live at once); a custom preset agent's
     entries and structure file go, a built-in is turned off (after a restart). A hand-written agent file is
-    refused. Returns `record`, the path of the one undo record `restore_agent` takes."""
+    refused. Given `expect`, refused (agentfiles.StaleError, nothing changed) when the agent's rev is another.
+    Returns `record`, the path of the one undo record `restore_agent` takes."""
     config, map_path = _start(config, map_path)
     skillset._agent_name(name)
     root = Path(structure) if structure is not None else STRUCTURE_DIR
@@ -1431,26 +1441,49 @@ def remove_agent(name, *, config=CONFIG, map_path=MAP, backups=BACKUPS, structur
     if name in files and files[name]["added"]:
         if not files[name]["editable"]:
             raise RosterError(files[name]["why"])
-        return _remove_added(name, backups=backups, root=root, agents_dir=agents_dir)
+        return _remove_added(name, backups=backups, root=root, agents_dir=agents_dir, expect=expect, config=config,
+                             map_path=map_path)
     with _structure_locked(root) as root_fd:
         with skillset._locked(config, map_path) as dirs:
             text, mode = skillset._read(config, "config")
             obj = skillset._parse(text)
             if name in files and _source_spec(obj, name) is None and name not in BUILTIN:
                 raise RosterError(files[name]["why"])
+            _expect_agent(name, expect, data=_agent_bytes(agents_dir, name), root_fd=root_fd, config=config,
+                          map_path=map_path)
             new_text, new_obj, map_files, record, where = _plan_remove(name, obj, text, None, map_path)
             changes = _structure_removal(root, root_fd, name, with_file=name not in BUILTIN)
             record["structure"] = _encode(changes)
             problems, _ = _schema_check(new_obj, [], name in BUILTIN, schema)
-            _apply(root_fd, changes)
+            failed = []
             try:
-                info = _save(config, map_path, backups, text, mode, new_text, map_files, dirs, record)
-            except BaseException:
-                _revert(root_fd, changes)
-                raise
+                _apply(root_fd, changes, failed)
+                try:
+                    info = _save(config, map_path, backups, text, mode, new_text, map_files, dirs, record)
+                except BaseException:
+                    failed += _revert(root_fd, changes)
+                    raise
+            except BaseException as exc:
+                if not failed:
+                    raise
+                # What could not be put back is only in the record now: keep it (`_save` dropped its copy).
+                try:
+                    kept = _save_record(skillset._backup_folder(config, backups, "roster-edit"), record, mode)
+                except OSError as error:
+                    kept = f"(none: it could not be saved: {error})"
+                raise RosterError(f"the removal of {name!r} failed ({exc}) and {', '.join(failed)} could not be "
+                                  f"put back; the undo record {kept} keeps them") from exc
     return {"agent": name, "kind": record["kind"], "action": "turned off" if name in BUILTIN else "deleted",
             "presets": where, "changed": True, "record": info["record_path"], "removed": _removed(changes, name),
             "backup": info["backup"], "previous": info["previous"], "warnings": problems, "message": RESTART}
+
+
+def _put_back_failed(what, name, exc, failed):
+    """Raise, when a restore failed and some of what it had already put back could not be taken back again, the
+    error that names those files (they stay until deleted by hand; the undo record is kept)."""
+    if failed:
+        raise RosterError(f"{what} {name!r} failed ({exc}) and {', '.join(failed)} could not be taken back; delete "
+                          "them by hand before trying again (the undo record is kept)") from exc
 
 
 def _structure_back(root_fd, root, removed):
@@ -1471,7 +1504,87 @@ def _structure_back(root_fd, root, removed):
                 "flow" if change["folder"] == FLOWS_FOLDER else "structure file")
             raise RosterError(f"the {what} {change['folder']}/{change['name']} was changed or added since the "
                               "agent was removed; nothing was restored")
+    problems = _dangling(root_fd, changes)
+    if problems:
+        raise RosterError(f"{'; '.join(problems)}; nothing was restored")
     return changes
+
+
+def _structure_agents(root_fd):
+    """The agents of the structure folder: the `.md` files of its group folders, by name."""
+    found = set()
+    for folder in _group_folders(root_fd):
+        fd = _open_folder(root_fd, folder, False)
+        try:
+            found |= {entry[:-3] for entry in os.listdir(fd) if entry.endswith(".md") and not entry.startswith(".")
+                      and NAME.fullmatch(entry[:-3])}
+        finally:
+            os.close(fd)
+    return found
+
+
+def _dangling(root_fd, changes):
+    """What would stand in the way of putting back `changes` (structure changes, made in order): a flow put back
+    whose name another flow holds now (it would take the name, and the command, from that flow), or a flow or group
+    put back that names an agent no longer in the structure folder (it would come back hidden). [] when none."""
+    if root_fd is None:
+        return []
+    touched = {(change["folder"], change["name"]) for change in changes}
+    agents = _structure_agents(root_fd)
+    for change in changes:
+        if change["folder"] not in (FLOWS_FOLDER, TEAMS_FOLDER):
+            stem = change["name"][:-3]
+            if change["after"] is None:
+                agents.discard(stem)
+            else:
+                agents.add(stem)
+    held = {}
+    for file, data in _listing(root_fd, FLOWS_FOLDER):
+        fields = flow_fields(data)
+        if (FLOWS_FOLDER, file) not in touched and fields is not None and fields["name"]:
+            held.setdefault(fields["name"], file[:-3])
+    problems = []
+    for change in changes:
+        if change["after"] is None:
+            continue
+        if change["folder"] == FLOWS_FOLDER:
+            fields = flow_fields(change["after"])
+            if fields is None:
+                continue
+            what, names = f"flow {change['name'][:-3]}", fields["path"]
+            if fields["name"] and fields["name"] in held:
+                problems.append(f"flow {held[fields['name']]} has the name {fields['name']} now (the {what} put "
+                                f"back would take it{' and its command' if fields['command'] else ''}); rename "
+                                "or remove that flow first")
+        elif change["folder"] == TEAMS_FOLDER:
+            team = teams_module.read_team(change["after"])
+            if team is None:
+                continue
+            what, names = f"group {change['name'][:-3]}", [team[0], *team[1]]
+        else:
+            continue
+        gone = sorted({agent for agent in names if agent not in agents})
+        if gone:
+            problems.append(f"the {what} names {', '.join(gone)}, no longer in the structure folder; restore "
+                            f"{'them' if len(gone) > 1 else 'it'} first")
+    return problems
+
+
+def _naming(root_fd, name, skip):
+    """The flows and groups, other than the (folder, file) pairs in `skip`, that name `name`: ["flow ID", ...]."""
+    if root_fd is None:
+        return []
+    found = []
+    for file, data in _listing(root_fd, FLOWS_FOLDER):
+        fields = flow_fields(data)
+        if (FLOWS_FOLDER, file) not in skip and fields is not None and name in fields["path"]:
+            found.append(f"flow {file[:-3]}" + (f" (command /{fields['name']})" if fields["command"] and fields["name"]
+                                                 else ""))
+    for file, data in _listing(root_fd, TEAMS_FOLDER):
+        team = teams_module.read_team(data)
+        if (TEAMS_FOLDER, file) not in skip and team is not None and (team[0] == name or name in team[1]):
+            found.append(f"group {file[:-3]}")
+    return found
 
 
 def _restore_added(record, *, backups, root, agents_dir, commands_dir=None, config=CONFIG):
@@ -1501,10 +1614,18 @@ def _restore_added(record, *, backups, root, agents_dir, commands_dir=None, conf
                               "nothing was restored")
         changes = _structure_back(root_fd, root, removed)
         agentfiles.replace(name, None, file, agents_dir=agents_dir)
+        failed = []
         try:
-            _apply(root_fd, changes)
-        except BaseException:
-            agentfiles.replace(name, file, None, agents_dir=agents_dir)
+            try:
+                _apply(root_fd, changes, failed)
+            except BaseException:
+                try:
+                    agentfiles.replace(name, file, None, agents_dir=agents_dir)
+                except (OSError, SkillsetError):
+                    failed.append(f"agents/{name}.md")
+                raise
+        except BaseException as exc:
+            _put_back_failed("the restore of", name, exc, failed)
             raise
     return {"agent": name, "kind": "added", "action": "restored", "presets": [], "changed": True,
             "restored": _removed(removed, name), "warnings": [], "message": agentfiles.LIVE}
@@ -1532,11 +1653,16 @@ def restore_agent(record, *, config=CONFIG, map_path=MAP, backups=BACKUPS, struc
             obj = skillset._parse(text)
             new_text, map_files, problems = _plan_restore(data, obj, text, map_path, schema)
             changes = _structure_back(root_fd, root, removed)
-            _apply(root_fd, changes)
+            failed = []
             try:
-                info = _save(config, map_path, backups, text, mode, new_text, map_files, dirs)
-            except BaseException:
-                _revert(root_fd, changes)
+                _apply(root_fd, changes, failed)
+                try:
+                    info = _save(config, map_path, backups, text, mode, new_text, map_files, dirs)
+                except BaseException:
+                    failed += _revert(root_fd, changes)
+                    raise
+            except BaseException as exc:
+                _put_back_failed("the restore of", data["agent"], exc, failed)
                 raise
     name = data["agent"]
     return {"agent": name, "kind": data["kind"], "action": "restored",
@@ -1661,12 +1787,13 @@ def _encode_commands(changes):
 
 
 def rename_agent(name, to, *, config=CONFIG, map_path=MAP, backups=BACKUPS, structure=None, agents_dir=AGENTS_DIR,
-                 commands_dir=None):
+                 commands_dir=None, expect=None):
     """Rename an added agent as one undoable step: its agent file (same bytes, new name; live at once), its file in
     the structure folder, every flow and group that names it and the command file of each of those paths whose
     command is on (`commands_dir`, default OpenCode's commands folder; opened only when there is one). Refused for
     the orchestrator, the council, seats, the plugin's agents and hand-written files; `to` passes the checks of a
-    new agent's name. Returns `record`, which `restore_agent` takes to give the old name back byte for byte."""
+    new agent's name. Given `expect`, refused (agentfiles.StaleError) when the agent's rev is another. Returns
+    `record`, which `restore_agent` takes to give the old name back byte for byte."""
     config, map_path = _start(config, map_path)
     skillset._agent_name(name)
     obj = skillset._parse(skillset._read(config, "config")[0])
@@ -1695,6 +1822,7 @@ def rename_agent(name, to, *, config=CONFIG, map_path=MAP, backups=BACKUPS, stru
             raise RosterError(f"{to!r} is already an agent file in the agents folder ({', '.join(held)})")
         if data is None or not agentfiles.is_added(data) or agentfiles.parse(data) is None:
             raise RosterError(f"there is no added agent {name!r}")
+        _expect_agent(name, expect, data=data, root_fd=root_fd, config=config, map_path=map_path)
         changes, commands, hubs = _rename_changes(root, root_fd, name, to)
         with flowcommands.Folder(commands_dir, create=False) if commands else nullcontext() as folder:
             command_changes = _command_changes(folder, commands, hubs) if commands else []
@@ -1821,6 +1949,12 @@ def _restore_rename(name, data, *, root, agents_dir, commands_dir, config):
         if taken:
             raise RosterError(f"{name!r} is already an agent file in the agents folder ({', '.join(taken)}); "
                               "nothing was restored")
+        since = _naming(root_fd, to, {(change["folder"], change["name"]) for change in renamed})
+        if since:
+            raise RosterError(f"{', '.join(since)} name{'s' if len(since) == 1 else ''} {to!r}, made since the rename; "
+                              f"undoing it would leave {'them' if len(since) > 1 else 'it'} naming an agent that is "
+                              f"gone. Remove {'them' if len(since) > 1 else 'it'} or take {to!r} out first; nothing "
+                              "was restored")
         changes = _structure_back(root_fd, root, renamed)
         back = [{"name": c["name"], "before": c["after"], "after": c["before"]} for c in reversed(commands)]
         with flowcommands.Folder(commands_dir, create=False) if back else nullcontext() as folder:
@@ -1831,37 +1965,156 @@ def _restore_rename(name, data, *, root, agents_dir, commands_dir, config):
                                           "nothing was restored")
             except flowcommands.CommandError as exc:
                 raise RosterError(str(exc)) from None
-            _apply(root_fd, changes)
-            written = []
+            failed, written = [], []
             try:
-                _write_commands(folder, back, written)
-                agentfiles.replace(name, None, file, agents_dir=agents_dir)
+                _apply(root_fd, changes, failed)
                 try:
-                    agentfiles.replace(to, file, None, agents_dir=agents_dir)
+                    _write_commands(folder, back, written)
+                    agentfiles.replace(name, None, file, agents_dir=agents_dir)
+                    try:
+                        agentfiles.replace(to, file, None, agents_dir=agents_dir)
+                    except BaseException:
+                        try:
+                            agentfiles.replace(name, file, None, agents_dir=agents_dir)
+                        except (OSError, SkillsetError):
+                            failed.append(f"agents/{name}.md")
+                        raise
                 except BaseException:
-                    agentfiles.replace(name, file, None, agents_dir=agents_dir)
+                    failed += _revert_commands(folder, written)
+                    failed += _revert(root_fd, changes)
                     raise
-            except BaseException:
-                _revert_commands(folder, written)
-                _revert(root_fd, changes)
+            except BaseException as exc:
+                _put_back_failed("undoing the rename of", to, exc, failed)
                 raise
     return {"agent": name, "kind": "added", "action": "restored the name", "presets": [], "changed": True,
             "restored": {"from": to, "to": name}, "warnings": [], "message": agentfiles.LIVE}
 
 
-def read_agent(name, *, agents_dir=AGENTS_DIR):
-    """{"name", "description", "model", "text", "skills", "permissions"} of an added agent (its instruction is the
-    text; `permissions` is what it may do: agentfiles.summary)."""
+# --- rev: no write from a stale view (stale-contract.md) ---------------------------------------------
+#
+# An agent's `rev` covers what it is stored as: its agent file, its entry in each preset, its SKILLS.md row and its
+# file in the structure folder (each absent part counts as absent). The snapshot (`annotate`) and `read_agent`
+# report it; `text_agent`, `rename_agent`, `remove_agent` and a skills change (`expecting`) take `expect`.
+
+
+def _rev_inputs(config, map_path):
+    """(the parsed preset file or None, SKILLS.md's text or None). Never raises."""
+    obj = map_text = None
+    try:
+        obj = skillset._parse(skillset._read(Path(config), "config")[0])
+    except (SkillsetError, OSError, ValueError):
+        pass
+    try:
+        map_text = skillset._read(Path(map_path), "SKILLS.md")[0]
+    except (SkillsetError, OSError, ValueError):
+        pass
+    return obj, map_text
+
+
+def _agent_bytes(agents_dir, name):
+    """The bytes of `name`.md in the agents folder, or None (missing, unreadable or not a regular file)."""
+    try:
+        with agentfiles._folder(agents_dir) as fd:
+            return agentfiles._read_at(fd, name + ".md")
+    except (SkillsetError, OSError):
+        return None
+
+
+def _own_file(root_fd, name):
+    """The bytes of the agent's file in the structure folder (the first group folder that has one), or None."""
+    if root_fd is None:
+        return None
+    try:
+        for folder in _group_folders(root_fd):
+            fd = _open_folder(root_fd, folder, False)
+            try:
+                data = _read_at(fd, name + ".md")
+            finally:
+                os.close(fd)
+            if data is not None:
+                return data
+    except (SkillsetError, OSError):
+        pass
+    return None
+
+
+def _agent_rev(name, data, obj, map_text, own):
+    entries = row = None
+    try:
+        found = {preset: agents[name] for preset, agents in obj["presets"].items() if name in agents}
+        entries = json.dumps(found, sort_keys=True, ensure_ascii=False) if found else None
+    except (KeyError, TypeError, AttributeError):
+        pass
+    try:
+        span = skillset._map_rows(map_text).get(name) if map_text is not None else None
+        row = map_text[span[0]:span[1]] if span else None
+    except SkillsetError:
+        pass
+    return agentfiles.rev(data, entries, row, own)
+
+
+def _structure_fd(structure):
+    try:
+        return os.open(Path(structure), os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return None
+
+
+def agent_rev(name, *, config=CONFIG, map_path=MAP, agents_dir=AGENTS_DIR, structure=STRUCTURE_DIR):
+    """The `rev` of one agent as the snapshot reports it (for a writer outside this module, e.g. a default agent's
+    skills change: compare with agentfiles.check_expect under its own lock). `structure` None: no structure folder
+    is read (see annotate). Never raises."""
+    obj, map_text = _rev_inputs(config, map_path)
+    root_fd = _structure_fd(structure) if structure is not None else None
+    try:
+        return _agent_rev(name, _agent_bytes(agents_dir, name), obj, map_text, _own_file(root_fd, name))
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+
+
+def _expect_agent(name, expect, *, data, root_fd, config, map_path, obj=None):
+    """Refuse (agentfiles.StaleError) a change to `name` from a view showing `expect` when its rev is another;
+    `data`: the agent file's bytes as the writer read them. No check when `expect` is None."""
+    if expect is None:
+        return
+    read_obj, map_text = _rev_inputs(config, map_path)
+    agentfiles.check_expect(expect, _agent_rev(name, data, obj if obj is not None else read_obj, map_text,
+                                               _own_file(root_fd, name)), f"{name!r}")
+
+
+@contextmanager
+def expecting(name, expect, *, config=CONFIG, map_path=MAP, structure=None):
+    """For a change to an added agent's file from a view showing `expect`: holds the structure folder's lock and
+    yields `check(data)` for agentfiles.set_text or set_skills (None when `expect` is None: no check), which refuses
+    with agentfiles.StaleError when the agent's rev is not `expect`."""
+    if expect is None:
+        yield None
+        return
+    if not isinstance(expect, str):
+        raise RosterError("expect must be text: the rev the view was showing")
+    with _structure_locked(Path(structure) if structure is not None else STRUCTURE_DIR) as root_fd:
+        yield lambda data: _expect_agent(name, expect, data=data, root_fd=root_fd, config=config, map_path=map_path)
+
+
+def read_agent(name, *, agents_dir=AGENTS_DIR, config=CONFIG, map_path=MAP, structure=None):
+    """{"name", "description", "model", "text", "skills", "permissions", "rev"} of an added agent (its instruction is
+    the text; `permissions` is what it may do: agentfiles.summary; `rev`: see agent_rev; give `structure`, the
+    folder the writers use: without it the rev leaves the structure file out, as annotate does)."""
     skillset._agent_name(name)
     shown = agentfiles.read(name, agents_dir=agents_dir)
     return {"agent": name, "action": "read", **{key: shown[key] for key in ("name", "description", "model", "text",
-                                                                            "skills", "permissions")}}
+                                                                            "skills", "permissions")},
+            "rev": agent_rev(name, config=config, map_path=map_path, agents_dir=agents_dir, structure=structure)}
 
 
-def text_agent(name, text, *, agents_dir=AGENTS_DIR, backups=BACKUPS):
-    """Replace an added agent's instruction; `record` undoes it exactly (restore_agent)."""
+def text_agent(name, text, *, agents_dir=AGENTS_DIR, backups=BACKUPS, expect=None, config=CONFIG, map_path=MAP,
+               structure=None):
+    """Replace an added agent's instruction; `record` undoes it exactly (restore_agent). Given `expect`, refused
+    (agentfiles.StaleError, nothing written) when the agent's rev is another."""
     skillset._agent_name(name)
-    done = agentfiles.set_text(name, text, agents_dir=agents_dir, backups=backups)
+    with expecting(name, expect, config=config, map_path=map_path, structure=structure) as check:
+        done = agentfiles.set_text(name, text, agents_dir=agents_dir, backups=backups, check=check)
     return {"agent": name, "action": "changed the instruction", **done}
 
 
@@ -1883,11 +2136,49 @@ def _models(obj):
     return list(seen)
 
 
-def annotate(document, *, config=CONFIG, map_path=MAP, agents_dir=AGENTS_DIR):
+def _command_refusals(document, structure):
+    """{agent: the removal's refusal} for each agent on a flow whose command is on (the first such flow in id order,
+    as the removal finds it): read from the structure folder `structure` without taking its lock, or, with none
+    given, from the document's own `structure.flows`. Never raises."""
+    found = {}
+
+    def note(file, flow):
+        for name in (flow["path"] if flow is not None else []):
+            if name not in found and _command_refusal(file, flow, name):
+                found[name] = _command_refusal(file, flow, name)
+
+    if structure is None:
+        try:
+            for flow in (document.get("structure") or {}).get("flows") or []:
+                note(f"{flow['id']}.md", {"path": list(flow["path"]), "name": flow.get("name") or "",
+                                          "command": bool(flow.get("command"))})
+        except (AttributeError, KeyError, TypeError):
+            pass
+        return found
+    root_fd = _structure_fd(structure)
+    if root_fd is None:
+        return found
+    try:
+        for file, data in _listing(root_fd, FLOWS_FOLDER):
+            note(file, flow_fields(data))
+    except (OSError, SkillsetError):
+        pass
+    finally:
+        os.close(root_fd)
+    return found
+
+
+def annotate(document, *, config=CONFIG, map_path=MAP, agents_dir=AGENTS_DIR, structure=None):
     """Add to a snapshot document, in place: per agent `added` (an agent file this toolkit wrote), whether Delete
     can remove it (`removable`, `removable_reason`, "" when it can) and, for an added agent, its `skills`; and
     `roster` ({"editable", "why" when not, "models": the distinct "provider/model#variant" the presets and added
-    agents use}). A hand-written agent file is listed but read-only, with the reason. Reads only; never raises."""
+    agents use}). Each agent gets its `rev` (agent_rev). A hand-written agent file is listed but read-only, with the
+    reason. An agent on a flow whose
+    command is on is not removable, with the removal's own refusal as the reason. `structure`: the structure folder
+    the writers use (give it: the rev covers the agent's structure file, and removable reads the flow files as the
+    removal does); without it no structure folder is read, the document's flows stand in and the rev leaves the
+    structure file out, so it matches the writers' only when they have no structure folder either. Reads only;
+    never raises."""
     obj, why = None, ""
     try:
         obj = skillset._parse(skillset._read(Path(config), "config")[0])
@@ -1912,6 +2203,9 @@ def annotate(document, *, config=CONFIG, map_path=MAP, agents_dir=AGENTS_DIR):
         off = set(_disabled(obj)) if obj is not None else set()
     except RosterError:
         off = set()
+    commanded = _command_refusals(document, structure)
+    rev_obj, rev_map = _rev_inputs(config, map_path)
+    root_fd = _structure_fd(structure) if structure is not None else None
     for agent in document.get("agents", []):
         name = agent.get("name") if isinstance(agent.get("name"), str) else ""
         canonical = ALIASES.get(name, name)
@@ -1938,8 +2232,13 @@ def annotate(document, *, config=CONFIG, map_path=MAP, agents_dir=AGENTS_DIR):
             reason = HOST_REASON
         else:
             reason = OUTSIDE_REASON
+        reason = reason or commanded.get(name, "")
         agent["removable"] = not reason
         agent["removable_reason"] = reason
+        agent["rev"] = _agent_rev(name, _agent_bytes(agents_dir, name) if name else None, rev_obj, rev_map,
+                                  _own_file(root_fd, name) if name else None)
+    if root_fd is not None:
+        os.close(root_fd)
     return document
 
 
@@ -1976,6 +2275,8 @@ def agent_main(argv=None):
             sub.add_argument("record", help="the undo record a removal or an instruction change printed")
         if op == "text":
             sub.add_argument("--text-file", required=True, help="the instruction from a file, or - for stdin")
+        if op in {"text", "rename", "remove"}:
+            sub.add_argument("--expect", metavar="REV", help="refuse unless the agent's rev (agent show) is still REV")
         if op == "add":
             sub.add_argument("--model")
             sub.add_argument("--variant")
@@ -1994,10 +2295,12 @@ def agent_main(argv=None):
         if args.op == "list":
             result = show(**files, agents_dir=agents_dir)
         elif args.op == "show":
-            result = read_agent(args.name, agents_dir=agents_dir)
+            result = read_agent(args.name, agents_dir=agents_dir, map_path=pick("map_path", MAP),
+                                structure=pick("structure", STRUCTURE_DIR), **files)
         elif args.op == "text":
             result = text_agent(args.name, _read_prompt(args.text_file), agents_dir=agents_dir,
-                                backups=pick("backups", BACKUPS))
+                                backups=pick("backups", BACKUPS), expect=args.expect, map_path=pick("map_path", MAP),
+                                structure=pick("structure", None), **files)
         else:
             files.update(map_path=pick("map_path", MAP), backups=pick("backups", BACKUPS),
                          structure=pick("structure", None), agents_dir=agents_dir)
@@ -2008,16 +2311,18 @@ def agent_main(argv=None):
                                    read_only=args.read_only, copy_of=args.copy_of, template=args.template,
                                    skills_dir=pick("skills_dir", None), **files)
             elif args.op == "rename":
-                result = rename_agent(args.name, args.to, commands_dir=pick("commands", None), **files)
+                result = rename_agent(args.name, args.to, commands_dir=pick("commands", None), expect=args.expect,
+                                      **files)
             elif args.op == "remove":
-                result = remove_agent(args.name, **files)
+                result = remove_agent(args.name, expect=args.expect, **files)
             else:
                 result = restore_agent(str(args.record), commands_dir=pick("commands", None), **files)
     except (SkillsetError, OSError, UnicodeError) as exc:
+        stale = {"rev": exc.rev} if isinstance(exc, agentfiles.StaleError) else {}
         if as_json:
-            print(json.dumps({"error": str(exc)}))
+            print(json.dumps({"error": str(exc), **stale}))
         else:
-            print(f"agentgraph agent: {exc}", file=sys.stderr)
+            print(f"agentgraph agent: {exc}" + (f" (rev now {exc.rev})" if stale else ""), file=sys.stderr)
         return 1
     if as_json:
         print(json.dumps(result))
@@ -2025,7 +2330,7 @@ def agent_main(argv=None):
         print("\n".join(_lines(result)))
     elif args.op == "show":
         print(f"{result['name']}: {result['description']}\nmodel: {result['model']}\n"
-              f"skills: {', '.join(result['skills']) or 'none'}\n\n{result['text']}")
+              f"skills: {', '.join(result['skills']) or 'none'}\nrev: {result['rev']}\n\n{result['text']}")
     else:
         out = [f"{result['agent']}: {result['action']}"]
         gone = result.get("removed") or result.get("restored") or result.get("renamed") or {}
