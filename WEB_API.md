@@ -469,17 +469,21 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   rev on the thrown error.
 // 3D view (orbit lane n105; the terminal's model in tui-plugin/src/scene.js): a button beside the controls (named
 //   "3D view", aria-pressed) and the key D (wherever the view has the keys, not while typing) switch 2D and 3D; the
-//   switch is one morph over 700 ms (at once with reduced motion): the camera tips from straight above down to a
-//   side view 0.32 rad above the system's plane while every agent travels from its 2D place to its 3D place (no cut,
-//   no fade), and back the same way. In 3D the orchestrator is the sun (at the
+//   switch is one morph over 700 ms (eased t*t*(3-2t); at once with reduced motion), the terminal's morphCamera: the
+//   camera stays at the side view (0.5 rad above the system's plane) while the rings rise out of the plane (each
+//   ring's tilt times the morph's progress, figure3D(L, k)) and every point moves in a straight line on screen from
+//   its 2D place to where that camera shows it (no cut, no fade), and back the same way. A press of D or the button
+//   during the morph is never lost: it turns the move round from where it is; a click during it picks as in 3D. In 3D the orchestrator is the sun (at the
 //   middle of the canvas the details leave, the rings narrowed to fit there), each group its own ring tilted differently, its agents on it near their 2D places, council seats and a group's
-//   members round their lead; nearer agents are larger, fully opaque and drawn over farther ones (which dim); names
+//   members round their lead; nearer agents are larger and drawn over farther ones, whose colour is mixed toward the
+//   muted one (the terminal's DEPTH_MIX .72 farthest to 0 nearest, continuous here; not while an agent works); names
 //   stay upright and at 11 px or more. Every line, loop (a closed dotted ring), group line, badge and pick follows
 //   the agents. Going back puts the 2D view back exactly (pan, zoom, every position). The choice is kept in the
 //   page and across a reload (key "<positions key>:view"; no storage: the page only). The system turns by itself
 //   once in 40 s, only in 3D, never with reduced motion, while the page is hidden or during a press. A drag (over
-//   5 px, on empty space or starting on an agent) turns it: across turns, up and down tilt it between nearly along
-//   its plane and straight down (never past); arrow keys on the canvas turn and tilt it; R or a double-click on
+//   5 px, on empty space or starting on an agent) turns it: across turns, up and down tilt it between along its
+//   plane (0) and straight down (PI/2, never past); arrow keys on the canvas turn it 15 degrees and tilt it 7.5
+//   degrees a press; R or a double-click on
 //   empty canvas resets the angle; Escape during a drag puts the angle back. Turning by hand pauses the self-turn
 //   for 3 s. Wheel and pinch zoom; there is no pan in 3D. The flat view is where the work is done; 3D is for
 //   looking: a click picks an agent or a line (a second agent is picked instead, never joined by a path; lines do
@@ -487,12 +491,26 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   undo works. Everything that would change something is refused, nothing is asked of the host and the status line
 //   says "3D is for looking: press D to change things in 2D.": drawing a path (Enter, l, a double-click's loop), N
 //   and the +, Delete and Backspace, G, moving an agent (a drag on one turns the system; Alt/Shift+arrow), typing in
-//   the details and pressing their controls. The sky is the first child of the drawing (svg.ag-sky, aria-hidden,
-//   no pointer events, no text; empty for now, for a later background): its layer g.ag-sky-turn turns with the
-//   system at a quarter of its rate. A frame is drawn only when the angle or the data changed. root carries
+//   the details and pressing their controls. The sky (3D only; nothing of it is drawn in 2D) is the drawing's
+//   first child (svg.ag-sky: aria-hidden, no pointer events, no focus, no text) and fades in and out with the morph:
+//   a sparse field of specks from a fixed seed (the same sky every time; three sizes, at most .3 opaque; warm white
+//   on dark, an ink star chart on light; the terminal's seed 0x5ca1ab1e and hash32) that shifts, wrapping round,
+//   as the terminal's skyPlace: it is V = max(view width, 2 PI x a third of the near side's movement per radian)
+//   wide and a full turn moves it exactly V; tilting lifts it by a third of the figure's movement; a warmer star (.4 opaque) for each finished run, i.e. run 1..stats.passed of each path (failed
+//   runs add none), placed by the FNV-1a seed of "<path id>#<run number>"; at most 200: every path's first run, then every
+//   path's second, and so on, in the snapshot's order; past 200 a new run adds no star and no streak. When a snapshot shows a run finished while 3D is
+//   shown, one shooting star (0.9 s) crosses to where that run's star then appears; several are spaced 0.7 s apart
+//   (at most 8 a snapshot, none for a path new in it); none on load, on entering 3D or for a failed run. The orchestrator glows as the sun, swelling while it works
+//   (still when idle); every other agent is shaded as a sphere lit from it. Nothing else moves by itself. Reduced
+//   motion: no streak (the star simply appears), no swell, no fade. A name over a speck keeps 4.5:1 or better even
+//   without its halo. The sky draws no frame of its own: it moves only with the frames below. A frame is drawn only when the angle or the data changed. root carries
 //   data-ag-view ("2d"/"3d"), data-ag-blend (0 to 1), data-ag-turn, data-ag-elevation (the 3D angle), data-ag-camera-elevation (the
 //   camera's, through the morph; 3D only), data-ag-frames and
-//   data-ag-frame-ms (mean of the last frames) for hosts and tests.
+//   data-ag-frame-ms (mean of the last frames) for hosts and tests. Where the web differs from the terminal (pixels,
+//   not cells): the drag's rate per pixel; one screen scale for both axes, the rings fitted to the free canvas; the
+//   field's density (a star per 9,000 px^2, a cell taken as 8 x 16 px) over a sky a quarter taller than the view
+//   above and below instead of wrapped rows; the depth mix continuous rather than six steps; the streak a line on
+//   the terminal's diagonal (one column, one row a step), not characters; the sun's glow and sphere shading.
 // options.motion: "full" (default) or "none" for a still picture (tests, screenshots). The system's
 //   reduced-motion setting is always honoured.
 // options.autofocus: true to give the canvas keyboard focus once the graph is first drawn (N, F and the arrows
