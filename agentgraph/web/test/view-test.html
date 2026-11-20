@@ -106,6 +106,12 @@
     function circleBounds(root) {
       return [...root.querySelectorAll('[data-agent]')].map(node => ({ name: node.dataset.agent, bounds: node.querySelector('.ag-halo').getBoundingClientRect() }));
     }
+    // A vertical drag on the canvas background by `dy` px (n114: a plain wheel zooms at every width; a drag pans).
+    function panBy(root, dy) {
+      const viewport = root.querySelector('.ag-viewport'), r = viewport.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2, id = 7000 + (panBy.seq = (panBy.seq || 0) + 1);
+      const at = (type, py) => viewport.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: id, pointerType: 'mouse', button: 0, clientX: x, clientY: py }));
+      at('pointerdown', y); at('pointermove', y + Math.sign(dy || 1) * 20); at('pointermove', y + dy); at('pointerup', y + dy);
+    }
     function assertFits(root) {
       const viewport = root.querySelector('.ag-viewport').getBoundingClientRect(), circles = circleBounds(root);
       const compact = root.classList.contains('ag-canvas-compact') || root.classList.contains('ag-compact');
@@ -149,11 +155,11 @@
         // Every clipped agent must be reachable, without zooming out.
         circles.forEach(({ name }) => {
           const node = root.querySelector('[data-agent="' + name + '"] .ag-halo'), b = node.getBoundingClientRect();
-          root.querySelector('.ag-viewport').dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: b.y + b.height / 2 - viewport.y - viewport.height / 2 }));
+          panBy(root, viewport.y + viewport.height / 2 - b.y - b.height / 2);
           const reached = node.getBoundingClientRect();
           assert(reached.top >= viewport.top - .1 && reached.bottom <= viewport.bottom + .1, name + ' cannot be reached by panning');
         });
-        if (anchor) root.querySelector('.ag-viewport').dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: anchor.getBoundingClientRect().y - anchorY }));
+        if (anchor) panBy(root, anchorY - anchor.getBoundingClientRect().y);
       }
     }
     function crowdedFixture() {
@@ -6086,6 +6092,293 @@
           if (token) html.style.setProperty('--v2-background-bg-deep', token); else html.style.removeProperty('--v2-background-bg-deep');
         }
         assert(!problems.length, problems.join('; '));
+      });
+      // ---- n114: the fourth real-browser trial at the narrow widths (620 and 420 px wide, 800 high) ----
+      // The trial's two loop sets, drawn one after another with the pointer as the trial drew them (each finished path
+      // opens its details; Escape closes them).
+      const N114_SETS = {
+        A: [['explorer', 'oracle-lite', 'explorer'], ['researcher', 'designer', 'impl-claude', 'researcher'], ['reviewer', 'impl-hard', 'impl-openai', 'impl-hard'], ['oracle-lite', 'verifier', 'oracle-lite']],
+        B: [['designer', 'oracle', 'designer'], ['impl-openai', 'verifier', 'reviewer', 'verifier'], ['designer', 'impl-claude', 'designer']]
+      };
+      const n114Flows = set => N114_SETS[set].map(path => ({ id: path.join('-'), path: [...path] })).sort((a, b) => a.id.localeCompare(b.id));
+      const n114Data = (flows = []) => { const data = n103Data(flows); data.roster = { editable: true, models: ['test/model-a'] }; data.agents.forEach(a => { a.removable = a.name !== 'orchestrator' && a.name !== 'council' && a.parent !== 'council'; a.added = false; a.skills = []; a.skills_editable = true; }); return data; };
+      // Drawn with taps, one loop after another; the back end lists the flows by id (as the trial's snapshots did), so
+      // the next snapshot has them in that order.
+      async function n114Draw(root, data, set, app) {
+        const problems = [];
+        for (const path of N114_SETS[set]) {
+          const count = data.structure.flows.length;
+          for (const name of path) { tap(root, name); await settle(); }
+          tap(root, path.at(-1)); await settled(); await settleSheet(root);
+          if (data.structure.flows.length !== count + 1) problems.push(set + ': drawing ' + path.join('>') + ' saved nothing');
+          press(viewportOf(root), 'Escape'); await settleSheet(root);
+          data.structure.flows.sort((a, b) => a.id.localeCompare(b.id)); await app.refresh(); await settled(); await settleSheet(root);
+        }
+        return problems;
+      }
+      // Every loop ring's line (screen points), and the rings any part of which lies outside the canvas.
+      const n114Rings = root => [...root.querySelectorAll('.ag-drawing [data-route]')].map(group => ({ id: group.dataset.route, points: [...group.querySelectorAll('.ag-route-step[data-step="loop"]')].flatMap(step => pointsOf(step, 40)) })).filter(ring => ring.points.length);
+      const n114RingsOut = root => { const v = viewportOf(root).getBoundingClientRect(); return n114Rings(root).filter(ring => ring.points.some(p => p.x < v.left - 1 || p.x > v.right + 1 || p.y < v.top - 1 || p.y > v.bottom + 1)).map(ring => ring.id + '\'s ring outside the canvas'); };
+      const n114Empty = root => {
+        const view = viewportOf(root).getBoundingClientRect();
+        for (let y = view.top + 60; y < view.bottom - 40; y += 13) for (let x = view.left + 20; x < view.right - 40; x += 17) {
+          const under = document.elementFromPoint(x, y), lines = document.elementsFromPoint(x, y).some(item => item.matches?.('.ag-route-hit, .ag-team-hit, .ag-line-hit, [data-agent] *'));
+          if (under && viewportOf(root).contains(under) && !under.closest('[data-agent], [data-route], [data-team-line], [data-loop-id], [data-work-loop-id], button') && !lines) return { x, y };
+        }
+        return null;
+      };
+      await test('n114 item 1 (620): with the trial\'s loop sets drawn one by one at 620x800 and the details open (impl-hard, then the orchestrator), every circle, name and loop ring is in the visible canvas, names 11 px or more', async () => {
+        const problems = [], counts = {};
+        for (const set of ['A', 'B']) {
+          const data = n114Data(), host = worldHost(data);
+          await using(data, async (root, app) => {
+            await resizeTo(root, 620, 800); await settle();
+            problems.push(...await n114Draw(root, data, set, app));
+            for (const opened of ['impl-hard', 'orchestrator']) {
+              context(nodeOf(root, opened), centre(root, opened)); await settled(); await settleSheet(root);
+              const label = set + ', ' + opened + ' open', out = [...outsideVisible(root), ...n114RingsOut(root)];
+              counts[label] = out.length;
+              problems.push(...out.map(line => label + ': ' + line));
+              if (nameSize(root) < 11 - .01) problems.push(label + ': names at ' + nameSize(root).toFixed(1) + ' px');
+              root.querySelector('.ag-close').click(); await settleSheet(root);
+            }
+          }, { actions: host.actions });
+        }
+        window.n114Wide = counts;
+        assert(!problems.length, problems.length + ' problems: ' + problems.slice(0, 60).join('; '));
+      });
+      await test('n114 item 1 (420): with the trial\'s loop sets drawn at 420x800 no agent or ring is cut by the canvas edge (the fit counts the rings); with the details open every agent and ring outside the canvas comes wholly into view with one drag on empty canvas, at the zoom the fit left', async () => {
+        const problems = [], counts = {};
+        for (const set of ['A', 'B']) {
+          const data = n114Data(), host = worldHost(data);
+          await using(data, async (root, app) => {
+            await resizeTo(root, 420, 800); await settle();
+            problems.push(...await n114Draw(root, data, set, app));
+            problems.push(...[...outsideVisible(root), ...n114RingsOut(root)].map(line => set + ' closed: ' + line));
+            context(nodeOf(root, 'impl-hard'), centre(root, 'impl-hard')); await settled(); await settleSheet(root);
+            const viewport = viewportOf(root), stage = root.querySelector('.ag-drawing > g'), zoom = stage.getCTM().a;
+            const agentsOut = () => [...new Set(outsideVisible(root).filter(line => line.endsWith(' outside the canvas')).map(line => line.split(' ')[0]))];
+            const boxOf = item => {
+              if (item.ring) { const ring = n114Rings(root).find(r => r.id === item.ring); return ring && { left: Math.min(...ring.points.map(p => p.x)), right: Math.max(...ring.points.map(p => p.x)), top: Math.min(...ring.points.map(p => p.y)), bottom: Math.max(...ring.points.map(p => p.y)) }; }
+              const parts = [...nodeOf(root, item.agent).querySelectorAll('.ag-core, .ag-agent-name')].map(part => part.getBoundingClientRect());
+              return { left: Math.min(...parts.map(b => b.left)), right: Math.max(...parts.map(b => b.right)), top: Math.min(...parts.map(b => b.top)), bottom: Math.max(...parts.map(b => b.bottom)) };
+            };
+            const items = [...agentsOut().map(agent => ({ agent })), ...n114RingsOut(root).map(line => ({ ring: line.split('\'')[0] }))];
+            counts[set] = items.length;
+            for (const item of items) {
+              const label = set + ' open: ' + (item.agent || item.ring + '\'s ring'), v = viewport.getBoundingClientRect(), box = boxOf(item);
+              if (box.left >= v.left - 1 && box.right <= v.right + 1 && box.top >= v.top - 1 && box.bottom <= v.bottom + 1) continue;
+              if (box.right - box.left > v.width - 8 || box.bottom - box.top > v.height - 8) { problems.push(label + ' is larger than the canvas'); continue; }
+              const dx = box.left < v.left + 4 ? v.left + 4 - box.left : box.right > v.right - 4 ? v.right - 4 - box.right : 0;
+              const dy = box.top < v.top + 4 ? v.top + 4 - box.top : box.bottom > v.bottom - 4 ? v.bottom - 4 - box.bottom : 0;
+              const spot = n114Empty(root);
+              if (!spot) { problems.push(label + ': no empty canvas to drag'); continue; }
+              const id = ++pointerSeq, target = document.elementFromPoint(spot.x, spot.y);
+              pointerOn(target, 'pointerdown', id, spot);
+              for (let i = 1; i <= 4; i++) pointerOn(viewport, 'pointermove', id, { x: spot.x + dx * i / 4, y: spot.y + dy * i / 4 });
+              pointerOn(viewport, 'pointerup', id, { x: spot.x + dx, y: spot.y + dy }); await settle();
+              const after = boxOf(item), w = viewport.getBoundingClientRect();
+              if (after.left < w.left - 1 || after.right > w.right + 1 || after.top < w.top - 1 || after.bottom > w.bottom + 1) problems.push(label + ': one drag of ' + Math.round(dx) + ',' + Math.round(dy) + ' px left it outside the canvas');
+              if (Math.abs(stage.getCTM().a - zoom) > .001) problems.push(label + ': the drag changed the zoom');
+            }
+          }, { actions: host.actions });
+        }
+        window.n114Narrow = counts;
+        assert(!problems.length, problems.length + ' problems: ' + problems.slice(0, 60).join('; '));
+      });
+      await test('n114 item 2: at 620 and 420 px, after the user zoomed and panned, opening and closing the details, drawing a loop, placing a new agent and adding one with the + menu move the view only as far as it takes to show what changed, and closing the details puts the view back', async () => {
+        const problems = [];
+        for (const width of [620, 420]) {
+          const data = n114Data(), host = worldHost(data);
+          await using(data, async root => {
+            await resizeTo(root, width, 800); await settle();
+            const viewport = viewportOf(root), stage = () => root.querySelector('.ag-drawing > g').getCTM(), label = width + ': ';
+            viewport.focus(); press(viewport, '+'); await settle(); press(viewport, 'ArrowUp'); press(viewport, 'ArrowLeft'); await settle();
+            const scale0 = stage().a;
+            const boxOf = names => { const parts = names.flatMap(name => nodeOf(root, name) ? [...nodeOf(root, name).querySelectorAll('.ag-core, .ag-agent-name')].map(part => part.getBoundingClientRect()) : []); return parts.length ? { left: Math.min(...parts.map(b => b.left)), right: Math.max(...parts.map(b => b.right)), top: Math.min(...parts.map(b => b.top)), bottom: Math.max(...parts.map(b => b.bottom)) } : null; };
+            // What the step changed may come into view, by the smallest pan: then it lies at the edge it came in from.
+            const check = (step, before, changed = [], routes = []) => {
+              const now = screenOf(root);
+              if (Math.abs(stage().a - scale0) > .001) problems.push(label + step + ' changed the zoom ' + scale0.toFixed(3) + ' → ' + stage().a.toFixed(3));
+              const shifts = Object.keys(before).filter(name => !changed.includes(name) && now[name]).map(name => ({ name, dx: now[name].x - before[name].x, dy: now[name].y - before[name].y }));
+              const worst = shifts.reduce((a, s) => Math.hypot(s.dx, s.dy) > Math.hypot(a.dx, a.dy) ? s : a, { dx: 0, dy: 0 });
+              if (Math.hypot(worst.dx, worst.dy) <= .5) return;
+              if (shifts.some(s => Math.hypot(s.dx - worst.dx, s.dy - worst.dy) > .5)) { problems.push(label + step + ' moved agents on screen unevenly: ' + shifts.filter(s => Math.hypot(s.dx - worst.dx, s.dy - worst.dy) > .5).slice(0, 3).map(s => s.name + ' ' + s.dx.toFixed(1) + ',' + s.dy.toFixed(1)).join(' ') + ' against ' + worst.name + ' ' + worst.dx.toFixed(1) + ',' + worst.dy.toFixed(1)); return; }
+              // (A loop just drawn comes into view with its ring.)
+              const box = boxOf(changed); routes.forEach(id => { const b = routeOf(root, id)?.getBoundingClientRect(); if (box && b && b.width) Object.assign(box, { left: Math.min(box.left, b.left), right: Math.max(box.right, b.right), top: Math.min(box.top, b.top), bottom: Math.max(box.bottom, b.bottom) }); });
+              const v = viewport.getBoundingClientRect(), top = Math.max(v.top, root.querySelector('.ag-usage').getBoundingClientRect().bottom);
+              const minimal = box && (worst.dx <= .5 || box.left - v.left <= 32) && (worst.dx >= -.5 || v.right - box.right <= 32) && (worst.dy <= .5 || box.top - top <= 40) && (worst.dy >= -.5 || v.bottom - box.bottom <= 32);
+              if (!minimal) problems.push(label + step + ' moved the view ' + worst.dx.toFixed(1) + ',' + worst.dy.toFixed(1) + ' px (' + worst.name + ')' + (changed.length ? ', more than it takes to show ' + changed.join(', ') : ''));
+            };
+            // Agents wholly in the part of the canvas the sheet leaves, nearest its middle.
+            const shownNames = () => { const v = viewport.getBoundingClientRect(), out = outsideVisible(root); return renderedNames(root).map(([name]) => name).filter(name => !out.some(line => line.startsWith(name + ' ')) && boxOf([name]).bottom < v.top + 450 && boxOf([name]).top > v.top + 60); };
+            const ordinary = name => !['orchestrator', 'council', 'fable', 'astra', 'carbon'].includes(name);
+            // Opening and closing an agent's details.
+            const one = shownNames().filter(ordinary)[0];
+            if (!one) { problems.push(label + 'no agent in view to open'); return; }
+            let before = screenOf(root);
+            context(nodeOf(root, one), centre(root, one)); await settled(); await settleSheet(root);
+            check('opening ' + one + '\'s details', before, [one]);
+            root.querySelector('.ag-close').click(); await settleSheet(root);
+            check('closing ' + one + '\'s details', before);
+            // Drawing a loop between two agents in view (its details open), then closing them.
+            const pair = shownNames().filter(ordinary).slice(0, 2);
+            before = screenOf(root);
+            const routes0 = new Set([...root.querySelectorAll('[data-route]')].map(group => group.dataset.route)), drawn = () => [...root.querySelectorAll('[data-route]')].map(group => group.dataset.route).filter(id => !routes0.has(id));
+            if (pair.length === 2) {
+              for (const name of [...pair, pair[0]]) { tap(root, name); await settle(); }
+              tap(root, pair[0]); await settled(); await settleSheet(root);
+              check('drawing the loop ' + pair.join('>'), before, pair, drawn());
+              press(viewport, 'Escape'); await settleSheet(root);
+              check('closing the loop\'s details', before, pair, drawn());
+            } else problems.push(label + 'no two agents in view for a loop');
+            // Placing a new agent on empty canvas in view (its details open), then closing them.
+            const names0 = new Set(Object.keys(screenOf(root))), spot = n114Empty(root);
+            before = screenOf(root);
+            root.querySelector('.ag-add').click(); await settle();
+            const item = menuItem(root, 'Blank agent'), from = middleOf(item);
+            pointerAt(item, 'pointerdown', from); await settle();
+            pointerAt(document, 'pointermove', { x: (from.x + spot.x) / 2, y: (from.y + spot.y) / 2 }); pointerAt(document, 'pointermove', spot);
+            pointerAt(document, 'pointerup', spot); await settled(); await settleSheet(root);
+            const placed = Object.keys(screenOf(root)).filter(name => !names0.has(name));
+            if (!placed.length) problems.push(label + 'placing an agent added none');
+            check('placing ' + placed.join() + ' on empty canvas', before, placed);
+            root.querySelector('.ag-close')?.click(); await settleSheet(root);
+            check('closing the placed agent\'s details', before, placed);
+            // Adding one with the + menu and the keyboard (placed for the user), then closing its details.
+            const names1 = new Set(Object.keys(screenOf(root)));
+            before = screenOf(root);
+            root.querySelector('.ag-add').click(); await settle();
+            menuItem(root, 'Blank agent').click(); await settled(); await settleSheet(root);
+            const added = Object.keys(screenOf(root)).filter(name => !names1.has(name));
+            if (!added.length) problems.push(label + 'the + menu added no agent');
+            check('adding ' + added.join() + ' with the + menu', before, added);
+            root.querySelector('.ag-close')?.click(); await settleSheet(root);
+            check('closing the added agent\'s details', before, added);
+          }, { actions: host.actions });
+        }
+        assert(!problems.length, problems.length + ' problems: ' + problems.slice(0, 60).join('; '));
+      });
+      await test('n114 item 3: a plain wheel zooms at every width (1400, 1100, 620 and 420 px), about the pointer, as Ctrl+wheel does; never under the 11 px name floor', async () => {
+        const problems = [];
+        for (const width of [1400, 1100, 620, 420]) {
+          const data = n114Data(), host = worldHost(data);
+          await using(data, async root => {
+            await resizeTo(root, width, 800); await settle();
+            const viewport = viewportOf(root), stage = () => root.querySelector('.ag-drawing > g').getCTM(), v = viewport.getBoundingClientRect();
+            const at = { x: v.left + v.width * .4, y: v.top + v.height * .45 }, wheel = (deltaY, extra = {}) => viewport.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY, clientX: at.x, clientY: at.y, ...extra }));
+            const under = () => { const m = stage(); return { x: (at.x - v.left - m.e) / m.a, y: (at.y - v.top - m.f) / m.a }; };
+            const scale0 = stage().a, spot0 = under();
+            wheel(-120); await settle();
+            const scale1 = stage().a, spot1 = under();
+            if (!(scale1 > scale0 * 1.05)) problems.push(width + ': a plain wheel did not zoom in (' + scale0.toFixed(3) + ' → ' + scale1.toFixed(3) + ')');
+            else if (Math.hypot(spot1.x - spot0.x, spot1.y - spot0.y) > .5) problems.push(width + ': the plain wheel did not zoom about the pointer');
+            for (let i = 0; i < 30; i++) wheel(240); await settle();
+            if (stage().a < 11 / 12 - .0001) problems.push(width + ': the wheel took names under 11 px (' + stage().a.toFixed(3) + ')');
+            const low = stage().a; wheel(-120, { ctrlKey: true }); await settle();
+            if (!(stage().a > low * 1.05)) problems.push(width + ': Ctrl+wheel no longer zooms');
+          }, { actions: host.actions });
+        }
+        assert(!problems.length, problems.join('; '));
+      });
+      await test('n114 item 4: with the trial\'s loop sets at 620 and 420 px, a click 6 px off a line picks that line in at least 98% of the trial\'s samples (nine a step, both sides, outside agents), and next to an agent two loops share a click 6 px off one ring picks that ring', async () => {
+        const problems = [], counts = {};
+        for (const width of [620, 420]) for (const set of ['A', 'B']) {
+          const flows = n114Flows(set), data = n114Data(flows), host = worldHost(data), shared = set === 'A' ? 'oracle-lite' : 'designer';
+          await using(data, async root => {
+            await resizeTo(root, width, 800); await settle();
+            const view = viewportOf(root).getBoundingClientRect();
+            let right = 0, tried = 0, nearRight = 0, nearTried = 0; const wrong = [];
+            for (const flow of flows) [...routeOf(root, flow.id).querySelectorAll('.ag-route-step')].forEach((step, si) => {
+              const ends = [flow.path[si], flow.path[si + 1]], length = step.getTotalLength(), m = step.getScreenCTM();
+              for (let i = 1; i <= 9; i++) {
+                const t = i / 10, p = step.getPointAtLength(length * t).matrixTransform(m), q = step.getPointAtLength(Math.min(length, length * t + .5)).matrixTransform(m), n = Math.hypot(q.x - p.x, q.y - p.y) || 1;
+                for (const side of [6, -6]) {
+                  const spot = { x: p.x - (q.y - p.y) / n * side, y: p.y + (q.x - p.x) / n * side };
+                  if (spot.x < view.left + 4 || spot.x > view.right - 4 || spot.y < view.top + 4 || spot.y > view.bottom - 4) continue;
+                  const under = document.elementFromPoint(spot.x, spot.y);
+                  if (!under || !viewportOf(root).contains(under) || under.closest('[data-agent], button')) continue;
+                  const near = step.dataset.step === 'loop' && ends.includes(shared) && (ends[0] === shared ? t <= .3 : t >= .7);
+                  tried++; if (near) nearTried++; clickAt(root, spot);
+                  const got = [...root.querySelectorAll('[data-route][data-selected="true"]')].map(group => group.dataset.route).join();
+                  if (got === flow.id) { right++; if (near) nearRight++; } else wrong.push(flow.id + ' step ' + si + ' at ' + t.toFixed(1) + (side > 0 ? '+' : '-') + ' picked ' + (got || 'nothing'));
+                  viewportOf(root).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+                }
+              }
+            });
+            const label = width + ' ' + set;
+            counts[label] = right + '/' + tried + ' (near ' + shared + ' ' + nearRight + '/' + nearTried + ')';
+            if (tried < 60 || right < tried * .98) problems.push(label + ': ' + right + ' of ' + tried + ' picked the intended line: ' + wrong.slice(0, 4).join('; '));
+            if (nearRight < nearTried) problems.push(label + ': next to ' + shared + ' ' + nearRight + ' of ' + nearTried + ' picked their own ring: ' + wrong.filter(line => line.includes('step')).slice(0, 3).join('; '));
+          }, { actions: host.actions });
+        }
+        window.n114Picks = counts;
+        assert(!problems.length, problems.join(' | '));
+      });
+      // Item 5 (and the verifier's gap: RING_SPACE at 0 passed the suite): the trial's loop sets drawn one by one at the narrow
+      // widths, and a loop through a council seat (its circle passes the council beside it), at 1400 and 620.
+      await test('n114 item 5: every loop ring keeps at least 8 drawing px clear of the orchestrator and of every agent circle not on it (drawn circles): the trial\'s loop sets drawn at 620 and 420 px, a loop through a council seat at 1400x900 and 620, and one through the orchestrator at 1400x900 keeps as clear of its name', async () => {
+        const problems = [];
+        const cases = [[620, 800, 'A'], [620, 800, 'B'], [420, 800, 'A'], [420, 800, 'B'], [1400, 900, 'seat'], [620, 800, 'seat'], [1400, 900, 'hub']];
+        for (const [width, height, set] of cases) {
+          const seat = set === 'seat' || set === 'hub', flows = set === 'seat' ? [{ id: 'seat', path: ['fable', 'explorer', 'fable'] }] : set === 'hub' ? [{ id: 'hub', path: ['orchestrator', 'impl-claude', 'orchestrator'] }] : [], data = n114Data(flows), host = worldHost(data);
+          await using(data, async (root, app) => {
+            await resizeTo(root, width, height); await settle();
+            const stage0 = stageOf(root);
+            if (!seat) problems.push(...await n114Draw(root, data, set, app));
+            // Nor does an agent the loops moved touch any circle or name not on its loop (the trial's m4).
+            const moved = Object.keys(stage0).filter(name => !near(at(root, name), stage0[name]));
+            problems.push(...loopProblems(root, data.structure.flows, moved, width + ' ' + set).filter(line => !/names at/.test(line)));
+            const scale = root.querySelector('.ag-drawing > g').getCTM().a, shapes = agentShapes(root);
+            data.structure.flows.forEach(flow => {
+              const names = ringNames(flow.path), points = ringSteps(root, flow.id).flatMap(step => pointsOf(step, 80));
+              if (!points.length) return;
+              let worst = Infinity, into = '';
+              shapes.filter(s => !names.includes(s.name)).forEach(s => points.forEach(p => { const gap = (Math.hypot(p.x - s.x, p.y - s.y) - s.r) / scale; if (gap < worst) { worst = gap; into = s.name; } }));
+              if (worst < 8 - .05) problems.push(width + ' ' + set + ': ' + flow.path.join('>') + '\'s ring comes ' + worst.toFixed(1) + ' px from ' + into);
+              // Through the orchestrator: out of its circle, as clear of its name.
+              const hub = names.includes('orchestrator') && shapes.find(s => s.name === 'orchestrator'), label = hub && nodeOf(root, 'orchestrator').querySelector('.ag-agent-name').getBoundingClientRect();
+              if (hub) {
+                const gap = Math.min(...points.filter(p => Math.hypot(p.x - hub.x, p.y - hub.y) > hub.r).map(p => Math.hypot(Math.max(label.left - p.x, 0, p.x - label.right), Math.max(label.top - p.y, 0, p.y - label.bottom)) / scale));
+                if (gap < 8 - .05) problems.push(width + ' ' + set + ': ' + flow.path.join('>') + '\'s ring comes ' + gap.toFixed(1) + ' px from the orchestrator\'s name');
+              }
+            });
+          }, { actions: host.actions });
+        }
+        assert(!problems.length, problems.length + ' problems: ' + problems.slice(0, 6).join('; '));
+      });
+      await test('n114 item 6: no text in the details is under 11 px (an agent, a path and the run figures, at 1100, 620 and 420 px), nothing in them overlaps or is cut, and the sheet handle\'s stops still work', async () => {
+        const problems = [];
+        for (const width of [1100, 620, 420]) {
+          const flows = n114Flows('A').slice(2, 3), data = n114Data(flows), host = worldHost(data);
+          await using(data, async root => {
+            await resizeTo(root, width, 800); await settle();
+            for (const [what, show] of [['agent', () => context(nodeOf(root, 'impl-hard'), centre(root, 'impl-hard'))], ['path', () => press(routeOf(root, flows[0].id), 'Enter')], ['run', () => root.querySelector('.ag-usage').click()]]) {
+              show(); await settled(); await settleSheet(root);
+              const label = width + ' ' + what, detail = root.querySelector('.ag-detail'), frame = detail.getBoundingClientRect();
+              if (detail.hidden) { problems.push(label + ': the details did not open'); continue; }
+              const texts = [...detail.querySelectorAll('*')].filter(e => (e.matches('input, textarea, select, button') || [...e.childNodes].some(n => n.nodeType === 3 && n.textContent.trim())) && e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden');
+              texts.filter(e => parseFloat(getComputedStyle(e).fontSize) < 11 - .01).slice(0, 30).forEach(e => problems.push(label + ': "' + e.textContent.trim().slice(0, 20) + '" (' + (e.className || e.tagName.toLowerCase() + ' in ' + e.parentElement.className) + ') at ' + getComputedStyle(e).fontSize));
+              const scroller = detail.querySelector('.ag-detail-scroll');
+              if (scroller && scroller.scrollWidth > scroller.clientWidth + 1) problems.push(label + ': the details are wider than the panel (' + scroller.scrollWidth + ' > ' + scroller.clientWidth + ')');
+              texts.forEach(e => { const b = e.getBoundingClientRect(); if (b.left < frame.left - .5 || b.right > frame.right + .5) problems.push(label + ': "' + e.textContent.trim().slice(0, 20) + '" is cut at the side'); });
+              const boxes = texts.map(e => ({ e, b: e.getBoundingClientRect() }));
+              boxes.forEach((one, i) => boxes.slice(i + 1).forEach(two => {
+                if (one.e.contains(two.e) || two.e.contains(one.e)) return;
+                if (Math.min(one.b.right, two.b.right) - Math.max(one.b.left, two.b.left) > 1 && Math.min(one.b.bottom, two.b.bottom) - Math.max(one.b.top, two.b.top) > 1) problems.push(label + ': "' + one.e.textContent.trim().slice(0, 16) + '" overlaps "' + two.e.textContent.trim().slice(0, 16) + '"');
+              }));
+              if (width <= 650 && what === 'agent') {
+                const handle = root.querySelector('.ag-sheet-handle'), height = () => detail.getBoundingClientRect().height;
+                handle.focus(); press(handle, 'End'); await settleSheet(root);
+                if (Math.abs(height() - 672) > 2) problems.push(label + ': End took the sheet to ' + height().toFixed(0) + ' px');
+                press(handle, 'Home'); await settleSheet(root);
+                if (Math.abs(height() - 120) > 2) problems.push(label + ': Home took the sheet to ' + height().toFixed(0) + ' px');
+                press(handle, 'Home'); press(handle, 'PageUp'); press(handle, 'PageUp'); await settleSheet(root);
+              }
+            }
+          }, { actions: host.actions, positionsKey: 'n114.item6.' + Date.now() + '.' + width });
+        }
+        assert(!problems.length, problems.length + ' problems: ' + problems.slice(0, 80).join('; '));
       });
     }
     // ---- geometry lane (n103) ----
