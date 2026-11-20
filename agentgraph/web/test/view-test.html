@@ -5137,7 +5137,7 @@
       }
       const stored = () => localStorage.getItem('agentgraph.positions.v1');
       // (item 4 first: the cheapest check, where the shards' split puts the busiest page)
-      await test('n105 item 4: everything drawn in 2D is drawn in 3D (agents, council seats, paths, loops as closed dotted rings, group lines, badges, spokes) with no new text; depth by size, dimming and order (nearer over farther); names upright and never under 11 px', async () => {
+      await test('n105 item 4: everything drawn in 2D is drawn in 3D (agents, council seats, paths, loops as closed dotted rings, group lines, badges, spokes) with no new text; depth by size, dimming and order (nearer over farther); names upright and never under 11 px; the sky (ruling 4): an empty layer first in the drawing, hidden from screen readers, that never takes a click, adds no text and turns with the system at a quarter of its rate', async () => {
         const data = n105Data();
         data.structure.teams = [{ id: 't1', lead: 'reviewer', members: ['verifier'], text: '' }];
         Object.assign(data.agents.find(a => a.name === 'impl-openai'), { busy: 2, sessions: [{ id: 's1', title: 'A', busy: true, model: 'm', cost: 0 }, { id: 's2', title: 'B', busy: true, model: 'm', cost: 0 }] });
@@ -5151,7 +5151,8 @@
             edges: [...root.querySelectorAll('line[data-edge], path[data-edge]')].map(line => line.dataset.edge).sort(),
             text: [...root.querySelectorAll('.ag-drawing text')].map(item => item.textContent).filter(Boolean).sort()
           });
-          const flat = inventory();
+          const flat = inventory(), skyBox = root.querySelector('.ag-drawing').firstElementChild, sky = skyBox?.querySelector('.ag-sky-turn');
+          assert(skyBox && skyBox.classList.contains('ag-sky') && sky && skyBox.children.length === 1 && !sky.getAttribute('transform'), 'no sky layer first in the drawing, or it is turned in 2D');
           press(viewportOf(root), 'd'); await until(() => in3d(root)); assert(in3d(root), 'd did not switch to 3D');
           press(viewportOf(root), 'ArrowLeft'); press(viewportOf(root), 'ArrowLeft'); await frame(); await frame();
           assert(inventory() === flat, '3D does not draw what 2D draws: ' + flat.slice(0, 200) + ' / ' + inventory().slice(0, 200));
@@ -5174,12 +5175,29 @@
           assert(scales.every((s, i) => i === 0 || s >= scales[i - 1] - 1e-3), 'a farther agent is drawn over a nearer one: ' + nodes.map((node, i) => node.dataset.agent + ' ' + scales[i].toFixed(3)).join(', '));
           const labels = [...root.querySelectorAll('.ag-drawing .ag-agent-name')];
           assert(labels.every(label => { const m = label.getScreenCTM(); return Math.abs(m.b) < 1e-6 && Math.abs(m.c) < 1e-6 && m.a > 0 && m.d > 0; }), 'a name is not upright');
+          // The sky: empty, hidden from screen readers, no pointer; it turns with the system at a quarter of its rate.
+          assert(skyBox === root.querySelector('.ag-drawing').firstElementChild && skyBox.getAttribute('aria-hidden') === 'true' && !skyBox.textContent && skyBox.children.length === 1 && !sky.children.length && getComputedStyle(skyBox).pointerEvents === 'none' && getComputedStyle(sky).pointerEvents === 'none', 'the sky is not an empty layer first in the drawing that takes no pointer');
+          const skyTurn = () => { const m = /rotate\(([-\d.]+)/.exec(sky.getAttribute('transform') || ''); return m ? Number(m[1]) : 0; };
+          const sky0 = skyTurn(), turn0 = turnOf(root);
+          press(viewportOf(root), 'ArrowLeft'); await frame(); await frame();
+          const turned = (turnOf(root) - turn0) * 180 / Math.PI, skyTurned = skyTurn() - sky0;
+          assert(Math.abs(turned) > 5 && Math.abs(skyTurned - turned * .25) < .05, 'the sky does not turn with the system at a quarter of its rate: ' + skyTurned.toFixed(2) + ' for ' + turned.toFixed(2) + ' degrees');
+          // Something drawn in it later never takes a click: a probe over the whole canvas.
+          const probe = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+          ['x', 'y'].forEach(key => probe.setAttribute(key, '-5000')); ['width', 'height'].forEach(key => probe.setAttribute(key, '10000')); probe.setAttribute('fill', 'currentColor');
+          sky.append(probe);
+          try {
+            const view = viewportOf(root).getBoundingClientRect();
+            for (let y = view.top + 20; y < view.bottom; y += 60) for (let x = view.left + 20; x < view.right; x += 80) assert(document.elementFromPoint(x, y) !== probe, 'the sky took the pointer at ' + Math.round(x) + ', ' + Math.round(y));
+            const step = routeOf(root, 'p4').querySelector('.ag-route-step'), spot = pointsOf(step, 20).slice(4, 17).find(q => !document.elementFromPoint(q.x, q.y)?.closest('[data-agent]') && document.elementFromPoint(q.x, q.y)?.closest('[data-route]'));
+            if (spot) { const owner = document.elementFromPoint(spot.x, spot.y).closest('[data-route]').dataset.route; clickAt(root, spot); assert(picked(root, owner), 'with the sky drawn a click does not pick a line'); press(viewportOf(root), 'Escape'); }
+          } finally { probe.remove(); }
           for (let i = 0; i < 12; i++) press(viewportOf(root), '-');
           await frame();
           assert(nameSize(root) >= 11 - .01, 'names at ' + nameSize(root).toFixed(2) + ' px in 3D zoomed out');
         }, { motion: 'none' });
       });
-      await test('n105 item 1: one named control beside the others and the key d switch 2D and 3D; the camera moves over about 700 ms; going back restores the 2D view exactly (camera, every position, every line); the choice is kept across a reload and a host without storage does not fail', async () => {
+      await test('n105 item 1 (rulings 1, 2): one named control beside the others and the key d switch 2D and 3D in one morph of about 700 ms (the camera tips from straight above down to a side view at 0.32 rad while every agent travels without a jump or a fade from its 2D place to its 3D place, and back); going back restores the 2D view exactly (camera, every position, every line); the choice is kept across a reload and a host without storage does not fail', async () => {
         const data = n105Data();
         await using(data, async root => {
           await settled();
@@ -5192,22 +5210,48 @@
           // The 2D view at rest (the first layout's glide over) is the one to come back to.
           let flat = pictureOf(root);
           for (let i = 0; i < 40; i++) { await sleep(50); const now = pictureOf(root); if (now === flat) break; flat = now; }
+          // The morph, frame by frame: the camera's elevation and every agent's place on screen and its opacity.
+          const names = [...root.querySelectorAll('.ag-nodes > [data-agent]')].map(node => node.dataset.agent), elements = names.map(name => nodeOf(root, name));
+          const sample = () => ({ blend: Number(root.dataset.agBlend), tilt: Number(root.dataset.agCameraElevation ?? Math.PI / 2), at: names.map(name => centre(root, name)), faint: Math.min(...elements.map(node => Number(getComputedStyle(node).opacity))), same: elements.every((node, i) => nodeOf(root, names[i]) === node && node.isConnected) });
+          async function morph(done) {
+            const track = [sample()], from = performance.now();
+            while (!done() && performance.now() - from < 1500) { await frame(); track.push(sample()); }
+            return { track, took: performance.now() - from };
+          }
+          function smooth(track, way) {
+            const first = track[0].at, last = track.at(-1).at, problems = [];
+            assert(track.length >= 12, way + ': only ' + track.length + ' frames in the morph');
+            track.slice(1).forEach((s, i) => { if (way === 'in' ? s.tilt > track[i].tilt + 1e-4 : s.tilt < track[i].tilt - 1e-4) problems.push('the camera turned back at frame ' + i); });
+            assert(track.every(s => s.faint >= .5 && s.same), way + ': an agent faded out or was swapped for another during the morph: ' + track.map(s => s.faint.toFixed(2) + (s.same ? '' : '*')).join(' '));
+            const mid = track.find(s => s.blend > .35 && s.blend < .65);
+            assert(mid, way + ': no frame half way through the morph');
+            names.forEach((name, n) => {
+              const travel = Math.hypot(last[n].x - first[n].x, last[n].y - first[n].y);
+              if (travel < 30) return;
+              const step = Math.max(...track.slice(1).map((s, i) => Math.hypot(s.at[n].x - track[i].at[n].x, s.at[n].y - track[i].at[n].y)));
+              if (step > travel * .35 + 2) problems.push(name + ' jumped ' + Math.round(step) + ' of ' + Math.round(travel) + ' px in one frame');
+              const fromStart = Math.hypot(mid.at[n].x - first[n].x, mid.at[n].y - first[n].y), fromEnd = Math.hypot(mid.at[n].x - last[n].x, mid.at[n].y - last[n].y);
+              if (fromStart < travel * .1 || fromEnd < travel * .1) problems.push(name + ' was not on its way half way through');
+            });
+            assert(!problems.length, way + ': ' + problems.slice(0, 5).join('; '));
+          }
+          // The agents' arrival (a fade on the first draw) is over.
+          await Promise.all(root.getAnimations({ subtree: true }).filter(item => item.effect?.getComputedTiming().iterations !== Infinity).map(item => item.finished.catch(() => {})));
           viewportOf(root).focus(); press(viewportOf(root), 'd');
-          const started = performance.now();
-          await until(() => Number(root.dataset.agBlend) > 0, 300);
-          await sleep(Math.max(0, started + 330 - performance.now()));
-          const blend = Number(root.dataset.agBlend), mid = pictureOf(root);
-          assert(blend > .1 && blend < .9 && root.dataset.agView === '3d' && button.getAttribute('aria-pressed') === 'true', 'no move under way a third of the way through (blend ' + blend + ')');
-          assert(mid !== flat, 'nothing moved during the switch');
-          await until(() => in3d(root), 1500);
-          const took = performance.now() - started;
-          assert(in3d(root) && took > 560 && took < 1100, 'the camera move took ' + Math.round(took) + ' ms, not about 700');
+          assert(root.dataset.agView === '3d' && button.getAttribute('aria-pressed') === 'true', 'd did not start the switch');
+          const going = await morph(() => in3d(root));
+          assert(in3d(root) && going.took > 560 && going.took < 1100, 'the morph took ' + Math.round(going.took) + ' ms, not about 700');
+          assert(going.track[1].tilt > 1.45 && Math.abs(going.track.at(-1).tilt - .32) < .005, 'the camera does not tip from straight above (' + going.track[1].tilt.toFixed(3) + ') to the side view at 0.32 rad (' + going.track.at(-1).tilt.toFixed(3) + ')');
+          smooth(going.track, 'in');
+          assert(pictureOf(root) !== flat, 'nothing moved during the switch');
           viewportOf(root).dispatchEvent(new WheelEvent('wheel', { deltaY: -240, bubbles: true, cancelable: true, clientX: 500, clientY: 400 }));
           await frame();
           assert(pictureOf(root) !== flat, '3D draws the 2D picture');
           button.click();
-          await until(() => in2d(root), 1500);
+          const coming = await morph(() => in2d(root));
           assert(in2d(root) && button.getAttribute('aria-pressed') === 'false', 'the control did not go back to 2D');
+          coming.track.at(-1).tilt = Math.PI / 2;
+          smooth(coming.track, 'back');
           const back = pictureOf(root);
           assert(back === flat, 'the 2D view is not restored exactly: ' + (() => { const a = JSON.parse(flat), b = JSON.parse(back); return a.flatMap((part, i) => JSON.stringify(part) === JSON.stringify(b[i]) ? [] : [JSON.stringify(part).slice(0, 160) + ' / ' + JSON.stringify(b[i]).slice(0, 160)]).join(' ; '); })());
           // Remembered: a reload (a second view on the same storage) opens in 3D, without the move.
@@ -5244,7 +5288,7 @@
           const cam0 = camera(), turn0 = turnOf(root), spot = emptySpot(root);
           dragBy(root, spot, 80, 0); await frame(); await frame();
           assert(Math.abs(turnOf(root) - (turn0 - .64)) < .02, 'a drag on empty space did not turn: ' + turn0 + ' -> ' + turnOf(root));
-          assert(camera() === cam0, 'a drag in 3D panned');
+          assert(camera() === cam0, 'a drag in 3D panned: ' + cam0 + ' -> ' + camera() + ' at ' + JSON.stringify(spot) + ' ' + document.elementFromPoint(spot.x, spot.y)?.outerHTML.slice(0, 120));
           await clearOf(root, ['impl-claude']);
           const turn1 = turnOf(root), from = centre(root, 'impl-claude');
           dragBy(root, from, -60, 0); await frame(); await frame();
@@ -5262,12 +5306,12 @@
           press(viewportOf(root), 'ArrowLeft'); press(viewportOf(root), 'ArrowDown'); await frame();
           assert(Math.abs(turnOf(root) - turn2 - .2) < .001 && tiltOf(root) < tilt2 - .1, 'arrow keys do not turn the system: ' + turnOf(root) + ' ' + tiltOf(root));
           press(viewportOf(root), 'r'); await frame();
-          assert(turnOf(root) === 0 && tiltOf(root) === .5, 'R does not reset the angle');
+          assert(turnOf(root) === 0 && tiltOf(root) === .32, 'R does not reset the angle');
           press(viewportOf(root), 'ArrowRight'); await frame();
           const empty = emptySpot(root);
           document.elementFromPoint(empty.x, empty.y).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, clientX: empty.x, clientY: empty.y }));
           await frame();
-          assert(turnOf(root) === 0 && tiltOf(root) === .5 && stored() === null, 'a double-click on empty space does not reset the angle (or moved agents)');
+          assert(turnOf(root) === 0 && tiltOf(root) === .32 && stored() === null, 'a double-click on empty space does not reset the angle (or moved agents)');
         }, { motion: 'none' });
         await using(n105Data(), async root => {
           await settle();
@@ -5314,52 +5358,86 @@
           assert(turnOf(root) === a && framesOf(root) === f, 'the system turns by itself with reduced motion');
         }, { motion: 'none' });
       });
-      await test('n105 item 5: in 3D clicks and keys work as in 2D: a click picks a path, Delete removes it and undo brings it back, a right-click opens details only, N opens the add menu, G a path\'s goal, Escape lets go, a path is drawn by clicks; a drag or Alt+arrow on an agent moves nothing and the status line says agents move in 2D; Escape during a turn puts the angle back', async () => {
+      await test('n105 item 5 (ruling 3): 3D is for looking: a click picks an agent or a line, a right-click and Enter open details to read, Escape lets go, undo works; drawing a path, a double-click loop, N and the +, Delete, Backspace, G, moving an agent, typing in the details and pressing their controls are each refused with one status-line sentence and ask nothing of the host', async () => {
         const data = n105Data(), host = worldHost(data);
         data.roster = { editable: true, models: ['test/model-a'] };
         data.agents.forEach(a => { a.removable = a.name !== 'orchestrator' && a.name !== 'council' && a.parent !== 'council'; a.added = false; a.skills = []; a.skills_editable = true; });
         await using(data, async (root, app) => {
           await settled();
+          const clearSpot = id => { const step = routeOf(root, id).querySelector('.ag-route-step'); return pointsOf(step, 20).slice(4, 17).find(p => !document.elementFromPoint(p.x, p.y)?.closest('[data-agent]') && document.elementFromPoint(p.x, p.y)?.closest('[data-route]')?.dataset.route === id); };
+          // Something to undo, done in 2D (where the work is done): p6 picked and deleted.
+          let spot = clearSpot('p6'); assert(spot, 'p6 has no clear point to click in 2D');
+          clickAt(root, spot); await settle(); press(viewportOf(root), 'Delete'); await settled();
+          assert(!routeOf(root, 'p6') && host.calls.some(call => call.startsWith('flow') && call.includes('"remove"')), 'the 2D delete did not happen');
           press(viewportOf(root), 'd'); await until(() => in3d(root)); assert(in3d(root), 'd did not switch to 3D');
+          const note = root.querySelector('.ag-orbit-note'), SAID = '3D is for looking: press D to change things in 2D.';
+          const said = () => { const ok = !note.hidden && note.textContent === SAID && root.querySelector('.ag-status').contains(note); note.hidden = true; note.textContent = ''; return ok; };
+          let calls = host.calls.length;
+          undoKey(viewportOf(root)); await settled();
+          assert(host.calls.length > calls && root.querySelectorAll('[data-route]').length === 6 && in3d(root), 'undo does not work in 3D');
           await clearOf(root, ['impl-claude', 'verifier']);
-          // Pick p4 (impl-claude -> verifier) by a click on its line, between the two circles.
-          const step = routeOf(root, 'p4').querySelector('.ag-route-step'), points = pointsOf(step, 20);
-          const spot = points.slice(4, 17).find(p => !document.elementFromPoint(p.x, p.y)?.closest('[data-agent]') && document.elementFromPoint(p.x, p.y)?.closest('[data-route]')?.dataset.route === 'p4');
-          assert(spot, 'p4 has no clear point to click');
+          calls = host.calls.length;
+          // A click picks an agent; a click on another picks that one (no path); again lets it go; a double-click is refused.
+          tap(root, 'impl-claude'); await settle();
+          assert(root.dataset.agTrail === 'impl-claude', 'a click does not pick an agent in 3D');
+          tap(root, 'verifier'); await settle();
+          assert(root.dataset.agTrail === 'verifier', 'a click on a second agent drew a path in 3D: ' + root.dataset.agTrail);
+          tap(root, 'verifier'); await settle();
+          assert(!root.dataset.agTrail, 'a second click on the picked agent did not let it go');
+          dbl(root, 'verifier'); await settled();
+          assert(said() && host.calls.length === calls, 'a double-click on an agent made a loop in 3D or was not refused: ' + host.calls.slice(calls).join(' | '));
+          tap(root, 'impl-claude'); await settle(); press(viewportOf(root), 'Enter'); await settle();
+          assert(said() && host.calls.length === calls, 'Enter with an agent picked finished a path in 3D');
+          press(viewportOf(root), 'Escape'); await settle();
+          assert(!root.dataset.agTrail, 'Escape does not let go in 3D');
+          // A click on a line picks it; Delete and Backspace are refused.
+          spot = clearSpot('p4'); assert(spot, 'p4 has no clear point to click');
           clickAt(root, spot); await settle();
           assert(picked(root, 'p4') && !detailOpen(root), 'a click does not pick a path in 3D');
-          press(document.activeElement, 'Delete'); await settled();
-          assert(host.calls.some(call => call.startsWith('flow') && call.includes('"remove"') && call.includes('p4')) && !routeOf(root, 'p4'), 'Delete does not remove the picked path in 3D: ' + host.calls.join(' | '));
-          undoKey(viewportOf(root)); await settled();
-          assert(root.querySelectorAll('[data-route]').length === 6, 'undo does not bring the path back in 3D');
+          press(viewportOf(root), 'Delete'); await settled();
+          assert(said() && routeOf(root, 'p4') && host.calls.length === calls, 'Delete removed the picked path in 3D or was not refused');
+          press(viewportOf(root), 'Backspace'); await settled();
+          assert(said() && routeOf(root, 'p4') && host.calls.length === calls, 'Backspace removed the picked path in 3D or was not refused');
+          press(viewportOf(root), 'g'); await settled();
+          assert(said() && !goalBox(root), 'G opened the goal box (to run) in 3D');
+          // Reading: a right-click opens details; Enter on a focused agent opens its details.
           const turnBefore = turnOf(root);
-          assert(context(nodeOf(root, 'verifier'), centre(root, 'verifier')) && detailOpen(root) && !root.dataset.agTrail, 'a right-click does not open details (only) in 3D');
-          press(viewportOf(root), 'Escape'); await settle();
-          assert(!detailOpen(root) && turnOf(root) === turnBefore, 'Escape does not close the details in 3D');
-          viewportOf(root).focus(); press(viewportOf(root), 'n'); await settle();
-          assert(!root.querySelector('.ag-add-menu').hidden, 'N does not open the add menu in 3D');
-          press(document.activeElement, 'Escape'); await settle();
-          clickAt(root, spot); await settle();
-          press(document.activeElement, 'g'); await settled();
-          assert(detailOpen(root) && goalBox(root), 'G does not open the picked path\'s goal in 3D');
+          assert(context(routeOf(root, 'p4').querySelector('.ag-route-step'), spot) && detailOpen(root), 'a right-click does not open details in 3D');
+          // The details' fields and controls: typing and pressing are refused.
+          const box = root.querySelector('.ag-detail [data-route-text]'), typed = new InputEvent('beforeinput', { inputType: 'insertText', data: 'x', bubbles: true, cancelable: true });
+          assert(box, 'the path\'s details have no instruction box');
+          box.focus(); box.dispatchEvent(typed);
+          assert(typed.defaultPrevented && said(), 'typing in the details is not refused in 3D');
+          root.querySelector('.ag-detail .ag-route-remove').click(); await settled();
+          assert(said() && routeOf(root, 'p4') && host.calls.length === calls, 'the details\' Remove worked in 3D or was not refused');
           root.querySelector('.ag-close').click(); await settle();
+          assert(!detailOpen(root) && turnOf(root) === turnBefore, 'the details do not close in 3D');
+          nodeOf(root, 'verifier').focus(); press(nodeOf(root, 'verifier'), 'Enter'); await settle();
+          assert(detailOpen(root) && root.querySelector('.ag-detail-title').textContent === 'verifier' && host.calls.length === calls, 'Enter on an agent does not open its details in 3D');
           press(viewportOf(root), 'Escape'); await settle();
-          // A path drawn by clicks: impl-claude, then verifier, then verifier again to finish.
-          const calls = host.calls.length;
-          tap(root, 'impl-claude'); dbl(root, 'verifier'); await settled();
-          assert(host.calls.slice(calls).some(call => call.startsWith('flow') && call.includes('"add"') && call.includes('["impl-claude","verifier"]')), 'a path is not drawn by clicks in 3D: ' + host.calls.slice(calls).join(' | '));
-          press(viewportOf(root), 'Escape'); await settle();
-          const note = root.querySelector('.ag-orbit-note');
+          // Adding: N and the + are refused.
+          viewportOf(root).focus(); press(viewportOf(root), 'n'); await settle();
+          assert(said() && root.querySelector('.ag-add-menu').hidden, 'N opened the add menu in 3D');
+          root.querySelector('.ag-add').click(); await settle();
+          assert(said() && root.querySelector('.ag-add-menu').hidden, 'the + opened the add menu in 3D');
+          // Moving: a drag starting on an agent turns the system and moves nothing; Alt/Shift+arrow is refused.
+          const turn0 = turnOf(root);
           dragBy(root, centre(root, 'impl-claude'), 40, 0); await frame();
-          assert(stored() === null && !note.hidden && /2D/.test(note.textContent) && root.querySelector('.ag-status').contains(note), 'a drag on an agent moved it or the status line did not say why');
-          note.hidden = true;
-          press(nodeOf(root, 'verifier'), 'ArrowRight', { altKey: true }); press(nodeOf(root, 'verifier'), 'ArrowDown', { shiftKey: true }); await settle();
-          assert(stored() === null && !note.hidden && /2D/.test(note.textContent), 'Alt+arrow moved an agent in 3D or the status line did not say why');
+          assert(stored() === null && turnOf(root) !== turn0, 'a drag on an agent moved it in 3D, or did not turn');
+          press(nodeOf(root, 'verifier'), 'ArrowRight', { altKey: true }); await settle();
+          assert(stored() === null && said(), 'Alt+arrow moved an agent in 3D or was not refused');
+          press(nodeOf(root, 'verifier'), 'ArrowDown', { shiftKey: true }); await settle();
+          assert(stored() === null && said(), 'Shift+arrow moved an agent in 3D or was not refused');
+          assert(host.calls.length === calls, 'something in 3D asked the host to change: ' + host.calls.slice(calls).join(' | '));
           const turn = turnOf(root), tilt = tiltOf(root), empty = emptySpot(root);
           dragBy(root, empty, 70, 30, { hold: true }); await frame();
           assert(turnOf(root) !== turn, 'the turn did not start');
           press(viewportOf(root), 'Escape'); pointerAt(viewportOf(root), 'pointerup', { x: empty.x + 70, y: empty.y + 30 }); await frame();
           assert(turnOf(root) === turn && tiltOf(root) === tilt, 'Escape during a turn does not put the angle back');
+          // Back in 2D the same click draws a path again.
+          press(viewportOf(root), 'd'); await until(() => in2d(root));
+          tap(root, 'impl-claude'); dbl(root, 'verifier'); await settled();
+          assert(host.calls.slice(calls).some(call => call.startsWith('flow') && call.includes('"add"') && call.includes('["impl-claude","verifier"]')), 'back in 2D a path is not drawn by clicks: ' + host.calls.slice(calls).join(' | '));
         }, { actions: host.actions, motion: 'none' });
       });
       await test('n105 item 6: at rest in 3D a click 6 px off a line picks that line in at least 98% of samples (every path, two angles); a frame is drawn only when the angle or the data changed; the frame time with fifteen agents and six paths is measured', async () => {
