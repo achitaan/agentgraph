@@ -38,6 +38,15 @@ The list (what the panel opens on):
     --open          without --demo (a real session, at rest the hub row is the only row): press Enter and require that
                     the plugin asked the host to open the hub's session (the debug log: `action: open <session>`, the
                     session this script opened) with no error, and that the session is still on screen.
+    --paths         start the app with AGENTGRAPH_TUI_DEMO=paths (the demo team at rest with three sample paths, see
+                    src/demo.js) and require the list at rest: at most 4 rows (the hub, the paths row
+                    `3 paths · last impl-loop 2h ago`, spend, the key line with `r run`). Then press `r` and require the
+                    host's chooser (`Run a path`) with the three sample paths, and `3 runs · $1.20 avg · 2.0 rounds`
+                    on the run one; press Enter (the first, impl-loop) and require the goal prompt
+                    (`Goal for impl-loop`); press Escape and require it closed. Stops before any goal is typed: nothing
+                    is sent, no back end runs (the demo never sends anyway), and the plugin's debug log must show
+                    `action: choose` and no `action: send`, `run` or `open`. Not with --demo, --dialog, --open,
+                    --gcheck, --fullscreen or --view3d.
     --selftest      check list_report on built-in screens and exit (no app, no pyte).
 
 The orbit (the full-panel scene):
@@ -84,7 +93,7 @@ except ImportError:
 HUB = "◉ orchestrator"
 TOAST = re.compile(r"Plugin failed|Open plugins|run opencode plugin update|Run /plugins")
 DEBUG_LOG = os.environ.get("AGENTGRAPH_TUI_DEBUG", "")
-DEMO = False  # set from --demo in main()
+DEMO = ""  # AGENTGRAPH_TUI_DEMO for the app, set from --demo ("1") or --paths ("paths") in main()
 BRAILLE = re.compile(r"[\u2801-\u28ff]")
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 # the group colours of src/scene.js (GROUP_COLORS), as pyte reports a 24-bit foreground
@@ -228,7 +237,7 @@ class Term:
             if DEBUG_LOG:
                 os.environ["AGENTGRAPH_TUI_DEBUG"] = DEBUG_LOG
             if DEMO:
-                os.environ["AGENTGRAPH_TUI_DEMO"] = "1"
+                os.environ["AGENTGRAPH_TUI_DEMO"] = DEMO
             else:
                 os.environ.pop("AGENTGRAPH_TUI_DEMO", None)
             os.chdir(cwd)
@@ -577,6 +586,59 @@ def drive_open(term, lines, session):
     return problems, facts, after
 
 
+PATHS_ROW = re.compile(r"^3 paths · last impl-loop \d+h(?:\d+m)? ago$")
+PATHS_SAMPLE = ["impl-loop", "deep-change", "designer-reviewer-designer"]
+
+
+def drive_paths(term, lines):
+    """--paths: the rest list with the paths row, then `r`, the chooser, Enter, the goal prompt, Escape.
+    -> (problems, facts, screens)"""
+    problems, facts, screens = [], [], []
+    found = find_view(lines)
+    rows = list_rows(lines, found) if found else []
+    facts.append(f"{len(rows)} rows at rest: " + " | ".join(rows))
+    if len(rows) > 4:
+        problems.append(f"paths: {len(rows)} rows at rest, more than 4")
+    if not any(PATHS_ROW.match(r) for r in rows):
+        problems.append("paths: no `3 paths · last impl-loop 2h ago` row")
+    if not rows or not re.search(r"\br run\b", rows[-1]):
+        problems.append("paths: no `r run` in the key line")
+    before = sum(1 for l in debug_lines() if "action:" in l)
+    term.write(b"r")
+    term.pump(1.5)
+    chooser = term.lines()
+    screens.append(("after r", chooser))
+    if not any("Run a path" in l for l in chooser):
+        problems.append("paths: no `Run a path` chooser after r")
+    for name in PATHS_SAMPLE:
+        if not any(name in l for l in chooser):
+            problems.append(f"paths: `{name}` is not in the chooser")
+    if not any("3 runs · $1.20 avg · 2.0 rounds" in l for l in chooser):
+        problems.append("paths: no `3 runs · $1.20 avg · 2.0 rounds` in the chooser")
+    if not any("impl-openai → verifier → impl-openai" in l for l in chooser):
+        problems.append("paths: no `impl-openai → verifier → impl-openai` in the chooser")
+    term.write(b"\r")  # the first row (impl-loop, run last) is the current one
+    term.pump(1.5)
+    goal = term.lines()
+    screens.append(("Enter in the chooser", goal))
+    if not any("Goal for impl-loop" in l for l in goal):
+        problems.append("paths: no `Goal for impl-loop` prompt after Enter")
+    term.write(b"\x1b")  # Escape: no goal, nothing sent
+    term.pump(1.5)
+    after = term.lines()
+    screens.append(("Escape in the goal prompt", after))
+    if any("Goal for impl-loop" in l or "Run a path" in l for l in after):
+        problems.append("paths: a dialog is still open after Escape")
+    actions = [l.split(" ", 1)[1] for l in debug_lines() if "action:" in l][before:]
+    facts += actions
+    if not any(a.startswith("action: choose impl-openai-verifier-impl-openai") for a in actions):
+        problems.append("paths: the plugin did not log `action: choose impl-openai-verifier-impl-openai`")
+    leaked = [a for a in actions if re.match(r"action: (send|run|open|stop)\b", a)]
+    if leaked:
+        problems.append("paths: " + "; ".join(leaked))
+    return problems, facts, screens
+
+
 def drive(term, args):
     started = term.wait_for(lambda ls: any("ctrl+p" in l or "commands" in l for l in ls), 40)
     term.pump(4)  # let plugins load and the first sidebar snapshot arrive
@@ -619,6 +681,8 @@ def drive(term, args):
     extra = None
     if args.dialog and find_view(lines) is not None:
         extra = ("dialog",) + drive_dialog(term, lines)
+    elif args.paths and find_view(lines) is not None:
+        extra = ("paths",) + drive_paths(term, lines)
     elif args.open and find_view(lines) is not None:
         p, f, after = drive_open(term, lines, args.session_id)
         extra = ("open", p, f, [("after Enter", after)])
@@ -916,11 +980,14 @@ def main():
     parser.add_argument("--view3d", action="store_true", help="press d after the 2D captures and check the 3D view")
     parser.add_argument("--dialog", action="store_true", help="with --demo: s, then down and Enter in the confirm; nothing leaks")
     parser.add_argument("--open", action="store_true", help="without --demo: Enter on the hub row opens its session")
+    parser.add_argument("--paths", action="store_true", help="the demo at rest with sample paths: r, the chooser, the goal prompt, Escape; nothing sent")
     parser.add_argument("--selftest", action="store_true", help="check list_report on built-in screens and exit")
     args = parser.parse_args()
     if args.selftest:
         return selftest()
     why = refuse(args.demo, args.dialog, any(a == "--session" or a.startswith("--session=") for a in sys.argv[1:]))
+    if not why and args.paths and (args.demo or args.dialog or args.open or args.gcheck or args.fullscreen or args.view3d):
+        why = "--paths runs alone (with --size, --binary, --wait, --settle, --keep-open)"
     if why:
         print("real-host.py: " + why, file=sys.stderr)
         return 2
@@ -928,10 +995,10 @@ def main():
         print("pyte is missing: pip install --target <folder> pyte, then set PYTEPATH=<folder>", file=sys.stderr)
         return 2
     global DEMO, DEBUG_LOG
-    DEMO = args.demo
+    DEMO = "paths" if args.paths else "1" if args.demo else ""
     if args.gcheck and not DEBUG_LOG:
         DEBUG_LOG = os.path.join(SCRATCH, "gcheck-debug.log")
-    if (args.dialog or args.open) and not DEBUG_LOG:
+    if (args.dialog or args.open or args.paths) and not DEBUG_LOG:
         DEBUG_LOG = os.path.join(SCRATCH, "actions-debug.log")
     args.list_mode = args.demo and not args.fullscreen and not args.expect_scene and not args.view3d
     cols, rows = (int(n) for n in args.size.lower().split("x"))
@@ -940,11 +1007,11 @@ def main():
     session = args.session or ensure_session(args.binary, proj)
     args.session_id = session
 
-    label = f"{cols}x{rows}{'-nograph' if args.no_graph else ''}{'-demo' if args.demo else ''}{'-dialog' if args.dialog else ''}{'-open' if args.open else ''}{'-full' if args.fullscreen else ''}{'-3d' if args.view3d else ''}{'-g' + args.pre if args.gcheck else ''}"
+    label = f"{cols}x{rows}{'-nograph' if args.no_graph else ''}{'-demo' if args.demo else ''}{'-dialog' if args.dialog else ''}{'-open' if args.open else ''}{'-paths' if args.paths else ''}{'-full' if args.fullscreen else ''}{'-3d' if args.view3d else ''}{'-g' + args.pre if args.gcheck else ''}"
     term = None
     try:
         term = Term([args.binary, "--standalone", "-s", session, proj], proj, cols, rows, os.path.join(SCRATCH, f"raw-{label}.bin"))
-        if DEBUG_LOG and (args.gcheck or args.dialog or args.open):
+        if DEBUG_LOG and (args.gcheck or args.dialog or args.open or args.paths):
             open(DEBUG_LOG, "w").close()
         term.start()
         if args.gcheck:
@@ -1019,9 +1086,9 @@ def main():
             print(f"===== {label}: FAIL, scene: " + "; ".join(problems))
             return 1
     extra = getattr(args, "extra", None)
-    if args.dialog or args.open:
+    if args.dialog or args.open or args.paths:
         if extra is None:
-            print(f"===== {label}: FAIL, {'dialog' if args.dialog else 'open'}: no view to press keys in")
+            print(f"===== {label}: FAIL, {'dialog' if args.dialog else 'paths' if args.paths else 'open'}: no view to press keys in")
             return 1
         kind, p_extra, f_extra, screens = extra
         for name, shot in screens:

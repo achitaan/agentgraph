@@ -47,6 +47,10 @@ that is 2 to 5 rows; a crowded run stays within 16.
    the review loop at work and is drawn in the live colour; the danger colour is for a gate that is blocked, failed,
    or refuted with nobody redoing the work. When the row is narrow the bar goes before the gate, and the word `gate`
    before the gate's name.
+   **Paths** (only when the snapshot has drawn paths, `structure.flows`, and nothing works or needs you): one row,
+   `3 paths · last impl-loop 2h ago` (the count, and the path run last when its stats say; the time goes first when
+   the row is narrow, then the name). So the rows at rest are 3 without paths (hub, spend, keys) and 4 with them:
+   one row, only at rest, because busy the rows above matter more; `r` works busy or not.
 5. **Spend and context**: dollars, then `ctx` and the root session's context: with `root.wear`
    (`../WEB_API.md`) an 8-cell bar to `compact_at` (or the window), the number and one `•` per summary, as in
    `ctx ━━━━──── 124k ••2`; the fill is muted below 60%, the live colour from 60%, the danger colour from 85%. Without
@@ -94,6 +98,7 @@ view, the list opens as a session panel:
 | `Enter` | open the row's session (`ui.router.navigate`): the agent's running session, the root session for the hub, the session that asked for a request (that is where the host lets you answer it) |
 | `s` | stop the selected working agent: asks `ui.dialog.confirm`, then `client.session.interrupt`; the result is a toast |
 | `m` | message the selected working agent: `ui.dialog.prompt`, then `client.session.prompt` with `delivery: "steer"` into its running session; the result is a toast |
+| `r` | run a drawn path (only when the snapshot has one): the host's chooser (`ui.dialog.select`, widened with `ui.dialog.set({ size: "large" })`; skipped with one path) lists `name  a → b → a` (the id when unnamed), most recently run first, with `3 runs · $1.20 avg · 2.0 rounds` from its stats (a dash for a null field, nothing without stats); then `ui.dialog.prompt` for the goal (required, at most 4,000 characters, refused with a toast); then the run message from `agentgraph flow prompt ID --goal-file -` (below); then `client.session.prompt({ sessionID, text })`, a normal user message, to the orchestrator's session (the snapshot's root session, never a child). A toast says sent, or the back end's or the host's error. `r` is off from the press until it is sent or given up, so nothing is sent twice |
 | `f` | full screen on and off; full screen shows the orbit, back to a side panel the list |
 | `q` | close the panel |
 | `g` | orbit or list (remembered while the app runs) |
@@ -173,7 +178,9 @@ the real host the debug log showed `panel size: 71x39`, then `120x40` after `f` 
 
 **Demo.** `AGENTGRAPH_TUI_DEMO=1` in the TUI's environment makes the plugin draw `test/fixtures/demo.json` instead
 of running the snapshot process (nothing is spawned), with a growing context history and moving costs, polled every
-2 s at most.
+2 s at most. `AGENTGRAPH_TUI_DEMO=paths` draws the same team at rest (nobody works, no task graph) with three sample
+paths, so the paths row and `r` can be seen; in the demo `r` goes as far as the goal and then says
+`Demo: impl-loop is not sent.`: no back end runs and nothing is sent.
 
 Real host, 120×40, demo, full screen, 2D (`real-host.py --size 120x40 --demo --fullscreen --view3d`):
 
@@ -306,6 +313,13 @@ directory (`location.directory`, else `home`). Like the Desktop plugin: SIGKILL 
 one process per session at a time, and every failure becomes one line of error text. A result that arrives after
 the session changed is dropped. The cleanup stops both timers and kills a running child.
 
+`r` gets the run message the same way: `<python> -P -m agentgraph.structure flow prompt <ID> --goal-file -` (what
+`agentgraph flow prompt` runs), no shell, `PYTHONPATH=<home>`, in `home`, the goal on standard input, SIGKILL after
+20 s, output capped at 256 KiB. Exit 0 with text: the message. Otherwise the last line of its standard error is the
+toast (`there is no flow 'x'`); an agentgraph without the command (`No module named agentgraph.structure`,
+`invalid choice: 'prompt'`) says ``This agentgraph has no `flow prompt` command yet; update the orchestration
+folder.``
+
 ## Limits
 
 - The sidebar is host-owned: 42 columns, about 37 usable; every line is cut to 37 display columns.
@@ -327,7 +341,7 @@ the session changed is dropped. The cleanup stops both timers and kills a runnin
   → exactly `height` lines of exactly `width` cells, spans `{ text, tone, color? }` (`color` a `#rrggbb` group
   colour). `view` is `"2d"` or `"3d"`, `change` `{ from, at }` the camera's move, `colors` `{ dark, muted }`.
 - `src/demo.js`: the demo runner for `AGENTGRAPH_TUI_DEMO`.
-- `src/runner.js`: the snapshot process runner.
+- `src/runner.js`: the snapshot process runner, and `runFlowPrompt` (the run message of a path).
 - `test/run.mjs`: `node tui-plugin/test/run.mjs` (plain node, exits non-zero on failure). `test/fixtures/demo.json`
   is a saved `agentgraph.snapshot_json --demo` document. Its stub `setProp` refuses an `fg` that is neither a string
   nor an RGBA, as the real host does.
@@ -411,7 +425,10 @@ List-mode checks (see the script's docstring): `--demo` alone requires the busy 
 at least 2 rows at work besides the hub, one a spinner row, the progress row, the key line last); `--demo --dialog` (refused without `--demo` or with `--session`) presses `s`, then down and Enter in
 the host's confirm, and requires the cursor not to move and no session to open; `--open` (a real session) presses
 Enter on the hub row and requires the plugin to ask the host to open that session with no error. `--selftest`
-checks the list check itself on built-in screens (run by `test/run.mjs`).
+checks the list check itself on built-in screens (run by `test/run.mjs`). `--paths` (alone) runs the
+`AGENTGRAPH_TUI_DEMO=paths` demo, requires the 4 rows at rest with the paths row and `r run`, presses `r` and requires
+the host's chooser with the sample paths and their stats, Enter and requires the goal prompt, then Escape: it stops
+before any goal, so nothing is sent and no back end runs.
 ## Not verified
 
 - `{ prepend: "sidebar.content" }`; that the returned cleanup of `ui.slot` and `keymap.layer` is called.

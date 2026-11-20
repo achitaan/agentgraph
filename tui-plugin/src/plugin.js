@@ -17,12 +17,16 @@
  * a row, Enter opens that row's session (`ui.router.navigate`), `s` stops a working agent (`client.session.interrupt`,
  * after `ui.dialog.confirm`) and `m` sends it a message (`ui.dialog.prompt`, `client.session.prompt`); each key exists
  * only when the host has the call it needs. Pending permission requests and questions come from `ctx.data`.
+ * `r` runs a drawn path (snapshot `structure.flows`): the host's chooser (`ui.dialog.select`), the goal
+ * (`ui.dialog.prompt`), the run message from `agentgraph flow prompt ID --goal-file -` (src/runner.js), sent to the
+ * orchestrator's session (the snapshot's root session) as a user message (`client.session.prompt`).
  *
- * AGENTGRAPH_TUI_DEMO=1 in the TUI's environment draws a moving demo document instead of running Python.
+ * AGENTGRAPH_TUI_DEMO=1 in the TUI's environment draws a moving demo document instead of running Python;
+ * AGENTGRAPH_TUI_DEMO=paths draws it at rest with sample paths (src/demo.js). The demo never sends a path.
  */
-import { render, layout, isAnimated, truncate as truncateText } from "./render.js";
+import { render, layout, isAnimated, truncate as truncateText, flowLabel, flowName, flowStatsText } from "./render.js";
 import { scene, sceneFits, frameInterval, changeAt } from "./scene.js";
-import { createSnapshotRunner, errorDocument, errorMessage, oneLine } from "./runner.js";
+import { createSnapshotRunner, errorDocument, errorMessage, oneLine, runFlowPrompt, GOAL_LIMIT } from "./runner.js";
 import { createDemoRunner, DEMO_INTERVAL_MS } from "./demo.js";
 
 export const PLUGIN_ID = "agentgraph-tui";
@@ -289,7 +293,7 @@ export function createPlugin(host) {
     const demo = demoRequested(host.env);
     if (demo) options.intervalMs = Math.min(options.intervalMs, DEMO_INTERVAL_MS);
     const runner = demo
-      ? createDemoRunner({ fs: host.fs, file: host.demoFile, now: clock })
+      ? createDemoRunner({ fs: host.fs, file: host.demoFile, now: clock, paths: String(host.env.AGENTGRAPH_TUI_DEMO).trim() === "paths" })
       : createSnapshotRunner({
           spawn: host.spawn,
           fs: host.fs,
@@ -510,8 +514,9 @@ export function createPlugin(host) {
           let result = first;
           if (typeof listOptions.keys === "function") {
             const item = first.items.find((i) => i.key === first.selected) || null;
-            result = layout(snap.doc, { width, frame: watcher.frame(), now: clock(), requests, cursor: !!listOptions.cursor, selected, keys: listOptions.keys(item, first.items) });
+            result = layout(snap.doc, { width, frame: watcher.frame(), now: clock(), requests, cursor: !!listOptions.cursor, selected, keys: listOptions.keys(item, first.items, first) });
           }
+          result.session = session;
           if (typeof listOptions.onLayout === "function") listOptions.onLayout(result);
           lines = result.lines;
         }
@@ -568,29 +573,37 @@ export function createPlugin(host) {
 
     // The list's rows in the panel: the selected row's key (remembered while the app runs) and the rows last drawn.
     const [selection, setSelection] = host.createSignal(null);
-    const rows = { items: [], selected: null, scene: false };
+    const rows = { items: [], selected: null, scene: false, flows: [], root: null, session: null };
     const has = (fn) => typeof fn === "function";
     const canOpen = () => !!(ctx.ui && ctx.ui.router && has(ctx.ui.router.navigate));
     const canStop = () => !!(ctx.client && ctx.client.session && has(ctx.client.session.interrupt) && ctx.ui && ctx.ui.dialog && has(ctx.ui.dialog.confirm));
     const canMessage = () => !!(ctx.client && ctx.client.session && has(ctx.client.session.prompt) && ctx.ui && ctx.ui.dialog && has(ctx.ui.dialog.prompt));
+    const canRun = canMessage; // the goal's prompt and the send are the calls `m` uses; the chooser is optional
+    let runBusy = false; // a path is being run: from `r` until it was sent or given up
+    let runKeyWanted = null; // the mounted panel's addRunKey: `r` is added once the snapshot has a path
     // The key line for the selected row: only keys that do something there.
-    const keyPieces = (item, items) => {
+    const keyPieces = (item, items, result) => {
       const pieces = [];
       if (Array.isArray(items) && items.length > 1) pieces.push(["↑↓", "select"]);
       if (item && item.open && canOpen()) pieces.push(["⏎", "open"]);
       if (item && item.busy && canStop()) pieces.push(["s", "stop"]);
       if (item && item.busy && canMessage()) pieces.push(["m", "message"]);
+      if (result && Array.isArray(result.flows) && result.flows.length && canRun()) pieces.push(["r", "run"]);
       pieces.push(["g", "graph"], ["q", "close"]);
       return pieces;
     };
     const panelList = {
       cursor: true,
       selected: () => selection(),
-      keys: (item, items) => (ctx.keymap && has(ctx.keymap.layer) ? keyPieces(item, items) : []),
+      keys: (item, items, result) => (ctx.keymap && has(ctx.keymap.layer) ? keyPieces(item, items, result) : []),
       onLayout(result) {
         rows.items = Array.isArray(result.items) ? result.items : [];
         rows.selected = result.selected || null;
         rows.scene = !!result.scene;
+        rows.flows = Array.isArray(result.flows) ? result.flows : [];
+        rows.root = typeof result.root === "string" ? result.root : null;
+        rows.session = typeof result.session === "string" ? result.session : null;
+        if (rows.flows.length && runKeyWanted) runKeyWanted();
       },
     };
     const toast = (message, variant = "info") => {
@@ -689,6 +702,87 @@ export function createPlugin(host) {
         .catch((error) => {
           report("message", error);
           toast(`Could not message ${item.name}: ${errorMessage(error)}`, "error");
+        });
+    };
+    // `r`: run a drawn path. The chooser (skipped with one path), the goal, the run message from the back end, then the
+    // send to the orchestrator's session: the snapshot's root session (the top of the panel's session tree, never a
+    // child), else the panel's own. Each failure is a toast; nothing is sent twice (runBusy); the demo sends nothing.
+    const choosePath = (flows) => {
+      if (flows.length === 1) return Promise.resolve(flows[0]);
+      if (has(ctx.ui.dialog.select)) {
+        const choices = flows.map((f) => {
+          const stats = flowStatsText(f.stats);
+          return Object.assign({ title: flowLabel(f), value: f.id }, stats ? { footer: stats } : {});
+        });
+        return withDialog(() => {
+          const chosen = ctx.ui.dialog.select({ title: "Run a path", placeholder: "Search", options: choices, current: flows[0].id });
+          // the host opens every plugin dialog at its medium width (60 columns), too narrow for a path and its stats
+          // side by side; `ui.dialog.set` widens the open dialog (large: 88 columns, within the terminal)
+          try {
+            if (has(ctx.ui.dialog.set)) ctx.ui.dialog.set({ size: "large" });
+          } catch (error) {
+            report("dialog size", error);
+          }
+          return chosen;
+        }).then(
+          (id) => flows.find((f) => f.id === id) || null,
+        );
+      }
+      // a host without a chooser: the paths are numbered in a prompt's title, the answer is a number
+      return withDialog(() =>
+        ctx.ui.dialog.prompt({ title: "Run which path? " + flows.map((f, i) => `${i + 1} ${flowName(f)}`).join("  "), placeholder: "1" }),
+      ).then((answer) => flows[Math.floor(Number(String(answer || "").trim())) - 1] || null);
+    };
+    const runPath = () => {
+      const flows = rows.flows.slice();
+      if (runBusy || !flows.length || !canRun()) return;
+      const sessionID = rows.root || rows.session;
+      runBusy = true;
+      let chosen = null;
+      Promise.resolve()
+        .then(() => choosePath(flows))
+        .then((flow) => {
+          if (!flow) return undefined;
+          chosen = flow;
+          report("action", `choose ${flow.id}`); // debug log only (real-host.py --paths)
+          return withDialog(() =>
+            ctx.ui.dialog.prompt({ title: `Goal for ${flowName(flow)}`, description: flow.path.join(" → "), placeholder: "The task for the orchestrator to run on this path" }),
+          ).then((answer) => {
+            const goal = typeof answer === "string" ? answer.trim() : "";
+            if (!goal) {
+              if (typeof answer === "string") toast("No goal: nothing was sent.");
+              return undefined;
+            }
+            const length = [...goal].length;
+            if (length > GOAL_LIMIT) {
+              toast(`The goal is ${length.toLocaleString("en-US")} characters; at most ${GOAL_LIMIT.toLocaleString("en-US")}. Nothing was sent.`, "error");
+              return undefined;
+            }
+            if (demo) {
+              report("action", `run ${flow.id} demo`);
+              toast(`Demo: ${flowName(flow)} is not sent.`);
+              return undefined;
+            }
+            if (!sessionID) {
+              toast(`Could not run ${flowName(flow)}: no orchestrator session.`, "error");
+              return undefined;
+            }
+            return runFlowPrompt({ spawn: host.spawn, path: host.path, env: host.env, home: options.home, python: options.python }, flow.id, goal).then((made) => {
+              if (!made || typeof made.text !== "string") {
+                toast(`Could not run ${flowName(flow)}: ${(made && made.error) || "no run message"}`, "error");
+                return undefined;
+              }
+              report("action", `send ${flow.id} ${sessionID}`);
+              return Promise.resolve(ctx.client.session.prompt({ sessionID, text: made.text })).then(() => toast(`Sent ${flowName(flow)} to the orchestrator`));
+            });
+          });
+        })
+        .catch((error) => {
+          report("run", error);
+          toast(`Could not send ${chosen ? flowName(chosen) : "the path"}: ${errorMessage(error)}`, "error");
+        })
+        .finally(() => {
+          runBusy = false;
         });
     };
     // The terminal's size, which is the panel's size in full screen; null when the host does not say.
@@ -999,6 +1093,7 @@ export function createPlugin(host) {
       const remove = () => {
         if (removed) return;
         removed = true;
+        if (runKeyWanted === addRunKey) runKeyWanted = null;
         panelLayers.delete(remove);
         for (const fn of unregisters) {
           try {
@@ -1024,6 +1119,26 @@ export function createPlugin(host) {
           report("view key", error);
         }
       };
+      // `r` (run a path), added once the first snapshot with a path is drawn: no paths, no key. Added after the
+      // render that saw the path (a timer), outside the host's render.
+      let runKey = false;
+      const addRunKey = () => {
+        if (runKey || removed || !canRun()) return;
+        runKey = true;
+        setTimeout(() => {
+          if (removed) return;
+          try {
+            unregisters.push(
+              ctx.keymap.layer(() => ({
+                commands: [{ id: PANEL_NAME + ".run", bind: "r", enabled: () => ours() && onList() && !runBusy && rows.flows.length > 0, run: () => ours() && onList() && runPath() }],
+              })),
+            );
+          } catch (error) {
+            report("run key", error);
+          }
+        }, 0);
+      };
+      runKeyWanted = addRunKey;
       panelLayers.add(remove);
       return { remove, addViewKey, sized };
     }

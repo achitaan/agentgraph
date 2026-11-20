@@ -2824,6 +2824,374 @@ test("panel scene: frames at 100 ms while work moves; an unchanged frame is not 
 });
 
 // ---------------------------------------------------------------------------------------------------------------
+// Paths: `r` runs a drawn path (structure.flows), the paths row at rest
+
+const RUNNER = await import(src("runner.js"));
+const FLOW = (id, path_, name = null, stats = null) => ({ id, path: path_, text: "t", name, command: null, source: "drawn", stats });
+const STATS = (runs, avg, rounds, last) => ({ runs, passed: runs, rounds: { avg: rounds, max: rounds }, cost: { total: avg === null ? null : avg * runs, avg }, last });
+const restDoc = (flows, extra = {}) => D([A("orchestrator", "hub"), A("impl-openai", "build"), A("verifier", "verify")], null, "orchestrator",
+  Object.assign({ root: { id: "ses_top", agent: "orchestrator", title: "Rate limits" }, totals: T(1.5, 10, 10), structure: { source: "builtin", flows, teams: [] } }, extra));
+
+test("paths row: at rest only, after the hub: the count and the path run last; at 37, 56 and 75 columns never wider", () => {
+  const nowSec = NOW / 1000;
+  const flows = [
+    FLOW("a-b-a", ["a", "b", "a"], null, STATS(1, 0.5, 1, nowSec - 3 * 86400)),
+    FLOW("impl-openai-verifier-impl-openai", ["impl-openai", "verifier", "impl-openai"], "impl-loop", STATS(3, 1.2, 2, nowSec - 2 * 3600)),
+    FLOW("c-d", ["c", "d"]),
+  ];
+  const doc = restDoc(flows);
+  assert.deepEqual(listText(doc, 37), [pad("◉ orchestrator  Rate limits", "2 idle"), "3 paths · last impl-loop 2h ago", "$1.50"]);
+  assert.deepEqual(listText(doc, 56, { cursor: true, keys: [["⏎", "open"], ["r", "run"], ["g", "graph"], ["q", "close"]] }), [
+    "›" + pad("◉ orchestrator  Rate limits", "2 idle", 55),
+    " 3 paths · last impl-loop 2h ago",
+    " $1.50",
+    " ⏎ open  r run  g graph  q close",
+  ]);
+  assert.deepEqual(listText(doc, 75).slice(1, 2), ["3 paths · last impl-loop 2h ago"]);
+  // no paths: the rows at rest are as before (3 in the panel: hub, spend, keys)
+  assert.deepEqual(listText(restDoc([]), 37), [pad("◉ orchestrator  Rate limits", "2 idle"), "$1.50"]);
+  // one path, never run: the count only
+  assert.deepEqual(listText(restDoc([FLOW("c-d", ["c", "d"])]), 37)[1], "1 path");
+  // narrow: the name is cut in the middle, then the time goes, then the name
+  const long = restDoc([FLOW("x-y", ["x", "y"], "a-very-long-path-name-indeed", STATS(1, null, null, nowSec - 60))]);
+  assert.equal(listText(long, 37)[1], "1 path · last a-very-long-pa…eed 1m ago".replace("a-very-long-pa…eed", R.truncateMiddle("a-very-long-path-name-indeed", 37 - 14 - 7)));
+  assert.equal(listText(long, 24)[1], "1 path · last a-ver…deed");
+  assert.equal(listText(long, 12)[1], "1 path");
+  for (const width of [12, 24, 37, 56, 75]) {
+    for (const d of [doc, long]) {
+      for (const extra of [{}, { cursor: true, keys: KEYS }]) {
+        for (const line of R.render(d, Object.assign({ width, now: NOW }, extra))) assert.ok(R.lineWidth(line) <= width, `${width}: ${R.toText([line])}`);
+      }
+    }
+  }
+  // busy (anything works or needs the user): no paths row
+  const busy = restDoc(flows, { agents: [A("orchestrator", "hub", 1), A("impl-openai", "build"), A("verifier", "verify")] });
+  assert.ok(!listText(busy, 56).some((l) => l.includes("paths")));
+  const working = restDoc(flows, { agents: [A("orchestrator", "hub"), A("impl-openai", "build", 1), A("verifier", "verify")] });
+  assert.ok(!listText(working, 56).some((l) => l.includes("paths")));
+  assert.ok(!listText(demo, 75).some((l) => l.includes("paths")));
+  // malformed flows are left out
+  assert.equal(R.flowsOf(restDoc([{ id: "-x", path: ["a", "b"] }, { id: "ok", path: ["a"] }, null, { id: "y", path: ["a", 3] }])).length, 0);
+});
+
+test("paths: the chooser's rows: `name  a → b → a` (the id when unnamed), most recently run first, stats with a dash for a null field", () => {
+  const flows = R.flowsOf(restDoc([
+    FLOW("never-run", ["a", "b"]),
+    FLOW("old", ["a", "b", "a"], "old-loop", STATS(1, null, 1, 100)),
+    FLOW("new", ["x", "y"], null, STATS(3, 1.2, 2, 200)),
+  ]));
+  const sorted = R.sortFlows(flows);
+  assert.deepEqual(sorted.map(R.flowLabel), ["new  x → y", "old-loop  a → b → a", "never-run  a → b"]);
+  assert.deepEqual(sorted.map((f) => R.flowStatsText(f.stats)), ["3 runs · $1.20 avg · 2.0 rounds", "1 run · – avg · 1.0 rounds", ""]);
+  assert.equal(R.flowStatsText({ runs: null, rounds: null, cost: null }), "– runs · – avg · – rounds");
+});
+
+const flowLog = path.join(tmp, "flow-calls.log");
+const pathsPython = fakePython("paths-python", `
+if [ "$3" = "agentgraph.structure" ]; then
+  goal=$(cat)
+  printf '%s|%s\\n' "$*" "$goal" >> "${flowLog}"
+  case "$6" in
+    broken) echo "agentgraph structure: no flow broken" >&2; exit 1;;
+    nomod) echo "/usr/bin/python3: No module named agentgraph.structure" >&2; exit 1;;
+    slow) sleep 0.4;;
+  esac
+  printf 'RUN %s\\n%s\\n' "$6" "$goal"
+  exit 0
+fi
+sid=""
+for a in "$@"; do case "$a" in --session=*) sid="\${a#--session=}";; esac; done
+flow() { printf '{"id":"%s","path":["impl-openai","verifier","impl-openai"],"text":"t","name":%s,"command":null,"source":"drawn","stats":%s}' "$1" "$2" "$3"; }
+case "$sid" in
+  ses_p0) flows="";;
+  ses_p1) flows="$(flow solo null null)";;
+  ses_pbroken) flows="$(flow broken null null)";;
+  ses_pnomod) flows="$(flow nomod null null)";;
+  ses_pslow) flows="$(flow slow null null)";;
+  *) flows="$(flow aaa null null),$(flow bbb '"impl-loop"' '{"runs":3,"passed":2,"rounds":{"avg":2,"max":3},"cost":{"total":3.6,"avg":1.2},"last":1795000000}'),$(flow ccc '"old"' '{"runs":1,"passed":1,"rounds":{"avg":null,"max":null},"cost":{"total":null,"avg":null},"last":1700000000}')";;
+esac
+printf '{"version":1,"root":{"id":"ses_top","agent":"orchestrator","title":"t-%s"},"agents":[{"name":"orchestrator","group":"hub","busy":0,"parent":"","sessions":[]},{"name":"impl-openai","group":"build","busy":0,"parent":"","sessions":[]}],"graph":null,"warnings":[],"totals":{"cost":1.5},"structure":{"source":"builtin","teams":[],"flows":[%s]}}\\n' "$sid" "$flows"
+`);
+
+// A panel on `session` with the paths fake; dialogs answer from `answers` (functions or values) and are logged.
+async function pathsPanel(session, { answers = {}, select = true, send } = {}) {
+  const host = makeActionHost();
+  host.ctx.options.python = pathsPython;
+  const calls = host.calls;
+  const answer = (name, o) => (typeof answers[name] === "function" ? answers[name](o) : answers[name]);
+  host.ctx.ui.dialog.prompt = async (o) => (calls.push(["prompt", o.title]), answer("prompt", o));
+  if (select) host.ctx.ui.dialog.select = async (o) => (calls.push(["select", o.title, o.options]), answer("select", o));
+  host.ctx.ui.dialog.set = (o) => calls.push(["dialog size", o]);
+  if (send) host.ctx.client.session.prompt = send;
+  const stop = tui.setup(host.ctx);
+  const view = host.panelClaim().render(makePanel({ sessionID: session, width: 80 }));
+  await waitFor(() => screen(view).some((l) => l.includes("t-" + session)), 5000, "panel snapshot " + session);
+  fs.writeFileSync(flowLog, "");
+  const done = () => {
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    stop();
+  };
+  return Object.assign(host, { view, done, toasts: host.state.toasts, flowCalls: () => fs.readFileSync(flowLog, "utf8").split("\n").filter(Boolean) });
+}
+const sends = (calls) => calls.filter((c) => c[0] === "send");
+
+test("paths: no paths, no `r`: no key, nothing in the key line, no paths row", async () => {
+  const p = await pathsPanel("ses_p0");
+  try {
+    await sleep(50);
+    assert.equal(p.key("r"), undefined);
+    assert.ok(!screen(p.view).some((l) => / r run|paths?\b/.test(l)), screen(p.view).join(" | "));
+    assert.deepEqual(screen(p.view).map((l) => l.slice(1, 15)), ["◉ orchestrator", "$1.50", "⏎ open  g grap"]);
+  } finally {
+    p.done();
+  }
+});
+
+test("paths: one path skips the chooser; the goal; the back end's run message is sent to the orchestrator's root session", async () => {
+  const p = await pathsPanel("ses_p1", { answers: { prompt: "  add a cache  " } });
+  try {
+    await waitFor(() => p.key("r"), 2000, "r key");
+    assert.deepEqual(screen(p.view).map((l) => l.slice(1)), [pad("◉ orchestrator  t-ses_p1", "1 idle", 79), "1 path", "$1.50", "⏎ open  r run  g graph  q close"]);
+    assert.equal(p.key("r").enabled(), true);
+    p.key("r").run();
+    await waitFor(() => sends(p.calls).length === 1, 5000, "sent");
+    assert.deepEqual(p.calls.filter((c) => c[0] !== "send"), [["prompt", "Goal for solo"]], "no chooser for one path");
+    assert.deepEqual(sends(p.calls)[0], ["send", { sessionID: "ses_top", text: "RUN solo\nadd a cache" }]);
+    assert.deepEqual(p.flowCalls(), ["-P -m agentgraph.structure flow prompt solo --goal-file -|add a cache"], "goal on stdin, no shell");
+    await waitFor(() => p.toasts.length > 0, 2000, "toast");
+    assert.deepEqual(p.toasts.at(-1), { message: "Sent solo to the orchestrator", variant: "info" });
+  } finally {
+    p.done();
+  }
+});
+
+test("paths: several: the host's chooser lists them, most recently run first, stats as each row's footer; the choice is run", async () => {
+  const p = await pathsPanel("ses_p3", { answers: { select: "ccc", prompt: "goal two" } });
+  try {
+    assert.equal(screen(p.view)[1], " 3 paths · last impl-loop " + R.formatElapsed(Date.now() - 1795000000 * 1000) + " ago");
+    await waitFor(() => p.key("r"), 2000, "r key");
+    p.key("r").run();
+    await waitFor(() => sends(p.calls).length === 1, 5000, "sent");
+    const [kind, title, options] = p.calls[0];
+    assert.deepEqual([kind, title], ["select", "Run a path"]);
+    assert.deepEqual(p.calls.find((c) => c[0] === "dialog size"), ["dialog size", { size: "large" }], "the chooser is widened once open");
+    assert.ok(p.calls.indexOf(p.calls.find((c) => c[0] === "dialog size")) === 1);
+    assert.deepEqual(options, [
+      { title: "impl-loop  impl-openai → verifier → impl-openai", value: "bbb", footer: "3 runs · $1.20 avg · 2.0 rounds" },
+      { title: "old  impl-openai → verifier → impl-openai", value: "ccc", footer: "1 run · – avg · – rounds" },
+      { title: "aaa  impl-openai → verifier → impl-openai", value: "aaa" },
+    ]);
+    assert.deepEqual(p.calls[2], ["prompt", "Goal for old"]);
+    assert.deepEqual(sends(p.calls)[0][1], { sessionID: "ses_top", text: "RUN ccc\ngoal two" });
+    // the chooser closed with nothing chosen: nothing more happens
+    p.calls.length = 0;
+    const q = p.calls;
+    await sleep(20);
+    p.ctx.ui.dialog.select = async (o) => (q.push(["select", o.title]), undefined);
+    p.key("r").run();
+    await sleep(100);
+    assert.deepEqual(q, [["select", "Run a path"], ["dialog size", { size: "large" }]]);
+  } finally {
+    p.done();
+  }
+});
+
+test("paths: without the host's chooser the paths are numbered in a prompt; the number picks one", async () => {
+  let n = 0;
+  const p = await pathsPanel("ses_p3", { select: false, answers: { prompt: () => (n += 1) === 1 ? "2" : "a goal" } });
+  try {
+    await waitFor(() => p.key("r"), 2000, "r key");
+    p.key("r").run();
+    await waitFor(() => sends(p.calls).length === 1, 5000, "sent");
+    assert.deepEqual(p.calls.slice(0, 2), [["prompt", "Run which path? 1 impl-loop  2 old  3 aaa"], ["prompt", "Goal for old"]]);
+    assert.equal(sends(p.calls)[0][1].text, "RUN ccc\na goal");
+  } finally {
+    p.done();
+  }
+});
+
+test("paths: an empty goal sends nothing (a toast says so); a cancelled goal sends nothing and says nothing", async () => {
+  const p = await pathsPanel("ses_p1", { answers: { prompt: "   " } });
+  try {
+    await waitFor(() => p.key("r"), 2000, "r key");
+    p.key("r").run();
+    await waitFor(() => p.toasts.length > 0, 2000, "toast");
+    assert.deepEqual(p.toasts.at(-1), { message: "No goal: nothing was sent.", variant: "info" });
+    p.ctx.ui.dialog.prompt = async (o) => (p.calls.push(["prompt", o.title]), undefined);
+    await sleep(20);
+    p.key("r").run();
+    await sleep(150);
+    assert.equal(p.toasts.length, 1);
+    assert.deepEqual(sends(p.calls), []);
+    assert.deepEqual(p.flowCalls(), [], "the back end was not asked");
+  } finally {
+    p.done();
+  }
+});
+
+test("paths: a goal over 4,000 characters is refused with a line saying so; 4,000 is sent", async () => {
+  const p = await pathsPanel("ses_p1", { answers: { prompt: "é".repeat(4001) } });
+  try {
+    await waitFor(() => p.key("r"), 2000, "r key");
+    p.key("r").run();
+    await waitFor(() => p.toasts.length > 0, 2000, "toast");
+    assert.deepEqual(p.toasts.at(-1), { message: "The goal is 4,001 characters; at most 4,000. Nothing was sent.", variant: "error" });
+    assert.deepEqual(p.flowCalls(), []);
+    assert.deepEqual(sends(p.calls), []);
+    p.ctx.ui.dialog.prompt = async () => "é".repeat(4000);
+    await sleep(20);
+    p.key("r").run();
+    await waitFor(() => sends(p.calls).length === 1, 5000, "sent at the limit");
+  } finally {
+    p.done();
+  }
+});
+
+test("paths: the back end missing (no `flow prompt` yet) or failing is a toast with its error, and nothing is sent", async () => {
+  for (const [session, message] of [
+    ["ses_pnomod", "Could not run nomod: This agentgraph has no `flow prompt` command yet; update the orchestration folder."],
+    ["ses_pbroken", "Could not run broken: no flow broken"],
+  ]) {
+    const p = await pathsPanel(session, { answers: { prompt: "a goal" } });
+    try {
+      await waitFor(() => p.key("r"), 2000, "r key");
+      p.key("r").run();
+      await waitFor(() => p.toasts.length > 0, 5000, "toast " + session);
+      assert.deepEqual(p.toasts.at(-1), { message, variant: "error" });
+      assert.deepEqual(sends(p.calls), []);
+    } finally {
+      p.done();
+    }
+  }
+  // no interpreter at all
+  const missing = await RUNNER.runFlowPrompt({ spawn, path, env: process.env, home: tmp, python: path.join(tmp, "no-python") }, "solo", "g");
+  assert.match(missing.error, /^Python was not found at /);
+  assert.deepEqual(await RUNNER.runFlowPrompt({ spawn, path, env: process.env, home: tmp, python: pathsPython }, "-x", "g"), { error: "The path's id is not valid." });
+});
+
+test("paths: the host refusing the send is a toast with its error", async () => {
+  const p = await pathsPanel("ses_p1", { answers: { prompt: "a goal" }, send: async () => { throw new Error("Session not found: ses_top"); } });
+  try {
+    await waitFor(() => p.key("r"), 2000, "r key");
+    p.key("r").run();
+    await waitFor(() => p.toasts.length > 0, 5000, "toast");
+    assert.deepEqual(p.toasts.at(-1), { message: "Could not send solo: Session not found: ses_top", variant: "error" });
+  } finally {
+    p.done();
+  }
+});
+
+test("paths: a double press runs it once: `r` is off from the first press until the send is done", async () => {
+  let resolveSelect;
+  const p = await pathsPanel("ses_pslow", { answers: { prompt: "once" } });
+  const p3 = await pathsPanel("ses_p3", { answers: { select: () => new Promise((r) => (resolveSelect = r)), prompt: "once" } });
+  try {
+    await waitFor(() => p.key("r") && p3.key("r"), 2000, "r keys");
+    // several paths: a second r while the chooser is open opens nothing
+    p3.key("r").run();
+    p3.key("r").run();
+    await sleep(30);
+    assert.equal(p3.calls.filter((c) => c[0] === "select").length, 1);
+    resolveSelect("bbb");
+    await waitFor(() => sends(p3.calls).length === 1, 5000, "sent");
+    // one path, a slow back end: r again while it works does nothing
+    p.key("r").run();
+    await waitFor(() => p.flowCalls().length === 1, 3000, "back end asked");
+    assert.equal(p.key("r").enabled(), false, "r is off while the path is being run");
+    p.key("r").run();
+    await waitFor(() => sends(p.calls).length === 1, 5000, "sent");
+    await sleep(100);
+    assert.equal(sends(p.calls).length, 1);
+    assert.equal(p.calls.filter((c) => c[0] === "prompt").length, 1);
+    assert.equal(p.key("r").enabled(), true, "on again once sent");
+  } finally {
+    p.done();
+    p3.done();
+  }
+});
+
+test("paths: dialog guard: `r` is off while any host dialog is open, and the keys stay off under the chooser and the goal prompt", async () => {
+  let resolveSelect, resolvePrompt;
+  const p = await pathsPanel("ses_p3", { answers: { select: () => new Promise((r) => (resolveSelect = r)), prompt: () => new Promise((r) => (resolvePrompt = r)) } });
+  const mode = { v: "base" };
+  p.ctx.keymap.mode = { current: () => mode.v };
+  try {
+    await waitFor(() => p.key("r"), 2000, "r key");
+    mode.v = "modal";
+    assert.equal(p.key("r").enabled(), false);
+    p.key("r").run();
+    await sleep(20);
+    assert.deepEqual(p.calls, []);
+    mode.v = "base";
+    p.key("r").run();
+    await waitFor(() => resolveSelect, 2000, "chooser");
+    for (const bind of ["r", "return", "down", "up"]) assert.equal(p.key(bind).enabled(), false, bind + " under the chooser");
+    resolveSelect("aaa");
+    p.key("return").run(); // the Enter that chose, reaching the panel in the same tick
+    await waitFor(() => resolvePrompt, 2000, "goal prompt");
+    for (const bind of ["r", "return"]) assert.equal(p.key(bind).enabled(), false, bind + " under the goal prompt");
+    resolvePrompt(undefined);
+    p.key("return").run();
+    await sleep(30);
+    assert.ok(!p.calls.some((c) => c[0] === "navigate"), JSON.stringify(p.calls));
+    assert.deepEqual(sends(p.calls), []);
+  } finally {
+    p.done();
+  }
+});
+
+test("demo paths: AGENTGRAPH_TUI_DEMO=paths is the team at rest with three sample paths; the demo never sends", async () => {
+  const now = Date.now();
+  const doc = DM.pathsDocument(demo, 0, now);
+  assert.equal(R.isAnimated(doc), false);
+  const lines = R.toText(R.render(doc, { width: 75, now, cursor: true, keys: [["⏎", "open"], ["r", "run"], ["g", "graph"], ["q", "close"]] })).split("\n");
+  assert.deepEqual(lines.map((l) => l.slice(0, 16)), ["›◉ orchestrator ", " 3 paths · last ", " $6.57  ctx ━━━━", " ⏎ open  r run  "]);
+  assert.equal(lines[1], " 3 paths · last impl-loop 2h ago");
+  const host = makeActionHost();
+  host.ctx.ui.dialog.select = async (o) => (host.calls.push(["select", o.options.length]), o.options[0].value);
+  host.ctx.ui.dialog.prompt = async (o) => (host.calls.push(["prompt", o.title]), "a goal");
+  let spawned = 0;
+  const plugin = P.createPlugin({
+    createElement: OT.createElement, insert: OT.insert, setProp: OT.setProp, createSignal: solid.createSignal, onCleanup: solid.onCleanup,
+    spawn: () => {
+      spawned += 1;
+      throw new Error("the demo spawned a process");
+    },
+    fs, os, path, env: { AGENTGRAPH_TUI_DEMO: "paths" }, demoFile: path.join(here, "fixtures", "demo.json"),
+  });
+  const stop = plugin.setup(host.ctx);
+  try {
+    const view = host.panelClaim().render(makePanel({ sessionID: "ses_demo", width: 80 }));
+    await waitFor(() => screen(view).some((l) => l.includes("3 paths")), 5000, "demo paths row");
+    await waitFor(() => host.key("r"), 2000, "r key");
+    host.key("r").run();
+    await waitFor(() => host.state.toasts.length > 0, 2000, "toast");
+    assert.deepEqual(host.calls, [["select", 3], ["prompt", "Goal for impl-loop"]]);
+    assert.deepEqual(host.state.toasts.at(-1), { message: "Demo: impl-loop is not sent.", variant: "info" });
+    assert.equal(spawned, 0, "no back end, no send");
+    assert.ok(!host.calls.some((c) => c[0] === "send"));
+  } finally {
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    stop();
+  }
+});
+
+test("runner: flow prompt: arguments, goal on stdin, working directory, PYTHONPATH, no shell; timeout", async () => {
+  const out = path.join(tmp, "flow-args.txt");
+  const py = fakePython("flow-args-python", `pwd -P > "${out}"\necho "$PYTHONPATH" >> "${out}"\necho "$@" >> "${out}"\ncat >> "${out}"\nprintf 'the message\\n\\n'`);
+  const work = fs.mkdtempSync(path.join(tmp, "flowhome-"));
+  const made = await RUNNER.runFlowPrompt({ spawn, path, env: process.env, home: work, python: py }, "a-b", "line one\n$(rm -rf /) `x`");
+  assert.deepEqual(made, { text: "the message" });
+  assert.deepEqual(fs.readFileSync(out, "utf8").split("\n").slice(0, 5), [fs.realpathSync(work), work, "-P -m agentgraph.structure flow prompt a-b --goal-file -", "line one", "$(rm -rf /) `x`"]);
+  const hang = fakePython("flow-hang-python", "exec sleep 30");
+  const t0 = Date.now();
+  const late = await RUNNER.runFlowPrompt({ spawn, path, env: process.env, home: tmp, python: hang, timeoutMs: 300 }, "a-b", "g");
+  assert.deepEqual(late, { error: "agentgraph flow prompt did not finish within 0 s." });
+  assert.ok(Date.now() - t0 < 3000);
+  assert.deepEqual(await RUNNER.runFlowPrompt({ spawn, path, env: process.env, home: tmp, python: py }, "a-b", "  "), { error: "The goal is empty." });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
 
 let failed = 0;
 for (const t of tests) {

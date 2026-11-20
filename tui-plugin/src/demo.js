@@ -6,6 +6,9 @@
  * the spend bars move), and the root gets a `wear` (the demo document has none) whose history grows turn by turn
  * and drops at each summary, so the context chart has something to draw. With the clock given, every timestamp is moved
  * so the document was generated now (the list shows how long each agent has been at its step). Nothing else changes.
+ *
+ * AGENTGRAPH_TUI_DEMO=paths: the same team at rest (nobody works, no task graph) with sample drawn paths
+ * (`structure.flows`, one run 2 h ago), so the list shows its paths row and `r` opens the chooser. pathsDocument().
  */
 import { errorDocument, errorMessage } from "./runner.js";
 
@@ -81,8 +84,35 @@ export function demoDocument(base, elapsedMs, nowMs) {
   return doc;
 }
 
+// Sample paths: one named and run (with a cost), one named and run once without a cost, one never run and unnamed.
+export function samplePaths(nowSec) {
+  return [
+    { id: "impl-openai-verifier-impl-openai", path: ["impl-openai", "verifier", "impl-openai"], name: "impl-loop", command: null,
+      stats: { runs: 3, passed: 2, rounds: { avg: 2, max: 3 }, cost: { total: 3.6, avg: 1.2 }, last: nowSec - 2 * 3600 } },
+    { id: "explorer-oracle-impl-claude", path: ["explorer", "oracle", "impl-claude"], name: "deep-change", command: null,
+      stats: { runs: 1, passed: 1, rounds: { avg: 1, max: 1 }, cost: { total: null, avg: null }, last: nowSec - 3 * 86400 } },
+    { id: "designer-reviewer-designer", path: ["designer", "reviewer", "designer"], name: null, command: null, stats: null },
+  ];
+}
+
+// The demo at rest with sample paths: nobody works, no task graph, no needs.
+export function pathsDocument(base, elapsedMs, nowMs) {
+  const doc = demoDocument(base, elapsedMs, nowMs);
+  for (const agent of Array.isArray(doc.agents) ? doc.agents : []) {
+    if (!isObject(agent)) continue;
+    agent.busy = 0;
+    for (const s of Array.isArray(agent.sessions) ? agent.sessions : []) if (isObject(s)) s.busy = false;
+  }
+  if (isObject(doc.root)) doc.root.busy = false;
+  doc.graph = null;
+  doc.graphs = [];
+  const nowSec = typeof doc.generated === "number" ? doc.generated : Number(nowMs) / 1000;
+  doc.structure = Object.assign({ source: "builtin", teams: [] }, isObject(doc.structure) ? doc.structure : {}, { flows: samplePaths(nowSec) });
+  return doc;
+}
+
 // The runner the plugin uses in demo mode: the same interface as createSnapshotRunner, and it never rejects.
-export function createDemoRunner({ fs, file, now }) {
+export function createDemoRunner({ fs, file, now, paths = false }) {
   const clock = typeof now === "function" ? now : Date.now;
   const start = clock();
   let base = null;
@@ -93,7 +123,7 @@ export function createDemoRunner({ fs, file, now }) {
       try {
         if (!base) base = JSON.parse(fs.readFileSync(file, "utf8"));
         const at = clock();
-        return demoDocument(base, at - start, at);
+        return (paths ? pathsDocument : demoDocument)(base, at - start, at);
       } catch (error) {
         return errorDocument("The demo document could not be read: " + errorMessage(error));
       }

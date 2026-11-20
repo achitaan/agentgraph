@@ -755,6 +755,76 @@ function costRow(doc, width) {
   return money.length ? money : ctxParts.length ? ctxParts[ctxParts.length - 1] : null;
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Paths: the agent paths the user drew (snapshot `structure.flows`, WEB_API.md); `r` in the panel runs one.
+
+const FLOW_ID = /^[a-z0-9][a-z0-9-]{0,79}$/;
+const PATH_ARROW = " → ";
+const DASH = "–";
+
+// The drawn paths of a snapshot: { id, path, name, stats, command } with a valid id and at least two agents.
+export function flowsOf(doc) {
+  const structure = isObject(doc) && isObject(doc.structure) ? doc.structure : null;
+  return list(structure && structure.flows)
+    .filter((f) => isObject(f) && typeof f.id === "string" && FLOW_ID.test(f.id) && list(f.path).length >= 2 && list(f.path).every((a) => typeof a === "string" && a))
+    .map((f) => ({
+      id: f.id,
+      path: f.path.map((a) => clean(a)),
+      name: typeof f.name === "string" && clean(f.name) ? clean(f.name) : null,
+      stats: isObject(f.stats) ? f.stats : null,
+      command: typeof f.command === "string" ? f.command : null,
+    }));
+}
+
+const lastRun = (flow) => (flow.stats ? epochMs(flow.stats.last) : null);
+
+// Most recently run first (stats.last), then the paths that never ran, in the snapshot's order.
+export function sortFlows(flows) {
+  return list(flows)
+    .map((f, i) => ({ f, i, last: lastRun(f) }))
+    .sort((x, y) => (y.last ?? -Infinity) - (x.last ?? -Infinity) || x.i - y.i)
+    .map((x) => x.f);
+}
+
+export const flowName = (flow) => flow.name || flow.id;
+
+// "impl-loop  impl-openai → verifier → impl-openai" (the id when the path has no name).
+export function flowLabel(flow) {
+  return `${flowName(flow)}  ${flow.path.join(PATH_ARROW)}`;
+}
+
+// "3 runs · $1.20 avg · 2.0 rounds"; a dash for a field the stats do not have, "" without stats.
+export function flowStatsText(stats) {
+  if (!isObject(stats)) return "";
+  const runs = finiteNumber(stats.runs);
+  const avg = isObject(stats.cost) ? finiteNumber(stats.cost.avg) : null;
+  const roundsAvg = isObject(stats.rounds) ? finiteNumber(stats.rounds.avg) : null;
+  return [
+    runs === null ? `${DASH} runs` : `${runs} ${runs === 1 ? "run" : "runs"}`,
+    `${avg === null ? DASH : formatDollars(avg)} avg`,
+    `${roundsAvg === null ? DASH : roundsAvg.toFixed(1)} rounds`,
+  ].join(" · ");
+}
+
+// "3 paths · last impl-loop 2h ago": the count, and the path run last when the stats say. The name is cut in the
+// middle when the row is narrow; then the time goes, then the name.
+function pathsRow(flows, width, now) {
+  const count = [sp(String(flows.length), "plain"), sp(flows.length === 1 ? " path" : " paths", "muted")];
+  const last = sortFlows(flows)[0];
+  const at = last ? lastRun(last) : null;
+  const candidates = [];
+  if (at !== null) {
+    const ago = now !== null ? ` ${formatElapsed(now - at)} ago` : "";
+    const lead = [...count, sp(" · last ", "muted")];
+    const room = width - lineWidth(lead) - displayWidth(ago);
+    if (room >= Math.min(4, displayWidth(flowName(last)))) candidates.push([...lead, sp(truncateMiddle(flowName(last), room), "plain"), ...(ago ? [sp(ago, "muted")] : [])]);
+    const roomNoTime = width - lineWidth(lead);
+    if (roomNoTime >= Math.min(4, displayWidth(flowName(last)))) candidates.push([...lead, sp(truncateMiddle(flowName(last), roomNoTime), "plain")]);
+  }
+  candidates.push(count);
+  return candidates.find((c) => lineWidth(c) <= width) || count;
+}
+
 // The keys: [[key, label], ...] -> one muted line of the pairs that fit, in order.
 function keysRow(keys, width) {
   let text = "";
@@ -776,7 +846,9 @@ function keysRow(keys, width) {
 //   { key, line, kind, agent, name, hub, open, busy }: `open` the session Enter opens, `busy` the running session stop
 //   and message act on (null for the hub and for agents that do not work). selected: the selected item's key (the
 //   first item's when `selected` names none). With `cursor` every row has a one-column gutter, `›` on the selected
-//   row; `keys` adds the dim key line ([[key, label], ...]).
+//   row; `keys` adds the dim key line ([[key, label], ...]). Also returned: `flows` (the drawn paths, most recently run
+//   first) and `root` (the root session's id, the orchestrator's session, or null). With paths and nothing at work
+//   (nothing needs the user, nobody works, the hub is idle) one row after the hub says how many and which ran last.
 export function layout(snapshot, options = {}) {
   const width = Math.max(1, Math.floor(Number(options.width) || DEFAULT_WIDTH));
   const now = Number.isFinite(Number(options.now)) && options.now !== null && options.now !== undefined ? Number(options.now) : null;
@@ -784,7 +856,7 @@ export function layout(snapshot, options = {}) {
     ? Math.floor(Number(options.frame))
     : now !== null ? Math.floor(now / 120) : 0;
   const finish = (lines) => lines.map((line) => clipLine(line, width));
-  const single = (line) => ({ lines: finish([line]), items: [], selected: null });
+  const single = (line) => ({ lines: finish([line]), items: [], selected: null, flows: [], root: null });
 
   if (snapshot === undefined || snapshot === null) return single([sp("Loading", "muted")]);
   if (!isObject(snapshot)) return single([sp("Bad snapshot", "danger")]);
@@ -835,6 +907,10 @@ export function layout(snapshot, options = {}) {
   // the hub needs the user, so its row is up there without the idle count: the count gets a row of its own
   if (hub && flagged.has(hub.name) && idle > 0) rows.push({ line: [sp(MARK_IDLE, "muted"), sp(` ${idle} idle`, "muted")] });
 
+  // the paths, at rest only (busy, the rows above matter more)
+  const flows = sortFlows(flowsOf(snapshot));
+  if (flows.length && !needs.length && !working.length && !hubWorking(snapshot, hub)) rows.push({ line: pathsRow(flows, inner, at) });
+
   // 3. the task's progress, 4. spend and context, 5. the keys
   const progress = progressRow(snapshot, inner);
   if (progress) rows.push({ line: progress });
@@ -852,7 +928,8 @@ export function layout(snapshot, options = {}) {
     const { key, kind, agent, name, hub: isHub, open, busy } = r.item;
     items.push({ key, line: i, kind, agent, name, hub: !!isHub, open: open || null, busy: busy || null });
   });
-  return { lines: finish(lines), items, selected };
+  const root = isObject(snapshot.root) && typeof snapshot.root.id === "string" && snapshot.root.id ? snapshot.root.id : null;
+  return { lines: finish(lines), items, selected, flows, root };
 }
 
 // render(snapshot, options) -> the lines of layout().
