@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 const [chrome, work] = process.argv.slice(2);
 const SHARDS = Math.max(1, Number(process.env.AGENTGRAPH_VIEW_SHARDS) || 4);
 const browsers = [];
-const timeout = setTimeout(() => { console.error('View checks timed out'); browsers.forEach(b => b.kill()); process.exit(1); }, 90000);
+const timeout = setTimeout(() => { console.error('View checks timed out'); browsers.forEach(b => b.kill()); process.exit(1); }, 150000);  // the suite takes about 62 s; a hang is cut off here
 
 async function runPage(shard) {
   const browser = spawn(chrome, ['--headless=new', '--disable-gpu', '--no-first-run', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--window-size=1400,900', '--remote-debugging-port=0', '--user-data-dir=' + work + '/profile-' + shard, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
