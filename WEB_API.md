@@ -538,7 +538,10 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   ring's tilt times the morph's progress, figure3D(L, k)) and every point moves in a straight line on screen from
 //   its 2D place to where that camera shows it (no cut, no fade), and back the same way. A press of D or the button
 //   during the morph is never lost: it turns the move round from where it is; a click during it picks as in 3D. In 3D the orchestrator is the sun (at the
-//   middle of the canvas the details leave, the rings narrowed to fit there), each group its own ring tilted differently, its agents on it near their 2D places, council seats and a group's
+//   middle of the canvas the details leave, below the top band; the rings narrowed until everything drawn round
+//   every agent, its seats or members, every name and count and the sun's glow, stays inside that canvas at every
+//   turn and at every elevation, sampled every 7.5 degrees; fitted again when that canvas changes size in 3D, e.g. the
+//   details opening, the user's zoom kept), each group its own ring tilted differently, its agents on it near their 2D places, council seats and a group's
 //   members round their lead; nearer agents are larger and drawn over farther ones, whose colour is mixed toward the
 //   muted one (the terminal's DEPTH_MIX .72 farthest to 0 nearest, continuous here; not while an agent works); names
 //   stay upright and at 11 px or more. Every line, loop (a closed dotted ring), group line, badge and pick follows
@@ -555,7 +558,9 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   undo works. Everything that would change something is refused, nothing is asked of the host and the status line
 //   says "3D is for looking: press D to change things in 2D.": drawing a path (Enter, l, a double-click's loop), N
 //   and the +, Delete and Backspace, G, moving an agent (a drag on one turns the system; Alt/Shift+arrow), typing in
-//   the details and pressing their controls. The sky (3D only; nothing of it is drawn in 2D) is the drawing's
+//   the details and pressing their controls. A step's output (Outputs in TASK) opens to read; typing in it, its Save,
+//   Ctrl/Cmd+Enter and a save queued in 2D that would go out after the switch are refused (the typing stays); undo
+//   of an output edit works. The sky (3D only; nothing of it is drawn in 2D) is the drawing's
 //   first child (svg.ag-sky: aria-hidden, no pointer events, no focus, no text) and fades in and out with the morph:
 //   a sparse field of specks from a fixed seed (the same sky every time; three sizes, at most .3 opaque; warm white
 //   on dark, an ink star chart on light; the terminal's seed 0x5ca1ab1e and hash32) that shifts, wrapping round,
