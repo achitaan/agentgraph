@@ -266,6 +266,27 @@
 /* 3D is for looking: no line follows the pointer from a picked agent. The sky behind the graph takes no pointer. */
 .agentgraph[data-ag-view="3d"] .ag-wire { display: none !important; }
 .agentgraph .ag-sky, .agentgraph .ag-sky * { pointer-events: none; }
+/* The sky (3D only). Dark: warm white specks; light: a star chart in ink. Run stars and streaks warmer, the sun's
+   glow the working colour. Specks are at most .3 opaque, run stars .4 (a name over one keeps 4.5:1 or better, and the
+   names' halo covers them anyway). */
+.agentgraph { --ag-sky-star: var(--ag-muted); --ag-sky-run: var(--ag-work); --ag-sun-glow: var(--ag-work); --ag-sphere-light: #fffdf9; --ag-sphere-dark: #38322f; }
+.agentgraph[data-ag-scheme="dark"] { --ag-sky-star: var(--ag-ink); --ag-sphere-light: #fff4ea; --ag-sphere-dark: #000000; }
+.agentgraph .ag-sky-star { fill: var(--ag-sky-star); stroke: none; }
+.agentgraph .ag-sky-star[data-size="faint"] { opacity: .16; }
+.agentgraph .ag-sky-star[data-size="dim"] { opacity: .22; }
+.agentgraph .ag-sky-star[data-size="bright"] { opacity: .3; }
+.agentgraph .ag-sky-run { fill: var(--ag-sky-run); opacity: .4; }
+.agentgraph .ag-sky-run[data-pending="true"] { visibility: hidden; }
+.agentgraph .ag-sky-streak { fill: none; stroke: var(--ag-sky-run); stroke-width: 1.4; stroke-linecap: round; opacity: 0; }
+.agentgraph .ag-sky-stop-sun { stop-color: var(--ag-sun-glow); }
+.agentgraph .ag-sky-stop-light { stop-color: var(--ag-sphere-light); }
+.agentgraph .ag-sky-stop-dark { stop-color: var(--ag-sphere-dark); }
+.agentgraph .ag-sun-glow, .agentgraph .ag-sphere { pointer-events: none; }
+/* 3D depth (the terminal's DEPTH_MIX): an agent's colour mixed toward the muted one, farther more. */
+.agentgraph .ag-depth-mix { fill: var(--ag-muted); stroke: none; pointer-events: none; }
+.agentgraph[data-ag-motion="full"] .ag-hub:not([data-busy="0"]) .ag-sun-glow { animation: ag-sun-swell 2.4s ease-in-out infinite alternate; transform-box: fill-box; transform-origin: center; }
+@keyframes ag-sun-swell { from { transform: scale(1); } to { transform: scale(1.22); } }
+@media (prefers-reduced-motion: reduce) { .agentgraph .ag-sun-glow { animation: none !important; } }
 /* ---- orbit lane (n105) ---- */
 .agentgraph .ag-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--ag-muted); font-size: 11px; pointer-events: none; }
 .agentgraph .ag-detail { position: absolute; inset: 0 0 0 auto; z-index: 5; width: min(340px, 100%); display: flex; flex-direction: column; background: var(--ag-paper); border-left: 1px solid var(--ag-line); box-shadow: -15px 0 50px var(--ag-panel-shadow); }

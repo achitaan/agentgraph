@@ -3444,21 +3444,35 @@
     // the views in ORBIT_CHANGE_MS. Council seats and a group's members stay round their lead as in 2D.
     // How it is drawn: while 3D is shown `positions` holds where each agent is on screen (the 2D place blended with
     // its projection, so every line, loop, pick and badge follows); the 2D places are kept in `orbit.base`, and any 2D
-    // layout code (addPositions, reseat) runs on them through orbitHold. Depth is size and dimming (orbitNode, from
-    // positionNode) and order (nearer agents drawn last). Going back puts the 2D places and camera back exactly.
+    // layout code (addPositions, reseat) runs on them through orbitHold. Depth is size and a mix toward the muted colour (orbitNode,
+    // from positionNode) and order (nearer agents drawn last). Going back puts the 2D places and camera back exactly.
     // In 3D lines do not bend round agents (obstaclesFor gives none): a line may pass in front of or behind an agent,
     // and every line and loop ring turns smoothly with the system. A frame is drawn only when the angle or the data
-    // changed. The switch is one morph: the camera tips from straight above down to a side view (ORBIT_ELEVATION, just
-    // above the plane) while every agent travels from its 2D place to its 3D place, and back the same way.
+    // changed. The switch is one morph (the terminal's morphCamera): the camera at the side view (ORBIT_ELEVATION)
+    // while the rings rise and every agent travels from its 2D place to its 3D place, and back the same way; D or the
+    // button during it turns it round from where it is (orbitEnter and orbitLeave start from orbit.k).
     // The flat view is where the work is done; 3D is for looking. In 3D a click picks (an agent or a line), a
     // right-click, Enter or i opens the details to read, Escape lets go and undo works; everything that would change
     // something (drawing a path, a double-click's loop, N and the +, Delete and Backspace, G's run, moving an agent,
     // typing or pressing a control in the details) is refused with one sentence in the status line (ORBIT_LOOK_SAID).
-    // The sky (first child of the drawing, empty for now) is the layer behind the graph for a later background: it
-    // takes no pointer and no text, and turns with the system at ORBIT_SKY_RATE of its turn.
-    const ORBIT_TURN_MS = 40000, ORBIT_CHANGE_MS = 700, ORBIT_ELEVATION = .32, ORBIT_PERSPECTIVE = 4, ORBIT_RESUME_MS = 3000, ORBIT_SKY_RATE = .25;
-    const ORBIT_INCLINATIONS = [.9, -1.05, .7, -.8, 1.15, -.6, 1, -.9];
-    const ORBIT_LOW = .06, ORBIT_HIGH = Math.PI / 2, ORBIT_TURN_PX = .008, ORBIT_TILT_PX = .006, ORBIT_KEY_TURN = .2, ORBIT_KEY_TILT = .12;
+    // The sky (n104 sky.md), 3D only, fading in and out with the morph: a sparse star field from a fixed seed (the same
+    // sky every time) in the layer behind the graph (the drawing's first child, no pointer, no text), shifting as the
+    // view turns and tilts at ORBIT_SKY_RATE of the agents' movement; a warmer, brighter star for each finished run
+    // (each path's stats.passed, placed by the path's id and the run's number, at most SKY_RUNS_MAX: those of the
+    // lowest run numbers); a shooting star when a run finishes while 3D is shown (one per run, spaced out, none on
+    // load or on entering 3D), its star appearing where it ends. The orchestrator glows as the sun (swelling while
+    // it works) and every other agent is shaded as a sphere lit from it. Nothing of it moves by itself or exists in
+    // 2D; with reduced motion there is no streak, swell or fade. The sky is redrawn only with the frames above.
+    // One model with the terminal (tui-plugin/src/scene.js): TURN_MS, CHANGE_MS, ELEVATION_3D, PERSPECTIVE, RESUME_MS,
+    // PARALLAX, INCLINATIONS, TURN_STEP and ELEVATION_STEP, ELEVATION_MIN/MAX, DEPTH_MIX, SKY_SEED, RUN_STARS_MAX,
+    // STREAK_MS, STREAK_GAP_MS and its hashes are its numbers. In pixels, not cells: the drag's rate (per pixel), the
+    // screen scale (one radius for both axes, the rings fitted to the free canvas), the field's density (one star per
+    // 9,000 px², a cell taken as 8 x 16 px, over a sky a quarter taller than the view above and below instead of
+    // wrapping rows), the depth mix (continuous in depth, not six steps) and the streak (a line, not characters).
+    const ORBIT_TURN_MS = 40000, ORBIT_CHANGE_MS = 700, ORBIT_ELEVATION = .5, ORBIT_PERSPECTIVE = 4, ORBIT_RESUME_MS = 3000, ORBIT_SKY_RATE = 1 / 3;
+    const SKY_SEED = 0x5ca1ab1e, SKY_DENSITY = 9000, SKY_FIELD_MAX = 400, SKY_RUNS_MAX = 200, SKY_MARGIN = .25, SKY_STREAK_MS = 900, SKY_STREAK_GAP = 700, SKY_STREAKS_MAX = 8;
+    const ORBIT_INCLINATIONS = [.9, -1.05, .7, -.8, 1.15, -.6, 1, -.9], ORBIT_DEPTH_MIX = [.72, .6, .45, .3, .15, 0];
+    const ORBIT_LOW = 0, ORBIT_HIGH = Math.PI / 2, ORBIT_TURN_PX = .008, ORBIT_TILT_PX = .006, ORBIT_KEY_TURN = Math.PI / 12, ORBIT_KEY_TILT = Math.PI / 24;
     const ORBIT_KEY = POSITIONS_KEY + ':view';
     const ORBIT_LOOK_SAID = '3D is for looking: press D to change things in 2D.';
     const orbit = { want: '2d', shown: false, k: 0, change: null, turn: 0, elevation: ORBIT_ELEVATION, base: null, saved: null, from3d: null, figure: null, depth: new Map(), order: '', raf: 0, last: 0, pausedUntil: 0, resume: null, waiting: false, holding: false, grab: null, frames: 0, frameMs: [] };
@@ -3468,6 +3482,144 @@
     const orbitSkyBox = svg('svg', { class: 'ag-sky', 'aria-hidden': 'true', focusable: 'false' }), orbitSky = svg('g', { class: 'ag-sky-turn' });
     orbitSkyBox.append(orbitSky);
     drawing.insertBefore(orbitSkyBox, drawing.firstChild);
+    const sky = { size: '', V: 0, W: 0, H: 0, tx: 0, tile: null, streaks: null, defs: null, runs: null, next: 0, timers: new Set() };
+    // The terminal's hashes: hash32 and unit (a number in [0, 1) from two integers) and nameSeed (FNV-1a of a string).
+    function skyHash32(a, b) {
+      let x = Math.imul((a | 0) ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul((b | 0) + 0x632be5ab, 0xc2b2ae35);
+      x = Math.imul(x ^ (x >>> 16), 0x7feb352d); x = Math.imul(x ^ (x >>> 15), 0x846ca68b);
+      return (x ^ (x >>> 16)) >>> 0;
+    }
+    const skyUnit = (a, b) => skyHash32(a, b) / 4294967296;
+    function skySeed(text) { let h = 2166136261; for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 16777619); return h >>> 0; }
+    // Field star i, as the terminal has it: its place (u across the sky, v down it; here the sky is SKY_MARGIN taller
+    // than the view above and below, for the tilt's shift) and its size, most of them faint.
+    const SKY_FIELD = Array.from({ length: SKY_FIELD_MAX }, (_, i) => { const k = skyHash32(SKY_SEED + i, 3) % 10; return { u: skyUnit(SKY_SEED + i, 1), v: -SKY_MARGIN + skyUnit(SKY_SEED + i, 2) * (1 + 2 * SKY_MARGIN), size: k < 6 ? 'faint' : k < 9 ? 'dim' : 'bright' }; });
+    const SKY_RADIUS = { faint: .7, dim: 1, bright: 1.35 };
+    // The finished runs' stars (the terminal's runStars): every path's first run, then every path's second, and so on,
+    // in the snapshot's order, at most SKY_RUNS_MAX; past that a new run adds no star and no streak.
+    function skyRunKeys() {
+      const runs = [...(sky.runs?.counts || [])], keys = [];
+      for (let n = 1; keys.length < SKY_RUNS_MAX && runs.some(([, passed]) => passed >= n); n++) runs.forEach(([id, passed]) => { if (passed >= n && keys.length < SKY_RUNS_MAX) keys.push(id + '#' + n); });
+      return keys;
+    }
+    function skyRunPlace(key) { const seed = skySeed(key); return { x: skyUnit(seed, 1) * sky.V, y: skyUnit(seed, 2) * sky.H, down: (seed & 1) === 1 }; }
+    // The tile (stars at their places in the view) and its copy one view to the left, so the shift wraps round.
+    function skyCopy() {
+      const copy = sky.tile.cloneNode(true);
+      copy.setAttribute('class', 'ag-sky-copy'); copy.setAttribute('transform', 'translate(' + (-sky.V).toFixed(1) + ' 0)');
+      orbitSky.querySelector(':scope > .ag-sky-copy')?.remove();
+      orbitSky.insertBefore(copy, sky.streaks);
+    }
+    // The sky is V wide (the view at least: a full turn moves it exactly V, so it is the same at 0 and 2 PI) and wraps.
+    function skyBuild(V, W, H) {
+      const size = V.toFixed(1) + 'x' + W + 'x' + H;
+      if (sky.tile && sky.size === size) return;
+      Object.assign(sky, { size, V, W, H });
+      if (!sky.defs) {
+        // The sun's glow and a sphere's light (highlight towards the upper left, turned towards the sun by each agent).
+        sky.defs = svg('defs');
+        const sun = svg('radialGradient', { id: uid + '-sun' }), sphere = svg('radialGradient', { id: uid + '-sphere', fx: .3, fy: .3 });
+        [[0, .34], [.45, .14], [1, 0]].forEach(([at, alpha]) => sun.append(svg('stop', { class: 'ag-sky-stop-sun', offset: at, 'stop-opacity': alpha })));
+        [['light', 0, .5], ['light', .45, 0], ['dark', .78, .06], ['dark', 1, .26]].forEach(([tone, at, alpha]) => sphere.append(svg('stop', { class: 'ag-sky-stop-' + tone, offset: at, 'stop-opacity': alpha })));
+        sky.defs.append(sun, sphere); orbitSkyBox.insertBefore(sky.defs, orbitSky);
+      }
+      sky.tile = svg('g', { class: 'ag-sky-tile' });
+      const count = clamp(Math.round(V * H * (1 + 2 * SKY_MARGIN) / SKY_DENSITY), 1, SKY_FIELD_MAX);
+      SKY_FIELD.slice(0, count).forEach(star => sky.tile.append(svg('circle', { class: 'ag-sky-star', 'data-size': star.size, cx: (star.u * V).toFixed(1), cy: (star.v * H).toFixed(1), r: SKY_RADIUS[star.size] })));
+      sky.streaks = svg('g', { class: 'ag-sky-streaks' });
+      orbitSky.replaceChildren(sky.tile, sky.streaks);
+      skyRunStars([]);
+    }
+    // The run stars now; `fresh` (runs just finished, 3D shown) each get a shooting star, their stars shown at its end.
+    function skyRunStars(fresh) {
+      sky.tile.querySelectorAll('.ag-sky-run').forEach(star => star.remove());
+      const flying = !reducedMotion() ? new Set(fresh) : new Set();
+      skyRunKeys().forEach(key => {
+        const at = skyRunPlace(key), star = svg('circle', { class: 'ag-sky-star ag-sky-run', 'data-run': key, cx: at.x.toFixed(1), cy: at.y.toFixed(1), r: 1.7 });
+        if (flying.has(key) || orbitSky.querySelector('.ag-sky-run[data-pending="true"][data-run="' + CSS.escape(key) + '"]')) star.dataset.pending = 'true';
+        sky.tile.append(star);
+      });
+      skyCopy();
+      flying.forEach(key => { if (sky.tile.querySelector('.ag-sky-run[data-run="' + CSS.escape(key) + '"]')) skyStreak(key); });
+    }
+    function skyReveal(key) { orbitSky.querySelectorAll('.ag-sky-run[data-run="' + CSS.escape(key) + '"]').forEach(star => star.removeAttribute('data-pending')); }
+    // Several at once are spaced SKY_STREAK_GAP apart.
+    function skyStreak(key) {
+      const now = performance.now(), start = Math.max(now, sky.next);
+      sky.next = start + SKY_STREAK_GAP;
+      const id = later(() => { sky.timers.delete(id); skyFly(key); }, start - now);
+      sky.timers.add(id);
+    }
+    function skyFly(key) {
+      if (!sky.tile || !orbitLooking() || reducedMotion()) { skyReveal(key); return; }
+      // To the star's place in whichever copy is in view, a short bright stretch travelling down a diagonal (the
+      // terminal's: one column and one row a step, here 8 by 16 px): down from the left or the right by the run's seed,
+      // up from below when the star is too near the top, from the other side when it would start off the view.
+      const at = skyRunPlace(key), x = at.x + sky.tx < sky.V ? at.x : at.x - sky.V, length = clamp(sky.W * .22, 90, 200);
+      const step = [8 / Math.hypot(8, 16), 16 / Math.hypot(8, 16)], lift = Number(/translate\([-\d.]+ ([-\d.]+)/.exec(orbitSky.getAttribute('transform') || '')?.[1]) || 0;
+      const dy = at.y + lift - length * step[1] >= 0 ? 1 : -1;
+      let dx = at.down ? 1 : -1;
+      const startX = x + sky.tx - dx * length * step[0];
+      if (startX < 0 || startX > sky.W) dx = -dx;
+      const line = svg('line', { class: 'ag-sky-streak', x1: (x - dx * length * step[0]).toFixed(1), y1: (at.y - dy * length * step[1]).toFixed(1), x2: x.toFixed(1), y2: at.y.toFixed(1) });
+      const stretch = Math.min(70, length * .45);
+      line.style.strokeDasharray = stretch + ' ' + (length + stretch);
+      sky.streaks.append(line);
+      let over = false;
+      const done = () => { if (over) return; over = true; line.remove(); skyReveal(key); };
+      const flight = line.animate([{ strokeDashoffset: stretch + 'px', opacity: 0 }, { opacity: .55, offset: .25 }, { opacity: .55, offset: .7 }, { strokeDashoffset: -(length - stretch) + 'px', opacity: 0 }], { duration: SKY_STREAK_MS, easing: 'ease-in' });
+      flight.finished.then(done, done);
+      const id = later(() => { sky.timers.delete(id); done(); }, SKY_STREAK_MS + 400);
+      sky.timers.add(id);
+    }
+    // The sky for this frame: built for the view's size, shifted with the turn and the tilt, faded with the morph.
+    function skyDraw() {
+      const W = viewport.clientWidth, H = viewport.clientHeight;
+      if (W <= 0 || H <= 0) return;
+      // The terminal's skyPlace: V = max(view, 2 PI x the near side's movement per radian x PARALLAX); shifted toward
+      // the far side by V a full turn, and up as the camera rises by PARALLAX of the figure's movement.
+      const front = orbitFigure().radius * (camera.scale || 1), V = Math.max(W, 2 * Math.PI * front * ORBIT_SKY_RATE);
+      skyBuild(V, W, H);
+      const full = 2 * Math.PI, turn = ((orbit.view.turn % full) + full) % full;
+      const lift = clamp(-(orbit.view.elevation - ORBIT_ELEVATION) * front * ORBIT_SKY_RATE, -SKY_MARGIN * H, SKY_MARGIN * H);
+      sky.tx = (turn / full * sky.V) % sky.V;
+      orbitSky.setAttribute('transform', 'translate(' + sky.tx.toFixed(2) + ' ' + lift.toFixed(2) + ')');
+      orbitSkyBox.style.opacity = orbit.k < .999 ? orbit.k.toFixed(3) : '';
+    }
+    // Back in 2D nothing of the sky is left: the stars, the streaks under way, the glow and the shading.
+    function skyClear() {
+      sky.timers.forEach(id => { clearTimeout(id); timers.delete(id); }); sky.timers.clear();
+      orbitSky.replaceChildren(); orbitSky.removeAttribute('transform'); orbitSkyBox.style.opacity = '';
+      sky.defs?.remove(); Object.assign(sky, { size: '', tile: null, streaks: null, defs: null, next: 0, tx: 0 });
+      nodeLayer.querySelectorAll('.ag-sun-glow, .ag-sphere, .ag-depth-mix').forEach(item => item.remove());
+    }
+    // Each snapshot (render's hook): the finished runs per path; the ones new since the last snapshot of this source
+    // fly in if 3D is shown, else their stars are simply there when it is (history does not replay).
+    function orbitRuns() {
+      const counts = new Map();
+      (snapshot?.structure?.flows || []).forEach(flow => { const n = Math.floor(Number(flow?.stats?.passed)); if (typeof flow?.id === 'string' && n > 0) counts.set(flow.id, n); });
+      const was = sky.runs, fresh = [];
+      if (was && was.generation === generation) counts.forEach((n, id) => { for (let k = (was.counts.has(id) ? was.counts.get(id) : (snapshot.structure.flows.some(flow => flow.id === id && was.ids.has(id)) ? 0 : n)) + 1; k <= n && fresh.length < SKY_STREAKS_MAX; k++) fresh.push(id + '#' + k); });
+      sky.runs = { generation, counts, ids: new Set((snapshot?.structure?.flows || []).map(flow => flow?.id)) };
+      if (sky.tile) skyRunStars(orbitLooking() ? fresh : []);
+    }
+    // The sun's glow and the planets' light (orbitNode's part, 3D only).
+    function orbitLight(node, name) {
+      const core = node.querySelector(':scope > .ag-core');
+      if (!core) return;
+      const fade = orbit.k < .999 ? orbit.k.toFixed(3) : '', r = Number(core.getAttribute('r')) || 0;
+      if (name === hubName) {
+        let glow = node.querySelector(':scope > .ag-sun-glow');
+        if (!glow) { glow = svg('circle', { class: 'ag-sun-glow', fill: 'url(#' + uid + '-sun)' }); node.insertBefore(glow, node.firstChild); }
+        glow.setAttribute('r', (r * 2.4).toFixed(1)); glow.style.opacity = fade;
+        return;
+      }
+      let shade = node.querySelector(':scope > .ag-sphere');
+      if (!shade) { shade = svg('circle', { class: 'ag-sphere', fill: 'url(#' + uid + '-sphere)' }); core.after(shade); }
+      const p = positions.get(name), sun = positions.get(hubName);
+      const toward = p && sun && (Math.abs(sun.x - p.x) > .01 || Math.abs(sun.y - p.y) > .01) ? Math.atan2(sun.y - p.y, sun.x - p.x) * 180 / Math.PI + 135 : 0;
+      shade.setAttribute('r', r); shade.setAttribute('transform', 'rotate(' + toward.toFixed(1) + ')'); shade.style.opacity = fade;
+    }
     const orbitButton = el('button', 'ag-control ag-orbit-toggle');
     orbitButton.type = 'button'; orbitButton.setAttribute('aria-label', '3D view'); orbitButton.title = '3D view (D)';
     orbitButton.setAttribute('aria-pressed', 'false'); orbitButton.setAttribute('aria-keyshortcuts', 'D');
@@ -3522,12 +3674,17 @@
         const along = (node + 2 * Math.PI) % (2 * Math.PI);
         return { key, members, node, along: along > 2 * Math.PI - .6 ? along - 2 * Math.PI : along };
       }).sort((a, b) => a.along - b.along);
+      // figure3D(L, k): the rings' tilt scaled by k (the morph's rise); at 1 the full tilt (the points kept here).
       const rings = groups.map((group, gi) => {
-        const inc = ORBIT_INCLINATIONS[gi % ORBIT_INCLINATIONS.length], node = group.node;
-        const n = [Math.sin(node), Math.cos(node), 0], m = [Math.cos(node) * Math.cos(inc), -Math.sin(node) * Math.cos(inc), Math.sin(inc)];
-        const at = u => [Math.cos(u) * n[0] + Math.sin(u) * m[0], Math.cos(u) * n[1] + Math.sin(u) * m[1], Math.sin(u) * m[2]];
-        group.members.forEach(member => { const beta = member.azimuth - node; points.set(member.name, at(Math.atan2(Math.sin(beta), Math.cos(beta) * Math.cos(inc)))); });
-        return { key: group.key, at };
+        const tilt = ORBIT_INCLINATIONS[gi % ORBIT_INCLINATIONS.length], node = group.node;
+        const ring = k => {
+          const inc = tilt * k, n = [Math.sin(node), Math.cos(node), 0], m = [Math.cos(node) * Math.cos(inc), -Math.sin(node) * Math.cos(inc), Math.sin(inc)];
+          const at = u => [Math.cos(u) * n[0] + Math.sin(u) * m[0], Math.cos(u) * n[1] + Math.sin(u) * m[1], Math.sin(u) * m[2]];
+          const place = new Map(group.members.map(member => { const beta = member.azimuth - node; return [member.name, at(Math.atan2(Math.sin(beta), Math.cos(beta) * Math.cos(inc)))]; }));
+          return { at, place };
+        };
+        ring(1).place.forEach((point, name) => points.set(name, point));
+        return { key: group.key, ring };
       });
       // The sun at the middle of the canvas the details leave (the space the camera had when 3D began), the rings as
       // wide as the 2D view's agents are from it, narrower where that would not fit there at the nearest (4/3 size).
@@ -3536,6 +3693,12 @@
       const radius = Math.max(wide * .45, Math.min(wide, frame.fit));
       orbit.figure = { rings, points, hub: { x: frame.x, y: frame.y }, radius, shrink: Math.max(.6, radius / wide) };
       return orbit.figure;
+    }
+    // The figure k of the way up (figure3D(L, k)): each ring's line and its agents' points, the hub at the middle.
+    function orbitRise(figure, k) {
+      if (k >= 1) return { rings: figure.rings.map(ring => ({ key: ring.key, at: ring.ring(1).at })), points: figure.points };
+      const points = new Map([[hubName, [0, 0, 0]]]), rings = figure.rings.map(item => { const ring = item.ring(k); ring.place.forEach((point, name) => points.set(name, point)); return { key: item.key, at: ring.at }; });
+      return { rings, points };
     }
     // The camera: the figure turned by `turn` round its upright axis, seen from `elevation` above its plane (PI/2:
     // straight above, as the 2D view). -> stage point and depth (+1 nearest, -1 farthest).
@@ -3548,16 +3711,20 @@
       };
     }
     // Where everything is now (no drawing): `positions` gets each agent's place on screen, `orbit.depth` its depth.
+    // The morph (the terminal's morphCamera): the camera stays at the 3D angle; the figure rises k of the way
+    // (orbitRise) and each point goes in a straight line on screen from its 2D place (here the agent's own 2D place,
+    // and for a ring its circle seen from straight above) to where the camera shows it, k of the way.
     function orbitProject() {
-      const e = orbit.k, figure = orbitFigure(), full = new Map();
-      orbit.view = { turn: orbit.turn * e, elevation: ORBIT_HIGH + (orbit.elevation - ORBIT_HIGH) * e };
-      const project = orbitCamera(figure, orbit.view.turn, orbit.view.elevation);
+      const e = orbit.k, figure = orbitFigure(), risen = orbitRise(figure, e), full = new Map();
+      orbit.view = { turn: orbit.turn, elevation: orbit.elevation, risen };
+      const camera3d = orbitCamera(figure, orbit.view.turn, orbit.view.elevation);
+      const project = p => { const q = camera3d(p), fx = figure.hub.x + p[0] * figure.radius, fy = figure.hub.y - p[1] * figure.radius; return { x: fx + (q.x - fx) * e, y: fy + (q.y - fy) * e, depth: q.depth }; };
       orbit.depth.clear();
       positions.forEach((p, name) => {
         if (!orbit.base.has(name)) orbit.base.set(name, { x: p.x, y: p.y });
-        const point = figure.points.get(name);
-        if (point) full.set(name, project(point));
-        else if (!(p.parent && orbit.base.has(p.parent))) full.set(name, { ...orbit.base.get(name), depth: 0 });
+        const point = risen.points.get(name);
+        if (point) { full.set(name, camera3d(point)); return; }
+        if (!(p.parent && orbit.base.has(p.parent))) full.set(name, { ...orbit.base.get(name), depth: 0 });
       });
       positions.forEach((p, name) => {
         if (full.has(name)) return;
@@ -3568,15 +3735,28 @@
       positions.forEach((p, name) => {
         const b = orbit.base.get(name), q = full.get(name);
         p.x = b.x + (q.x - b.x) * e; p.y = b.y + (q.y - b.y) * e;
-        orbit.depth.set(name, { z: q.depth, s: 1 + e * .3 * (q.depth + 1) / 2, o: 1 - e * .45 * (1 - q.depth) / 2 });
+        orbit.depth.set(name, { z: q.depth, s: 1 + e * .3 * (q.depth + 1) / 2, mix: e * orbitMix(q.depth) });
       });
       return project;
     }
-    // positionNode's part: an agent's size and dimming for its depth ('' and none in 2D).
+    // The terminal's DEPTH_MIX (its six levels, far to near, toward the muted colour), here continuous in depth.
+    function orbitMix(depth) {
+      const x = clamp((depth + 1) / 2 * 6 - .5, 0, 5), i = Math.min(4, Math.floor(x));
+      return ORBIT_DEPTH_MIX[i] + (ORBIT_DEPTH_MIX[i + 1] - ORBIT_DEPTH_MIX[i]) * (x - i);
+    }
+    // positionNode's part: an agent's size for its depth ('' in 2D), its colour mixed toward the muted one (not while
+    // it works, as in the terminal), its light.
     function orbitNode(node, name) {
       const d = orbit.shown && orbit.depth.get(name);
       if (!d) { if (node.style.opacity) node.style.opacity = ''; return ''; }
-      node.style.opacity = d.o < .999 ? d.o.toFixed(3) : '';
+      const core = node.querySelector(':scope > .ag-core');
+      if (core && name !== hubName) {
+        let mixer = node.querySelector(':scope > .ag-depth-mix');
+        if (!mixer) { mixer = svg('circle', { class: 'ag-depth-mix' }); core.after(mixer); }
+        const mix = node.dataset.busy && node.dataset.busy !== '0' ? 0 : d.mix;
+        mixer.setAttribute('r', core.getAttribute('r')); mixer.style.opacity = mix.toFixed(3);
+      }
+      orbitLight(node, name);
       return d.s > 1.0005 ? ' scale(' + d.s.toFixed(4) + ')' : '';
     }
     // Nearer agents over farther ones (and their names): the node order follows depth, moved without losing focus.
@@ -3592,9 +3772,9 @@
       list.forEach(([, node]) => { if (nodeLayer.moveBefore) nodeLayer.moveBefore(node, null); else nodeLayer.append(node); });
       if (focused && focused !== document.activeElement && focused.isConnected) focused.focus({ preventScroll: true });
     }
-    // The rings: each a thin line, its far half fainter; they fade in and out with the camera's move.
+    // The rings: each a thin line, its far half fainter; they rise with the morph and fade in and out with it.
     function orbitRings(project) {
-      const figure = orbitFigure(), shown = new Set();
+      const figure = orbit.view.risen, shown = new Set();
       orbitLayer.style.opacity = orbit.k < .999 ? orbit.k.toFixed(3) : '';
       figure.rings.forEach(ring => {
         shown.add(ring.key);
@@ -3615,13 +3795,13 @@
     function orbitDraw() {
       const started = performance.now();
       const project = orbitProject();
+      skyDraw();
       nodes.forEach((_, name) => positionNode(name));
       orbitOrder(true);
       orbitRings(project);
       updateEdges();
       const wireFrom = flowAction && trail.length && !trailPending && positions.get(trail.at(-1));
       if (wireFrom && wire.style.display !== 'none') { wire.setAttribute('x1', wireFrom.x); wire.setAttribute('y1', wireFrom.y); }
-      orbitSky.setAttribute('transform', 'rotate(' + (orbit.view.turn * ORBIT_SKY_RATE * 180 / Math.PI).toFixed(3) + ' ' + (viewport.clientWidth / 2).toFixed(1) + ' ' + (viewport.clientHeight / 2).toFixed(1) + ')');
       root.dataset.agCameraElevation = orbit.view.elevation.toFixed(4);
       orbit.frames++;
       orbit.frameMs.push(performance.now() - started); if (orbit.frameMs.length > 240) orbit.frameMs.shift();
@@ -3663,7 +3843,7 @@
       const resized = !!saved && (Math.abs(view.width - saved.width) > .5 || Math.abs(view.height - saved.height) > .5);
       if (saved && camera.initialized) Object.assign(camera, { x: saved.x, y: saved.y, scale: saved.scale, own: saved.own, touched: saved.touched });
       orbit.base = null; orbit.saved = null; orbit.from3d = null; orbit.figure = null; orbit.frame = null;
-      orbitLayer.replaceChildren(); orbitLayer.style.opacity = ''; orbitSky.removeAttribute('transform'); delete root.dataset.agCameraElevation;
+      orbitLayer.replaceChildren(); orbitLayer.style.opacity = ''; skyClear(); delete root.dataset.agCameraElevation;
       orbitOrder(false); orbit.dom = null;
       nodes.forEach(node => { node.style.opacity = ''; });
       if (draw && snapshot) {
@@ -4301,6 +4481,7 @@
       const graph = data.graph;
       runDetails.dataset.notices = String(data.warnings.length + (graph ? graph.problems.length : 0) > 0 || !!data.learning?.due);
       renderActivity(); updatePlus();
+      orbitRuns();
       const previousLayout = layoutSignature;
       if (root.clientWidth > 0 && viewport.clientWidth > 0) {
         addPositions(visibleAgents);
