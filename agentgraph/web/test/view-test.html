@@ -739,7 +739,7 @@
           const lightBackground = getComputedStyle(root).backgroundColor, lightLabel = getComputedStyle(root.querySelector('.ag-agent-name')).fill;
           html.setAttribute('data-color-scheme', 'dark'); html.style.setProperty('--v2-background-bg-deep', '#080808'); await sleep(20);
           assert(root.dataset.agScheme === 'dark', 'host dark mode did not update without remount');
-          assert(getComputedStyle(root).backgroundColor === 'rgb(8, 8, 8)' && getComputedStyle(root).backgroundColor !== lightBackground, 'host deep background not used');
+          assert(getComputedStyle(root).backgroundColor === 'rgb(19, 17, 17)' && getComputedStyle(root).backgroundColor !== lightBackground, 'the dark canvas is not its own warm colour (n103 item 8: never the host\'s deep background)');
           assert(getComputedStyle(root.querySelector('.ag-agent-name')).fill !== lightLabel, 'label palette did not change');
           assert(getComputedStyle(root).colorScheme === 'dark', 'native controls do not follow dark mode');
           assert(getComputedStyle(root.querySelector('.ag-agent-name')).stroke === getComputedStyle(root).backgroundColor, 'label halo does not match the host background');

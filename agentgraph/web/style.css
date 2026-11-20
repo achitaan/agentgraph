@@ -1,6 +1,6 @@
 .agentgraph {
   --ag-canvas-bg: #f5f2ed;
-  --ag-bg: var(--v2-background-bg-deep, var(--ag-canvas-bg));
+  --ag-bg: var(--ag-canvas-bg); /* its own warm canvas, on the plain page and in a host's panel alike (n103 item 8) */
   --ag-paper: #fffdf9;
   --ag-ink: #38322f;
   --ag-muted: #6d635d; /* 4.5:1 or better on the canvas, the paper and a hovered control (light) */
@@ -85,7 +85,7 @@
 }
 .agentgraph[data-ag-scheme="dark"] {
   --ag-canvas-bg: #131111;
-  --ag-bg: var(--v2-background-bg-deep, var(--ag-canvas-bg));
+  --ag-bg: var(--ag-canvas-bg);
   --ag-paper: #1d1918;
   --ag-ink: #e8e0da;
   --ag-muted: #b0a39c;
