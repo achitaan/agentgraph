@@ -300,6 +300,18 @@
 .agentgraph .ag-moon-ring[data-side="far"] { opacity: .22; }
 /* A moon's name drawn again above its parent's disc and its siblings' (3D only). */
 .agentgraph .ag-moon-name { pointer-events: none; }
+/* The side chat's moon (n8): a small disc round the orchestrator, drawn as a moon is and named "side chat". It is not an agent
+   (a layer of its own), goes round only while it works and in 3D on a plane of its own; its far half is fainter. */
+.agentgraph .ag-sidemoon { cursor: pointer; outline: none; }
+.agentgraph .ag-side-halo { fill: transparent; stroke: transparent; stroke-width: 1; }
+.agentgraph .ag-side-core { fill: var(--ag-node-fill); stroke: var(--ag-node-stroke); stroke-width: 1.4; }
+.agentgraph .ag-sidemoon[data-busy="1"] .ag-side-core { fill: var(--ag-busy-fill); stroke: var(--ag-busy-stroke); stroke-width: 1.8; }
+.agentgraph .ag-sidemoon:hover .ag-side-halo { fill: var(--ag-hover-fill); stroke: var(--ag-hover-stroke); }
+.agentgraph .ag-sidemoon:focus-visible .ag-side-halo, .agentgraph .ag-sidemoon[data-selected="true"] .ag-side-halo { stroke: var(--ag-work); stroke-width: 2; }
+.agentgraph .ag-sidemoon[data-side="far"] { opacity: .6; }
+.agentgraph .ag-side-name { fill: var(--ag-ink); font-size: 12px; font-weight: 500; paint-order: stroke; stroke: var(--ag-bg); stroke-width: 5px; stroke-linejoin: round; pointer-events: none; }
+.agentgraph .ag-detail .ag-side-model { margin: 0 0 8px; color: var(--ag-muted); }
+.agentgraph .ag-detail .ag-side[data-state="asking"] .ag-side-send, .agentgraph .ag-detail .ag-side[data-state="busy"] .ag-side-send { opacity: .55; }
 /* The sun (n119). At rest a ball lit from the upper left, still. Fired up (the hub at work): flame spikes and a glow in
    the warm end of the palette (the hub's accent, the build orange, a pale yellow core); a spike's base is 2:1 or more
    against the page in both schemes. Under every line, ring, agent and name; no pointer. Reduced motion: short still

@@ -48,6 +48,15 @@ It is a GUI-only plugin (no server or TUI part), loaded as a local directory. It
     of the agents' sessions) and refuse any other without calling the host. The panel gives `send` only when
     `client.session.prompt` is a function and `stop` only when `client.session.interrupt` is, so the page shows no
     dead control. The demo is given `chat` alone (it reads the demo's example chats); the page code is the same.
+- **The side chat's moon and its question** (`options.actions.side`): when the snapshot says the side chat is installed, the
+  view draws a small moon named `side chat` and opens a panel with its chat and a box. `side(text)` asks it through a
+  third Ipc method, `side({ main, text }) -> JSON text`, which runs
+  `python3 -P -m agentgraph.sidechat ask --main <the snapshot's root session> --text-file - --json` with the same
+  `execFile` rules and environment as the other commands but a 150 s timeout. The question goes on stdin only: it is in no
+  argument and in no log. The question (1 to 4,000 characters, no NUL) and the root session id are checked in the window
+  and again in main; a bad one never reaches Python, and nothing is asked before a snapshot has been read. The reply is
+  `{ ok: true, answer }` or `{ ok: false, error: "<one line>" }` and never throws. It is given in every mode but the demo
+  (the page shows the box only when the side chat is installed); the demo has no `side`.
   - Nothing here logs: no message text, nor the feed, is written to a log or put on a command line.
 
 ## Load it
@@ -162,3 +171,5 @@ Not yet tried on the real app (the harness uses a fake client; the chat read use
   leaves out Send or Stop, by design); and that the `chat` Ipc method (a `Number` field in its input schema) crosses the
   host's bridge like the string methods do.
 - the chat view drawing and scrolling inside the real side panel.
+- asking the side chat through the bridge: the `side` Ipc method with a real `agentgraph sidechat ask` (a real model answer
+  taking up to two minutes), and the moon and its panel drawing inside the real side panel.

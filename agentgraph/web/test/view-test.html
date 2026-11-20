@@ -7299,7 +7299,8 @@
       const viewSource = [...document.scripts].find(script => script.textContent.includes('function call(fn, request)')).textContent;
       // n5: chat, send and stop are the chat's own host actions: they change nothing in the setup, so the 3D rule does not
       // apply to them (the chat checks below drive them in 2D and in 3D); every other action is swept as before.
-      const CHAT_ACTIONS = ['chat', 'send', 'stop'];
+      // n8: so is side (asking the side chat changes nothing in the setup, and works in 3D: the side chat checks drive it there).
+      const CHAT_ACTIONS = ['chat', 'send', 'stop', 'side'];
       const actionNames = [...new Set([...viewSource.matchAll(/action\('(\w+)'\)/g), ...viewSource.matchAll(/options\.actions\.(\w+)/g)].map(m => m[1]))].filter(name => !CHAT_ACTIONS.includes(name));
       const sweepData = () => {
         const data = pathFixture();
@@ -8673,6 +8674,256 @@
       }, chatMount(host, clock));
     });
     // ==== Chat lane (n5): end ====
+    // ==== Side chat (n8): start (the moon: drawn only when installed, not an agent; its panel; asking through actions.side) ====
+    const SIDE_ITEMS = [{ kind: 'user', time: 1, text: 'What is the build doing?' }, { kind: 'text', time: 2, text: 'It is running the tests' }];
+    function sideFixture(extra = {}) {
+      const data = chatFixture();
+      data.sidechat = { installed: true, session: 'ses_side', model: 'openai/gpt-6-luna', busy: false, spent: 0.0042, ...extra };
+      return data;
+    }
+    // A host with chat (and send and stop, to show the side chat takes neither) and side (as asked), with one gate to hold its reply.
+    function sideHost(config = {}) {
+      const host = chatHost({ ses_side: chatFeed('ses_side', SIDE_ITEMS), ses_work: chatFeed('ses_work', CHAT_ITEMS) }, config);
+      host.calls.side = []; host.sideReply = { ok: true, answer: 'It is fine' }; host.holdSide = null; host.sideFlying = 0; host.sideMost = 0;
+      if (config.side !== false) host.actions.side = async text => {
+        host.calls.side.push(text); host.sideFlying++; host.sideMost = Math.max(host.sideMost, host.sideFlying);
+        try {
+          if (host.holdSide) await host.holdSide.promise;
+          if (host.sideReply.ok) host.feeds.ses_side = chatFeed('ses_side', [...SIDE_ITEMS, { kind: 'user', time: 3, text }, { kind: 'text', time: 4, text: host.sideReply.answer }]);
+          return host.sideReply;
+        } finally { host.sideFlying--; }
+      };
+      return host;
+    }
+    const gate = () => { let go; const promise = new Promise(resolve => { go = resolve; }); return { promise, go }; };
+    const moonOf = root => root.querySelector('.ag-sidemoon');
+    const moonAt = root => { const n = (/translate\(([-\d.e]+)[ ,]+([-\d.e]+)\)/.exec(moonOf(root).getAttribute('transform') || '') || []).slice(1).map(Number); return { x: n[0], y: n[1] }; };
+    const openMoon = async root => { moonOf(root).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); await settle(); };
+    const sideOf = root => root.querySelector('.ag-detail .ag-side');
+    const sideBox = root => sideOf(root)?.querySelector('textarea');
+    const sideNote = root => sideOf(root)?.querySelector('.ag-side-note')?.textContent || '';
+    const sideKey = (root, text, extra = {}) => { const box = sideBox(root); box.focus(); typeIn(box, text); const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...extra }); box.dispatchEvent(event); return event; };
+    const sideMount = (host, extra = {}) => ({ actions: host.actions, clock: chatClock(), ...extra });
+
+    await test('side chat: nothing is drawn or said when it is not installed (no sidechat, installed false, a sidechat that is not an object)', async () => {
+      for (const sidechat of [undefined, { installed: false, session: 'ses_side', busy: true }, 'yes', null, { installed: 'true' }]) {
+        const data = chatFixture(); if (sidechat !== undefined) data.sidechat = sidechat;
+        await using(data, async root => {
+          assert(!moonOf(root) && !root.querySelector('[data-sidechat]'), 'a moon is drawn for ' + JSON.stringify(sidechat));
+          assert(!/side chat/i.test(root.textContent), 'the view says side chat for ' + JSON.stringify(sidechat));
+        }, sideMount(sideHost()));
+      }
+    });
+
+    await test('side chat: installed, one moon named "side chat" beside the orchestrator: a name of 11 px or more, no other text in the graph, not an agent (not in the nodes, the working count, the lines or any editor)', async () => {
+      const data = sideFixture({ busy: true }), host = sideHost();
+      let agents = 0;
+      await using(chatFixture(), async root => { agents = root.querySelectorAll('[data-agent]').length; }, sideMount(host));
+      assert(agents > 3, 'no agents to compare with');
+      await using(data, async root => {
+        const moons = root.querySelectorAll('.ag-sidemoon');
+        assert(moons.length === 1 && moons[0].closest('.ag-drawing') && moons[0].dataset.sidechat !== undefined, 'not one moon in the drawing: ' + moons.length);
+        const name = moons[0].querySelector('.ag-side-name');
+        assert(name && name.textContent === 'side chat' && parseFloat(getComputedStyle(name).fontSize) >= 11, 'the name is not "side chat" at 11 px or more');
+        assert(moons[0].textContent === 'side chat', 'the moon carries more text than its name: ' + moons[0].textContent);
+        assert(!moons[0].matches('.ag-agent, [data-agent]') && root.querySelectorAll('[data-agent]').length === agents && root.querySelectorAll('.ag-agent').length === agents, 'the moon is counted among the agents');
+        assert(root.querySelector('.ag-activity').textContent === '1 working', 'the moon is counted as working: ' + root.querySelector('.ag-activity').textContent);
+        assert(!root.querySelector('.ag-nodes').contains(moons[0]) && !root.querySelector('.ag-edges').querySelector('[data-sidechat]') && !/side/i.test(root.querySelector('.ag-edges').outerHTML), 'the moon is in the nodes or on a line');
+        const hub = centre(root, 'orchestrator'), b = moons[0].querySelector('.ag-side-core').getBoundingClientRect();
+        assert(Math.hypot(hub.x - (b.x + b.width / 2), hub.y - (b.y + b.height / 2)) < 120, 'the moon is not beside the orchestrator');
+        press(viewportOf(root), 'n'); await settle();
+        assert(!/side chat/i.test([...root.querySelectorAll('.ag-add-menu, .ag-agents-list, .ag-team-form')].map(item => item.textContent).join(' ')), 'the moon is offered in an editor');
+        open(root, 'orchestrator'); await settle();
+        assert(!/side chat/i.test(root.querySelector('.ag-detail').textContent), 'the orchestrator\'s details name the moon');
+      }, sideMount(host));
+    });
+
+    await test('side chat: it moves only while it works, one lap on the moons\' clock, and stands still when idle or under reduced motion', async () => {
+      for (const [busy, motion, moves] of [[true, 'full', true], [false, 'full', false], [true, 'none', false]]) {
+        const data = sideFixture({ busy });
+        await using(data, async root => {
+          const first = moonAt(root); await sleep(500); const second = moonAt(root);
+          const moved = Math.hypot(first.x - second.x, first.y - second.y);
+          assert(moves ? moved > 1 : moved < .01, 'busy=' + busy + ' motion=' + motion + ' moved ' + moved.toFixed(2) + ' px');
+          assert(moonOf(root).dataset.busy === String(busy ? 1 : 0), 'the moon does not show that it is ' + (busy ? 'working' : 'idle'));
+        }, sideMount(sideHost(), { motion }));
+      }
+    });
+
+    await test('side chat: choosing the moon (Enter, right-click) opens its panel: one quiet line saying what it is, its model and spend, its chat; unknown model and spend are not shown', async () => {
+      const data = sideFixture(), host = sideHost();
+      await using(data, async (root, app) => {
+        await openMoon(root);
+        assert(root.querySelector('.ag-detail-title').textContent === 'side chat' && !root.querySelector('.ag-detail').hidden, 'the panel did not open');
+        const about = root.querySelector('.ag-side-about');
+        assert(about && /reads the main chat and task graph/i.test(about.textContent) && /only you/i.test(about.textContent) && /changes nothing/i.test(about.textContent), 'the quiet line is wrong: ' + about?.textContent);
+        const model = root.querySelector('.ag-side-model');
+        assert(model && model.textContent === 'openai/gpt-6-luna · $0.0042', 'the model line is wrong: ' + model?.textContent);
+        assert(/monospace/.test(getComputedStyle(root.querySelector('.ag-detail')).fontFamily), 'the panel is not monospace');
+        assert(await chatUntil(() => chatOf(root)?.dataset.state === 'ready') && chatKinds(root).join() === 'user,text' && host.calls.chat[0][0] === 'ses_side', 'its chat did not load from ses_side: ' + JSON.stringify(host.calls.chat));
+        assert(!chatOf(root).querySelector('[data-chat-stop], [data-chat-step], .ag-chat-compose'), 'the chat has a Stop, a stepper or a steer box');
+        assert(root.querySelector('.ag-side-open') === null, 'the panel has more than it needs');
+        root.querySelector('.ag-close').click(); await settle();
+        context(moonOf(root)); await settle();
+        assert(root.querySelector('.ag-detail-title').textContent === 'side chat', 'a right-click did not open the panel');
+        data.sidechat = { installed: true, session: 'ses_side', busy: false }; await app.refresh(); await settle();
+        assert(!root.querySelector('.ag-side-model'), 'a model line shows for an unknown model and spend: ' + root.querySelector('.ag-side-model')?.textContent);
+      }, sideMount(host));
+    });
+
+    await test('side chat: no session yet is one quiet line, no Stop, no steer, and nothing is read', async () => {
+      const data = sideFixture({ session: null }), host = sideHost();
+      await using(data, async root => {
+        await openMoon(root);
+        assert(chatOf(root).querySelector('.ag-chat-status')?.textContent === 'No session yet.' && !host.calls.chat.length && !chatOf(root).querySelector('[data-chat-stop], textarea'), 'no-session state wrong: ' + chatSaid(root));
+      }, sideMount(host));
+    });
+
+    await test('side chat: its transcript is never steerable or stoppable, even busy with send and stop given; the web page (no chat action) reads /api/chat and shows no box', async () => {
+      const urls = [], realFetch = window.fetch;
+      window.fetch = async url => { urls.push(String(url)); return { ok: true, json: async () => chatFeed('ses_side', SIDE_ITEMS, { busy: true }) }; };
+      try {
+        await using(sideFixture({ busy: true }), async root => {
+          await openMoon(root);
+          assert(await chatUntil(() => chatOf(root)?.dataset.state === 'ready'), 'the page did not read: ' + chatSaid(root));
+          assert(urls.length >= 1 && urls[0].startsWith('/api/chat?session=ses_side&limit='), 'the page read ' + urls.join(' '));
+          assert(chatKinds(root).join() === 'user,text' && !chatOf(root).querySelector('[data-chat-stop], textarea') && !sideOf(root)?.querySelector('textarea') && !root.querySelector('[data-side-box], [data-side-send]'), 'the web page has a box or a control');
+        }, { chatUrl: '/api/chat' });
+      } finally { window.fetch = realFetch; }
+      const host = sideHost({ side: false });
+      await using(sideFixture({ busy: true }), async root => {
+        await openMoon(root); assert(await chatUntil(() => chatOf(root)?.dataset.state === 'ready'));
+        assert(chatKinds(root).join() === 'user,text' && !chatOf(root).querySelector('[data-chat-stop], textarea') && !root.querySelector('.ag-detail [data-side-box]'), 'a host without side shows a box or Stop');
+      }, sideMount(host));
+    });
+
+    await test('side chat: Enter sends, Shift+Enter is a newline, empty and over 4,000 characters are refused with no call, one at a time, and not while it is busy', async () => {
+      const data = sideFixture(), host = sideHost();
+      await using(data, async (root, app) => {
+        await openMoon(root);
+        assert(sideBox(root) && sideBox(root).hasAttribute('data-side-box') && root.querySelector('[data-side-send]'), 'the box is not shown with side');
+        const shift = sideKey(root, 'two\nlines', { shiftKey: true });
+        assert(!shift.defaultPrevented && !host.calls.side.length, 'Shift+Enter sent or was not left to the box');
+        sideKey(root, '   '); await settle();
+        assert(!host.calls.side.length && sideNote(root), 'an empty question was sent or not refused');
+        sideKey(root, 'x'.repeat(4001)); await settle();
+        assert(!host.calls.side.length && /4,?000/.test(sideNote(root) + (sideOf(root).querySelector('.ag-side-count')?.textContent || '')), 'a question over 4,000 characters was sent or not explained: ' + sideNote(root));
+        sideKey(root, 'x'.repeat(4000)); await settle(); await settle();
+        assert(host.calls.side.length === 1 && host.calls.side[0].length === 4000, 'exactly 4,000 characters were not sent');
+        host.calls.side.length = 0;
+        host.holdSide = gate();
+        sideKey(root, 'first'); await settle(); sideKey(root, 'first'); root.querySelector('[data-side-send]').click(); await settle();
+        assert(host.calls.side.length === 1 && host.sideMost === 1, 'a second question went out while one was in flight: ' + host.calls.side.length);
+        host.holdSide.go(); host.holdSide = null; await settled();
+        data.sidechat.busy = true; await app.refresh(); await settle();
+        host.calls.side.length = 0; sideKey(root, 'while busy'); await settle();
+        assert(!host.calls.side.length && sideBox(root).value === 'while busy', 'a question was sent while the side chat is busy (or its text was lost)');
+      }, sideMount(host));
+    });
+
+    await test('side chat: ok clears the box and the answer shows; an error is one line and keeps the text; the question shows at once as pending and the box takes no more while waiting', async () => {
+      const data = sideFixture(), host = sideHost(), chatClk = chatClock();
+      await using(data, async root => {
+        await openMoon(root); assert(await chatUntil(() => chatOf(root)?.dataset.state === 'ready'));
+        host.sideReply = { ok: false, error: 'the side chat said\nno   twice over' };
+        sideKey(root, 'Will this fail?'); assert(await chatUntil(() => /no twice over/.test(sideNote(root))), 'the error is not shown: ' + sideNote(root));
+        assert(sideBox(root).value === 'Will this fail?' && !/\n/.test(sideNote(root)) && sideOf(root).querySelector('.ag-side-note').dataset.kind === 'error', 'the error is not one line that keeps the text');
+        host.sideReply = { ok: true, answer: 'It is fine' }; host.holdSide = gate();
+        sideBox(root).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); await settle();
+        const pending = [...chatOf(root).querySelectorAll('.ag-chat-item[data-pending="true"]')];
+        assert(pending.length === 1 && /Will this fail\?/.test(pending[0].textContent) && /waiting/.test(pending[0].textContent), 'the question is not shown at once as pending: ' + chatOf(root).textContent);
+        assert(sideBox(root).value === 'Will this fail?', 'the text was cleared before the answer');
+        host.holdSide.go(); host.holdSide = null;
+        assert(await chatUntil(() => sideBox(root).value === ''), 'ok did not clear the box');
+        assert(await chatUntil(() => [...chatOf(root).querySelectorAll('.ag-chat-item[data-kind="text"]')].some(item => /It is fine/.test(item.textContent))), 'the answer did not appear: ' + chatOf(root).textContent);
+        assert(!chatOf(root).querySelector('.ag-chat-item[data-pending="true"]'), 'the question is still pending after its answer');
+      }, sideMount(host));
+    });
+
+    await test('side chat: a long wait (a reply after the polls, the panel closed and reopened) keeps a moving caret only while waiting and never freezes the panel', async () => {
+      const data = sideFixture(), host = sideHost();
+      await using(data, async root => {
+        await openMoon(root); assert(await chatUntil(() => chatOf(root)?.dataset.state === 'ready'));
+        assert(!chatOf(root).querySelector('.ag-chat-caret'), 'a caret shows with nothing happening');
+        host.holdSide = gate(); sideKey(root, 'Slow question'); await settle();
+        const caret = chatOf(root).querySelector('.ag-chat-caret');
+        assert(caret && getComputedStyle(caret).animationName !== 'none', 'no moving caret while waiting');
+        root.querySelector('.ag-close').click(); await settle();
+        open(root, 'impl-claude'); await settle();
+        assert(root.querySelector('.ag-detail-title').textContent === 'impl-claude', 'the panel froze while a question was out');
+        await openMoon(root);
+        assert(chatOf(root).querySelector('.ag-chat-item[data-pending="true"]') && chatOf(root).querySelector('.ag-chat-caret') && sideBox(root).value === 'Slow question' && host.calls.side.length === 1, 'the wait is not kept across closing the panel');
+        sideKey(root, 'Slow question'); await settle(); assert(host.calls.side.length === 1, 'a second went out');
+        host.holdSide.go(); host.holdSide = null;
+        assert(await chatUntil(() => sideBox(root).value === ''), 'the reply was not taken');
+        assert(await chatUntil(() => !chatOf(root).querySelector('.ag-chat-caret')), 'the caret stays after the wait');
+      }, sideMount(host, { motion: 'full' }));
+    });
+
+    await test('side chat: a question that is never answered ends in one line (the wait has a ceiling) and the box is free again', async () => {
+      const data = sideFixture(), host = sideHost(), timers = new Map(); let next = 0;
+      const clock = { setTimeout: (fn, ms) => { timers.set(++next, { fn, ms }); return next; }, clearTimeout: id => { timers.delete(id); } };
+      await using(data, async root => {
+        await openMoon(root); host.holdSide = gate(); sideKey(root, 'Never answered'); await settle();
+        const long = [...timers.values()].filter(item => item.ms >= 120000 && item.ms <= 300000);
+        assert(long.length === 1, 'no ceiling of two to five minutes for the wait: ' + [...timers.values()].map(item => item.ms));
+        long[0].fn(); await settle();
+        assert(sideNote(root) && !/\n/.test(sideNote(root)) && sideBox(root).value === 'Never answered' && !chatOf(root).querySelector('.ag-chat-item[data-pending="true"]'), 'the wait did not end in one line that keeps the text: ' + sideNote(root));
+        host.holdSide.go();
+      }, { actions: host.actions, clock });
+    });
+
+    await test('side chat: in 3D the moon sits on its own tilted orbit plane and still asks; setup writes stay refused', async () => {
+      const data = sideFixture(), host = sideHost(); host.actions.roster = async () => ({ ok: true });
+      await using(data, async root => {
+        const flat = moonAt(root);
+        viewportOf(root).focus({ preventScroll: true }); press(viewportOf(root), 'd');
+        for (let i = 0; i < 100 && root.dataset.agBlend !== '1'; i++) await sleep(30);
+        assert(root.dataset.agView === '3d' && root.dataset.agBlend === '1', '3D did not open');
+        await sleep(120);
+        const plane = (moonOf(root).dataset.plane || '').split(',').map(Number);
+        assert(plane.length === 3 && plane.every(Number.isFinite) && Math.abs(Math.hypot(...plane) - 1) < .02, 'no unit plane normal in 3D: ' + moonOf(root).dataset.plane);
+        assert(Math.abs(plane[2]) < .98 && Math.abs(plane[2]) > .02, 'the plane is the flat view\'s or edge on: ' + plane);
+        const T = 1.1; assert(Math.abs(Math.abs(plane[0] * Math.sin(T) - plane[2] * Math.cos(T)) - 1) > .05, 'the plane is the moons\' fallback plane: ' + plane);
+        assert(Math.hypot(moonAt(root).x - flat.x, moonAt(root).y - flat.y) >= 0 && moonOf(root).querySelector('.ag-side-name').textContent === 'side chat', 'the moon lost its name in 3D');
+        await openMoon(root);
+        assert(await chatUntil(() => chatOf(root)?.dataset.state === 'ready'), 'the transcript did not load in 3D');
+        sideKey(root, 'In three D'); assert(await chatUntil(() => host.calls.side.length === 1 && sideBox(root).value === ''), 'asking does not work in 3D: ' + sideNote(root));
+        press(viewportOf(root), 'n'); await settle();
+        assert(!root.querySelector('.ag-add-menu') || root.querySelector('.ag-add-menu').hidden, '3D let a setup write start');
+      }, sideMount(host));
+    });
+
+    await test('side chat: a question and an answer that look like markup stay text (no element, attribute or handler is made from them)', async () => {
+      const evil = '<img src=x onerror="window.__sidePwned=1"><b>bold</b> <script>window.__sidePwned=2<\/script>';
+      const data = sideFixture(), host = sideHost(); host.sideReply = { ok: true, answer: evil + ' answer' };
+      delete window.__sidePwned;
+      await using(data, async root => {
+        await openMoon(root); assert(await chatUntil(() => chatOf(root)?.dataset.state === 'ready'));
+        host.holdSide = gate(); sideKey(root, evil); await settle();
+        assert(chatOf(root).textContent.includes(evil) && !sideOf(root).querySelector('img, b, script'), 'the pending question became markup');
+        host.holdSide.go(); host.holdSide = null;
+        assert(await chatUntil(() => chatOf(root).textContent.includes(evil + ' answer')), 'the answer did not show as text');
+        await settle(); await sleep(100);
+        assert(!root.querySelector('.ag-detail img, .ag-detail b, .ag-detail script, .ag-detail [onerror]') && window.__sidePwned === undefined, 'markup in a question or answer ran or was drawn');
+      }, sideMount(host));
+    });
+
+    await test('side chat: light and dark, with no green anywhere on the moon or its panel, and the ask box follows the scheme', async () => {
+      for (const scheme of ['light', 'dark']) {
+        await using(sideFixture({ busy: true }), async root => {
+          assert(root.dataset.agScheme === scheme, 'the scheme is not ' + scheme);
+          await openMoon(root);
+          const parts = [moonOf(root).querySelector('.ag-side-core'), moonOf(root).querySelector('.ag-side-halo'), moonOf(root).querySelector('.ag-side-name'), sideBox(root), root.querySelector('[data-side-send]'), root.querySelector('.ag-side-about'), root.querySelector('.ag-side-model')];
+          parts.forEach(part => { assert(part, 'a part is missing in ' + scheme); const s = getComputedStyle(part); ['fill', 'stroke', 'color', 'backgroundColor', 'borderTopColor'].forEach(key => assert(!chatGreen(s[key]), 'green in ' + scheme + ' ' + part.className + ' ' + key + ' ' + s[key])); });
+          const core = getComputedStyle(moonOf(root).querySelector('.ag-side-core')), idle = getComputedStyle(root.querySelector('[data-agent="impl-claude"] .ag-core'));
+          assert(core.fill !== 'none' && core.fill !== 'rgba(0, 0, 0, 0)', 'the moon has no fill');
+          assert(getComputedStyle(sideBox(root)).backgroundColor !== (scheme === 'light' ? 'rgb(0, 0, 0)' : 'rgb(255, 255, 255)'), 'the box does not follow the scheme');
+          assert(idle.fill, 'no agent circle to compare');
+        }, sideMount(sideHost(), { scheme }));
+      }
+    });
+    // ==== Side chat (n8): end ====
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
   })().catch(error => { document.getElementById('results').textContent = 'RESULT: FAIL ' + error.stack; });
 </script>

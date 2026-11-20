@@ -222,7 +222,9 @@
       [[0, 'light', .9], [.3, 'light', .3], [.62, 'light', 0], [.78, 'dark', .12], [1, 'dark', .42]].forEach(([at, tone, alpha]) => shade.append(svg('stop', { offset: at, class: 'ag-ball-' + tone + (kind === 'fire' && tone === 'light' ? ' ag-ball-fire' : ''), 'stop-opacity': alpha })));
       defs.append(shade);
     });
-    stage.append(flareLayer, edgeLayer, teamLayer, loopLayer, routeLayer, trailLayer, wire, nodeLayer, draftLayer); drawing.append(defs, stage);
+    // The side chat's moon (n8) is drawn in a layer of its own: it is not an agent, so it is never among the nodes.
+    const sideLayer = svg('g', { class: 'ag-sidemoons' });
+    stage.append(flareLayer, edgeLayer, teamLayer, loopLayer, routeLayer, trailLayer, wire, nodeLayer, sideLayer, draftLayer); drawing.append(defs, stage);
     const teamLines = new Map(); // "id\nmember" -> { group, hit, line, team, member }
     const empty = el('div', 'ag-empty', 'Loading');
     viewport.append(drawing, empty);
@@ -1309,7 +1311,7 @@
       const node = nodes.get(name), p = positions.get(name);
       if (!node || !p) return;
       node.setAttribute('transform', 'translate(' + p.x + ' ' + p.y + ')' + orbitNode(node, name));
-      if (name === hubName) flareLayer.setAttribute('transform', node.getAttribute('transform'));
+      if (name === hubName) { flareLayer.setAttribute('transform', node.getAttribute('transform')); sidePaint(); }
     }
     // Move one agent to (x, y) on the stage, as far as it goes without landing on another. A lead carries its
     // seats; a seat moves on its own and keeps its new place beside its lead. The place is remembered.
@@ -2265,10 +2267,10 @@
       : { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: id => clearTimeout(id) };
     const ceilings = new Set();
     const noAnswer = () => Object.assign(new Error(NO_ANSWER_SAID), { noAnswer: true });
-    function within(work) {
+    function within(work, limit = ANSWER_MS) {
       return new Promise((resolve, reject) => {
         let done = false;
-        const timer = clock.setTimeout(() => { if (done) return; done = true; ceilings.delete(timer); reject(noAnswer()); }, ANSWER_MS);
+        const timer = clock.setTimeout(() => { if (done) return; done = true; ceilings.delete(timer); reject(noAnswer()); }, limit);
         ceilings.add(timer);
         const finish = fn => value => { if (done) return; done = true; ceilings.delete(timer); clock.clearTimeout(timer); fn(value); };
         Promise.resolve(work).then(finish(resolve), finish(reject));
@@ -3502,7 +3504,7 @@
       });
       listen(chat.sessions, 'click', event => {
         const step = event.target.closest('[data-chat-step]'), target = step && chatTarget();
-        if (!target) return;
+        if (!target || target.side) return;
         const at = target.list.indexOf(target.session), next = target.list[at + (step.dataset.chatStep === 'older' ? 1 : -1)];
         if (next) { chat.choice.set(target.agent.name, next.id); chatSync(); }
       });
@@ -3525,7 +3527,13 @@
     // The agent whose details are open (null when none are, so nothing is read), its sessions newest first and the one
     // shown: the user's choice, else the orchestrator's root session, else the newest.
     function chatTarget() {
-      if (!alive || !snapshot || detail.hidden || selected?.type !== 'agent') return null;
+      if (!alive || !snapshot || detail.hidden) return null;
+      // The side chat (n8): one session, only its transcript; never steered, stopped or paged through.
+      if (selected?.type === 'sidechat') {
+        const info = sideInfo(), session = info?.session ? { id: info.session, title: 'side chat', busy: info.busy } : null;
+        return info ? { agent: null, side: true, session, list: session ? [session] : [], own: false } : null;
+      }
+      if (selected?.type !== 'agent') return null;
       const agent = agentsByName.get(selected.key);
       if (!agent) return null;
       const list = (Array.isArray(agent.sessions) ? agent.sessions : []).filter(session => session && typeof session.id === 'string' && session.id);
@@ -3535,7 +3543,7 @@
     }
     // What the box would do: steer a busy session, or (the orchestrator, idle) a plain prompt; null: no box.
     function chatMode(target) {
-      if (!sendAction || !target?.session) return null;
+      if (!sendAction || !target?.session || target.side) return null;
       return target.session.busy ? 'steer' : target.own ? 'prompt' : null;
     }
     function chatReset(id) {
@@ -3548,7 +3556,7 @@
       const target = chatTarget(), id = target?.session?.id || '';
       if (id !== chat.session) chatReset(id);
       if (!target) return;
-      chat.busy = !!target.session?.busy;
+      chat.busy = !!target.session?.busy || (!!target.side && side.sending);
       chatPaint();
       chatSchedule();
     }
@@ -3576,7 +3584,7 @@
     }
     function chatRead() {
       if (chat.inflight || !chatCanRead || !chat.session) return;
-      const id = chat.session, token = chat.token, busyAtRead = chat.busy;
+      const id = chat.session, token = chat.token, busyAtRead = chat.busy, after = side.local;
       chat.inflight = true;
       let work;
       try { work = within(chatFetch(id)); } catch (error) { work = Promise.reject(error); }
@@ -3584,6 +3592,7 @@
         if (!alive || token !== chat.token) return;
         if (!feed || typeof feed !== 'object' || !Array.isArray(feed.items)) throw new Error('The chat came back in a form that cannot be shown');
         chat.feed = chatTidy(feed); chat.failed = false; chat.loaded = true; chat.staleBusy = busyAtRead;
+        if (after && side.local === after) side.local = null; // a read that began after the answer shows it from the feed
       }).catch(() => { if (alive && token === chat.token) chat.failed = true; }).finally(() => {
         if (!alive || token !== chat.token) return;
         chat.inflight = false; chatPaint();
@@ -3620,8 +3629,9 @@
     function chatPaint() {
       const target = chatTarget();
       if (!target) return;
-      const session = target.session, mode = chatMode(target), canStop = !!(stopAction && session?.busy), feed = chat.feed;
-      const streaming = !!session?.busy && feed?.busy !== false;
+      const session = target.session, mode = chatMode(target), canStop = !!(stopAction && session?.busy && !target.side), feed = chat.feed;
+      const streaming = (!!session?.busy && feed?.busy !== false) || (!!target.side && side.sending);
+      const extras = target.side ? sideExtras(feed) : [];
       if (!canStop || chat.stopping === session?.id) chat.confirm = false;
       chat.el.dataset.chatSession = session?.id || ''; chat.el.dataset.busy = String(!!session?.busy);
       chat.el.dataset.state = !session ? 'none' : !chatCanRead ? 'unavailable' : chat.failed ? 'error' : chat.loaded ? 'ready' : 'loading';
@@ -3632,18 +3642,19 @@
       chat.sessions.querySelector('[data-chat-step="newer"]').disabled = at <= 0;
       chat.sessions.querySelector('[data-chat-step="older"]').disabled = at < 0 || at >= target.list.length - 1;
       // The log, drawn again only when the feed or the busy mark changed.
-      const signature = JSON.stringify([feed, streaming, !!session]);
+      const signature = JSON.stringify([feed, streaming, !!session, extras]);
       if (signature !== chat.signature) {
         chat.signature = signature; chat.log.replaceChildren();
         if (feed) {
           if (feed.more || feed.truncated) chat.log.append(el('div', 'ag-chat-edge', [feed.more ? 'Older chat is not shown.' : '', feed.truncated ? 'Long text is cut.' : ''].filter(Boolean).join(' ')));
           feed.items.forEach(item => chat.log.append(chatItem(item)));
         }
+        extras.forEach(item => chat.log.append(chatItem(item)));
         if (streaming) { const caret = el('span', 'ag-chat-caret'); caret.setAttribute('aria-hidden', 'true'); chat.log.append(caret); }
         chatScroll();
       }
       chat.el.dataset.streaming = String(streaming);
-      chat.status.textContent = !session ? 'No session yet.' : !chatCanRead ? 'The chat cannot be read here.' : chat.failed ? 'Could not read the chat. Trying again.' : feed?.warning ? feed.warning : chat.loaded && !feed.items.length ? 'Nothing said yet.' : '';
+      chat.status.textContent = !session ? (extras.length ? '' : 'No session yet.') : !chatCanRead ? 'The chat cannot be read here.' : chat.failed ? 'Could not read the chat. Trying again.' : feed?.warning ? feed.warning : chat.loaded && !feed.items.length && !extras.length ? 'Nothing said yet.' : '';
       chat.status.dataset.kind = session && chatCanRead && chat.failed ? 'error' : '';
       // The box: only where the host can send and the session takes it.
       if (mode) {
@@ -3668,7 +3679,7 @@
       const said = chat.result && chat.result.session === session?.id ? chat.result : null;
       chat.note.textContent = said ? said.text : ''; if (said) chat.note.dataset.kind = said.kind; else delete chat.note.dataset.kind;
       // The parts that show, in order; replaced only when the set changes (a box with the focus keeps it).
-      const wanted = [chat.title, target.list.length > 1 ? chat.sessions : null, session ? chat.log : null, chat.status.textContent ? chat.status : null, mode ? chat.compose : null, canStop ? chat.stopRow : null, chat.note.textContent ? chat.note : null].filter(Boolean);
+      const wanted = [chat.title, target.list.length > 1 ? chat.sessions : null, session || extras.length ? chat.log : null, chat.status.textContent ? chat.status : null, mode ? chat.compose : null, canStop ? chat.stopRow : null, chat.note.textContent ? chat.note : null].filter(Boolean);
       const current = [...chat.el.children];
       if (wanted.length !== current.length || wanted.some((part, index) => part !== current[index])) {
         const focused = chat.el.contains(document.activeElement) ? document.activeElement : null;
@@ -3721,6 +3732,123 @@
       return doing.kind === 'tool' ? 'running ' + (oneLine(doing.tool, 80) || 'a tool') : doing.kind === 'reasoning' ? 'thinking' : doing.kind === 'text' ? 'replying' : '';
     }
     chatBuild();
+    // ---- The side chat (n8) ----
+    // A small moon of the orchestrator, drawn only when the snapshot says it is installed. It is not an agent: no lines,
+    // no place in the roster, group or skill editors, never counted as working. It goes round the orchestrator only while
+    // it is busy (on the moons' clock) and stands still otherwise or under reduced motion; in 3D it goes round on a plane of
+    // its own. Choosing it (as an agent is chosen: Enter, right-click, a long press) opens its panel: a quiet line, its model
+    // and spend, its transcript (the chat section) and, where the host gives actions.side, a box to ask it. A reply
+    // is { ok: true, answer } or { ok: false, error }; text from it reaches the page as textContent only.
+    const sideAction = action('side');
+    const SIDE_WAIT_MS = 170000, SIDE_R = 11, SIDE_GAP = 44, SIDE_TILT = .6, SIDE_START = -2.2;
+    const SIDE_AXES = [[1, 0, 0], [0, Math.cos(SIDE_TILT), Math.sin(SIDE_TILT)]];
+    const side = { sending: false, pending: '', local: null, note: null, angle: SIDE_START, raf: 0, last: 0, node: null };
+    function sideInfo() {
+      const state = snapshot?.sidechat;
+      if (!state || typeof state !== 'object' || state.installed !== true) return null;
+      return { session: typeof state.session === 'string' ? state.session : '', model: typeof state.model === 'string' ? oneLine(state.model, 80) : '', busy: state.busy === true, spent: typeof state.spent === 'number' && Number.isFinite(state.spent) && state.spent >= 0 ? state.spent : null };
+    }
+    function sideSpend(value) { return '$' + value.toFixed(value < .1 ? 4 : 2); }
+    function sideMoves() { return !!sideInfo()?.busy && !reducedMotion() && !document.hidden && !!side.node?.isConnected; }
+    function sideRun() { if (alive && !side.raf && sideMoves()) side.raf = requestAnimationFrame(sideTick); }
+    function sideTick(now) {
+      side.raf = 0;
+      if (!alive || !sideMoves()) { side.last = 0; return; }
+      const dt = side.last ? clamp(now - side.last, 0, 100) : 16;
+      side.last = now; side.angle = (side.angle + dt * 2 * Math.PI / MOON_LAP_MS) % (2 * Math.PI);
+      sidePaint();
+    }
+    cleanups.push(() => { if (side.raf) cancelAnimationFrame(side.raf); side.raf = 0; });
+    function sideNode() {
+      if (side.node) return side.node;
+      const node = svg('g', { class: 'ag-sidemoon', 'data-sidechat': '', role: 'button', tabindex: 0, 'aria-label': 'side chat' });
+      const name = svg('text', { class: 'ag-side-name', 'text-anchor': 'middle' });
+      name.textContent = 'side chat';
+      node.append(svg('circle', { class: 'ag-side-halo', r: SIDE_R + 8 }), svg('circle', { class: 'ag-side-core', r: SIDE_R }), name);
+      return side.node = node;
+    }
+    // Where the moon is now: round the orchestrator's place at the moons' phase, flat in 2D, on its own tilted plane in 3D
+    // (as far along the morph as the figure has risen), nearer ones a little larger.
+    function sidePaint() {
+      const info = sideInfo(), hub = hubName && positions.get(hubName);
+      if (!info || !hub) {
+        side.node?.remove(); side.last = 0;
+        if (!info && selected?.type === 'sidechat') closeDetails();
+        return;
+      }
+      const node = sideNode();
+      if (!node.isConnected) sideLayer.append(node);
+      node.dataset.busy = info.busy ? '1' : '0'; node.dataset.selected = String(selected?.type === 'sidechat'); node.setAttribute('aria-pressed', String(selected?.type === 'sidechat'));
+      const reach = (Number(hub.r) || 29) + SIDE_GAP, a = side.angle;
+      let x = hub.x + reach * Math.cos(a), y = hub.y + reach * Math.sin(a), scale = 1, depth = 1;
+      if (orbit.shown && orbit.view) {
+        const o = orbitAim(orbitMoonDir({ axes: SIDE_AXES }, a), orbit.view.turn, orbit.view.elevation), e = orbit.k;
+        x += (hub.x + o.x * reach - x) * e; y += (hub.y - o.up * reach - y) * e;
+        scale = 1 + .25 * o.depth * e; depth = o.depth;
+        node.dataset.plane = [SIDE_AXES[0][1] * SIDE_AXES[1][2] - SIDE_AXES[0][2] * SIDE_AXES[1][1], SIDE_AXES[0][2] * SIDE_AXES[1][0] - SIDE_AXES[0][0] * SIDE_AXES[1][2], SIDE_AXES[0][0] * SIDE_AXES[1][1] - SIDE_AXES[0][1] * SIDE_AXES[1][0]].map(n => n.toFixed(3)).join(',');
+      } else delete node.dataset.plane;
+      node.dataset.side = depth >= 0 ? 'near' : 'far';
+      node.setAttribute('transform', 'translate(' + x.toFixed(2) + ' ' + y.toFixed(2) + ')' + (Math.abs(scale - 1) > .0005 ? ' scale(' + scale.toFixed(4) + ')' : ''));
+      node.querySelector('.ag-side-name').setAttribute('y', Math.sin(a) < 0 && !(orbit.shown && orbit.view) ? -SIDE_R - 8 : SIDE_R + 16);
+      sideRun();
+    }
+    // The question out, the text in the box, the note: what the details' ask box shows.
+    function sideBuild() {
+      side.el = el('section', 'ag-detail-section ag-side');
+      side.box = el('textarea', 'ag-chat-box ag-side-box'); side.box.rows = 2; side.box.spellcheck = false; side.box.dataset.sideBox = '';
+      side.box.placeholder = 'Ask the side chat…'; side.box.setAttribute('aria-label', 'Ask the side chat'); side.box.setAttribute('aria-keyshortcuts', 'Enter');
+      side.send = el('button', 'ag-text-button ag-side-send', 'Send'); side.send.type = 'button'; side.send.dataset.sideSend = '';
+      side.count = el('p', 'ag-chat-count ag-side-count'); side.count.setAttribute('aria-live', 'polite');
+      side.noteEl = el('p', 'ag-chat-result ag-side-note'); side.noteEl.setAttribute('aria-live', 'polite');
+      const row = el('div', 'ag-route-actions'); row.append(side.count, side.send);
+      side.el.append(side.box, row, side.noteEl);
+      listen(side.box, 'keydown', event => {
+        if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
+        event.preventDefault(); sideSend();
+      });
+      listen(side.box, 'input', sidePanel);
+      listen(side.send, 'click', () => sideSend());
+    }
+    sideBuild();
+    function sideSay(said, kind) { side.note = said ? { text: said, kind } : null; }
+    function sidePanel() {
+      const info = sideInfo(), counted = goalCount(side.box.value), blocked = side.sending || !!info?.busy;
+      side.send.textContent = side.sending ? 'Asking…' : 'Send';
+      if (blocked) side.send.setAttribute('aria-disabled', 'true'); else side.send.removeAttribute('aria-disabled');
+      side.el.dataset.state = side.sending ? 'asking' : info?.busy ? 'busy' : 'ready';
+      side.count.textContent = counted ? counted.said : ''; if (counted) side.count.dataset.kind = counted.kind; else delete side.count.dataset.kind;
+      side.noteEl.textContent = side.note ? side.note.text : ''; if (side.note) side.noteEl.dataset.kind = side.note.kind; else delete side.noteEl.dataset.kind;
+    }
+    // What the chat adds to the feed until the feed has it: the question out (pending) or the question and its answer.
+    function sideExtras(feed) {
+      const items = feed ? feed.items : [], last = items[items.length - 1];
+      if (side.pending) {
+        const text = side.pending.slice(0, CHAT_TEXT);
+        return last && last.kind === 'user' && last.text.trim() === text.trim() ? [] : [{ kind: 'user', time: 0, text, cut: side.pending.length > CHAT_TEXT, pending: true }];
+      }
+      return side.local ? [{ kind: 'user', time: 0, text: side.local.question.slice(0, CHAT_TEXT) }, { kind: 'text', time: 0, text: side.local.answer.slice(0, CHAT_TEXT) }] : [];
+    }
+    function sideSync() { sidePaint(); sidePanel(); }
+    async function sideSend() {
+      const info = sideInfo();
+      if (!sideAction || !info || side.sending) return;
+      const value = side.box.value, question = value.trim();
+      if (info.busy) { sideSay('The side chat is busy. Ask again when it has answered.', 'error'); sidePanel(); return; }
+      if (!question) { sideSay('Write a question first.', 'error'); sidePanel(); return; }
+      if (chars(value) > RUN_GOAL_CHARS) { sideSay(goalCount(value).said, 'error'); sidePanel(); return; }
+      side.sending = true; side.pending = question; side.local = null; sideSay('', ''); sidePanel(); chatSync();
+      let reply;
+      try { reply = await within(sideAction(question), SIDE_WAIT_MS); }
+      catch (error) { reply = { ok: false, error: error?.noAnswer ? 'No answer yet. Look in the side chat before you ask again.' : error?.message }; }
+      side.sending = false; side.pending = '';
+      if (!alive) return;
+      if (reply && reply.ok === true) {
+        if (side.box.value === value) side.box.value = '';
+        side.local = typeof reply.answer === 'string' && reply.answer ? { question, answer: reply.answer } : null; sideSay('', '');
+        chatSync(); chatReadAgain();
+      } else { sideSay(oneLine(reply?.error) || 'Not answered.', 'error'); chatSync(); }
+      sidePanel();
+    }
     function renderDetail(force = false) {
       if (!selected || !snapshot) return;
       const graph = snapshot.graph;
@@ -3754,7 +3882,7 @@
       chatSync();
       const scroll = detailScroll.scrollTop;
       const focused = document.activeElement;
-      const focusedChat = chat.el.contains(focused) ? focused : null;
+      const focusedChat = chat.el.contains(focused) || side.el.contains(focused) ? focused : null;
       const focusedStep = detailScroll.contains(focused) ? focused.closest('[data-step]')?.dataset.step : null;
       // A skill control with focus gets it back after the rebuild (the same control of the same skill).
       const focusedSkill = detailScroll.contains(focused) ? SKILL_CONTROLS.find(key => key in focused.dataset) : null, focusedValue = focusedSkill ? focused.dataset[focusedSkill] : null;
@@ -3823,6 +3951,18 @@
           section(detailScroll, 'Step pairs', loop.pairs, false, pair => pair[0] + ' → ' + pair[1] + ' → ' + pair[0]);
           section(detailScroll, 'Artifacts sent back', loop.artifacts.length ? loop.artifacts : 'None');
         }
+      } else if (selected.type === 'sidechat') {
+        eyebrow.textContent = 'Side chat';
+        detailScroll.append(el('h2', 'ag-detail-title', 'side chat'));
+        const info = sideInfo();
+        if (!info) detailScroll.append(el('p', 'ag-detail-intro', 'Unavailable'));
+        else {
+          detailScroll.append(el('p', 'ag-detail-intro ag-side-about', 'Reads the main chat and task graph and answers only you. It changes nothing.'));
+          const line = [info.model, info.spent === null ? '' : sideSpend(info.spent)].filter(Boolean).join(' · ');
+          if (line) detailScroll.append(el('p', 'ag-detail-activity ag-side-model', line));
+          detailScroll.append(chat.el);
+          if (sideAction) { sidePanel(); detailScroll.append(side.el); }
+        }
       } else if (selected.type === 'agent') {
         eyebrow.textContent = 'Agent';
         if (!agent) { detailScroll.append(el('h2', 'ag-detail-title', 'Unavailable')); return; }
@@ -3883,6 +4023,7 @@
         renderRunDetail(graph);
       }
       detailScroll.scrollTop = scroll;
+      if (side.el.isConnected && focusedChat && side.el.contains(focusedChat) && document.activeElement !== focusedChat) focusedChat.focus({ preventScroll: true });
       if (chat.el.isConnected) { chatScroll(); if (focusedChat?.isConnected && document.activeElement !== focusedChat) focusedChat.focus({ preventScroll: true }); }
       if (focusedStep) Array.from(detailScroll.querySelectorAll('[data-step]')).find(row => row.dataset.step === focusedStep)?.querySelector('summary').focus({ preventScroll: true });
       if (focusedSkill && !detailScroll.contains(document.activeElement)) Array.from(detailScroll.querySelectorAll('button, textarea')).find(item => item.dataset[focusedSkill] === focusedValue)?.focus({ preventScroll: true });
@@ -3992,6 +4133,8 @@
       if (element.closest('[data-learning]')) return { type: 'learning', key: '', origin: element.closest('[data-learning]') };
       const node = element.closest('[data-agent]');
       if (node && nodeLayer.contains(node)) return { type: 'agent', key: node.dataset.agent, origin: node };
+      const moon = element.closest('[data-sidechat]');
+      if (moon && sideLayer.contains(moon)) return { type: 'sidechat', key: '', origin: moon };
       const route = element.closest('[data-route]');
       if (route) return { type: 'flow', key: route.dataset.route, origin: route };
       const member = element.closest('[data-team-line]');
@@ -5216,6 +5359,7 @@
         if (resized && camera.initialized) scheduleResize(); else if (settle) { layoutChange = settle; settleCamera(); }
         transform();
       }
+      sidePaint();
       orbitMark();
       // Back in the flat view the usual rules go on: what a refusal in 3D left typed and not saved is saved.
       if (draw && orbit.want === '2d') flushTyping();
@@ -5379,7 +5523,7 @@
     // Everything in the details, the + and its menu that would change something is refused in 3D: typing in a field,
     // pressing a control (a button, a choice, a box to tick). Reading stays: closing, the links between agents, opening
     // a session or a skill's text, the notices, the folds.
-    const ORBIT_READING = '.ag-chat, .ag-close, .ag-family-link, .ag-open-session, .ag-skill-open, .ag-spend-row, .ag-run-notices, summary, [data-output-open]';
+    const ORBIT_READING = '.ag-chat, .ag-side, .ag-close, .ag-family-link, .ag-open-session, .ag-skill-open, .ag-spend-row, .ag-run-notices, summary, [data-output-open]';
     // call()'s part: while anything but the flat view shows no write is asked of the host, whatever started it (a key, a
     // save queued in 2D, the pause after typing, leaving a box, the page hidden, undo); reads are. Refused with the same
     // sentence; whoever asked keeps the typing (marked not saved) and the undo step; back in 2D the usual rules go on.
@@ -5747,6 +5891,8 @@
     listen(viewport, 'keydown', event => {
       const ring = event.target.closest('[data-learning]');
       if (ring && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); select('learning', '', ring); return; }
+      const moon = event.target.closest('[data-sidechat]');
+      if (moon && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); select('sidechat', '', moon); return; }
       const work = event.target.closest('[data-work-loop-id]');
       if (work && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); select('work-loop', work.dataset.workLoopId, work); return; }
       const loop = event.target.closest('[data-loop-id]');
@@ -5940,12 +6086,13 @@
     function render(data) {
       const previousTeam = activeTeam;
       snapshot = { ...data, agents: prepareRoster(data) };
-      const stamp = JSON.stringify([data.agents, data.graph, data.warnings, data.totals, data.escalation, data.root?.wear, data.structure, data.skill_warnings, data.skills, data.roster, data.mcp]);
+      const stamp = JSON.stringify([data.agents, data.graph, data.warnings, data.totals, data.escalation, data.root?.wear, data.structure, data.skill_warnings, data.skills, data.roster, data.mcp, data.sidechat]);
       if (stamp !== renderStamp) { renderStamp = stamp; renderRevision++; }
       // The host's answer stands for an agent's skills only until a snapshot shows the same list.
       skillOverride.forEach((list, name) => { const agent = (data.agents || []).find(item => item?.name === name); if (!agent || JSON.stringify(agent.skills) === JSON.stringify(list)) skillOverride.delete(name); });
       indexSteps();
       chatSync();
+      sideSync();
       if (activeTeam !== previousTeam) { rememberTeam(previousTeam); restoreTeam(activeTeam); }
       if (trail.some(name => !shownAgents.has(name))) dropTrail();
       const graph = data.graph;

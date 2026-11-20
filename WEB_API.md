@@ -121,7 +121,7 @@ Rules:
 - The reserved agent name `user` (a `human` node) is not an agent and never appears in `agents`.
 - `graphs` lists every graph found, newest first.
 - `setup` (a live source; the demo has sample names) is where the default preset stands and what is saved: `{"preset", "presets": [names], "override": null|"env"|"project", "saved": [{"name", "saved", "preset", "rev"}], "undo"}`. `preset` is the top-level `preset` of the plugin's preset file (`null`, with `presets` empty and an `error` text, when the file cannot be read), `presets` the names of its presets in file order, `override` what takes precedence over it when OpenCode starts (`"env"` when `OH_MY_OPENCODE_SLIM_PRESET` is set, `"project"` when a `.opencode/oh-my-opencode-slim.json[c]` in the server's folder or one above it sets a preset; by name only, never its contents), `saved` the setups under `setups/` (`saved` is the UTC time, `rev` is the `expect` value for a replace, restore or remove; a setup whose manifest cannot be read has `"damaged": text`), `undo` the path of the newest undo record in the backups folder (`<date>-setups/...`), or `null`. It is cheap: one file parsed and the manifests listed; no setup file is hashed. A switch of the preset applies at the next start of OpenCode.
-- `sidechat` (a live source; the demo has a sample) is the side chat's state: `{"installed": bool, "session": the side session id or null, "model": "provider/model" or null, "busy": bool (a question is being answered), "spent": US dollars the side session has cost, present only when known}` (`agentgraph sidechat status`). It is read only; there is no route that asks the side chat a question.
+- `sidechat` (a live source; the demo has a sample) is the side chat's state: `{"installed": bool, "session": the side session id or null, "model": "provider/model" or null, "busy": bool (a question is being answered), "spent": US dollars the side session has cost, present only when known}` (`agentgraph sidechat status`). It is read only; there is no route that asks the side chat a question (a Desktop host asks it through `options.actions.side`, section 4). The view draws it as a small moon named "side chat" only when `installed` is true.
 - All text is passed through as data. The interface must treat it as untrusted text and never as markup.
 
 ## 2. The commands
@@ -436,6 +436,24 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   stop: optional (sessionID) => Promise of { ok: true } or { ok: false, error }. With it, Stop shows while the
 //   session is busy; it asks once ("Stop this agent?", Stop / Keep going) before it calls, then says the result.
 //   Without send and stop (the web page: it has neither) the chat is a read-only transcript: no box, no Stop.
+// options.actions.side (the side chat's moon and panel, loop n8). Optional: (text) => Promise of { ok: true,
+//   answer } or { ok: false, error }. It asks the side chat one question (Desktop runs `agentgraph sidechat ask
+//   --main <root session> --text-file - --json`, the question on stdin only, 150 s at most) and changes nothing in
+//   the setup, so it works in 3D too. The moon: when snapshot.sidechat.installed is true (section 3) one small moon
+//   named "side chat" sits beside the orchestrator; when it is not, nothing is drawn or said. It is not an agent: no
+//   lines, never a path's end, not in the roster, group or skill editors, never counted in "N working" or the
+//   "! N" badge. It goes round the orchestrator (the moons' lap) only while sidechat.busy and not with reduced
+//   motion, and stands still otherwise; in 3D it goes round on a tilted plane of its own. Choosing it as an agent is
+//   chosen (Enter or Space on it, a right-click, a long press) opens its panel: one quiet line (it reads the main
+//   chat and the task graph, answers only you, changes nothing), its model and spend when known, and its chat: the
+//   transcript of sidechat.session, read through actions.chat (or /api/chat on the web page), with no Stop, no
+//   steer and no session stepper; with no session yet, one quiet line. The ask box shows only when the host gives
+//   `side`: Enter sends, Shift+Enter is a newline, empty is refused, at most 4,000 characters (over it is said, not
+//   sent), one question at a time and none while sidechat.busy. The question shows at once as pending ("waiting")
+//   with the chat's caret moving only while it waits (up to about 2 minutes; the panel stays usable). The box clears
+//   only on ok; the answer shows from the reply and then from the next read of the session. An error is one line
+//   and keeps the text. The web page gives no `side`: it shows the transcript only. Questions and answers reach the
+//   page as text only: no markup, link or image is made from them.
 //   The chat, oldest first: `reasoning` quieter than `text` (italic, muted, a rule at the left), `tool` as its name
 //   and state only (never its input or output), `user` marked (and "waiting" while `pending`), `note` as the one
 //   word "note", a `cut` item and a `truncated` or `more` feed saying so quietly, following the newest line unless

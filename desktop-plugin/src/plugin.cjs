@@ -67,6 +67,8 @@ const CHAT_LIMIT_DEFAULT = 40;
 const CHAT_LIMIT_MAX = 200;
 const CHAT_SEND_MAX_CHARS = 4000;
 const FLOW_TIMEOUT_MS = 10000;
+const SIDE_TIMEOUT_MS = 150000; // a question to the side chat can take two minutes; the view waits a little longer
+const SIDE_MAX_CHARS = 4000;
 const FLOW_MAX_BYTES = 1024 * 1024;
 // The commands' own limits, in characters: an agent's description and prompt, a skill's text, a group's instruction.
 const DESCRIPTION_MAX_CHARS = 300;
@@ -295,6 +297,13 @@ function snapshotIpc(pluginId) {
         // as the command printed it, or {"error": "..."}.
         chat: {
           input: Schema.Struct({ session: Schema.String, limit: Schema.Number }),
+          output: Schema.String,
+        },
+        // Ask the side chat one question (`agentgraph sidechat ask --main ID --text-file - --json`). Input: the main
+        // session's id and the question (sent on stdin, never in the arguments). Output: the command's JSON text,
+        // {"answer": "...", ...} or {"error": "..."}.
+        side: {
+          input: Schema.Struct({ main: Schema.String, text: Schema.String }),
           output: Schema.String,
         },
       },
@@ -859,6 +868,29 @@ function createChatRunner(deps) {
   };
 }
 
+// Main process: `python3 -P -m agentgraph.sidechat ask --main ID --text-file - --json` without a shell. The question goes
+// to the command on stdin, never on the command line (and so never into a log); the main session's id and the question
+// are checked here as the window checks them. The answer is the command's document, or { error: one line }.
+function createSideRunner(deps) {
+  const fail = (message) => ({ error: oneLine(message) });
+  function command(input) {
+    if (!isPlainObject(input)) return fail("Bad side chat request.");
+    const { main, text } = input;
+    if (deps.demo) return fail("The demo has no side chat.");
+    if (typeof main !== "string" || !SESSION_ID.test(main)) return fail("The session id is not valid.");
+    if (typeof text !== "string" || !text.trim()) return fail("Write a question first.");
+    if (text.includes("\0") || Array.from(text).length > SIDE_MAX_CHARS) return fail("Bad side chat request.");
+    return { args: ["-P", "-m", "agentgraph.sidechat", "ask", "--main", main, "--text-file", "-", "--json"], stdin: text };
+  }
+  const accept = (doc) => (typeof doc.answer === "string" ? doc : null);
+  return {
+    side(input) {
+      const request = command(input);
+      return request.error ? Promise.resolve(request) : runCommand(deps, request, "The side chat", accept);
+    },
+  };
+}
+
 function nonEmptyString(value) {
   return typeof value === "string" && value.trim() !== "";
 }
@@ -931,6 +963,8 @@ function main(ctx) {
   // The chat is read as the snapshot is: the same time limit and size cap.
   const chats = createChatRunner(Object.assign(commandDeps(SNAPSHOT_MAX_BYTES), { timeoutMs: SNAPSHOT_TIMEOUT_MS }));
 
+  const sides = createSideRunner(Object.assign(commandDeps(SNAPSHOT_MAX_BYTES), { timeoutMs: SIDE_TIMEOUT_MS }));
+
   ctx.provide(snapshotIpc(ctx.id), {
     snapshot: (input) => runner.snapshot(input).then((doc) => JSON.stringify(doc)),
     flow: (input) => flows.flow(input).then((doc) => JSON.stringify(doc)),
@@ -940,6 +974,7 @@ function main(ctx) {
     team: (input) => groups.team(input).then((doc) => JSON.stringify(doc)),
     output: (input) => outputs.output(input).then((doc) => JSON.stringify(doc)),
     chat: (input) => chats.chat(input).then((doc) => JSON.stringify(doc)),
+    side: (input) => sides.side(input).then((doc) => JSON.stringify(doc)),
   });
 
   if (ctx.log && typeof ctx.log.write === "function") {
@@ -1001,7 +1036,7 @@ function renderPanel(ctx, solid, props) {
 
   // The sessions of the last snapshot this panel read (the root and each agent's), for the session it was read for:
   // a message or a stop is accepted for one of these only.
-  let known = { key: undefined, ids: new Set() };
+  let known = { key: undefined, ids: new Set(), root: "" };
   const rememberSessions = (doc) => {
     const ids = new Set();
     const add = (id) => {
@@ -1011,7 +1046,7 @@ function renderPanel(ctx, solid, props) {
     for (const agent of Array.isArray(doc.agents) ? doc.agents : []) {
       if (isPlainObject(agent) && Array.isArray(agent.sessions)) for (const item of agent.sessions) add(isPlainObject(item) ? item.id : undefined);
     }
-    known = { key: sessionKey(), ids };
+    known = { key: sessionKey(), ids, root: isPlainObject(doc.root) && typeof doc.root.id === "string" && SESSION_ID.test(doc.root.id) ? doc.root.id : "" };
   };
   const isKnownSession = (id) => known.key !== undefined && known.key === sessionKey() && known.ids.has(id);
 
@@ -1292,6 +1327,30 @@ function renderPanel(ctx, solid, props) {
     if (typeof doc.session !== "string" || !Array.isArray(doc.items)) throw new Error("The chat command did not answer with a chat.");
     return doc;
   };
+  // Asking the side chat: one question about the main chat (the root session of the last snapshot this panel read), asked
+  // through main (`agentgraph sidechat ask`), answered { ok: true, answer } or { ok: false, error } (one short line), never
+  // thrown. Neither the question nor the answer is written down anywhere here.
+  const side = async (text) => {
+    try {
+      if (!alive) return { ok: false, error: "The panel is closed." };
+      if (typeof text !== "string" || !text.trim()) return { ok: false, error: "Write a question first." };
+      if (text.includes("\0") || Array.from(text).length > SIDE_MAX_CHARS) return { ok: false, error: "The question is longer than " + SIDE_MAX_CHARS + " characters." };
+      if (known.key === undefined || known.key !== sessionKey() || !known.root) return { ok: false, error: "The main chat is not in the agent graph." };
+      const reply = await ctx.main(snapshotIpc(ctx.id)).side({ main: known.root, text }, { signal: ctx.signal });
+      let doc;
+      try {
+        doc = JSON.parse(reply);
+      } catch (_) {
+        return { ok: false, error: "The side chat did not answer with JSON." };
+      }
+      if (!isPlainObject(doc)) return { ok: false, error: "The side chat did not answer." };
+      if (typeof doc.error === "string" && doc.error) return { ok: false, error: oneLine(doc.error) };
+      if (typeof doc.answer !== "string") return { ok: false, error: "The side chat did not answer." };
+      return { ok: true, answer: doc.answer };
+    } catch (error) {
+      return { ok: false, error: oneLine(errorMessage(error)) };
+    }
+  };
   // Steering and stopping use the host's own client (props.session.server.client.session), read where used, and answer
   // { ok: true } or { ok: false, error } (one short line) and never throw. They are refused, without calling the host,
   // for a session that is not in the last snapshot this panel read. Only the id, a count or a short error line is ever
@@ -1329,7 +1388,7 @@ function renderPanel(ctx, solid, props) {
   // The page shows a control only for an action it is given: send and stop only where the host has the call.
   const demoMode = ctx.options && ctx.options.demo === true;
   const hostHas = (name) => typeof sessionClient()?.[name] === "function";
-  const actions = demoMode ? { chat } : { flow, skills, roster, skillfile, team, output, run, chat };
+  const actions = demoMode ? { chat } : { flow, skills, roster, skillfile, team, output, run, chat, side };
   if (!demoMode && hostHas("prompt")) actions.send = send;
   if (!demoMode && hostHas("interrupt")) actions.stop = stop;
 

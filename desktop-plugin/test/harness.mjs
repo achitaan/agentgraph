@@ -478,7 +478,8 @@ await check("main registers exactly one Ipc (<id>.snapshot) with snapshot, flow,
   // Round 2: the skills method joined snapshot and flow.
   // n110: the output method (a step's output: read, write, restore) joined them.
   // n14: the chat method (one session's recent chat: its id and a number of messages) joined them.
-  assert.deepEqual(Object.keys(token.spec.methods), ["snapshot", "flow", "skills", "roster", "skillfile", "team", "output", "chat"]);
+  // n8: the side method (one question to the side chat, sent on stdin) joined them (the key list above gains "side").
+  assert.deepEqual(Object.keys(token.spec.methods), ["snapshot", "flow", "skills", "roster", "skillfile", "team", "output", "chat", "side"]);
   assert.deepEqual(Object.keys(token.spec.methods.chat.input.fields), ["session", "limit"]);
   assert.equal(token.spec.methods.chat.input.fields.session._tag, "String");
   assert.equal(token.spec.methods.chat.input.fields.limit._tag, "Number");
@@ -2615,6 +2616,146 @@ await check("send, stop and chat: no message text reaches a log, the console or 
   const everything = JSON.stringify([seen, t.logs, t.log]);
   assert.equal(everything.includes(MARK), false, "message text was logged or put on a command line");
   assert.equal(JSON.stringify(t.asked).includes(MARK), false, "message text crossed the bridge");
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// n8: the side chat: ask it one question through the bridge (`agentgraph sidechat ask`), the question on stdin.
+
+const SIDE_ANSWER = { answer: "It is fine <b>really</b>", session: "ses_side", model: "openai/gpt-6-luna", fallback: false, spent: 0.004 };
+const sideSnapshot = (root = "ses_a") => ({ version: 1, root: { id: root }, agents: [{ name: "orchestrator", sessions: [{ id: root, busy: false }] }] });
+const plainReply = (answer) => JSON.parse(JSON.stringify(answer));
+
+await check("side chat: main runs `python3 -P -m agentgraph.sidechat ask --main ROOT --text-file - --json` in home with a 150 s limit and the question on stdin; the reply is { ok: true, answer }", async () => {
+  const python = chatPython("fake-side-python", `cat > /dev/null; printf '%s\\n' '${JSON.stringify(SIDE_ANSWER)}'`);
+  const t = chatWindow({ python, client: chatClient().client, snapshot: sideSnapshot("ses_root1") });
+  try {
+    assert.equal(typeof t.actions.side, "function", "the window gives the page a side action");
+    await t.options.fetchSnapshot();
+    const question = "What is it doing? $(touch x) `id` \"quoted\"\nsecond line <b>x</b>";
+    const reply = await t.actions.side(question);
+    assert.deepEqual(plainReply(reply), { ok: true, answer: SIDE_ANSWER.answer });
+    assert.deepEqual(Object.keys(reply), ["ok", "answer"]);
+    assert.equal(t.log.length, 1);
+    assert.equal(t.log[0].file, python);
+    assert.deepEqual(t.log[0].args, ["-P", "-m", "agentgraph.sidechat", "ask", "--main", "ses_root1", "--text-file", "-", "--json"]);
+    assert.equal(t.log[0].cwd, ORCHESTRATION);
+    assert.equal(t.log[0].timeout, 150000, "the side chat's time limit");
+    assert.equal(t.log[0].stdin, question, "the question went on stdin as it was");
+    assert.equal(t.log[0].args.some((arg) => arg.includes("What is it") || arg.includes("second line")), false, "the question is in the arguments");
+    assert.deepEqual(t.asked.map((item) => item.method), ["side"], "one bridge call per question");
+    assert.deepEqual(Object.keys(t.asked[0].input), ["main", "text"]);
+    // The 4,000 characters (counted as characters) are the most it takes.
+    assert.equal((await t.actions.side("x".repeat(4000))).ok, true);
+    assert.equal((await t.actions.side("\u{1F600}".repeat(4000))).ok, true);
+    assert.equal(t.log.length, 3);
+  } finally {
+    t.rendered.dispose();
+  }
+});
+
+await check("side chat: an error document, a failing command, a missing answer, no JSON and a missing Python are each one short line { ok: false, error }", async () => {
+  const cases = [
+    ["error line", `cat > /dev/null; printf '%s\\n' '{"error": "the side chat is not installed.\\nRun agentgraph sidechat install"}'; exit 1`, /^the side chat is not installed\. Run agentgraph sidechat install$/],
+    ["error line, exit 0", `cat > /dev/null; printf '%s\\n' '{"error": "no model"}'`, /^no model$/],
+    ["no answer field", `cat > /dev/null; printf '%s\\n' '{"session": "ses_side"}'`, /^The side chat failed/],
+    ["no JSON, stderr", `cat > /dev/null; echo "boom now" >&2; exit 3`, /^The side chat failed: boom now$/],
+    ["not JSON", `cat > /dev/null; echo "plain words"`, /^The side chat failed\.$/],
+    ["answer not a string", `cat > /dev/null; printf '%s\\n' '{"answer": 5}'`, /^The side chat failed/],
+    ["old python", `cat > /dev/null; echo "Unknown option: -P" >&2; exit 2`, /Python 3\.11 or newer/],
+  ];
+  for (const [name, script, expected] of cases) {
+    const t = chatWindow({ python: chatPython("side-case-python", script), client: chatClient().client, snapshot: sideSnapshot() });
+    try {
+      await t.options.fetchSnapshot();
+      const reply = await t.actions.side("Why?");
+      assert.deepEqual(Object.keys(reply), ["ok", "error"], name);
+      assert.equal(reply.ok, false, name);
+      assert.match(reply.error, expected, name);
+      assert.ok(reply.error.length > 0 && reply.error.length <= 300 && !/[\r\n]/.test(reply.error), name + ": one short line");
+    } finally {
+      t.rendered.dispose();
+    }
+  }
+  const t = chatWindow({ python: path.join(TMP, "no-such-python"), client: chatClient().client, snapshot: sideSnapshot() });
+  try {
+    await t.options.fetchSnapshot();
+    const reply = await t.actions.side("Why?");
+    assert.equal(reply.ok, false);
+    assert.match(reply.error, /Python was not found/);
+  } finally {
+    t.rendered.dispose();
+  }
+});
+
+await check("side chat: an empty, over-long or NUL question, no snapshot yet and another session's root never reach execFile; the main method refuses the same", async () => {
+  const python = chatPython("never-side-python", `cat > /dev/null; printf '%s\\n' '${JSON.stringify(SIDE_ANSWER)}'`);
+  const t = chatWindow({ python, client: chatClient().client, snapshot: sideSnapshot() });
+  try {
+    const refused = (answer) => {
+      assert.deepEqual(Object.keys(answer), ["ok", "error"]);
+      assert.equal(answer.ok, false);
+      assert.ok(answer.error.length > 0 && answer.error.length <= 300 && !/[\r\n]/.test(answer.error));
+    };
+    refused(await t.actions.side("Before any snapshot"));
+    await t.options.fetchSnapshot();
+    for (const text of ["", "  \n ", undefined, null, 7, {}, ["x"], "x".repeat(4001), "\u{1F600}".repeat(4001), "has\0nul"]) refused(await t.actions.side(text));
+    t.setSession({ key: "srv\nses_z", id: "ses_z", directory: ORCHESTRATION, server: {} });
+    refused(await t.actions.side("Another session"));
+    assert.equal(t.log.length, 0, "execFile ran for a refused question");
+    // Main checks again whatever the window sent it.
+    const loaded = loadMain(CODE, []);
+    const m = mainContext({ home: ORCHESTRATION, python });
+    resolveDefault(loaded.module.exports).main(m.ctx);
+    const impl = m.provided[0].impl;
+    const direct = [{ main: "", text: "q" }, { main: "--x", text: "q" }, { main: "ses a", text: "q" }, { main: "ses_a\n", text: "q" }, { main: "ses_a", text: "" }, { main: "ses_a", text: " \n" }, { main: "ses_a", text: "x".repeat(4001) }, { main: "ses_a", text: "a\0b" }, { main: 5, text: "q" }, { main: "ses_a", text: 5 }, null, "ses_a", []];
+    for (const input of direct) {
+      const doc = JSON.parse(await impl.side(input));
+      assert.equal(typeof doc.error, "string", JSON.stringify(input));
+      assert.ok(doc.error.length > 0 && !/[\r\n]/.test(doc.error));
+    }
+    assert.equal(JSON.parse(await impl.side({ main: "ses_a", text: "fine" })).answer, SIDE_ANSWER.answer);
+  } finally {
+    t.rendered.dispose();
+  }
+});
+
+await check("side chat: the demo gives the page no side action and spawns nothing", async () => {
+  const demo = chatWindow({ python: chatPython("demo-side-python", `echo '{"answer":"x"}'`), demo: true, client: chatClient().client, snapshot: sideSnapshot() });
+  try {
+    assert.equal("side" in demo.actions, false, "the demo has a side action");
+    assert.deepEqual(Object.keys(demo.actions), ["chat"]);
+    assert.equal(demo.log.length, 0);
+  } finally {
+    demo.rendered.dispose();
+  }
+});
+
+await check("side chat: the question and the answer are in no log, command line or bridge record of main or the window", async () => {
+  const MARK = "SIDE-MARK-9f3a41";
+  const seen = [];
+  const original = {};
+  for (const name of ["log", "info", "warn", "error", "debug"]) {
+    original[name] = console[name];
+    console[name] = (...args) => seen.push(args.map(String).join(" "));
+  }
+  const python = chatPython("mark-side-python", `cat > /dev/null; printf '%s\\n' '{"answer":"${MARK} answer"}'`);
+  const t = chatWindow({ python, client: chatClient().client, snapshot: sideSnapshot() });
+  try {
+    await t.options.fetchSnapshot();
+    assert.equal((await t.actions.side(MARK + " question")).ok, true);
+    await t.actions.side(MARK + "x".repeat(4001));
+  } finally {
+    for (const [name, fn] of Object.entries(original)) console[name] = fn;
+    t.rendered.dispose();
+  }
+  assert.equal(JSON.stringify([seen, t.logs, t.log.map(({ stdin, ...rest }) => rest)]).includes(MARK), false, "the question or answer was logged or put on a command line");
+  assert.equal(t.log[0].stdin, MARK + " question");
+});
+
+await check("the bundle carries the side chat: the main command, the window's action and the page's side chat code", () => {
+  assert.match(CODE, /agentgraph\.sidechat/);
+  assert.match(CODE, /const sideAction = action\('side'\)/);
+  assert.match(CODE, /ag-sidemoon/);
 });
 
 await check("the bundle carries the chat: the main command, the window's actions and the page's chat code; the live bundle is the build of the current sources", () => {
