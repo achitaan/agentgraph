@@ -5,9 +5,13 @@
   const EDGE = 12, SLOT = 104, GROUP_GAP = 34, SEAT_DISTANCE = 68, MEMBER_DISTANCE = 96, MEMBER_REACH = 40;
   // A full loop's agents sit on a circle of their own: neighbours RING_GAP apart, the circle never under RING_MIN.
   const RING_GAP = 124, RING_MIN = 82, RING_MS = 240;
+  // Out of the canvas counts against a place, but less than running into a circle or a name (n103).
+  const RING_OUT = .25;
   const DETAIL_WIDTH = 340; // the details panel beside a wide graph (style.css: .ag-details-open .ag-network margin)
   const READABLE = 11 / 12; // agent names are 12 px: the automatic view never shows them under 11 px; it pans instead
   let instance = 0;
+  // The bottom sheet's height the user dragged to, per positions key, while the page is open (n103 item 7).
+  const sheetShares = new Map();
   const STATES = { pending: 'Waiting', waiting: 'Waiting', running: 'Working', returned: 'Returned', passed: 'Passed', failed: 'Failed', blocked: 'Blocked' };
   const LOOP_STATES = { working: 'Revising', checking: 'In review', sent_back: 'Sent back', closed: 'Done', idle: 'Idle' };
   const WORK_LOOP_STATES = { working: 'Working', waiting: 'Waiting', stuck: 'Stuck', closed: 'Done', idle: 'Idle' };
@@ -103,9 +107,15 @@
     // sessions under one key; an agent never moved keeps its automatic place. Nothing goes to the structure folder.
     const POSITIONS_KEY = typeof options.positionsKey === 'string' && options.positionsKey ? options.positionsKey : 'agentgraph.positions.v1';
     const moves = loadMoves();
+    // The details sheet's height in a narrow pane (n103 item 7): the user's share of the pane (null: the default),
+    // kept for the page and, where storage works, across reloads; clamped to the pane whenever it is used.
+    const SHEET_KEY = POSITIONS_KEY + '.sheet', SHEET_MIN = 120, SHEET_GRAPH = 100, SHEET_FIGURES = 28;
+    let sheetShare = loadSheetShare(), sheetDrag = null;
     // Presses since the last drag that moved something: a double-click counts only when its two clicks were clean.
     let cleanPresses = Infinity;
     const flowErrors = new Map(), flowHistory = [], routeViews = new Map(), freshRoutes = new Set(), timers = new Set();
+    // Whether the details were open at the last resize, and the automatic view from before they opened (n103).
+    let detailsWere = false, closedView = null;
     let layoutSignature = '', layoutFrame = null, resizeFrame = null, generation = 0, renderStamp = '', layoutChange = { changed: [], steady: false };
     let arrangement = root.clientWidth > 0 && root.clientWidth <= 650 ? 'compact' : 'wide';
     let agentsByName = new Map(), stepsByAgent = new Map(), stepsById = new Map(), nodeOwners = new Map(), shownAgents = new Map();
@@ -238,7 +248,10 @@
     close.type = 'button'; close.setAttribute('aria-label', 'Close');
     detailHeader.append(eyebrow, close);
     const detailScroll = el('div', 'ag-detail-scroll');
-    detail.append(detailHeader, detailScroll); root.append(notice, network, detail);
+    // The sheet's grab handle (narrow panes only): dragging it or its arrow keys resize the sheet, nothing else.
+    const sheetHandle = el('div', 'ag-sheet-handle');
+    sheetHandle.tabIndex = 0; sheetHandle.setAttribute('role', 'separator'); sheetHandle.setAttribute('aria-orientation', 'horizontal'); sheetHandle.setAttribute('aria-label', 'Details height');
+    detail.append(sheetHandle, detailHeader, detailScroll); root.append(notice, network, detail);
 
     function renderActivity() {
       const working = snapshot ? visibleAgents.filter(agent => agent.busy > 0).length : 0;
@@ -416,8 +429,8 @@
       const inset = Math.max(EDGE, topInset());
       const outside = top < inset || bottom > height - EDGE || left < EDGE || right > width - EDGE;
       if (!outside) return;
-      if (top < inset || bottom > height - EDGE) camera.y += (height + inset - EDGE) / 2 - (top + bottom) / 2;
-      if (left < EDGE || right > width - EDGE) camera.x += width / 2 - (left + right) / 2;
+      // Only as far as it takes, so a view the user placed moves least (n103).
+      revealNames([selected.key]);
       clampPan(); clearOfCovers(point); transform();
     }
     function fitView(userAction) {
@@ -464,9 +477,12 @@
       const spans = points.map(p => { const e = extentOf(p); return { left: (p.x + e.left) * s + camera.x, right: (p.x + e.right) * s + camera.x, top: (p.y + e.top) * s + camera.y, bottom: (p.y + e.bottom) * s + camera.y }; });
       const box = { left: Math.min(...spans.map(b => b.left)), right: Math.max(...spans.map(b => b.right)), top: Math.min(...spans.map(b => b.top)), bottom: Math.max(...spans.map(b => b.bottom)) };
       // The margins the fit itself keeps (a narrow canvas is filled closer to its edges).
-      const side = arrangement === 'compact' ? 2 : EDGE, foot = arrangement === 'compact' ? 8 : EDGE;
-      const inset = Math.max(arrangement === 'compact' ? 8 : EDGE, topInset()), x0 = camera.x, y0 = camera.y;
-      if (whole && (box.right - box.left > width - 2 * side || box.bottom - box.top > height - foot - inset)) return false;
+      let side = arrangement === 'compact' ? 2 : EDGE, foot = arrangement === 'compact' ? 8 : EDGE;
+      let inset = Math.max(arrangement === 'compact' ? 8 : EDGE, topInset()), x0 = camera.x, y0 = camera.y;
+      const fits = () => box.right - box.left <= width - 2 * side && box.bottom - box.top <= height - foot - inset;
+      // A set that must come into view together may use the margins too (the extents already pad each name).
+      if (whole && !fits()) { side = 0; foot = 0; inset = Math.max(0, ...coverRects().filter(b => b.top < 24).map(b => b.bottom)); }
+      if (whole && !fits()) return false;
       const shift = (low, high, from, to) => to - from > high - low ? (low + high) / 2 - (from + to) / 2 : from < low ? low - from : to > high ? high - to : 0;
       camera.x += shift(side, width - side, box.left, box.right);
       camera.y += shift(inset, height - foot, box.top, box.bottom);
@@ -634,7 +650,9 @@
         const movable = names.filter(name => ordinaryAgent(name) && !orbit.has(name) && !claimed.has(name));
         if (!movable.length) return;
         movable.forEach(name => claimed.add(name));
-        rings.push({ key: 'ring:' + names.slice().sort().join('|'), names, movable });
+        // A, B, C, B: A leads into the circle (it stays near A).
+        const into = start > 0 && byAgent.has(flow.path[start - 1]) && !names.includes(flow.path[start - 1]) ? flow.path[start - 1] : null;
+        rings.push({ key: 'ring:' + names.slice().sort().join('|'), names, movable, into });
       });
       return rings;
     }
@@ -661,6 +679,9 @@
     const boxGap = (a, b) => Math.max(a.left - b.right, b.left - a.right, a.top - b.bottom, b.top - a.bottom);
     // How far shape `m` comes into shape `o` (0: clear), and how far a shape comes into the inside of a circle (c, R).
     const clashOf = (m, o) => Math.max(0, m.r + o.r + 14 - Math.hypot(m.x - o.x, m.y - o.y)) + Math.max(0, o.r + 4 - boxNear(m.box, o.x, o.y)) + Math.max(0, m.r + 4 - boxNear(o.box, m.x, m.y)) + Math.max(0, 4 - boxGap(m.box, o.box));
+    // How far a circle (c, R) actually runs through or round a shape, and how far two shapes actually overlap.
+    const realOf = (s, x, y, R) => Math.max(0, R + s.r - Math.hypot(s.x - x, s.y - y)) + Math.max(0, R - boxNear(s.box, x, y));
+    const hitOf = (m, o) => Math.max(0, m.r + o.r - Math.hypot(m.x - o.x, m.y - o.y)) + Math.max(0, o.r - boxNear(m.box, o.x, o.y)) + Math.max(0, m.r - boxNear(o.box, m.x, m.y)) + Math.max(0, -boxGap(m.box, o.box));
     const insideOf = (s, x, y, R) => Math.max(0, R + s.r + RING_SPACE - Math.hypot(s.x - x, s.y - y)) + Math.max(0, R + RING_SPACE - boxNear(s.box, x, y));
     function placeRings(rings, placed, targets, placedByUser, canvas) {
       const byName = new Map(targets.map(target => [target.name, target])), movers = new Set(rings.flatMap(ring => ring.movable).filter(name => !byName.get(name)?.pinned)), bands = [];
@@ -671,10 +692,23 @@
       // The picture as it is without loops; what stays put; and the room the canvas has round the picture's middle (the
       // figures take the top; a wide canvas as the details leave it), so a loop formed there stays in view.
       const area = extent(targets.map(target => shapeOf(target))), shapes = targets.filter(target => !movers.has(target.name)).map(target => shapeOf(target));
-      const half = Math.max(canvas.width / 2 - EDGE, (area.right - area.left) / 2), halfY = Math.max(canvas.height / 2 - EDGE - 44, (area.bottom - area.top) / 2);
+      // A wide canvas shows the picture at up to 1.3 times, with the details open and closed: the room is what both show.
+      const across = area.right - area.left || 1, high = area.bottom - area.top || 1;
+      let half = Infinity, halfY = Infinity;
+      // A narrow one at up to 1 (its fit keeps 2 px each side and 8 px top and bottom), and its panel may be taller than
+      // the canvas laid out for (the sheet closed), so the view can be as large as the width allows.
+      (canvas.wide ? [canvas.width, canvas.width + DETAIL_WIDTH] : [canvas.width]).forEach(w => {
+        const side = canvas.wide ? EDGE : 2, top = canvas.wide ? EDGE + 44 : 8;
+        const s = clamp(Math.min((w - 2 * side) / across, canvas.wide ? (canvas.height - 2 * top) / high : Infinity), READABLE, canvas.wide ? 1.3 : 1);
+        // Less the room the view keeps round each circle and name when it brings one into view (extentOf).
+        half = Math.min(half, (w / 2 - side) / s - 14); halfY = Math.min(halfY, (canvas.height / 2 - top) / s - 22);
+      });
+      half = Math.max(half, across / 2); halfY = Math.max(halfY, high / 2);
       const centre = (area.left + area.right) / 2, middle = (area.top + area.bottom) / 2;
       // The best place for one loop's circle, its `movable` agents moving onto it (null: it cannot be drawn).
-      const search = ring => {
+      // `ahead`: later loops through one of this loop's moving agents (and otherwise free): each needs room on the far side
+      // of that agent, touching this circle there, so this circle leaves it.
+      const search = (ring, ahead = []) => {
         const count = ring.names.length, radius = Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / count))), step = Math.PI * 2 / count;
         const spots = ring.names.map(name => byName.has(name) ? at(byName.get(name)) : null);
         if (spots.some(spot => !spot)) return;
@@ -707,10 +741,34 @@
             if (best && bad > best.bad + 1e-6) return;
             moved += Math.hypot(px - spots[i].x, py - spots[i].y); made.push([name, px, py]); list.push(m);
           }
+          for (const next of ahead) {
+            const spot = made.find(([name]) => name === next.name);
+            if (!spot) continue;
+            const nx = spot[1] + (spot[1] - x) / radius * next.radius, ny = spot[2] + (spot[2] - y) / radius * next.radius, skip = new Set([...ring.names, ...next.names]);
+            for (const s of shapes) if (!skip.has(s.name)) bad += insideOf(s, nx, ny, next.radius);
+            for (const s of list) if (!next.names.includes(s.name)) bad += insideOf(s, nx, ny, next.radius);
+            bands.forEach(band => { if (!band.names.some(name => next.names.includes(name))) bad += Math.max(0, next.radius + band.r + RING_APART - Math.hypot(nx - band.x, ny - band.y)); });
+            bad += RING_OUT * (Math.max(0, centre - half - (nx - next.radius)) + Math.max(0, nx + next.radius - centre - half) + Math.max(0, middle - halfY - (ny - next.radius)) + Math.max(0, ny + next.radius - middle - halfY));
+            if (best && bad > best.bad + 1e-6) return;
+          }
+          // A, B, C, B: the circle stays near A, so the step into it is short and both come into view together.
+          const from = ring.into && (placed.get(ring.into) || (byName.has(ring.into) && at(byName.get(ring.into)))), entry = made.find(([name]) => name === ring.names[0]) || [null, spots[0].x, spots[0].y];
+          if (from) moved += 3 * Math.hypot(entry[1] - from.x, entry[2] - from.y);
+          // A and the circle must fit in one view at the smallest readable size (the open agent and its
+          // neighbours are shown together); that counts for more than staying inside the canvas.
+          if (from && byName.has(ring.into)) {
+            const both = extent([shapeOf(byName.get(ring.into), from), ...list]);
+            bad += 3 * (Math.max(0, both.right - both.left + 28 - (canvas.width - 4) / READABLE) + Math.max(0, both.bottom - both.top + 44 - (canvas.height - 16) / READABLE));
+            if (best && bad > best.bad + 1e-6) return;
+          }
           list.push({ x, y, r: radius, box: { left: x, right: x, top: y, bottom: y } });
           const e = extent(list), grown = Math.max(0, area.left - e.left) + Math.max(0, e.right - area.right) + Math.max(0, area.top - e.top) + Math.max(0, e.bottom - area.bottom);
+          // The canvas has no room to spare: a circle out of it would refit the view, which moves everything on
+          // screen, so it counts as running into something.
+          const over = Math.max(0, centre - half - e.left) + Math.max(0, e.right - centre - half) + Math.max(0, middle - halfY - e.top) + Math.max(0, e.bottom - middle - halfY);
+          if (over > 0) { bad += RING_OUT * over; if (best && bad > best.bad + 1e-6) return; }
           const cost = moved + 3 * grown + 1000 * (Math.max(0, centre - half - e.left) + Math.max(0, e.right - centre - half) + Math.max(0, middle - halfY - e.top) + Math.max(0, e.bottom - middle - halfY));
-          if (!best || bad < best.bad - 1e-6 || cost < best.cost) best = { bad, cost, x, y, start, dir, made };
+          if (!best || bad < best.bad - 1e-6 || cost < best.cost) best = { bad, cost, x, y, start, dir, made, over };
         };
         if (fixed.length === 1) {
           // One agent stays (the orchestrator, a seat, one on an earlier loop): the circle passes through it.
@@ -733,24 +791,68 @@
         }
         return best;
       };
-      rings.forEach(full => {
-        // An agent the user put somewhere stays there and the circle goes through it, unless the circle would then run
-        // into something; then it moves onto a circle in free space like the rest.
-        let ring = { ...full, movable: full.movable.filter(name => !byName.get(name)?.pinned) }, best = search(ring);
-        if (ring.movable.length < full.movable.length && (!best || best.bad > .5)) { const other = search(full); if (other && (!best || other.bad < best.bad)) { ring = full; best = other; } }
-        if (!best) return;
-        const count = ring.names.length, radius = Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / count)));
-        const shift = placedByUser[ring.key], sx = shift && Number.isFinite(shift.dx) ? shift.dx : 0, sy = shift && Number.isFinite(shift.dy) ? shift.dy : 0;
-        best.made.forEach(([name, x, y]) => {
-          const body = placed.get(name);
-          if (!body) return;
-          Object.assign(body, { x: x + sx, y: y + sy, still: true, ring: ring.key });
-          const stayed = shapes.findIndex(shape => shape.name === name);
-          if (stayed >= 0) shapes.splice(stayed, 1);
-          shapes.push(shapeOf(byName.get(name), body));
+      // One pass over the loops in order. `looking`: the loops that leave room for a later loop through one of their agents.
+      const pass = (looking, order = rings.map((ring, index) => index)) => {
+        const results = [];
+        order.forEach(index => {
+          const full = rings[index];
+          const ahead = !looking.has(index) ? [] : looking.get(index).map(k => rings[k]).flatMap(next => {
+            const common = next.names.filter(name => full.movable.includes(name));
+            if (common.length !== 1 || next.names.some(name => name !== common[0] && (!next.movable.includes(name) || byName.get(name)?.pinned))) return [];
+            return [{ name: common[0], names: next.names, radius: Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / next.names.length))) }];
+          });
+          // An agent the user put somewhere stays there and the circle goes through it, unless the circle would then run
+          // into something; then it moves onto a circle in free space like the rest.
+          let ring = { ...full, movable: full.movable.filter(name => !byName.get(name)?.pinned) }, best = search(ring, ahead);
+          if (ring.movable.length < full.movable.length && (!best || best.bad > .5)) { const other = search(full, ahead); if (other && (!best || other.bad < best.bad)) { ring = full; best = other; } }
+          const count = ring.names.length, radius = Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / count)));
+          results[index] = (best ? { bad: best.bad, x: best.x, y: best.y, radius, names: ring.names, made: best.made.map(([name]) => name), over: best.over } : null);
+          if (!best) return;
+          const shift = placedByUser[ring.key], sx = shift && Number.isFinite(shift.dx) ? shift.dx : 0, sy = shift && Number.isFinite(shift.dy) ? shift.dy : 0;
+          best.made.forEach(([name, x, y]) => {
+            const body = placed.get(name);
+            if (!body) return;
+            Object.assign(body, { x: x + sx, y: y + sy, still: true, ring: ring.key });
+            const stayed = shapes.findIndex(shape => shape.name === name);
+            if (stayed >= 0) shapes.splice(stayed, 1);
+            shapes.push(shapeOf(byName.get(name), body));
+          });
+          bands.push({ x: best.x + sx, y: best.y + sy, r: radius, names: ring.names });
         });
-        bands.push({ x: best.x + sx, y: best.y + sy, r: radius, names: ring.names });
+        return results;
+      };
+      // Earlier loops stay where they are when a loop is added. Only when a later loop through an agent of an earlier one
+      // then has no clear place does that earlier loop go where it leaves room for it (still a function of the loops
+      // drawn, so removing one puts every agent back).
+      const bodies = [...new Set(rings.flatMap(ring => ring.movable))].map(name => placed.get(name)).filter(Boolean), saved = bodies.map(body => ({ body, x: body.x, y: body.y, still: body.still, ring: body.ring })), shapes0 = shapes.slice();
+      // No clear place: its line or a moved agent actually runs into an agent or a name (not only into the margins).
+      const clashes = result => !result || shapes.some(s => !result.names.includes(s.name) && (realOf(s, result.x, result.y, result.radius) > 1 || result.made.some(name => { const m = shapes.find(t => t.name === name); return m && hitOf(m, s) > 1; })));
+      // Out of the canvas counts too when comparing passes, but only a real clash makes an earlier loop make room.
+      const blocked = result => clashes(result) || result.over > 1;
+      // The earlier loop is then placed after every other loop (so it keeps clear of them too) and just before the loops
+      // it makes room for; only when no other loop goes through its agents.
+      const first = pass(new Map()), looking = new Map(), worse = list => [clashes, blocked].map(test => rings.filter((ring, index) => test(list[index])).length), before = worse(first);
+      rings.forEach((ring, k) => {
+        if (!clashes(first[k])) return;
+        const fixedOn = ring.names.filter(name => !ring.movable.includes(name));
+        rings.forEach((earlier, j) => {
+          if (j >= k || fixedOn.length !== 1 || !earlier.movable.includes(fixedOn[0]) || blocked(first[j])) return;
+          if (rings.some((other, m) => m !== j && m !== k && other.names.some(name => earlier.names.includes(name)))) return;
+          looking.set(j, [...(looking.get(j) || []), k]);
+        });
       });
+      if (!looking.size) return;
+      const last = new Set([...looking.keys(), ...[...looking.values()].flat()]), order = rings.map((ring, index) => index).filter(index => !last.has(index));
+      [...looking.keys()].sort((a, b) => a - b).forEach(j => { order.push(j); looking.get(j).forEach(k => { if (!order.includes(k)) order.push(k); }); });
+      const keep = { bodies: bodies.map(body => ({ body, x: body.x, y: body.y, still: body.still, ring: body.ring })), shapes: shapes.slice(), bands: bands.slice() };
+      saved.forEach(({ body, x, y, still, ring }) => Object.assign(body, { x, y, still, ring }));
+      shapes.splice(0, shapes.length, ...shapes0); bands.length = 0;
+      const second = pass(looking, order);
+      // The second pass stays when fewer loops run into something, or as many and fewer leave the canvas.
+      const after = worse(second);
+      if (after[0] < before[0] || (after[0] === before[0] && after[1] < before[1])) return;
+      keep.bodies.forEach(({ body, x, y, still, ring }) => Object.assign(body, { x, y, still, ring }));
+      shapes.splice(0, shapes.length, ...keep.shapes); bands.splice(0, bands.length, ...keep.bands);
     }
     function positionStore() { try { return typeof localStorage === 'undefined' ? null : localStorage; } catch (_) { return null; } }
     function loadMoves() {
@@ -795,8 +897,39 @@
       viewport.dataset.dragging = 'false';
     }
     function updateDetailSpace() {
-      if (root.classList.contains('ag-compact') && !detail.hidden) root.style.setProperty('--ag-sheet-height', Math.max(0, Math.min(root.clientHeight * .4, root.clientHeight - 112)) + 'px');
-      else root.style.removeProperty('--ag-sheet-height');
+      if (root.classList.contains('ag-compact') && !detail.hidden) {
+        const height = sheetHeight(), { min, max } = sheetStops(), pane = root.clientHeight || 1;
+        root.style.setProperty('--ag-sheet-height', height + 'px');
+        sheetHandle.setAttribute('aria-valuemin', String(Math.round(min / pane * 100))); sheetHandle.setAttribute('aria-valuemax', String(Math.round(max / pane * 100)));
+        sheetHandle.setAttribute('aria-valuenow', String(Math.round(height / pane * 100)));
+      } else root.style.removeProperty('--ag-sheet-height');
+    }
+    // From a small minimum up to leaving the figures row and a strip of graph (enough to see the picked agent).
+    function sheetStops() {
+      const max = Math.max(0, root.clientHeight - (notice.hidden ? 0 : notice.offsetHeight) - SHEET_FIGURES - SHEET_GRAPH);
+      return { min: Math.min(SHEET_MIN, max), max };
+    }
+    function sheetHeight() {
+      const pane = root.clientHeight;
+      if (sheetShare === null) return Math.max(0, Math.min(pane * .4, pane - 112));
+      const { min, max } = sheetStops();
+      return clamp(sheetShare * pane, min, max);
+    }
+    function loadSheetShare() {
+      if (sheetShares.has(SHEET_KEY)) return sheetShares.get(SHEET_KEY);
+      try { const share = Number(JSON.parse(positionStore()?.getItem(SHEET_KEY) || 'null')); return share > 0 && share < 1 ? share : null; } catch (_) { return null; }
+    }
+    // The graph above refits to what the sheet leaves (the resize observer: fitted with the open agent revealed, or
+    // the user's own pan and zoom kept); the agents are laid out for the default sheet, so none of them moves.
+    function setSheet(height, keep) {
+      const pane = root.clientHeight;
+      if (pane <= 0) return;
+      const { min, max } = sheetStops();
+      sheetShare = clamp(height, min, max) / pane;
+      updateDetailSpace(); scheduleResize();
+      if (!keep) return;
+      sheetShares.set(SHEET_KEY, sheetShare);
+      try { positionStore()?.setItem(SHEET_KEY, JSON.stringify(sheetShare)); } catch (_) { /* no storage: kept for the page */ }
     }
     function perimeter(a, b) { return Math.PI * (3 * (a + b) - Math.sqrt((3 * a + b) * (a + 3 * b))); }
     // Points by distance travelled round an ellipse, clockwise from the top.
@@ -839,9 +972,11 @@
       const rect = { width: root.clientWidth, height: Math.max(1, root.clientHeight - (notice.hidden ? 0 : notice.offsetHeight)) };
       if (rect.width <= 0 || viewport.clientWidth <= 0 || viewport.clientHeight <= 0) return;
       const compact = arrangement === 'compact';
-      // The canvas as it is: a narrow oval grows into spare height. With the sheet open (n103) it is shaped for what the
-      // sheet leaves, so every circle and name fits above it at a readable size; closing the sheet puts it back.
-      const canvasHeight = Math.max(1, Math.round(viewport.clientHeight));
+      // A narrow canvas is laid out for what the bottom sheet leaves of it (n103), open or not: every circle and name fits
+      // above the sheet at a readable size, and opening or closing it never re-lays out the agents.
+      const sheetOpen = compact && root.classList.contains('ag-details-open'), sheetHigh = Math.max(0, Math.min(root.clientHeight * .4, root.clientHeight - 112));
+      const full = viewport.clientHeight + (sheetOpen ? (parseFloat(getComputedStyle(root).getPropertyValue('--ag-sheet-height')) || 0) + 28 : 0);
+      const canvasHeight = Math.max(1, Math.round(compact ? full - sheetHigh - 28 : viewport.clientHeight));
       // Wide: the oval is shaped for the canvas the details panel (DETAIL_WIDTH) leaves, open or not, so opening it
       // never re-lays out the agents and they still fit at a readable size beside it.
       // A canvas the details leave taller than wide (n103: 760 px) gets a taller oval, chosen below once its size is known.
@@ -883,15 +1018,17 @@
       if (!lead.length && groups.length > 2) groups.unshift({ key: '', units: [], width: slot });
       const depth = Math.max(0, ...groups.flatMap(group => group.units.map(unit => unit.seats.length ? unit.reach : 0)));
       const filled = groups.reduce((sum, group) => sum + group.width, 0), needed = filled + groups.length * GROUP_GAP;
-      const least = 38 + (depth ? depth + 64 : 104);
+      // A narrow canvas is short above its sheet: the oval is as flat as the council's seats allow (n103).
+      const least = 38 + (depth ? depth + (compact ? 24 : 64) : (compact ? 64 : 104));
       const grow = fits => { let low = least, high = least + needed; for (let i = 0; i < 32; i++) { const middle = (low + high) / 2; if (fits(middle)) high = middle; else low = middle; } return high; };
       let rx, ry;
       if (compact) {
-        rx = Math.max(60, rect.width / 2 - 23 - EDGE);
-        // Flatter with the sheet open: it leaves a canvas wider than tall.
-        ry = Math.max(least, rx / (root.classList.contains('ag-details-open') ? 1.45 : 1.3));
+        // What the sheet leaves is wider than tall: the oval takes the width the canvas shows at the smallest readable
+        // size (names either side) and is as flat as that allows.
+        rx = Math.max(60, (rect.width - 4) / READABLE / 2 - 50);
+        ry = least;
         if (perimeter(rx, ry) < needed) ry = grow(value => perimeter(rx, value) >= needed);
-        // A tall panel is used, not left empty: the oval grows into spare height.
+        // A tall panel is used, not left empty: the oval grows into spare height above the sheet.
         ry = Math.max(ry, Math.min(rx * 2.2, canvasHeight / 2 - Math.max(depth + 34, 96)));
       } else {
         const oval = a => perimeter(a * least, least) < needed ? grow(value => perimeter(a * value, value) >= needed) : least;
@@ -956,7 +1093,7 @@
       settle();
       const placed = new Map(bodies.map(body => [body.name, body]));
       // Full loops: their moving agents go onto an even circle, in path order, in free space (placeRings); nothing else moves.
-      if (rings.length) placeRings(rings, placed, targets, placedByUser, compact ? { width: rect.width, height: canvasHeight } : { width: rect.width - DETAIL_WIDTH, height: rect.height });
+      if (rings.length) placeRings(rings, placed, targets, placedByUser, compact ? { width: rect.width, height: canvasHeight } : { width: rect.width - DETAIL_WIDTH, height: rect.height, wide: true });
       const before = new Map(Array.from(positions, ([name, point]) => [name, { x: point.x, y: point.y }]));
       // What this layout moved: agents new to the picture, and those going onto, off or along a loop's circle (`steady`
       // when nothing else moved: then the camera stays where it is, see settleCamera).
@@ -969,6 +1106,8 @@
         positions.set(target.name, Object.assign(point, { x: target.x, y: target.y, r: target.r, reach: target.reach, group: target.group, parent: target.parent, dx: target.dx, dy: target.dy, fixed: target.pinned, ring: target.ring || '' }));
       });
       layoutChange = { changed, steady: steady && before.size > 0 };
+      // A re-laid-out picture (not only a loop or a new agent) has no view to go back to when the details close.
+      if (!layoutChange.steady && changed.length) closedView = null;
       if (glide) glideFrom(before);
     }
     function reducedMotion() { return root.dataset.agMotion === 'none' || !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches; }
@@ -1670,6 +1809,7 @@
       if (agent && agent.team !== activeTeam) switchTeam(agent.team);
       selected = { type, key }; selectedOrigin = origin || selectedOrigin; highlightedStep = step || '';
       if (step) openSteps.add(step);
+      if (detail.hidden) rememberClosedView();
       detailSignature = ''; detail.hidden = false; root.classList.add('ag-details-open'); renderDetail(); updateEdges(); scheduleResize();
       reveal();
       close.focus({ preventScroll: true });
@@ -4575,6 +4715,36 @@
       else if (event.key === 'Escape' && draft) { event.preventDefault(); dropDraft(); }
     });
     listen(close, 'click', closeDetails);
+    // The sheet's handle: one gesture, one meaning. A drag on it only resizes the sheet (never pans, picks, moves or
+    // closes); Arrow keys resize it a step, Page keys a larger one, Home and End go to the smallest and largest.
+    listen(sheetHandle, 'pointerdown', event => {
+      event.stopPropagation();
+      if (event.button !== 0 || !root.classList.contains('ag-compact')) return;
+      // Pressed, it takes the keys (preventing the default would otherwise keep focus where it was).
+      event.preventDefault(); sheetHandle.focus({ preventScroll: true });
+      try { sheetHandle.setPointerCapture(event.pointerId); } catch (_) { /* a synthetic pointer */ }
+      sheetDrag = { id: event.pointerId, y: event.clientY, from: sheetHeight() };
+    });
+    listen(sheetHandle, 'pointermove', event => {
+      event.stopPropagation();
+      if (!sheetDrag || event.pointerId !== sheetDrag.id) return;
+      event.preventDefault(); setSheet(sheetDrag.from + sheetDrag.y - event.clientY, false);
+    });
+    const endSheetDrag = event => {
+      event.stopPropagation();
+      if (!sheetDrag || event.pointerId !== sheetDrag.id) return;
+      sheetDrag = null; setSheet(sheetHeight(), true);
+    };
+    listen(sheetHandle, 'pointerup', endSheetDrag); listen(sheetHandle, 'pointercancel', endSheetDrag);
+    listen(sheetHandle, 'click', event => event.stopPropagation());
+    listen(sheetHandle, 'dblclick', event => event.stopPropagation());
+    listen(sheetHandle, 'keydown', event => {
+      if (!root.classList.contains('ag-compact') || event.altKey || event.ctrlKey || event.metaKey) return;
+      const { min, max } = sheetStops(), now = sheetHeight(), steps = { ArrowUp: 24, ArrowDown: -24, PageUp: 96, PageDown: -96 };
+      const next = event.key in steps ? now + steps[event.key] : event.key === 'Home' ? min : event.key === 'End' ? max : null;
+      if (next === null) return;
+      event.preventDefault(); event.stopPropagation(); setSheet(next, true);
+    });
     listen(runDetails, 'click', () => select('run', '', runDetails));
     listen(usage, 'click', () => select('run', '', usage));
     listen(attention, 'click', () => { select('run', '', attention); detailScroll.querySelector('[data-run-section="attention"]')?.scrollIntoView({ block: 'start' }); });
@@ -5010,7 +5180,8 @@
         const labelsChanged = renderNodes(visibleAgents); updateEdges();
         if (!camera.initialized) fitView(false);
         else if (previousLayout !== layoutSignature) settleCamera();
-        else if (labelsChanged && !camera.touched) fitView(false);
+        // Names measured again just after a loop formed or an agent came, nothing else moved: the view stays (n103).
+        else if (labelsChanged && !camera.touched) { if (layoutChange.steady) { revealNames(layoutChange.changed); clampPan(true); transform(); } else fitView(false); }
       }
       root.dataset.state = visibleAgents.length || graph ? 'ready' : 'empty';
       showEmpty();
@@ -5063,9 +5234,24 @@
         // The user's own pan and zoom survive anything that did not change the space.
         // When the details open or close the graph refits into the space left, unless the user panned or zoomed since
         // (then their view stays). A change of the pane's own size, or of arrangement, refits as before.
-        if ((resized || !camera.initialized) && !(camera.own && camera.initialized && !switched && !paneResized)) { fitView(false); reveal(); } else { clampPan(); transform(); }
+        // Closing the details puts an automatic view back where it was before they opened (n103: a loop drawn while
+        // they were open moves nothing else on screen); only what moved meanwhile is panned into view.
+        const shown = !detail.hidden, before = closedView;
+        if (!shown || paneResized || switched) closedView = null;
+        const back = !shown && detailsWere && before && before.pane === root.clientWidth + 'x' + root.clientHeight && before.arrangement === arrangement && resized && !camera.own && !switched && !paneResized;
+        detailsWere = shown;
+        if (back) {
+          Object.assign(camera, { x: before.x, y: before.y, scale: before.scale, width: rect.width, height: rect.height });
+          const moved = visibleAgents.map(a => a.name).filter(name => before.at.get(name) !== JSON.stringify(finalOf(name) && [finalOf(name).x, finalOf(name).y]));
+          if (moved.length) revealNames(moved);
+          clampPan(true); transform();
+        } else if ((resized || !camera.initialized) && !(camera.own && camera.initialized && !switched && !paneResized)) { fitView(false); reveal(); } else { clampPan(); transform(); }
         orbitRefit();
       });
+    }
+    // The automatic view as the details open (before anything pans for them), to go back to when they close.
+    function rememberClosedView() {
+      closedView = camera.initialized && !camera.own ? { x: camera.x, y: camera.y, scale: camera.scale, pane: root.clientWidth + 'x' + root.clientHeight, arrangement, at: new Map(visibleAgents.map(a => [a.name, JSON.stringify(finalOf(a.name) && [finalOf(a.name).x, finalOf(a.name).y])])) } : null;
     }
     const resize = new ResizeObserver(scheduleResize);
     root.classList.toggle('ag-compact', root.clientWidth > 0 && root.clientWidth <= 650);

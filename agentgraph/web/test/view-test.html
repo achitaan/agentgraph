@@ -742,7 +742,7 @@
           const lightBackground = getComputedStyle(root).backgroundColor, lightLabel = getComputedStyle(root.querySelector('.ag-agent-name')).fill;
           html.setAttribute('data-color-scheme', 'dark'); html.style.setProperty('--v2-background-bg-deep', '#080808'); await sleep(20);
           assert(root.dataset.agScheme === 'dark', 'host dark mode did not update without remount');
-          assert(getComputedStyle(root).backgroundColor === 'rgb(8, 8, 8)' && getComputedStyle(root).backgroundColor !== lightBackground, 'host deep background not used');
+          assert(getComputedStyle(root).backgroundColor === 'rgb(19, 17, 17)' && getComputedStyle(root).backgroundColor !== lightBackground, 'the dark canvas is not its own warm colour (n103 item 8: never the host\'s deep background)');
           assert(getComputedStyle(root.querySelector('.ag-agent-name')).fill !== lightLabel, 'label palette did not change');
           assert(getComputedStyle(root).colorScheme === 'dark', 'native controls do not follow dark mode');
           assert(getComputedStyle(root.querySelector('.ag-agent-name')).stroke === getComputedStyle(root).backgroundColor, 'label halo does not match the host background');
@@ -5738,7 +5738,10 @@
     // ---- geometry lane (n103) ----
     {
       // The real roster's shape (the trial's: fifteen agents, the council with three seats), with drawn paths.
-      const n103Data = (flows = []) => { const data = trialRoster(); data.structure = { source: 'folder', flows: flows.map(flow => ({ ...flow, text: flow.id, source: 'drawn' })) }; return data; };
+      // The real roster as the trial's server sends it: the structure folder's groups in folder order (the council first on
+      // the ring, at the top, its seats round it).
+      const N103_GROUPS = [['hub', ['orchestrator']], ['council', ['council', 'fable', 'astra', 'carbon']], ['decide', ['oracle', 'oracle-lite']], ['build', ['designer', 'impl-openai', 'impl-claude', 'impl-hard']], ['verify', ['reviewer', 'verifier']], ['understand', ['explorer', 'researcher']]];
+      const n103Data = (flows = []) => { const data = trialRoster(); data.groups = N103_GROUPS.map(([id, agents]) => ({ id, title: id, agents })); data.structure = { source: 'folder', flows: flows.map(flow => ({ ...flow, text: flow.id, source: 'drawn' })) }; return data; };
       const ringNames = path => { const start = path.indexOf(path.at(-1)); return start < path.length - 2 ? path.slice(start, -1) : []; };
       const ringSteps = (root, id) => [...(routeOf(root, id)?.querySelectorAll('.ag-route-step[data-step="loop"]') || [])];
       const screenOf = root => Object.fromEntries([...root.querySelectorAll('.ag-drawing [data-agent]')].map(node => [node.dataset.agent, centre(root, node.dataset.agent)]));
@@ -5774,7 +5777,7 @@
         { id: 'tail', path: ['reviewer', 'impl-hard', 'impl-openai', 'impl-hard'] }, { id: 'shared', path: ['oracle-lite', 'verifier', 'oracle-lite'] }];
       await test('n103 item 1: loops drawn one after another (the trial\'s far pair, a second loop, A,B,C,B, one sharing an agent) each form a circle in free space: no ring or moved agent touches the orchestrator or any circle or name not on it, no two share a centre, agents on no loop do not move (on the stage or on screen), and removing the paths puts every agent back', async () => {
         const problems = [];
-        for (const [width, height] of [[1300, 850], [620, 800]]) {
+        for (const [width, height] of [[1400, 900], [620, 800]]) {
           const data = n103Data(), label = width + 'x' + height;
           await using(data, async (root, app) => {
             await resizeTo(root, width, height); await settle();
@@ -5809,10 +5812,17 @@
           await resizeTo(root, 1300, 850); await settle();
           // The third loop dragged towards the first until its line runs beside it.
           const mid = names => { const ps = names.map(name => at(root, name)); return [ps.reduce((s, p) => s + p[0], 0) / ps.length, ps.reduce((s, p) => s + p[1], 0) / ps.length]; };
-          // Beside it on the side away from the loop crossing it, so the side-by-side lines run 30 px apart.
+          // Beside it, so the side-by-side lines run 30 px apart, on the side with the most free room (as a user drags into
+          // free space): away from the loop crossing it and from every other agent, inside the canvas.
           const scale = root.querySelector('.ag-drawing > g').getCTM().a, a = mid(['explorer', 'oracle-lite']), c = mid(['oracle-lite', 'verifier']), z = mid(['researcher', 'designer']);
-          const d = Math.hypot(a[0] - c[0], a[1] - c[1]) || 1, goal = 82 * 2 + 30, from = centre(root, 'researcher');
-          dragTo(root, 'researcher', { x: from.x + (a[0] + (a[0] - c[0]) / d * goal - z[0]) * scale, y: from.y + (a[1] + (a[1] - c[1]) / d * goal - z[1]) * scale }, 12); await settled();
+          const goal = 82 * 2 + 30, from = centre(root, 'researcher'), rest = renderedNames(root).map(([name]) => name).filter(name => !['researcher', 'designer'].includes(name));
+          const box = viewportOf(root).getBoundingClientRect(), side = Array.from({ length: 24 }, (_, k) => {
+            const angle = k * Math.PI / 12, t = [a[0] + Math.cos(angle) * goal, a[1] + Math.sin(angle) * goal], to = { x: from.x + (t[0] - z[0]) * scale, y: from.y + (t[1] - z[1]) * scale };
+            const ox = to.x + (z[0] - at(root, 'researcher')[0]) * scale, oy = to.y + (z[1] - at(root, 'researcher')[1]) * scale;
+            const room = Math.min(Math.hypot(t[0] - c[0], t[1] - c[1]) - 82, ...rest.map(name => Math.hypot(t[0] - at(root, name)[0], t[1] - at(root, name)[1])), (ox - box.left) / scale, (box.right - ox) / scale, (oy - box.top - 44) / scale, (box.bottom - oy) / scale);
+            return { to, room };
+          }).sort((one, two) => two.room - one.room)[0];
+          dragTo(root, 'researcher', side.to, 12); await settled();
           const gapOf = (one, two) => Math.min(...ringSteps(root, one).flatMap(step => pointsOf(step, 60)).map(p => Math.min(...ringSteps(root, two).flatMap(step => pointsOf(step, 60)).map(q => Math.hypot(p.x - q.x, p.y - q.y)))));
           const gap = gapOf('next', 'far');
           counts.gap = Math.round(gap);
@@ -5939,6 +5949,143 @@
           }
         }, { actions: host.actions });
         assert(!problems.length, problems.length + ' problems: ' + problems.slice(0, 6).join('; '));
+      });
+      // Item 1 as drawn in the trial: the path's details open while the loop forms; closing them puts the automatic view
+      // back, so no agent off the loop has moved on screen.
+      await test('n103 item 1 (details): a loop formed while the details are open, then the details closed: agents on no loop are where they were on screen', async () => {
+        const data = n103Data(), problems = [];
+        await using(data, async (root, app) => {
+          await resizeTo(root, 1400, 900); await settle();
+          const screen0 = screenOf(root);
+          open(root, 'explorer'); await settleSheet(root);
+          data.structure.flows.push({ id: 'far', path: ['explorer', 'oracle-lite', 'explorer'], text: 'far', source: 'drawn' }); await app.refresh(); await settled();
+          root.querySelector('.ag-close').click(); await settleSheet(root);
+          const screen1 = screenOf(root);
+          Object.keys(screen0).filter(name => !['explorer', 'oracle-lite'].includes(name)).forEach(name => {
+            const d = Math.hypot(screen1[name].x - screen0[name].x, screen1[name].y - screen0[name].y);
+            if (d > .5) problems.push(name + ' moved ' + d.toFixed(1) + ' px on screen');
+          });
+        });
+        assert(!problems.length, problems.slice(0, 6).join('; '));
+      });
+      // Item 7 (the user: "i want the afent info thing to be able to be dragable higher"): the narrow pane's details sheet
+      // has a grab handle on its top edge. Dragging it (or its keys) only resizes the sheet, between a small minimum and
+      // leaving the figures row and a 100 px strip of graph; the graph refits above it (the open agent in view, names
+      // 11 px or more), the user's own zoom stays, and nothing is picked, moved or closed.
+      const sheetRect = root => root.querySelector('.ag-detail').getBoundingClientRect();
+      const handleOf = root => root.querySelector('.ag-sheet-handle');
+      const titleOf = root => root.querySelector('.ag-detail-title')?.textContent || '';
+      // The sheet's height changes at once; the view handles the resize notice in a frame of its own: wait until two
+      // whole frames pass with no new notice (as resizeTo, without its fixed wait).
+      async function settleSheet(root) {
+        let seen = 0;
+        const watch = new ResizeObserver(() => { seen++; }), frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+        watch.observe(root); watch.observe(viewportOf(root));
+        await frame();
+        for (let last = -1, rounds = 0; last !== seen && rounds < 30; rounds++) { last = seen; await frame(); await frame(); }
+        watch.disconnect();
+      }
+      async function dragSheet(root, by) {
+        const handle = handleOf(root), p = middleOf(handle), target = document.elementFromPoint(p.x, p.y);
+        pointerOn(target, 'pointerdown', 77, p);
+        pointerOn(handle, 'pointermove', 77, { x: p.x, y: p.y - by / 2 }); pointerOn(handle, 'pointermove', 77, { x: p.x, y: p.y - by });
+        pointerOn(handle, 'pointerup', 77, { x: p.x, y: p.y - by });
+        handle.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: p.x, clientY: p.y - by }));
+        await settleSheet(root);
+        return target;
+      }
+      await test('n103 item 7: in a narrow pane the details sheet has a grab handle: dragging it or its keys resizes the sheet between its stops and nothing else (no pick, move or close), the graph refits above it keeping the user\'s zoom, and the height is kept for the page, across a reload and when storage fails, clamped to the pane', async () => {
+        const problems = [], key = 'n103.item7.' + Date.now();
+        for (const width of [620, 420]) {
+          await using(n103Data(N103_NARROW), async root => {
+            const label = width + ' px';
+            await resizeTo(root, width, 800);
+            context(nodeOf(root, 'impl-hard'), centre(root, 'impl-hard')); await settle(); await settleSheet(root);
+            const handle = handleOf(root);
+            if (!handle || !handle.getClientRects().length) { problems.push(label + ': no grab handle on the sheet'); return; }
+            if (handle.getAttribute('role') !== 'separator' || handle.tabIndex !== 0 || !handle.getAttribute('aria-label') || handle.textContent.trim()) problems.push(label + ': the handle is not a named, focusable separator without text');
+            const top = sheetRect(root).top, hb = handle.getBoundingClientRect();
+            if (Math.abs(hb.top - top) > 2) problems.push(label + ': the handle is not on the sheet\'s top edge');
+            const stage0 = stageOf(root), title0 = titleOf(root), h0 = sheetRect(root).height;
+            const target = await dragSheet(root, 200), h1 = sheetRect(root).height;
+            if (target !== handle) problems.push(label + ': the handle is not what a press there reaches');
+            if (Math.abs(h1 - h0 - 200) > 2) problems.push(label + ': dragging up 200 px made the sheet ' + h0.toFixed(0) + ' → ' + h1.toFixed(0));
+            if (root.querySelector('.ag-detail').hidden || titleOf(root) !== title0) problems.push(label + ': the drag closed or changed the details');
+            if (root.querySelector('[data-route][data-selected="true"]')) problems.push(label + ': the drag picked a line');
+            Object.keys(stage0).forEach(name => { if (!near(at(root, name), stage0[name])) problems.push(label + ': the drag moved ' + name); });
+            const shown = () => !outsideVisible(root).some(line => line.startsWith('impl-hard '));
+            if (!shown()) problems.push(label + ': after the drag the open agent is not in view');
+            if (nameSize(root) < 11 - .01) problems.push(label + ': names at ' + nameSize(root).toFixed(1) + ' px after the drag');
+            // The stops: the top one leaves the figures row and 100 px of graph (the open agent still in view).
+            await dragSheet(root, 3000);
+            const view = viewportOf(root).getBoundingClientRect(), usage = root.querySelector('.ag-usage').getBoundingClientRect(), high = sheetRect(root);
+            if (Math.abs(high.height - (800 - 28 - 100)) > 2 || view.height < 99.5) problems.push(label + ': the top stop is ' + high.height.toFixed(0) + ' px, leaving ' + view.height.toFixed(0) + ' px of graph');
+            if (usage.bottom > high.top + .5) problems.push(label + ': the top stop covers the figures row');
+            if (!shown()) problems.push(label + ': at the top stop the open agent is not in view');
+            await dragSheet(root, -3000);
+            if (Math.abs(sheetRect(root).height - 120) > 2) problems.push(label + ': the bottom stop is ' + sheetRect(root).height.toFixed(0) + ' px');
+            // Keys: a step up, End and Home; they move no agent and leave the details as they were.
+            handle.focus(); const k0 = sheetRect(root).height;
+            press(handle, 'ArrowUp'); await settleSheet(root);
+            if (Math.abs(sheetRect(root).height - k0 - 24) > 2) problems.push(label + ': ArrowUp did not grow the sheet a step');
+            press(handle, 'End'); await settleSheet(root);
+            if (Math.abs(sheetRect(root).height - 672) > 2) problems.push(label + ': End did not go to the top stop');
+            press(handle, 'Home'); await settleSheet(root);
+            if (Math.abs(sheetRect(root).height - 120) > 2) problems.push(label + ': Home did not go to the bottom stop');
+            if (titleOf(root) !== title0 || Object.keys(stage0).some(name => !near(at(root, name), stage0[name]))) problems.push(label + ': the keys changed the details or moved an agent');
+            // The user's own zoom stays when the sheet is resized (item 4); only the space changes.
+            const viewport = viewportOf(root), stage = root.querySelector('.ag-drawing > g');
+            viewport.focus(); press(viewport, '+'); await settle();
+            const zoom = stage.getCTM().a;
+            handle.focus(); press(handle, 'PageUp'); await settleSheet(root);
+            if (Math.abs(stage.getCTM().a - zoom) > .001) problems.push(label + ': resizing the sheet discarded the user\'s zoom');
+          }, { positionsKey: key + '.' + width });
+        }
+        // Kept: for the page (a remount), in storage (a reload), and without storage; clamped to a smaller pane.
+        const mountAt = async (options, run) => {
+          const root = host(); root.style.width = '420px'; root.style.height = '800px';
+          const app = AgentGraph.mount(root, { fetchSnapshot: async () => stampRevs(n103Data()), intervalMs: 60000, motion: 'none', ...options });
+          try { await app.refresh(); await settleSheet(root); context(nodeOf(root, 'reviewer'), centre(root, 'reviewer')); await settle(); await settleSheet(root); await run(root); } finally { app.destroy(); root.remove(); }
+        };
+        await mountAt({ positionsKey: key + '.kept' }, async root => { press(handleOf(root), 'End'); await settleSheet(root); });
+        const stored = Number(localStorage.getItem(key + '.kept.sheet'));
+        if (!(stored > .8 && stored < .85)) problems.push('the height was not stored: ' + localStorage.getItem(key + '.kept.sheet'));
+        await mountAt({ positionsKey: key + '.kept' }, async root => {
+          if (Math.abs(sheetRect(root).height - 672) > 2) problems.push('a remount did not keep the height: ' + sheetRect(root).height.toFixed(0));
+          await resizeTo(root, 420, 500);
+          const view = viewportOf(root).getBoundingClientRect(), usage = root.querySelector('.ag-usage').getBoundingClientRect(), sheet = sheetRect(root);
+          if (sheet.height > 500 - 128 + 2 || view.height < 99.5 || usage.bottom > sheet.top + .5) problems.push('in a 500 px pane the kept height is ' + sheet.height.toFixed(0) + ' px, leaving ' + view.height.toFixed(0) + ' px of graph');
+        });
+        localStorage.setItem(key + '.reload.sheet', '0.5');
+        await mountAt({ positionsKey: key + '.reload' }, async root => { if (Math.abs(sheetRect(root).height - 400) > 2) problems.push('a reload did not read the stored height: ' + sheetRect(root).height.toFixed(0)); });
+        const get = Storage.prototype.getItem, set = Storage.prototype.setItem;
+        Storage.prototype.getItem = () => { throw new Error('no storage'); }; Storage.prototype.setItem = () => { throw new Error('no storage'); };
+        try {
+          await mountAt({ positionsKey: key + '.none' }, async root => { press(handleOf(root), 'End'); await settleSheet(root); if (Math.abs(sheetRect(root).height - 672) > 2) problems.push('without storage the sheet did not resize'); });
+          await mountAt({ positionsKey: key + '.none' }, async root => { if (Math.abs(sheetRect(root).height - 672) > 2) problems.push('without storage the height was not kept for the page'); });
+        } catch (error) { problems.push('without storage: ' + error.message); } finally { Storage.prototype.getItem = get; Storage.prototype.setItem = set; }
+        assert(!problems.length, problems.length + ' problems: ' + problems.slice(0, 6).join('; '));
+      });
+      // Item 8 (the user: "sidebar should have same backgorund as the web one"): the view's root paints its own warm canvas,
+      // so a host's panel (which sets its own deep background token) shows what the plain page shows, light and dark.
+      await test('n103 item 8: mounted in a host that sets its own background (the Desktop panel), the root paints the same background as on the plain page, in light and in dark', async () => {
+        const html = document.documentElement, scheme = html.getAttribute('data-color-scheme'), token = html.style.getPropertyValue('--v2-background-bg-deep'), problems = [];
+        try {
+          for (const [mode, hostColour, warm] of [['light', '#ffffff', 'rgb(245, 242, 237)'], ['dark', '#080808', 'rgb(19, 17, 17)']]) {
+            html.setAttribute('data-color-scheme', mode); html.style.removeProperty('--v2-background-bg-deep');
+            let page = '', panel = '', halo = '';
+            await using(fixture(), root => { page = getComputedStyle(root).backgroundColor; });
+            html.style.setProperty('--v2-background-bg-deep', hostColour);
+            await using(fixture(), root => { panel = getComputedStyle(root).backgroundColor; halo = getComputedStyle(root.querySelector('.ag-agent-name')).stroke; });
+            if (page !== warm) problems.push(mode + ': the page is ' + page + ', not the warm canvas ' + warm);
+            if (panel !== page) problems.push(mode + ': the panel is ' + panel + ', the page ' + page);
+            if (halo !== panel) problems.push(mode + ': the names\' halo is ' + halo + ' on ' + panel);
+          }
+        } finally {
+          if (scheme === null) html.removeAttribute('data-color-scheme'); else html.setAttribute('data-color-scheme', scheme);
+          if (token) html.style.setProperty('--v2-background-bg-deep', token); else html.style.removeProperty('--v2-background-bg-deep');
+        }
+        assert(!problems.length, problems.join('; '));
       });
     }
     // ---- geometry lane (n103) ----
