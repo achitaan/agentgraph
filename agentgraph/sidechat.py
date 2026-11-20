@@ -8,7 +8,7 @@
     agentgraph sidechat undo RECORD [--json]
 
 **What it is.** One native agent, `side-chat` (a file in OpenCode's agents folder; the proposal is
-`.opencode/artifacts/agentgraph-chat/n15/r1/side-chat.agent.proposed.md`), with every tool denied: no file tool, no
+`config/side-chat/agent.md`), with every tool denied: no file tool, no
 shell, no web, no sub-agent. It talks only to the user. This module is the only thing that asks it anything.
 
 **How it gets its information: not through tools.** Each question is sent with a brief this module builds, capped
@@ -85,9 +85,9 @@ HEADS = 2
 CHAT_CAP = 10000
 FILES_LIMIT = 200
 WALK_DEPTH = 5
-PROPOSALS = Path(__file__).resolve().parent.parent / ".opencode" / "artifacts" / "agentgraph-chat" / "n15" / "r1"
-AGENT_PROPOSAL = PROPOSALS / "side-chat.agent.proposed.md"
-SKILL_PROPOSAL = PROPOSALS / "side-chat.skill.proposed.md"
+PROPOSALS = Path(__file__).resolve().parent.parent / "config" / "side-chat"  # shipped with the toolkit
+AGENT_PROPOSAL = PROPOSALS / "agent.md"
+SKILL_PROPOSAL = PROPOSALS / "skill.md"
 PROPOSAL_LIMIT = 16 * 1024
 SEPARATOR = "\n\n--- brief"  # the question ends here; the view's copy of the side chat is cut at it
 SECTIONS = ("graph", "artifacts", "heads", "chat")
