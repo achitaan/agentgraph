@@ -111,7 +111,13 @@ def _valid_improvement_fields(item: dict) -> bool:
         and isinstance(item.get("summary"), str) and _strings(item.get("signals", []))
         and (item.get("metric") is None or isinstance(item["metric"], str))
         and ("seen_until" not in item or _number(item["seen_until"]))
+        and all(field not in item or _sizes(item[field]) for field in ("size_change", "fixed_chars", "size_actual"))
     )
+
+
+def _sizes(value) -> bool:
+    """{agent: characters}: a proposal's size change, or the fixed text measured when it was recorded."""
+    return isinstance(value, dict) and all(isinstance(k, str) and k and type(v) is int for k, v in value.items())
 
 
 def _valid_handled(handled) -> bool:
@@ -469,16 +475,57 @@ def feedback(
 def improved(
     home: Path, now: float | None, file: str | Path | list[str], summary: str, *,
     signals: list[str] | None = None, metric: str | None = None, seen_until: float | None = None,
-    keep_watermark: bool = False,
+    keep_watermark: bool = False, size_change: dict[str, int] | None = None,
 ) -> dict:
-    """Record an applied improvement without opening or modifying its file."""
+    """Record an applied improvement without opening or modifying its file.
+
+    `size_change` is the proposal's stated change to each agent's fixed text, in characters. With a bloat
+    baseline in the home, the record also keeps the fixed text measured now (`fixed_chars`) and the actual change
+    since the previous measured record, or since the baseline (`size_actual`)."""
     fields = {"file": str(file) if isinstance(file, Path) else file,
               "summary": summary, "signals": signals or [], "metric": metric}
     if seen_until is not None:
         fields["seen_until"] = seen_until
     if keep_watermark:
         fields["keep_watermark"] = True
+    if size_change is not None:
+        if not _sizes(size_change):
+            raise ValueError("size_change maps agent names to whole numbers of characters")
+        fields["size_change"] = size_change
+    fields.update(_measured_size(home))
     return _append(home / _IMPROVEMENTS, now, fields)
+
+
+def _measured_size(home: Path) -> dict:
+    """{"fixed_chars", "size_actual"} when the home has a bloat baseline (nothing otherwise, or on any error)."""
+    from . import bloat
+    try:
+        found = bloat.current(home)
+        if found is None:
+            return {}
+        baseline, rows = found
+        now = {agent: row["chars"] for agent, row in rows.items()}
+        before = baseline["agents"]
+        for item in reversed(_records(_read(home / _IMPROVEMENTS, _valid_improvement))):
+            if "fixed_chars" in item:
+                before = item["fixed_chars"]
+                break
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+    actual = {agent: now.get(agent, 0) - before.get(agent, 0) for agent in sorted({*now, *before})}
+    return {"fixed_chars": now, "size_actual": {agent: delta for agent, delta in actual.items() if delta}}
+
+
+def _bloat(home: Path) -> dict:
+    from . import bloat
+    return bloat.signal(home)
+
+
+def _print_bloat(report: dict) -> None:
+    from . import bloat
+    line = bloat.signal_line(report)
+    if line:
+        print(line)
 
 
 def _open_message_db(path: Path) -> sqlite3.Connection:
@@ -716,6 +763,7 @@ def signals(home: Path, now: float | None, *, all_items: bool = False, cost_db: 
         "outcomes": {"passed": outcomes["passed"], "abandoned": outcomes["abandoned"], "unknown": outcomes[None]},
         "escalations": _escalations(scope),
         "amendments": sum(run["amendments"] for run in scope), "trend": trend, "improvements": improvements,
+        "bloat": _bloat(home),
     }
     if message_db is not None:
         report.update(_message_report(message_db, generated, messages_since, keep, responses, handled))
@@ -749,8 +797,13 @@ def _print_cost(report: dict) -> None:
               f"pauses ${period['pauses']['cost']:.2f}")
 
 
+def _sizes_text(sizes: dict) -> str:
+    return ", ".join(f"{agent} {delta:+,}" for agent, delta in sizes.items()) or "no change"
+
+
 def _print_report(report: dict) -> None:
     _print_due(report)
+    _print_bloat(report.get("bloat") or {})
     _print_cost(report)
     for title, field in (("Feedback", "feedback"), ("Lessons", "lessons"), ("Discovered", "discovered")):
         if report[field]:
@@ -796,6 +849,10 @@ def _print_report(report: dict) -> None:
                 print("    Signals: " + "; ".join(item["signals"]))
             if item.get("metric") is not None:
                 print(f"    Metric: {item['metric']}")
+            if "size_change" in item or "size_actual" in item:
+                sizes = [f"{label} {_sizes_text(item[key])}" for label, key in
+                         (("proposed", "size_change"), ("actual", "size_actual")) if key in item]
+                print("    Size (characters of fixed text): " + "; ".join(sizes))
 
 
 def _feedback_text(args: argparse.Namespace) -> str:
@@ -812,9 +869,25 @@ def _feedback_text(args: argparse.Namespace) -> str:
     return text[:-2] if text.endswith("\r\n") else text.removesuffix("\n")
 
 
+def _size_change(values: list[str] | None) -> dict[str, int] | None:
+    """AGENT=+N or AGENT=-N options as {agent: N}."""
+    if not values:
+        return None
+    sizes = {}
+    for value in values:
+        agent, sep, delta = value.partition("=")
+        try:
+            sizes[agent] = int(delta)
+        except ValueError:
+            sep = ""
+        if not sep or not agent:
+            raise ValueError(f"--size-change takes AGENT=+N or AGENT=-N characters, not {value!r}")
+    return sizes
+
+
 def _improvement_fields(args: argparse.Namespace) -> dict:
     fields = {"file": args.file, "summary": args.summary, "signals": args.signal,
-              "metric": args.metric, "seen_until": args.seen_until}
+              "metric": args.metric, "seen_until": args.seen_until, "size_change": _size_change(args.size_change)}
     supplied = {key: value for key, value in fields.items() if value is not None}
     if args.json_file is not None:
         if supplied:
@@ -851,6 +924,8 @@ def main(argv: list[str] | None = None) -> int:
     improved_parser.add_argument("--signal", action="append")
     improved_parser.add_argument("--metric")
     improved_parser.add_argument("--seen-until", type=_finite_float, help="generated time of the signals report used")
+    improved_parser.add_argument("--size-change", action="append", metavar="AGENT=DELTA",
+                                 help="the proposal's change to an agent's fixed text, in characters (repeatable)")
     batch = improved_parser.add_mutually_exclusive_group()
     batch.add_argument("--keep-watermark", action="store_true", help="record a batch edit without consuming pending signals")
     batch.add_argument("--handled-file", type=Path, help="mark feedback using a JSON object mapping IDs to reasons")
@@ -891,6 +966,7 @@ def main(argv: list[str] | None = None) -> int:
             for run in result.runs:
                 print(f"recorded {run['task']}: {run['nodes_passed']}/{run['nodes_total']} nodes passed ({run['path']})")
             _print_due(result.due)
+            _print_bloat(_bloat(home))
             return result.code
         if args.command == "feedback":
             if feedback(home, None, _feedback_text(args), agent=args.agent, task=args.task) is None:
@@ -899,7 +975,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "improved":
             if args.handled_file is not None:
                 if any(value is not None for value in
-                       (args.json_file, args.file, args.summary, args.signal, args.metric, args.seen_until)):
+                       (args.json_file, args.file, args.summary, args.signal, args.metric, args.seen_until,
+                        args.size_change)):
                     raise ValueError("--handled-file cannot be combined with improvement metadata options")
                 _mark_feedback(home, None, json.loads(args.handled_file.read_text(encoding="utf-8")),
                                args.db or sources.DB_PATH)
