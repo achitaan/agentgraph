@@ -19,6 +19,7 @@ from .contract import (
 from .sources import find_graph_dir, graph_files, graph_from_raw, read_graph_text
 from .snapshot_json import flow_steps, hub_names, is_self_loop, load_structure
 from .teams import problems as team_problems
+from . import outputs
 
 
 _NODE_STRINGS = ("id", "type", "agent", "goal", "done_when", "status")
@@ -474,7 +475,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--task", metavar="NAME", help="check only the graph with this declared task name")
     parser.add_argument("--structure", type=Path, metavar="DIR",
                         help="structure folder whose drawn flows the graphs must follow (default: the orchestration's own)")
+    parser.add_argument("--home", type=Path, metavar="DIR",
+                        help="memory home whose edit log says which outputs were edited by hand (agentgraph.outputs; "
+                             "default: $AGENTGRAPH_HOME, else the active preset's memory folder)")
     args = parser.parse_args(argv)
+    edits = outputs.edit_home(args.home)
     # A missing default folder means no drawn flows; a folder named on the command line must exist,
     # so a mistyped path cannot turn the flow checks off without a word.
     shape = load_structure(args.structure)
@@ -518,6 +523,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.task is not None and raw.get("task") != args.task:
                 continue  # Another task's graph: never validated, so it cannot slow this check.
             graph, issues = _graph_and_issues(raw, path, flows, hubs, seats, teams, escalation)
+            issues = issues + outputs.lost_edits(graph, edits)  # an edit by hand the graph no longer records
         if graph is None:
             # A non-object is readable JSON with a schema problem; preserve
             # the CLI's distinction between it and a read or decode failure.

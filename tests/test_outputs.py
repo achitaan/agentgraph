@@ -1,0 +1,584 @@
+"""A step's output opened and edited by hand (contract n110, `.opencode/artifacts/agentgraph-desktop/n110/r1/`):
+the snapshot shows each output's rev, size and whether it can be edited; a read gives its text and rev; a write
+with `expect` saves the text as the next revision, makes every step that read the old one stale, records an event,
+an undo record and an edit-log line, as one undoable step; a stale `expect` changes nothing (409 with the current
+rev); undo puts back file and graph byte for byte, or is refused naming what stands in the way. The graph file is
+shared with a running orchestrator: its concurrent change is never lost (interleaved here through the module's test
+hook), and an orchestrator that drops the edit's record makes `check` say so from the edit log. Scratch folders
+only: every test builds its own graph, artifacts folder, memory home and backups folder."""
+import contextlib
+import http.client
+import io
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from agentgraph import agentfiles, check, contract, outputs, server
+from agentgraph.snapshot_json import snapshot_document
+from agentgraph.sources import build_snapshot, load_graphs
+
+ROOT = Path(__file__).resolve().parent.parent
+STALE = "changed since you opened it; reload and try again"
+OLD = "0123456789abcdef"  # a rev no output has
+TEXT = "line one\nline two\n"
+LOG_KEYS = {"time", "id", "task", "graph", "node", "agent", "artifact", "from_revision", "revision", "path",
+            "chars_before", "chars_after", "lines_added", "lines_removed", "undone"}
+
+
+def graph_raw():
+    return {
+        "task": "t1", "goal": "g", "status": "running", "revision": 1, "created": 1, "updated": 2,
+        "objectives": [{"id": "o1", "text": "x", "nodes": ["n1", "n2", "n3"]}],
+        "nodes": [
+            {"id": "n1", "type": "research", "agent": "explorer", "goal": "find", "depends_on": [], "scope": [],
+             "done_when": "list", "status": "passed", "evidence": "e",
+             "artifacts": [{"id": "report", "path": ".opencode/artifacts/t1/n1/r1/report.md", "revision": 1}]},
+            {"id": "n2", "type": "implement", "agent": "impl-openai", "goal": "do", "depends_on": ["n1"],
+             "scope": ["src/"], "done_when": "tests", "status": "passed", "evidence": "e",
+             "inputs": [{"from": "n1", "artifact": "report", "revision": 1}]},
+            {"id": "n3", "type": "check", "agent": "verifier", "goal": "verify", "depends_on": ["n1"], "scope": [],
+             "done_when": "ok", "status": "pending", "evidence": "",
+             "inputs": [{"from": "n1", "artifact": "report", "revision": 1}]},
+        ],
+        "events": [{"time": 1, "node": "", "event": "declared", "note": "3 nodes"}],
+    }
+
+
+def tree(root: Path) -> dict:
+    """Every entry under `root`: a file's bytes, a link's target, or "dir"."""
+    found = {}
+    for path in sorted(root.rglob("*")):
+        key = str(path.relative_to(root))
+        found[key] = ("link", os.readlink(path)) if path.is_symlink() else path.read_bytes() if path.is_file() else "dir"
+    return found
+
+
+def write_whole(path: Path, raw) -> None:
+    """Write a graph file the way GRAPH_FORMAT.md tells the orchestrator to: whole, to a temporary file, renamed."""
+    temporary = path.with_name(f".orchestrator-{os.getpid()}.tmp")
+    temporary.write_bytes(raw if isinstance(raw, bytes) else json.dumps(raw).encode("utf-8"))
+    os.replace(temporary, path)
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.project = self.root / "project"
+        self.graphs = self.project / ".opencode" / "graph"
+        self.graphs.mkdir(parents=True)
+        self.artifacts = self.project / ".opencode" / "artifacts" / "t1"
+        (self.artifacts / "n1" / "r1").mkdir(parents=True)
+        (self.artifacts / "n1" / "r1" / "report.md").write_text(TEXT)
+        self.graph = self.graphs / "t1.json"
+        self.graph.write_text(json.dumps(graph_raw(), indent=1))
+        self.home = self.root / "memory"
+        self.backups = self.root / "backups"
+        self.where = {"dirs": [self.graphs], "home": self.home, "backups": self.backups}
+
+    def state(self):
+        return tree(self.project), tree(self.home) if self.home.exists() else {}, \
+            tree(self.backups) if self.backups.exists() else {}
+
+    def rev(self):
+        return outputs.read_output("t1", "n1", "report", dirs=[self.graphs])["rev"]
+
+    def write(self, text="line one\nline 2\nline three\n", expect=None, **extra):
+        return outputs.write_output("t1", "n1", "report", text, expect=self.rev() if expect is None else expect,
+                                    **{**self.where, **extra})
+
+    def raw(self):
+        return json.loads(self.graph.read_text())
+
+    def check(self, home=None):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = check.main(["--dir", str(self.graphs), "--home", str(home or self.home)])
+        return code, out.getvalue()
+
+    def log(self):
+        return [json.loads(line) for line in (self.home / outputs.EDIT_LOG).read_text().splitlines()]
+
+
+class Shown(Base):
+    def document(self):
+        graphs, _ = load_graphs(self.graphs)
+        snapshot = build_snapshot(graph_dir=self.graphs, db_path=self.root / "none.db", config_dir=self.root,
+                                  cwd=self.project)
+        document = snapshot_document(snapshot, "live", "t1")
+        outputs.annotate(document)
+        return {node["id"]: node["artifacts"] for node in document["graph"]["nodes"]}
+
+    def test_each_output_shows_its_rev_size_and_whether_it_can_be_edited_without_its_content(self):
+        artifact = self.document()["n1"][0]
+        self.assertEqual(set(artifact), {"id", "path", "revision", "rev", "size", "editable", "why"})
+        self.assertRegex(artifact["rev"], r"^[0-9a-f]{16}$")
+        self.assertEqual((artifact["size"], artifact["editable"], artifact["why"]), (len(TEXT), True, ""))
+        self.assertEqual(artifact["rev"], self.rev(), "the snapshot's rev is the one a read gives and a write checks")
+        self.assertEqual(artifact["rev"], outputs.output_rev(artifact["path"], 1, TEXT.encode()))
+
+    def test_an_output_that_cannot_be_edited_says_why(self):
+        raw = graph_raw()
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "secret.md").write_text("secret\n")
+        (self.artifacts / "n1" / "r1" / "binary.bin").write_bytes(b"\x00\x01\x02")
+        (self.artifacts / "n1" / "r1" / "big.md").write_bytes(b"a" * (outputs.TEXT_LIMIT + 1))
+        (self.artifacts / "n1" / "linked").symlink_to(outside, target_is_directory=True)
+        (self.artifacts / "n1" / "r1" / "file-link.md").symlink_to(outside / "secret.md")
+        cases = {
+            "missing": (".opencode/artifacts/t1/n1/r1/gone.md", "the file is missing"),
+            "binary": (".opencode/artifacts/t1/n1/r1/binary.bin", "not text"),
+            "big": (".opencode/artifacts/t1/n1/r1/big.md", "larger than 256 KiB"),
+            "elsewhere": ("src/report.md", "outside this task's artifacts folder"),
+            "climbing": (".opencode/artifacts/t1/../t2/report.md", "outside this task's artifacts folder"),
+            "absolute": (str(outside / "secret.md"), "outside this task's artifacts folder"),
+            "linked": (".opencode/artifacts/t1/n1/linked/secret.md", "link"),
+            "file-link": (".opencode/artifacts/t1/n1/r1/file-link.md", "link"),
+        }
+        raw["nodes"][0]["artifacts"] += [{"id": key, "path": path, "revision": 1} for key, (path, _) in cases.items()]
+        self.graph.write_text(json.dumps(raw))
+        shown = {artifact["id"]: artifact for artifact in self.document()["n1"]}
+        for key, (_, reason) in cases.items():
+            self.assertFalse(shown[key]["editable"], key)
+            self.assertIn(reason, shown[key]["why"], key)
+            self.assertRegex(shown[key]["rev"], r"^[0-9a-f]{16}$", key)
+            with self.assertRaisesRegex(outputs.OutputError, "cannot be opened here"):
+                outputs.read_output("t1", "n1", key, dirs=[self.graphs])
+            before = self.state()
+            with self.assertRaisesRegex(outputs.OutputError, "cannot be edited here"):
+                outputs.write_output("t1", "n1", key, "mine\n", **self.where)
+            self.assertEqual(self.state(), before, key)
+        self.assertEqual((outside / "secret.md").read_text(), "secret\n")
+        self.assertEqual(sorted(path.name for path in outside.iterdir()), ["secret.md"])
+
+    def test_a_writer_step_whose_next_revision_falls_outside_its_scope_cannot_be_edited(self):
+        raw = graph_raw()
+        raw["nodes"][0]["scope"] = [".opencode/artifacts/t1/n1/r1/"]
+        self.graph.write_text(json.dumps(raw))
+        artifact = self.document()["n1"][0]
+        self.assertFalse(artifact["editable"])
+        self.assertIn("outside the step's scope", artifact["why"])
+        raw["nodes"][0]["scope"] = [".opencode/artifacts/t1/n1/"]
+        self.graph.write_text(json.dumps(raw))
+        self.assertTrue(self.document()["n1"][0]["editable"])
+
+    def test_the_server_snapshot_carries_the_fields(self):
+        httpd = server.make_server(0, graph_dir=self.graphs, cwd=self.project, web_dir=self.root,
+                                   structure_dir=self.root / "structure", skills_config=self.root / "preset.json",
+                                   skills_map=self.root / "SKILLS.md", skills_backups=self.backups,
+                                   skills_profiles=self.root / "profiles", skills_dir=self.root / "skills",
+                                   skills_bundled=[], agents_dir=self.root / "agents", opencode_dir=self.root,
+                                   ledger_root=self.root, commands_dir=self.root / "commands",
+                                   sessions_db=self.root / "none.db")
+        thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=10)
+            conn.request("GET", "/api/snapshot?task=t1")
+            document = json.loads(conn.getresponse().read())
+            conn.close()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(2)
+        artifact = document["graph"]["nodes"][0]["artifacts"][0]
+        self.assertEqual((artifact["rev"], artifact["editable"], artifact["size"]), (self.rev(), True, len(TEXT)))
+        self.assertNotIn(TEXT, json.dumps(document))
+
+
+class ReadWrite(Base):
+    def test_a_read_gives_the_text_and_the_rev(self):
+        read = outputs.read_output("t1", "n1", "report", dirs=[self.graphs])
+        self.assertEqual(read, {"task": "t1", "node": "n1", "artifact": "report",
+                                "path": ".opencode/artifacts/t1/n1/r1/report.md", "revision": 1, "size": len(TEXT),
+                                "rev": outputs.output_rev(".opencode/artifacts/t1/n1/r1/report.md", 1, TEXT.encode()),
+                                "text": TEXT, "editable": True})
+
+    def test_a_write_saves_the_next_revision_and_every_reader_of_the_old_one_becomes_stale(self):
+        self.assertEqual(self.check()[0], 0)
+        new = "line one\nline 2\nline three\n"
+        answer = self.write(new, now=1_800_000_000.0)
+        self.assertTrue(answer["changed"])
+        self.assertEqual((self.artifacts / "n1" / "r1" / "report.md").read_text(), TEXT, "the earlier file is kept")
+        self.assertEqual((self.artifacts / "n1" / "r2" / "report.md").read_text(), new)
+        raw = self.raw()
+        self.assertEqual(raw["nodes"][0]["artifacts"][0],
+                         {"id": "report", "path": ".opencode/artifacts/t1/n1/r2/report.md", "revision": 2})
+        self.assertEqual(raw["events"][-1], {"time": 1_800_000_000.0, "node": "n1", "event": "changed",
+                                             "note": "output report edited by hand by the user: revision 1 -> 2 "
+                                                     "(.opencode/artifacts/t1/n1/r2/report.md)"})
+        self.assertEqual(raw["updated"], 1_800_000_000.0)
+        graph = load_graphs(self.graphs)[0][0]
+        self.assertEqual([item[0] for item in contract.stale_inputs(graph)], ["n2", "n3"])
+        self.assertEqual([(item["id"], item["agent"], item["read"]) for item in answer["stale"]],
+                         [("n2", "impl-openai", 1), ("n3", "verifier", 1)])
+        self.assertIn("n2 (impl-openai), n3 (verifier)", answer["message"])
+        code, printed = self.check()
+        self.assertEqual(code, 1)
+        self.assertIn("n2 is passed with stale input 'report' from n1: read revision 1, current revision 2", printed)
+        self.assertEqual(answer["output"]["revision"], 2)
+        self.assertEqual(answer["rev"], self.rev())
+        self.assertTrue(Path(answer["record"]).is_file())
+        self.assertTrue(Path(answer["record"]).is_relative_to(self.backups))
+
+    def test_the_edit_log_has_one_line_per_edit_and_no_content(self):
+        answer = self.write("line one\nline 2\nline three\n", now=1_800_000_000.0)
+        [entry] = self.log()
+        self.assertEqual(set(entry), LOG_KEYS)
+        self.assertEqual({key: entry[key] for key in LOG_KEYS - {"id", "graph"}}, {
+            "time": 1_800_000_000.0, "task": "t1", "node": "n1", "agent": "explorer", "artifact": "report",
+            "from_revision": 1, "revision": 2, "path": ".opencode/artifacts/t1/n1/r2/report.md",
+            "chars_before": len(TEXT), "chars_after": len("line one\nline 2\nline three\n"), "lines_added": 2,
+            "lines_removed": 1, "undone": False})
+        self.assertEqual(entry["graph"], str(self.graph.resolve()))
+        log = (self.home / outputs.EDIT_LOG).read_text()
+        self.assertNotIn("line 2", log)
+        self.assertNotIn("line two", log)
+        outputs.restore_output(answer["record"], backups=self.backups, home=self.home, now=1_800_000_100.0)
+        [entry] = self.log()
+        self.assertEqual((entry["undone"], entry["undone_time"]), (True, 1_800_000_100.0))
+
+    def test_a_stale_expect_changes_nothing_and_answers_with_the_current_rev(self):
+        before = self.state()
+        with self.assertRaisesRegex(agentfiles.StaleError, STALE) as caught:
+            self.write(expect=OLD)
+        self.assertEqual(caught.exception.rev, self.rev())
+        self.assertEqual(self.state(), before)
+        current = self.rev()
+        self.write("first\n", expect=current)
+        before = self.state()
+        with self.assertRaises(agentfiles.StaleError) as caught:
+            self.write("second\n", expect=current)  # the view still shows the earlier revision
+        self.assertEqual(self.state(), before)
+        self.assertEqual(caught.exception.rev, self.rev())
+
+    def test_an_expect_that_is_not_a_rev_is_bad_input_and_no_expect_still_writes(self):
+        for bad in ("", " ", "ABCDEF0123456789", "0" * 15, 7):
+            before = self.state()
+            with self.assertRaisesRegex(outputs.OutputError, "16 lowercase hex digits"):
+                outputs.write_output("t1", "n1", "report", "x\n", expect=bad, **self.where)
+            self.assertEqual(self.state(), before)
+        self.assertTrue(outputs.write_output("t1", "n1", "report", "x\n", **self.where)["changed"])
+
+    def test_the_same_text_changes_nothing(self):
+        before = self.state()
+        answer = self.write(TEXT)
+        self.assertEqual((answer["changed"], "record" in answer), (False, False))
+        self.assertEqual(self.state(), before)
+
+    def test_text_rules_and_the_size_cap(self):
+        before = self.state()
+        for text, reason in (("a\x00b", "control character U\\+0000"), ("\x1b[31mred", "control character U\\+001B"),
+                             ("a" * (outputs.TEXT_LIMIT + 1), "larger than 256 KiB"), ("\ud800", "not valid Unicode"),
+                             (b"bytes", "must be text")):
+            with self.assertRaisesRegex(outputs.OutputError, reason):
+                outputs.write_output("t1", "n1", "report", text, **self.where)
+        self.assertEqual(self.state(), before)
+        self.assertTrue(self.write("tab\tand\r\nCRLF and é ✓\n")["changed"])
+        self.assertTrue(self.write("a" * outputs.TEXT_LIMIT)["changed"], "exactly the cap is allowed")
+
+    def test_a_link_where_the_next_revision_goes_is_refused_and_nothing_is_written_through_it(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.artifacts / "n1" / "r2").symlink_to(outside, target_is_directory=True)
+        before = self.state()
+        with self.assertRaisesRegex(outputs.OutputError, "link"):
+            self.write()
+        self.assertEqual(self.state(), before)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_a_file_already_where_the_next_revision_goes_is_refused(self):
+        (self.artifacts / "n1" / "r2").mkdir()
+        (self.artifacts / "n1" / "r2" / "report.md").write_text("an orchestrator's revision 2\n")
+        before = self.state()
+        with self.assertRaisesRegex(outputs.OutputError, "already exists"):
+            self.write()
+        self.assertEqual(self.state(), before)
+
+    def test_unknown_task_step_or_output_is_refused(self):
+        for task, node, artifact, reason in (("t9", "n1", "report", "no task graph"), ("t1", "n9", "report", "no step"),
+                                             ("t1", "n1", "other", "no output")):
+            with self.assertRaisesRegex(outputs.OutputError, reason):
+                outputs.read_output(task, node, artifact, dirs=[self.graphs])
+            with self.assertRaisesRegex(outputs.OutputError, reason):
+                outputs.write_output(task, node, artifact, "x\n", **self.where)
+
+    def test_two_graph_files_declaring_the_task_are_refused(self):
+        (self.graphs / "copy.json").write_text(self.graph.read_text())
+        with self.assertRaisesRegex(outputs.OutputError, "2 graph files"):
+            outputs.read_output("t1", "n1", "report", dirs=[self.graphs])
+
+
+class Undo(Base):
+    def test_undo_restores_file_and_graph_byte_for_byte(self):
+        before = tree(self.project)
+        answer = self.write()
+        self.assertNotEqual(tree(self.project), before)
+        undone = outputs.restore_output(answer["record"], backups=self.backups, home=self.home)
+        self.assertEqual(tree(self.project), before)
+        self.assertEqual((undone["text"], undone["rev"], undone["output"]["revision"]), (TEXT, self.rev(), 1))
+        self.assertFalse(Path(answer["record"]).exists(), "a record undoes once")
+        self.assertEqual(self.check()[0], 0)
+        with self.assertRaisesRegex(outputs.OutputError, "no such record"):
+            outputs.restore_output(answer["record"], backups=self.backups, home=self.home)
+
+    def test_two_edits_undo_in_turn(self):
+        before = tree(self.project)
+        first = self.write("first\n")
+        middle = tree(self.project)
+        second = self.write("second\n")
+        self.assertEqual(self.raw()["nodes"][0]["artifacts"][0]["revision"], 3)
+        outputs.restore_output(second["record"], backups=self.backups, home=self.home)
+        self.assertEqual(tree(self.project), middle)
+        outputs.restore_output(first["record"], backups=self.backups, home=self.home)
+        self.assertEqual(tree(self.project), before)
+
+    def test_undo_after_the_orchestrator_wrote_the_graph_takes_back_only_the_edit(self):
+        answer = self.write(now=1_800_000_000.0)
+        raw = self.raw()
+        raw["nodes"][2]["status"] = "running"
+        raw["events"].append({"time": 1_800_000_050.0, "node": "n3", "event": "dispatched", "note": "verifier"})
+        write_whole(self.graph, raw)
+        outputs.restore_output(answer["record"], backups=self.backups, home=self.home, now=1_800_000_100.0)
+        raw = self.raw()
+        self.assertEqual(raw["nodes"][0]["artifacts"][0],
+                         {"id": "report", "path": ".opencode/artifacts/t1/n1/r1/report.md", "revision": 1})
+        self.assertEqual(raw["nodes"][2]["status"], "running", "the orchestrator's change is kept")
+        self.assertEqual([event["event"] for event in raw["events"]], ["declared", "dispatched"])
+        self.assertFalse((self.artifacts / "n1" / "r2").exists())
+
+    def test_undo_is_refused_when_a_later_run_replaced_the_output(self):
+        answer = self.write()
+        raw = self.raw()
+        (self.artifacts / "n1" / "r3").mkdir()
+        (self.artifacts / "n1" / "r3" / "report.md").write_text("rerun\n")
+        raw["nodes"][0]["artifacts"][0].update(path=".opencode/artifacts/t1/n1/r3/report.md", revision=3)
+        write_whole(self.graph, raw)
+        before = self.state()
+        with self.assertRaisesRegex(outputs.OutputError, "is now revision 3 at .*r3/report.md \\(a later run "
+                                                         "replaced it\\), not the hand edit's revision 2"):
+            outputs.restore_output(answer["record"], backups=self.backups, home=self.home)
+        self.assertEqual(self.state(), before)
+
+    def test_undo_is_refused_when_the_edited_file_was_changed_after(self):
+        answer = self.write()
+        (self.artifacts / "n1" / "r2" / "report.md").write_text("changed again by hand\n")
+        before = self.state()
+        with self.assertRaisesRegex(outputs.OutputError, "revision 2 was changed after the edit"):
+            outputs.restore_output(answer["record"], backups=self.backups, home=self.home)
+        self.assertEqual(self.state(), before)
+
+    def test_a_record_from_elsewhere_is_refused(self):
+        stray = self.root / "record.json"
+        stray.write_text("{}")
+        for record in (str(stray), "", "relative/record.json"):
+            with self.assertRaisesRegex(outputs.OutputError, "invalid undo record"):
+                outputs.restore_output(record, backups=self.backups, home=self.home)
+
+
+class SharedGraph(Base):
+    """The graph file is shared with a running orchestrator that rewrites it whole at any moment."""
+
+    def orchestrator(self, stage, change, times=1):
+        calls = {"left": times}
+
+        def hook(at):
+            if at == stage and calls["left"]:
+                calls["left"] -= 1
+                raw = self.raw()
+                change(raw)
+                write_whole(self.graph, raw)
+        return patch.object(outputs, "_HOOK", hook)
+
+    @staticmethod
+    def dispatch(raw):
+        raw["nodes"][2]["status"] = "running"
+        raw["events"].append({"time": 5, "node": "n3", "event": "dispatched", "note": "verifier"})
+
+    def kept(self):
+        raw = self.raw()
+        self.assertEqual(raw["nodes"][2]["status"], "running", "the orchestrator's change was lost")
+        self.assertIn({"time": 5, "node": "n3", "event": "dispatched", "note": "verifier"}, raw["events"])
+        self.assertEqual(raw["nodes"][0]["artifacts"][0]["revision"], 2, "the edit was lost")
+        self.assertEqual(raw["events"][-1]["event"], "changed")
+
+    def test_an_orchestrator_write_after_the_graph_was_read_is_merged_with_the_edit(self):
+        with self.orchestrator("file", self.dispatch):
+            self.write()
+        self.kept()
+
+    @unittest.skipIf(outputs._SWAP is None, "no atomic exchange on this system")
+    def test_an_orchestrator_write_in_the_last_moment_before_the_replace_is_kept(self):
+        # The orchestrator writes after the merged file is ready and the graph was last read: the exchange puts
+        # it back and the merge is made again from it.
+        with self.orchestrator("replace", self.dispatch):
+            self.write()
+        self.kept()
+
+    def test_an_orchestrator_that_changes_the_same_output_meanwhile_refuses_the_edit(self):
+        def rerun(raw):
+            raw["nodes"][0]["artifacts"][0].update(path=".opencode/artifacts/t1/n1/r9/report.md", revision=9)
+        with self.orchestrator("file", rerun):
+            with self.assertRaisesRegex(outputs.OutputError, "was changed in the graph while this edit was being "
+                                                             "saved \\(it is now revision 9"):
+                self.write()
+        self.assertEqual(self.raw()["nodes"][0]["artifacts"][0]["revision"], 9)
+        self.assertFalse((self.artifacts / "n1" / "r2").exists(), "the edit's file is taken back")
+        self.assertFalse((self.home / outputs.EDIT_LOG).exists())
+        self.assertEqual(tree(self.backups) if self.backups.exists() else {}, {})
+
+    def test_a_graph_that_keeps_changing_is_refused_without_loss(self):
+        with self.orchestrator("replace", self.dispatch, times=100):
+            with self.assertRaisesRegex(outputs.OutputError, "kept changing"):
+                self.write()
+        self.assertEqual(self.raw()["nodes"][0]["artifacts"][0]["revision"], 1)
+        self.assertEqual(self.raw()["nodes"][2]["status"], "running")
+        self.assertFalse((self.artifacts / "n1" / "r2").exists())
+
+    def test_check_reports_an_edit_the_graph_no_longer_records(self):
+        older = self.graph.read_bytes()  # the orchestrator's own copy, from before the edit
+        answer = self.write()
+        write_whole(self.graph, older)
+        code, printed = self.check()
+        self.assertEqual(code, 1)
+        self.assertIn("n1 output 'report' was edited by hand after the graph last recorded it", printed)
+        self.assertIn("made revision 2 (.opencode/artifacts/t1/n1/r2/report.md), the graph says revision 1", printed)
+        self.assertEqual(self.check(home=self.root / "elsewhere")[0], 0, "only the edit log knows")
+        # Undo still works: the graph already records the earlier revision, so only the file goes.
+        outputs.restore_output(answer["record"], backups=self.backups, home=self.home)
+        self.assertEqual(self.graph.read_bytes(), older)
+        self.assertEqual(self.check()[0], 0)
+
+    def test_check_is_quiet_once_the_graph_records_the_edit_or_a_later_run(self):
+        self.write()
+        self.assertNotIn("edited by hand after", self.check()[1])
+        raw = self.raw()
+        raw["nodes"][0]["artifacts"][0].update(path=".opencode/artifacts/t1/n1/r3/report.md", revision=3)
+        write_whole(self.graph, raw)
+        self.assertNotIn("edited by hand after", self.check()[1])
+        raw["nodes"] = raw["nodes"][1:]
+        write_whole(self.graph, raw)
+        self.assertIn("the graph no longer lists that output", self.check()[1])
+
+
+class Surfaces(Base):
+    def command(self, *args, stdin=""):
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.root), "PYTHONIOENCODING": "utf-8"}
+        done = subprocess.run([str(ROOT / "bin" / "agentgraph"), "output", *args], input=stdin, env=env,
+                              capture_output=True, text=True, timeout=60)
+        last = [line for line in done.stdout.splitlines() if line.strip()]
+        return done.returncode, json.loads(last[-1]) if last else done.stderr
+
+    def test_the_command_reads_writes_refuses_a_stale_expect_and_undoes(self):
+        where = ["--dir", str(self.graphs)]
+        stores = ["--home", str(self.home), "--backups", str(self.backups)]
+        before = tree(self.project)
+        code, read = self.command("read", "t1", "n1", "report", *where, "--json")
+        self.assertEqual((code, read["text"], read["rev"]), (0, TEXT, self.rev()))
+        code, refused = self.command("write", "t1", "n1", "report", *where, *stores, "--text-file", "-", "--expect", OLD,
+                                     "--json", stdin="mine\n")
+        self.assertEqual((code, refused), (1, {"error": f"step n1's output report {STALE}", "rev": read["rev"]}))
+        self.assertEqual(tree(self.project), before)
+        code, saved = self.command("write", "t1", "n1", "report", *where, *stores, "--text-file", "-", "--expect",
+                                   read["rev"], "--json", stdin="mine\n")
+        self.assertEqual((code, saved["changed"], [item["id"] for item in saved["stale"]]), (0, True, ["n2", "n3"]))
+        code, undone = self.command("restore", saved["record"], *stores, "--json")
+        self.assertEqual((code, undone["restored"]), (0, True))
+        self.assertEqual(tree(self.project), before)
+        code, message = self.command("write", "t1", "n1", "report", *where, *stores, "--text-file", "-", "--expect",
+                                     "nope", stdin="x\n")
+        self.assertEqual(code, 1)
+        self.assertIn("16 lowercase hex digits", message)
+
+    def test_the_command_finds_the_graph_from_a_folder_as_the_snapshot_does(self):
+        code, read = self.command("read", "t1", "n1", "report", "--from", str(self.project / ".opencode"), "--json")
+        self.assertEqual((code, read.get("rev")), (0, self.rev()))
+
+    def endpoint(self):
+        httpd = server.make_server(0, graph_dir=self.graphs, cwd=self.project, web_dir=self.root,
+                                   skills_backups=self.backups, ledger_root=self.root,
+                                   skills_config=self.root / "preset.json", sessions_db=self.root / "none.db")
+        thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        origin = f"http://127.0.0.1:{httpd.server_port}"
+
+        def post(body):
+            conn = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=10)
+            try:
+                conn.request("POST", "/api/output", body=json.dumps(body).encode(),
+                             headers={"Content-Type": "application/json", "Origin": origin})
+                response = conn.getresponse()
+                return response.status, json.loads(response.read())
+            finally:
+                conn.close()
+        return post
+
+    def test_the_endpoint_reads_writes_answers_409_on_a_stale_expect_and_undoes(self):
+        post = self.endpoint()
+        self.home = self.root / "memory"  # ledger_root's memory folder: where the server keeps the edit log
+        before = self.state()
+        status, read = post({"op": "read", "task": "t1", "node": "n1", "artifact": "report"})
+        self.assertEqual((status, read["text"], read["rev"]), (200, TEXT, self.rev()))
+        body = {"op": "write", "task": "t1", "node": "n1", "artifact": "report", "text": "mine\n"}
+        status, refused = post({**body, "expect": OLD})
+        self.assertEqual((status, refused), (409, {"error": f"step n1's output report {STALE}", "rev": read["rev"]}))
+        self.assertEqual(self.state(), before)
+        for bad in ("", None, 5, "ABCDEF0123456789"):
+            status, answer = post({**body, "expect": bad})
+            self.assertEqual(status, 400, bad)
+        status, answer = post({**body, "extra": 1})
+        self.assertEqual(status, 400)
+        self.assertEqual(self.state(), before)
+        status, saved = post({**body, "expect": read["rev"]})
+        self.assertEqual((status, saved["changed"], saved["output"]["revision"]), (200, True, 2))
+        self.assertEqual([entry["node"] for entry in self.log()], ["n1"])
+        status, undone = post({"op": "restore", "record": saved["record"]})
+        self.assertEqual((status, undone["text"]), (200, TEXT))
+        self.assertEqual(tree(self.project), before[0])
+        status, answer = post({"op": "read", "task": "t1", "node": "n1", "artifact": "nothing"})
+        self.assertEqual((status, set(answer)), (400, {"error"}))
+
+
+class DesktopPath(Base):
+    """The Desktop panel's command lines, as the plugin runs them: the snapshot in the session's folder, the outputs
+    command in the orchestration folder with `--from` the session's folder, HOME in scratch."""
+
+    def test_the_snapshot_rev_is_the_one_the_desktop_write_checks(self):
+        home = self.root  # the project is inside HOME, where graph discovery looks
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home), "PYTHONPATH": str(ROOT),
+               "PYTHONIOENCODING": "utf-8", "AGENTGRAPH_HOME": str(self.home)}
+
+        def run(*args, cwd, stdin=""):
+            done = subprocess.run([sys.executable, "-P", "-m", *args], cwd=cwd, env=env, input=stdin,
+                                  capture_output=True, text=True, timeout=120)
+            return done.returncode, json.loads(done.stdout.splitlines()[-1])
+
+        code, document = run("agentgraph.snapshot_json", "--task", "t1", cwd=self.project)
+        self.assertEqual(code, 0, document)
+        artifact = document["graph"]["nodes"][0]["artifacts"][0]
+        self.assertEqual((artifact["rev"], artifact["editable"]), (self.rev(), True))
+        line = ["agentgraph.outputs", "output", "write", "t1", "n1", "report", "--from", str(self.project),
+                "--text-file", "-"]
+        before = self.state()
+        code, refused = run(*line, "--expect", OLD, "--json", cwd=ROOT, stdin="mine\n")
+        self.assertEqual((code, refused.get("rev")), (1, artifact["rev"]))
+        self.assertEqual(self.state(), before)
+        code, saved = run(*line, "--expect", artifact["rev"], "--json", cwd=ROOT, stdin="mine\n")
+        self.assertEqual((code, saved.get("changed")), (0, True), saved)
+        self.assertTrue(Path(saved["record"]).is_relative_to(home / ".config" / "opencode" / "backups"))
+        self.assertEqual([entry["revision"] for entry in self.log()], [2])
+        code, document = run("agentgraph.snapshot_json", "--task", "t1", cwd=self.project)
+        self.assertEqual([entry["stale"] for entry in document["graph"]["nodes"][1]["inputs"]], [True])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -13,10 +13,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote
 
-from . import agentfiles, flowcommands, flowrun, roster, skillfiles, skillset, structure, teams
+from . import agentfiles, flowcommands, flowrun, outputs, roster, skillfiles, skillset, structure, teams
 from .demo import demo_snapshot
 from .snapshot_json import ledger_home, learning_document, load_structure, skills_document, snapshot_document
-from .sources import DB_PATH, ORCHESTRATION_GRAPH_DIR, build_snapshot
+from .sources import DB_PATH, ORCHESTRATION_GRAPH_DIR, build_snapshot, find_graph_dir
 
 _HOST = "127.0.0.1"
 _FLOW_PATH = "/api/structure/flow"
@@ -28,7 +28,9 @@ _SKILLFILE_PATH = "/api/skillfile"
 _SKILLFILE_BODY_LIMIT = 12 * 200_000 + 16384  # a skill's text of 200000 characters as escaped JSON
 _TEAM_PATH = "/api/structure/team"
 _TEAM_BODY_LIMIT = 32768  # as a flow: an instruction of 2000 characters
-_POSTS = (_FLOW_PATH, _SKILLS_PATH, _ROSTER_PATH, _SKILLFILE_PATH, _TEAM_PATH)
+_OUTPUT_PATH = "/api/output"  # a step's output: read, write (undoable), restore (agentgraph.outputs)
+_OUTPUT_BODY_LIMIT = 12 * outputs.TEXT_LIMIT + 16384  # an output's text as escaped JSON
+_POSTS = (_FLOW_PATH, _SKILLS_PATH, _ROSTER_PATH, _SKILLFILE_PATH, _TEAM_PATH, _OUTPUT_PATH)
 _LOOPBACK = frozenset({"127.0.0.1", "::1"})
 _FLOW_BODY_LIMIT = 32768  # an instruction of 2000 characters, each up to 12 bytes as escaped JSON (and a goal of 4000)
 # A write from a view that has not seen a later change (stale-contract.md): every op that names an existing thing
@@ -178,7 +180,7 @@ def make_server(
         def do_POST(self):
             target = self.path.partition("?")[0]
             handler = {_SKILLS_PATH: self._skills, _ROSTER_PATH: self._roster, _SKILLFILE_PATH: self._skillfile,
-                       _TEAM_PATH: self._team}.get(target)
+                       _TEAM_PATH: self._team, _OUTPUT_PATH: self._output}.get(target)
             if handler is not None:
                 handler()
                 return
@@ -453,6 +455,34 @@ def make_server(
 
             self._answer(run, structure.StructureError)
 
+        def _output(self):
+            # Read a step's output, save a new text as its next revision (its readers become stale; undoable), or
+            # undo that from its record (agentgraph.outputs).
+            request = self._request("outputs", _OUTPUT_BODY_LIMIT, {
+                "read": ({"op", "task", "node", "artifact"}, {"op", "task", "node", "artifact"}, {}),
+                "write": ({"op", "task", "node", "artifact", "text"}, {"op", "task", "node", "artifact", "text"}, {},
+                          EXPECT),
+                "restore": ({"op", "record"}, {"op", "record"}, {})},
+                '{"op": "read", "task", "node", "artifact"}, {"op": "write", "task", "node", "artifact", "text"} '
+                '(with an optional "expect": rev) or {"op": "restore", "record"}')
+            if request is None:
+                return
+            home = outputs.edit_home(root=ledger_root, config_path=paths["config"])  # the edit log's memory home
+
+            def run():
+                if request["op"] == "restore":
+                    return outputs.restore_output(request["record"], backups=paths["backups"], home=home)
+                dirs = [graph_dir] if graph_dir is not None else [
+                    folder for folder in (find_graph_dir(Path(cwd) if cwd else Path.cwd()), ORCHESTRATION_GRAPH_DIR)
+                    if folder is not None]
+                if request["op"] == "read":
+                    return outputs.read_output(request["task"], request["node"], request["artifact"], dirs=dirs)
+                return outputs.write_output(request["task"], request["node"], request["artifact"], request["text"],
+                                            dirs=dirs, home=home, backups=paths["backups"],
+                                            expect=request.get("expect"))
+
+            self._answer(run, outputs.OutputError)
+
         def _reply(self, status: int, content_type: str, body: bytes):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -491,6 +521,7 @@ def make_server(
                     roster.annotate(document, config=paths["config"], map_path=paths["map_path"],
                                     agents_dir=agents_dir or roster.AGENTS_DIR, structure=structure_root)
                     skillfiles.annotate(document, skills=skills_dir or skillfiles.SKILLS, bundled=skills_bundled)
+                    outputs.annotate(document)  # each output of the shown graph: rev, size, editable, why
                 body = json.dumps(document, allow_nan=False).encode("utf-8")
             except Exception as exc:
                 body = json.dumps({"version": 1, "error": str(exc)}).encode("utf-8")
