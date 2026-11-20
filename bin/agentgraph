@@ -9,7 +9,12 @@
 #   agentgraph serve [--port N]     the same view as a local web page (http://127.0.0.1:4747/)
 #   agentgraph snapshot             the data behind the view, as one line of JSON
 #   agentgraph structure flows      the drawn flows (flow add A B [C ...] / flow text ID / flow remove ID)
+#   agentgraph structure teams      the groups: agents that report to one lead (team add LEAD MEMBER ... / team members ID MEMBER ... /
+#                                   team text ID --text-file F|- / team remove ID; --structure DIR)
 #   agentgraph skills show AGENT    an agent's skills (skills add|remove AGENT SKILL, skills all AGENT; --json, --config ...)
+#   agentgraph agent list           the agents in the presets and agent files (agent add NAME --model M ... | --copy-of A, agent remove NAME,
+#                                   agent restore RECORD; --config, --map, --backups, --structure)
+#   agentgraph skill show ID        a skill's text (skill create ID / write ID --text-file F|-, skill delete ID, skill restore RECORD)
 #   agentgraph cost [--session ID]  where one chat's money went, and what would have made it cheaper
 #   agentgraph cost --trend         cost per turn over time, split at each change to the cost settings
 # -P: do not put the current directory on the import path, so a project that
@@ -40,6 +45,13 @@ case "$1" in
   skills)
     shift
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.skillset "$@" ;;
+  agent)
+    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.roster "$@" ;;
+  skill)
+    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.skillfiles "$@" ;;
+  team)
+    shift
+    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.teams "$@" ;;
   *)
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph "$@" ;;
 esac

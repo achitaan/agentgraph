@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote
 
-from . import skillset, structure
+from . import roster, skillfiles, skillset, structure, teams
 from .demo import demo_snapshot
 from .snapshot_json import learning_document, load_structure, skills_document, snapshot_document
 from .sources import ORCHESTRATION_GRAPH_DIR, build_snapshot
@@ -22,6 +22,13 @@ _HOST = "127.0.0.1"
 _FLOW_PATH = "/api/structure/flow"
 _SKILLS_PATH = "/api/skills"
 _SKILLS_BODY_LIMIT = 4096
+_ROSTER_PATH = "/api/roster"
+_ROSTER_BODY_LIMIT = 131072  # a prompt of 8000 characters, each up to 12 bytes as escaped JSON, and the rest
+_SKILLFILE_PATH = "/api/skillfile"
+_SKILLFILE_BODY_LIMIT = 12 * 200_000 + 16384  # a skill's text of 200000 characters as escaped JSON
+_TEAM_PATH = "/api/structure/team"
+_TEAM_BODY_LIMIT = 32768  # as a flow: an instruction of 2000 characters
+_POSTS = (_FLOW_PATH, _SKILLS_PATH, _ROSTER_PATH, _SKILLFILE_PATH, _TEAM_PATH)
 _LOOPBACK = frozenset({"127.0.0.1", "::1"})
 _FLOW_BODY_LIMIT = 32768  # an instruction of 2000 characters, each up to 12 bytes as escaped JSON
 _TYPES = {
@@ -55,12 +62,19 @@ def make_server(
     session: str | None = None, cwd: Path | None = None, web_dir: Path | None = None,
     structure_dir: Path | None = None, skills_config: Path | None = None, skills_map: Path | None = None,
     skills_backups: Path | None = None, skills_profiles: Path | None = None,
+    skills_dir: Path | None = None, skills_bundled: list[Path] | None = None, agents_dir: Path | None = None,
+    opencode_dir: Path | None = None, ledger_root: Path | None = None,
 ) -> ThreadingHTTPServer:
     """Bind a server; the caller is responsible for running and closing it.
     `structure_dir` is the folder `POST /api/structure/flow` edits (default: the
     orchestration's own `structure/`). `POST /api/skills` edits `skills_config`
     (the plugin's preset file) and `skills_map` (SKILLS.md), backs up into
-    `skills_backups` and reads `skills_profiles`; each defaults to skillset's own."""
+    `skills_backups` and reads `skills_profiles`; each defaults to skillset's own. `POST /api/roster` adds,
+    removes and restores agents in those files and the structure folder (`agents_dir`: OpenCode's agents folder,
+    read only). `POST /api/skillfile` reads and edits the skill files in `skills_dir` (`skills_bundled`: where
+    plugins keep the skills they bundle, read only). `POST /api/structure/team` edits the groups in
+    `structure_dir`. A snapshot reads `opencode.json` from `opencode_dir` (and the models catalogue only for the
+    real folder) and the ledger (`memory-<preset>`) from `ledger_root`; each defaults to the real one."""
     paths = {"config": skills_config or skillset.CONFIG, "map_path": skills_map or skillset.MAP,
              "backups": skills_backups or skillset.BACKUPS, "profiles": skills_profiles or skillset.PROFILES}
     directory = (web_dir if web_dir is not None else Path(__file__).with_name("web")).resolve()
@@ -87,7 +101,7 @@ def make_server(
                     self.request_version = "HTTP/1.0"
                 self.send_error(403)
                 return False
-            allowed = ("POST",) if self.path.partition("?")[0] in (_FLOW_PATH, _SKILLS_PATH) else ("GET", "HEAD")
+            allowed = ("POST",) if self.path.partition("?")[0] in _POSTS else ("GET", "HEAD")
             if self.command not in allowed:
                 self.send_response(405)
                 self.send_header("Allow", ", ".join(allowed))
@@ -131,8 +145,11 @@ def make_server(
                 return None
 
         def do_POST(self):
-            if self.path.partition("?")[0] == _SKILLS_PATH:
-                self._skills()
+            target = self.path.partition("?")[0]
+            handler = {_SKILLS_PATH: self._skills, _ROSTER_PATH: self._roster, _SKILLFILE_PATH: self._skillfile,
+                       _TEAM_PATH: self._team}.get(target)
+            if handler is not None:
+                handler()
                 return
             request = self._json_body("the structure", _FLOW_BODY_LIMIT)
             if request is None:
@@ -181,10 +198,11 @@ def make_server(
                 self._refuse(403, "the demo cannot change skills")
                 return
             try:
+                where = {**paths, "agents_dir": agents_dir or skillset.AGENTS_DIR, "skills_dir": skills_dir}
                 if "all" in request:
-                    result = skillset.set_all(request["agent"], **paths)
+                    result = skillset.set_all(request["agent"], **where)
                 else:
-                    result = (skillset.add if request["on"] else skillset.remove)(request["agent"], request["skill"], **paths)
+                    result = (skillset.add if request["on"] else skillset.remove)(request["agent"], request["skill"], **where)
             except skillset.SkillsetError as exc:
                 self._refuse(400, str(exc))
                 return
@@ -194,6 +212,155 @@ def make_server(
             answer = {"agent": result["agent"], "skills": result["skills"], "warnings": result.get("warnings", []),
                       "changed": bool(result.get("changed")), "message": result.get("message", "")}
             self._reply(200, "application/json", json.dumps(answer).encode("utf-8"))
+
+        def _request(self, what: str, limit: int, shapes: dict, expected: str):
+            """The request when its body passes `_json_body` and its keys and types fit one of `shapes`
+            ({op: (required keys, allowed keys, {key: types})}), else None after refusing it."""
+            request = self._json_body(what, limit)
+            if request is None:
+                return None
+            op = request.get("op") if isinstance(request, dict) else None
+            shape = shapes.get(op) if isinstance(op, str) else None
+            if (shape is None or not shape[0] <= set(request) <= shape[1]
+                    or not all(isinstance(request[key], shape[2].get(key, str)) for key in request if key != "op")):
+                self._refuse(400, "expected " + expected)
+                return None
+            if demo:
+                self._refuse(403, f"the demo cannot change {what}")
+                return None
+            return request
+
+        def _answer(self, call, *errors):
+            """Run `call`; a refusal (one of `errors`) is a 400 with its message, a file error a 500."""
+            try:
+                answer = call()
+            except errors as exc:
+                self._refuse(400, str(exc))
+                return
+            except OSError as exc:
+                self._refuse(500, f"could not make the change: {exc}")
+                return
+            self._reply(200, "application/json", json.dumps(answer).encode("utf-8"))
+
+        def _roster(self):
+            # Add an agent (an agent file, live at once; from a template, a copy or the fields given), read or
+            # replace an added agent's instruction, remove an agent with its flows and groups, or restore what a
+            # removal (or an instruction change) took.
+            names = lambda value: isinstance(value, list) and all(isinstance(item, str) for item in value)
+            optional = (str, type(None))
+            add_keys = {"op", "name", "model", "variant", "description", "prompt", "skills", "read_only", "copy_of",
+                        "template"}
+            types = {"model": optional, "variant": optional, "description": optional, "prompt": optional,
+                     "copy_of": optional, "template": optional, "skills": (list, type(None)),
+                     "read_only": (bool, type(None))}
+            request = self._request("the agents", _ROSTER_BODY_LIMIT, {
+                "add": ({"op", "name"}, add_keys, types), "remove": ({"op", "name"}, {"op", "name"}, {}),
+                "restore": ({"op", "record"}, {"op", "record"}, {}), "read": ({"op", "name"}, {"op", "name"}, {}),
+                "text": ({"op", "name", "text"}, {"op", "name", "text"}, {})},
+                '{"op": "add", "name", "model", "description", "prompt"} (or "copy_of" or "template"; optional '
+                '"variant", "skills", "read_only"), {"op": "read"|"remove", "name"}, {"op": "text", "name", "text"} '
+                'or {"op": "restore", "record"}')
+            if request is None:
+                return
+            if request.get("skills") is not None and not names(request["skills"]):
+                self._refuse(400, "skills must be a list of names")
+                return
+            folder = agents_dir or roster.AGENTS_DIR
+            files = {"config": paths["config"], "map_path": paths["map_path"], "backups": paths["backups"],
+                     "structure": structure_dir, "agents_dir": folder}
+
+            def run():
+                op = request["op"]
+                if op == "add":
+                    result = roster.add_agent(
+                        request["name"], model=request.get("model"), variant=request.get("variant"),
+                        description=request.get("description"), prompt=request.get("prompt"),
+                        skills=request.get("skills"), read_only=request.get("read_only"),
+                        copy_of=request.get("copy_of"), template=request.get("template"), skills_dir=skills_dir,
+                        **files)
+                elif op == "remove":
+                    result = roster.remove_agent(request["name"], **files)
+                elif op == "restore":
+                    result = roster.restore_agent(request["record"], **files)
+                elif op == "read":
+                    return roster.read_agent(request["name"], agents_dir=folder)
+                else:
+                    result = roster.text_agent(request["name"], request["text"], agents_dir=folder,
+                                               backups=paths["backups"])
+                keys = ("agent", "kind", "action", "presets", "changed", "copy_of", "template", "model", "skills",
+                        "permission", "structure_file", "record", "removed", "restored", "name", "description",
+                        "text", "warnings", "message")
+                return {key: result[key] for key in keys if key in result}
+
+            self._answer(run, skillset.SkillsetError, structure.StructureError)
+
+        def _skillfile(self):
+            # Read a skill's text, write it, create a skill (and give it to an agent), delete it or restore it.
+            request = self._request("skills", _SKILLFILE_BODY_LIMIT, {
+                "read": ({"op", "id"}, {"op", "id"}, {}),
+                "write": ({"op", "id", "text"}, {"op", "id", "text", "description"}, {}),
+                "create": ({"op", "id", "description", "text"}, {"op", "id", "description", "text", "assign"}, {}),
+                "delete": ({"op", "id"}, {"op", "id"}, {}), "restore": ({"op", "record"}, {"op", "record"}, {})},
+                '{"op": "read"|"delete", "id"}, {"op": "write", "id", "text"} (optional "description"), '
+                '{"op": "create", "id", "description", "text"} (optional "assign") or {"op": "restore", "record"}')
+            if request is None:
+                return
+            where = {"skills": skills_dir or skillfiles.SKILLS, "backups": paths["backups"]}
+
+            def run():
+                op = request["op"]
+                if op == "read":
+                    return skillfiles.show(request["id"], skills=where["skills"], bundled=skills_bundled)
+                if op == "write":
+                    done = skillfiles.write(request["id"], body=request["text"], description=request.get("description"),
+                                            **where)
+                    return {"id": done["id"], "description": done["frontmatter"]["description"], "text": done["body"],
+                            "changed": done["changed"], **{key: done[key] for key in ("record", "message") if key in done}}
+                if op == "create":
+                    done = skillfiles.create_skill(request["id"], request["description"], request["text"],
+                                                   request.get("assign"), config=paths["config"],
+                                                   map_path=paths["map_path"], profiles=paths["profiles"],
+                                                   agents_dir=agents_dir or skillset.AGENTS_DIR, **where)
+                    return {"id": done["id"], "description": done["frontmatter"]["description"], "text": done["body"],
+                            "changed": True,
+                            **{key: done[key] for key in ("assigned", "warnings", "message") if key in done}}
+                if op == "delete":
+                    return skillfiles.delete(request["id"], config=paths["config"], wildcards_hold=False,
+                                             agents_dir=agents_dir or skillset.AGENTS_DIR, **where)
+                done = skillfiles.restore(request["record"], **where)
+                return {"id": done["id"], "changed": True, **({"record": done["record"]} if "frontmatter" in done else {})}
+
+            self._answer(run, skillset.SkillsetError)
+
+        def _team(self):
+            # Add a group (agents that report to one lead), replace its members or instruction, or remove it.
+            names = (list,)
+            request = self._request("the structure", _TEAM_BODY_LIMIT, {
+                "add": ({"op", "lead", "members"}, {"op", "lead", "members", "text"}, {"members": names}),
+                "members": ({"op", "id", "members"}, {"op", "id", "members"}, {"members": names}),
+                "text": ({"op", "id", "text"}, {"op", "id", "text"}, {}), "remove": ({"op", "id"}, {"op", "id"}, {})},
+                '{"op": "add", "lead", "members": [agents]} (and an optional "text"), {"op": "members", "id", '
+                '"members": [agents]}, {"op": "text", "id", "text"} or {"op": "remove", "id"}')
+            if request is None:
+                return
+
+            def run():
+                answer, notes = {}, []
+                if request["op"] == "add":
+                    answer["team"], notes = teams.add(request["lead"], request["members"], request.get("text"),
+                                                      structure_dir)
+                elif request["op"] == "members":
+                    answer["team"], notes = teams.set_members(request["id"], request["members"], structure_dir)
+                elif request["op"] == "text":
+                    answer["team"] = teams.set_text(request["id"], request["text"], structure_dir)
+                else:
+                    answer["team"] = teams.remove(request["id"], structure_dir)
+                answer["teams"] = teams.teams(structure_dir)
+                if notes:
+                    answer["notes"] = notes
+                return answer
+
+            self._answer(run, structure.StructureError)
 
         def _reply(self, status: int, content_type: str, body: bytes):
             self.send_response(status)
@@ -211,15 +378,23 @@ def make_server(
                 if use_demo:
                     snapshot = demo_snapshot(time.time())
                 else:
+                    # The roster is read from the same preset file and agents folder the endpoints write.
+                    where = {**({"roster_config": skills_config} if skills_config is not None else {}),
+                             **({"agents_dir": agents_dir} if agents_dir is not None else {}),
+                             **({"config_dir": opencode_dir} if opencode_dir is not None else {})}
                     snapshot = build_snapshot(graph_dir=graph_dir, root_id=session, cwd=cwd,
-                                              session_graph_dir=None if graph_dir else ORCHESTRATION_GRAPH_DIR)
+                                              session_graph_dir=None if graph_dir else ORCHESTRATION_GRAPH_DIR, **where)
                 document = snapshot_document(snapshot, "demo" if use_demo else "live", task,
                                              session=None if use_demo else session,
                                              structure=None if use_demo else load_structure(structure_dir))
                 if not use_demo:
-                    document["learning"] = learning_document()
-                    document["skills"] = skills_document()
-                    skillset.annotate(document, config=paths["config"], profiles=paths["profiles"])
+                    document["learning"] = learning_document(ledger_root, config_path=paths["config"])
+                    document["skills"] = skills_document(skills_dir=skills_dir)
+                    skillset.annotate(document, config=paths["config"], profiles=paths["profiles"],
+                                      agents_dir=agents_dir or roster.AGENTS_DIR, skills_dir=skills_dir)
+                    roster.annotate(document, config=paths["config"], map_path=paths["map_path"],
+                                    agents_dir=agents_dir or roster.AGENTS_DIR)
+                    skillfiles.annotate(document, skills=skills_dir or skillfiles.SKILLS, bundled=skills_bundled)
                 body = json.dumps(document, allow_nan=False).encode("utf-8")
             except Exception as exc:
                 body = json.dumps({"version": 1, "error": str(exc)}).encode("utf-8")
