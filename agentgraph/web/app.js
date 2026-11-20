@@ -8,6 +8,8 @@
   const DETAIL_WIDTH = 340; // the details panel beside a wide graph (style.css: .ag-details-open .ag-network margin)
   const READABLE = 11 / 12; // agent names are 12 px: the automatic view never shows them under 11 px; it pans instead
   let instance = 0;
+  // The bottom sheet's height the user dragged to, per positions key, while the page is open (n103 item 7).
+  const sheetShares = new Map();
   const STATES = { pending: 'Waiting', waiting: 'Waiting', running: 'Working', returned: 'Returned', passed: 'Passed', failed: 'Failed', blocked: 'Blocked' };
   const LOOP_STATES = { working: 'Revising', checking: 'In review', sent_back: 'Sent back', closed: 'Done', idle: 'Idle' };
   const WORK_LOOP_STATES = { working: 'Working', waiting: 'Waiting', stuck: 'Stuck', closed: 'Done', idle: 'Idle' };
@@ -103,6 +105,10 @@
     // sessions under one key; an agent never moved keeps its automatic place. Nothing goes to the structure folder.
     const POSITIONS_KEY = typeof options.positionsKey === 'string' && options.positionsKey ? options.positionsKey : 'agentgraph.positions.v1';
     const moves = loadMoves();
+    // The details sheet's height in a narrow pane (n103 item 7): the user's share of the pane (null: the default),
+    // kept for the page and, where storage works, across reloads; clamped to the pane whenever it is used.
+    const SHEET_KEY = POSITIONS_KEY + '.sheet', SHEET_MIN = 120, SHEET_GRAPH = 100, SHEET_FIGURES = 28;
+    let sheetShare = loadSheetShare(), sheetDrag = null;
     // Presses since the last drag that moved something: a double-click counts only when its two clicks were clean.
     let cleanPresses = Infinity;
     const flowErrors = new Map(), flowHistory = [], routeViews = new Map(), freshRoutes = new Set(), timers = new Set();
@@ -234,7 +240,10 @@
     close.type = 'button'; close.setAttribute('aria-label', 'Close');
     detailHeader.append(eyebrow, close);
     const detailScroll = el('div', 'ag-detail-scroll');
-    detail.append(detailHeader, detailScroll); root.append(notice, network, detail);
+    // The sheet's grab handle (narrow panes only): dragging it or its arrow keys resize the sheet, nothing else.
+    const sheetHandle = el('div', 'ag-sheet-handle');
+    sheetHandle.tabIndex = 0; sheetHandle.setAttribute('role', 'separator'); sheetHandle.setAttribute('aria-orientation', 'horizontal'); sheetHandle.setAttribute('aria-label', 'Details height');
+    detail.append(sheetHandle, detailHeader, detailScroll); root.append(notice, network, detail);
 
     function renderActivity() {
       const working = snapshot ? visibleAgents.filter(agent => agent.busy > 0).length : 0;
@@ -877,8 +886,39 @@
       viewport.dataset.dragging = 'false';
     }
     function updateDetailSpace() {
-      if (root.classList.contains('ag-compact') && !detail.hidden) root.style.setProperty('--ag-sheet-height', Math.max(0, Math.min(root.clientHeight * .4, root.clientHeight - 112)) + 'px');
-      else root.style.removeProperty('--ag-sheet-height');
+      if (root.classList.contains('ag-compact') && !detail.hidden) {
+        const height = sheetHeight(), { min, max } = sheetStops(), pane = root.clientHeight || 1;
+        root.style.setProperty('--ag-sheet-height', height + 'px');
+        sheetHandle.setAttribute('aria-valuemin', String(Math.round(min / pane * 100))); sheetHandle.setAttribute('aria-valuemax', String(Math.round(max / pane * 100)));
+        sheetHandle.setAttribute('aria-valuenow', String(Math.round(height / pane * 100)));
+      } else root.style.removeProperty('--ag-sheet-height');
+    }
+    // From a small minimum up to leaving the figures row and a strip of graph (enough to see the picked agent).
+    function sheetStops() {
+      const max = Math.max(0, root.clientHeight - (notice.hidden ? 0 : notice.offsetHeight) - SHEET_FIGURES - SHEET_GRAPH);
+      return { min: Math.min(SHEET_MIN, max), max };
+    }
+    function sheetHeight() {
+      const pane = root.clientHeight;
+      if (sheetShare === null) return Math.max(0, Math.min(pane * .4, pane - 112));
+      const { min, max } = sheetStops();
+      return clamp(sheetShare * pane, min, max);
+    }
+    function loadSheetShare() {
+      if (sheetShares.has(SHEET_KEY)) return sheetShares.get(SHEET_KEY);
+      try { const share = Number(JSON.parse(positionStore()?.getItem(SHEET_KEY) || 'null')); return share > 0 && share < 1 ? share : null; } catch (_) { return null; }
+    }
+    // The graph above refits to what the sheet leaves (the resize observer: fitted with the open agent revealed, or
+    // the user's own pan and zoom kept); the agents are laid out for the default sheet, so none of them moves.
+    function setSheet(height, keep) {
+      const pane = root.clientHeight;
+      if (pane <= 0) return;
+      const { min, max } = sheetStops();
+      sheetShare = clamp(height, min, max) / pane;
+      updateDetailSpace(); scheduleResize();
+      if (!keep) return;
+      sheetShares.set(SHEET_KEY, sheetShare);
+      try { positionStore()?.setItem(SHEET_KEY, JSON.stringify(sheetShare)); } catch (_) { /* no storage: kept for the page */ }
     }
     function perimeter(a, b) { return Math.PI * (3 * (a + b) - Math.sqrt((3 * a + b) * (a + 3 * b))); }
     // Points by distance travelled round an ellipse, clockwise from the top.
@@ -3567,6 +3607,35 @@
       else if (event.key === 'Escape' && draft) { event.preventDefault(); dropDraft(); }
     });
     listen(close, 'click', closeDetails);
+    // The sheet's handle: one gesture, one meaning. A drag on it only resizes the sheet (never pans, picks, moves or
+    // closes); Arrow keys resize it a step, Page keys a larger one, Home and End go to the smallest and largest.
+    listen(sheetHandle, 'pointerdown', event => {
+      event.stopPropagation();
+      if (event.button !== 0 || !root.classList.contains('ag-compact')) return;
+      event.preventDefault();
+      try { sheetHandle.setPointerCapture(event.pointerId); } catch (_) { /* a synthetic pointer */ }
+      sheetDrag = { id: event.pointerId, y: event.clientY, from: sheetHeight() };
+    });
+    listen(sheetHandle, 'pointermove', event => {
+      event.stopPropagation();
+      if (!sheetDrag || event.pointerId !== sheetDrag.id) return;
+      event.preventDefault(); setSheet(sheetDrag.from + sheetDrag.y - event.clientY, false);
+    });
+    const endSheetDrag = event => {
+      event.stopPropagation();
+      if (!sheetDrag || event.pointerId !== sheetDrag.id) return;
+      sheetDrag = null; setSheet(sheetHeight(), true);
+    };
+    listen(sheetHandle, 'pointerup', endSheetDrag); listen(sheetHandle, 'pointercancel', endSheetDrag);
+    listen(sheetHandle, 'click', event => event.stopPropagation());
+    listen(sheetHandle, 'dblclick', event => event.stopPropagation());
+    listen(sheetHandle, 'keydown', event => {
+      if (!root.classList.contains('ag-compact') || event.altKey || event.ctrlKey || event.metaKey) return;
+      const { min, max } = sheetStops(), now = sheetHeight(), steps = { ArrowUp: 24, ArrowDown: -24, PageUp: 96, PageDown: -96 };
+      const next = event.key in steps ? now + steps[event.key] : event.key === 'Home' ? min : event.key === 'End' ? max : null;
+      if (next === null) return;
+      event.preventDefault(); event.stopPropagation(); setSheet(next, true);
+    });
     listen(runDetails, 'click', () => select('run', '', runDetails));
     listen(usage, 'click', () => select('run', '', usage));
     listen(attention, 'click', () => { select('run', '', attention); detailScroll.querySelector('[data-run-section="attention"]')?.scrollIntoView({ block: 'start' }); });
