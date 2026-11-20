@@ -482,7 +482,8 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   A plain wheel zooms about the pointer at every width, the compact arrangement included (one gesture, one
 //   meaning); a drag on empty canvas pans whenever anything lies outside the canvas, at any zoom.
 // Narrow canvas (n114): the fit and the pan limits count loop rings as well as agents (no ring is left cut by the
-//   edge when a pan-free placement exists). With the trial's loop sets and the details open at 620 px every circle,
+//   edge when a pan-free placement exists; an automatic view whose picture a new loop no longer lets fit is fitted
+//   again when it fits at 11 px). With the trial's loop sets and the details open at 620 px every circle,
 //   name and ring is in the canvas; at 420 px what is outside comes into view with one drag. Every ring keeps at
 //   least 8 drawing px clear of every circle and name not on it, the orchestrator's name included (the aim is 12);
 //   where the canvas has no room for that the ring keeps clear and lies outside, a pan away. Two loops through one
