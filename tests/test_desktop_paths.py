@@ -28,7 +28,8 @@ class DesktopPaths(unittest.TestCase):
         self.orch = self.root / "orchestration"
         shutil.copytree(ROOT / "agentgraph", self.orch / "agentgraph",
                         ignore=shutil.ignore_patterns("__pycache__", "web"))
-        shutil.copytree(ROOT / "structure", self.orch / "structure")
+        # without the user's own drawn flows and groups (git-ignored): a flow with a command would block a removal
+        shutil.copytree(ROOT / "structure", self.orch / "structure", ignore=shutil.ignore_patterns("flows", "teams"))
         shutil.copyfile(ROOT / "SKILLS.md", self.orch / "SKILLS.md")
         self.home = self.root / "home"
         config = self.home / ".config" / "opencode"

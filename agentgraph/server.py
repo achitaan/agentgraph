@@ -13,16 +13,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote
 
-from . import (agentfiles, flowcommands, flowrun, mcpview, outputs, roster, setups, skillfiles, skillset, structure,
-               teams)
-from .demo import demo_setup, demo_snapshot
-from .snapshot_json import ledger_home, learning_document, load_structure, skills_document, snapshot_document
+from . import (agentfiles, chatfeed, flowcommands, flowrun, mcpview, outputs, roster, setups, skillfiles, skillset,
+               structure, teams)
+from .demo import demo_activity, demo_setup, demo_snapshot
+from .snapshot_json import (ledger_home, learning_document, live_activity, load_structure, skills_document,
+                            snapshot_document)
 from .sources import DB_PATH, ORCHESTRATION_GRAPH_DIR, build_snapshot, find_graph_dir
 
 _HOST = "127.0.0.1"
 _FLOW_PATH = "/api/structure/flow"
 _SKILLS_PATH = "/api/skills"
 _SKILLS_BODY_LIMIT = 4096
+_CHAT_PATH = "/api/chat"  # GET only: one session's recent chat (agentgraph.chatfeed), a session of the shown tree only
 _ROSTER_PATH = "/api/roster"
 _ROSTER_BODY_LIMIT = 131072  # a prompt of 8000 characters, each up to 12 bytes as escaped JSON, and the rest
 _SKILLFILE_PATH = "/api/skillfile"
@@ -535,24 +537,30 @@ def make_server(
             if self.command != "HEAD":
                 self.wfile.write(body)
 
+        def _live_snapshot(self):
+            # The roster is read from the same preset file and agents folder the endpoints write.
+            where = {**({"roster_config": skills_config} if skills_config is not None else {}),
+                     **({"agents_dir": agents_dir} if agents_dir is not None else {}),
+                     **({"config_dir": opencode_dir} if opencode_dir is not None else {}),
+                     **({"db_path": sessions_db} if sessions_db is not None else {})}
+            return build_snapshot(graph_dir=graph_dir, root_id=session, cwd=cwd,
+                                  session_graph_dir=None if graph_dir else ORCHESTRATION_GRAPH_DIR, **where)
+
         def _snapshot(self, query: str):
             params = parse_qs(query, keep_blank_values=True)
             use_demo = demo or params.get("demo", [None])[0] == "1"
             task = params.get("task", [None])[0]
             try:
                 if use_demo:
-                    snapshot = demo_snapshot(time.time())
+                    now = time.time()
+                    snapshot, activity = demo_snapshot(now), demo_activity(now)
                 else:
-                    # The roster is read from the same preset file and agents folder the endpoints write.
-                    where = {**({"roster_config": skills_config} if skills_config is not None else {}),
-                             **({"agents_dir": agents_dir} if agents_dir is not None else {}),
-                             **({"config_dir": opencode_dir} if opencode_dir is not None else {}),
-                             **({"db_path": sessions_db} if sessions_db is not None else {})}
-                    snapshot = build_snapshot(graph_dir=graph_dir, root_id=session, cwd=cwd,
-                                              session_graph_dir=None if graph_dir else ORCHESTRATION_GRAPH_DIR, **where)
+                    snapshot = self._live_snapshot()
+                    activity = live_activity(snapshot, sessions_db)
                 document = snapshot_document(snapshot, "demo" if use_demo else "live", task,
                                              session=None if use_demo else session,
-                                             structure=None if use_demo else load_structure(structure_dir))
+                                             structure=None if use_demo else load_structure(structure_dir),
+                                             activity=activity)
                 if use_demo:
                     document["setup"] = demo_setup()
                 else:
@@ -578,6 +586,37 @@ def make_server(
             else:
                 self._reply(200, "application/json", body)
 
+        def _chat(self, query: str):
+            """GET /api/chat?session=ID[&limit=N][&demo=1]: the chat of one session of the tree the snapshot
+            shows (its root and the sessions listed under its agents); any other id is 404, without detail."""
+            params = parse_qs(query, keep_blank_values=True)
+            ids, limits = params.get("session", []), params.get("limit", [])
+            if len(ids) != 1 or not chatfeed.valid_session(ids[0]) or len(limits) > 1 or (
+                    limits and not (limits[0].isdigit() and 1 <= int(limits[0]) <= chatfeed.MAX_LIMIT)):
+                self._refuse(400, "give one session id (ses_...) and, optionally, a limit from 1 to 200")
+                return
+            wanted, limit = ids[0], int(limits[0]) if limits else chatfeed.DEFAULT_LIMIT
+            use_demo = demo or params.get("demo", [None])[0] == "1"
+            try:
+                if use_demo:
+                    feed = chatfeed.demo_feed(wanted)
+                else:
+                    snapshot = self._live_snapshot()
+                    document = snapshot_document(snapshot, "live", None, session=session,
+                                                 structure=load_structure(structure_dir))
+                    tree = {document["root"]["id"]} if document["root"] else set()
+                    tree.update(item["id"] for agent in document["agents"] for item in agent["sessions"])
+                    feed = chatfeed.read_chat(wanted, limit=limit,
+                                              db_path=sessions_db if sessions_db is not None else DB_PATH) \
+                        if wanted in tree else None
+            except Exception:
+                self._refuse(500, "the chat could not be read")
+                return
+            if feed is None:
+                self.send_error(404)
+                return
+            self._reply(200, "application/json", json.dumps(feed, allow_nan=False).encode("utf-8"))
+
         def do_GET(self):
             # Use the raw target: the base class normalizes leading double slashes.
             target = self.requestline.split()[1]
@@ -592,6 +631,9 @@ def make_server(
                 return
             if path == "/api/snapshot":
                 self._snapshot(query)
+                return
+            if path == _CHAT_PATH:
+                self._chat(query)
                 return
             filename = path[1:] if path != "/" else "index.html"
             if filename in ("", ".", "..") or any(c in filename for c in ("/", "\\", "\0")):
