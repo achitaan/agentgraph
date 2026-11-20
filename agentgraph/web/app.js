@@ -4,7 +4,7 @@
   const LIST_LIMIT = 200;
   const EDGE = 12, SLOT = 104, GROUP_GAP = 34, SEAT_DISTANCE = 68, MEMBER_DISTANCE = 96, MEMBER_REACH = 40;
   // A full loop's agents sit on a circle of their own: neighbours RING_GAP apart, the circle never under RING_MIN.
-  const RING_GAP = 124, RING_MIN = 82, RING_MS = 240, RING_CLEAR = 32; // RING_CLEAR: a loop ring's line from an agent's rim, room for its name below
+  const RING_GAP = 124, RING_MIN = 82, RING_MS = 240;
   const DETAIL_WIDTH = 340; // the details panel beside a wide graph (style.css: .ag-details-open .ag-network margin)
   const READABLE = 11 / 12; // agent names are 12 px: the automatic view never shows them under 11 px; it pans instead
   let instance = 0;
@@ -106,7 +106,7 @@
     // Presses since the last drag that moved something: a double-click counts only when its two clicks were clean.
     let cleanPresses = Infinity;
     const flowErrors = new Map(), flowHistory = [], routeViews = new Map(), freshRoutes = new Set(), timers = new Set();
-    let layoutSignature = '', layoutFrame = null, resizeFrame = null, generation = 0, renderStamp = '';
+    let layoutSignature = '', layoutFrame = null, resizeFrame = null, generation = 0, renderStamp = '', layoutChange = { changed: [], steady: false };
     let arrangement = root.clientWidth > 0 && root.clientWidth <= 650 ? 'compact' : 'wide';
     let agentsByName = new Map(), stepsByAgent = new Map(), stepsById = new Map(), nodeOwners = new Map(), shownAgents = new Map();
     let visibleAgents = [], hubName = '', activeTeam = 'main';
@@ -372,16 +372,17 @@
     }
     // The sidebar keeps a readable scale: what does not fit is reached by
     // panning, and the picture stays centred on the orchestrator.
-    function clampPan() {
+    // `steady` (n103): a view already placed stays where it is while the whole graph is in it (no re-centring).
+    function clampPan(steady) {
       if (arrangement !== 'compact') return;
       const bounds = graphBounds();
       if (!bounds) return;
       const width = viewport.clientWidth, height = viewport.clientHeight;
       // Panned to the top, the topmost agent sits below the figures.
       const top = topInset() - bounds.top * camera.scale, bottom = height - 8 - bounds.bottom * camera.scale;
-      camera.y = bottom >= top ? (top + bottom) / 2 : clamp(camera.y, bottom, top);
+      camera.y = bottom >= top ? (steady ? clamp(camera.y, top, bottom) : (top + bottom) / 2) : clamp(camera.y, bottom, top);
       const left = 2 - bounds.left * camera.scale, right = width - 2 - bounds.right * camera.scale;
-      camera.x = right >= left ? clamp(width / 2, left, right) : clamp(camera.x, right, left);
+      camera.x = right >= left ? clamp(steady ? camera.x : width / 2, left, right) : clamp(camera.x, right, left);
     }
     // Zooming out (wheel, pinch, keys) stops before names go under 11 px (agent names are 12 px in the drawing), the
     // floor Fit keeps too: the user's rule is that names are never drawn smaller.
@@ -440,6 +441,38 @@
       transform();
     }
 
+    // Where an agent is going (the end of a glide in progress), on the stage.
+    function finalOf(name) {
+      const item = glideState?.items.find(entry => entry.name === name), p = positions.get(name);
+      return p && (item ? { ...p, x: item.tx, y: item.ty } : p);
+    }
+    // The smallest pan that brings the given agents (circle, name and count) into the space left uncovered; when they
+    // cannot all fit, centred on them (or, `whole`, left alone: returns false). Returns whether they are now in view.
+    function revealNames(names, whole) {
+      const width = viewport.clientWidth, height = viewport.clientHeight, s = camera.scale;
+      const points = names.map(finalOf).filter(Boolean);
+      if (!points.length || !width || !height) return false;
+      const spans = points.map(p => { const e = extentOf(p); return { left: (p.x + e.left) * s + camera.x, right: (p.x + e.right) * s + camera.x, top: (p.y + e.top) * s + camera.y, bottom: (p.y + e.bottom) * s + camera.y }; });
+      const box = { left: Math.min(...spans.map(b => b.left)), right: Math.max(...spans.map(b => b.right)), top: Math.min(...spans.map(b => b.top)), bottom: Math.max(...spans.map(b => b.bottom)) };
+      // The margins the fit itself keeps (a narrow canvas is filled closer to its edges).
+      const side = arrangement === 'compact' ? 2 : EDGE, foot = arrangement === 'compact' ? 8 : EDGE;
+      const inset = Math.max(arrangement === 'compact' ? 8 : EDGE, topInset()), x0 = camera.x, y0 = camera.y;
+      if (whole && (box.right - box.left > width - 2 * side || box.bottom - box.top > height - foot - inset)) return false;
+      const shift = (low, high, from, to) => to - from > high - low ? (low + high) / 2 - (from + to) / 2 : from < low ? low - from : to > high ? high - to : 0;
+      camera.x += shift(side, width - side, box.left, box.right);
+      camera.y += shift(inset, height - foot, box.top, box.bottom);
+      return whole || Math.abs(camera.x - x0) + Math.abs(camera.y - y0) > .01;
+    }
+    // After the layout changed under a camera already placed (n8 major 6, n103): a view the user panned or zoomed stays
+    // as it is. An automatic view stays too when only a loop formed or went or an agent was added (nothing else moved,
+    // so nothing else moves on screen); it only pans what moved (and the open agent) into view. Otherwise it is fitted again.
+    function settleCamera() {
+      if (camera.own) { clampPan(true); transform(); return; }
+      if (!layoutChange.steady) { fitView(false); return; }
+      revealNames(layoutChange.changed);
+      clampPan(true); transform();
+      reveal();
+    }
     function flows() { return snapshot?.graph?.flows || []; }
     function loops() { return snapshot?.graph?.loops || []; }
     function workLoops() { return snapshot?.graph?.work_loops || []; }
@@ -594,6 +627,120 @@
         rings.push({ key: 'ring:' + names.slice().sort().join('|'), names, movable });
       });
       return rings;
+    }
+    // Where a full loop's circle goes (n103): in free space. Its line keeps RING_SPACE clear of every circle and name not
+    // on it (none of them inside it), of the orchestrator's name always, and RING_APART from every other loop's line (two
+    // loops meet only at an agent on both, and touch there rather than cross). Its moving agents, circle and name, land
+    // clear of everything else. Of the places that do, the one that moves its agents least and grows the picture least.
+    // Nothing else moves, so removing the loop puts every agent back.
+    const RING_SPACE = 12, RING_APART = 24;
+    // An agent's name box round its centre: as last drawn, else estimated from its length.
+    function labelBox(name, r, labelUp, lead) {
+      const p = positions.get(name);
+      if (p && Number.isFinite(p.labelLeft) && Math.abs((p.r || r) - r) < .01 && !!p.labelUp === !!labelUp) return { left: p.labelLeft, right: p.labelRight, top: p.labelTop, bottom: p.labelBottom };
+      const agent = shownAgents.get(name), shown = agent ? displayName(agent) : name, size = name === hubName ? 18 : lead ? 15 : 12;
+      const half = shown.length * size * .31 + 2, base = labelUp ? -r - 8 : r + 20;
+      return { left: -half, right: half, top: base - size * .8, bottom: base + size * .25 };
+    }
+    // An agent as the loops see it: its circle (the orchestrator's with its outer ring) and its name box, on the stage.
+    function shapeAt(name, x, y, r, labelUp, lead) {
+      const b = labelBox(name, r, labelUp, lead);
+      return { name, x, y, r: name === hubName ? r + 27 : r, box: { left: x + b.left, right: x + b.right, top: y + b.top, bottom: y + b.bottom } };
+    }
+    const boxNear = (b, x, y) => Math.hypot(Math.max(b.left - x, 0, x - b.right), Math.max(b.top - y, 0, y - b.bottom));
+    const boxGap = (a, b) => Math.max(a.left - b.right, b.left - a.right, a.top - b.bottom, b.top - a.bottom);
+    // How far shape `m` comes into shape `o` (0: clear), and how far a shape comes into the inside of a circle (c, R).
+    const clashOf = (m, o) => Math.max(0, m.r + o.r + 14 - Math.hypot(m.x - o.x, m.y - o.y)) + Math.max(0, o.r + 4 - boxNear(m.box, o.x, o.y)) + Math.max(0, m.r + 4 - boxNear(o.box, m.x, m.y)) + Math.max(0, 4 - boxGap(m.box, o.box));
+    const insideOf = (s, x, y, R) => Math.max(0, R + s.r + RING_SPACE - Math.hypot(s.x - x, s.y - y)) + Math.max(0, R + RING_SPACE - boxNear(s.box, x, y));
+    function placeRings(rings, placed, targets, placedByUser, canvas) {
+      const byName = new Map(targets.map(target => [target.name, target])), movers = new Set(rings.flatMap(ring => ring.movable).filter(name => !byName.get(name)?.pinned)), bands = [];
+      const at = target => { const owner = target.parent && placed.get(target.parent); return owner ? { x: owner.x + target.dx, y: owner.y + target.dy } : { x: target.x, y: target.y }; };
+      const lead = target => !target.parent && target.r === 29;
+      const shapeOf = (target, p = at(target)) => shapeAt(target.name, p.x, p.y, target.r, !!target.parent && target.dy < -1, lead(target));
+      const extent = list => ({ left: Math.min(...list.map(s => Math.min(s.x - s.r, s.box.left))), right: Math.max(...list.map(s => Math.max(s.x + s.r, s.box.right))), top: Math.min(...list.map(s => Math.min(s.y - s.r, s.box.top))), bottom: Math.max(...list.map(s => Math.max(s.y + s.r, s.box.bottom))) });
+      // The picture as it is without loops; what stays put; and the room the canvas has round the picture's middle (the
+      // figures take the top; a wide canvas as the details leave it), so a loop formed there stays in view.
+      const area = extent(targets.map(target => shapeOf(target))), shapes = targets.filter(target => !movers.has(target.name)).map(target => shapeOf(target));
+      const half = Math.max(canvas.width / 2 - EDGE, (area.right - area.left) / 2), halfY = Math.max(canvas.height / 2 - EDGE - 44, (area.bottom - area.top) / 2);
+      const centre = (area.left + area.right) / 2, middle = (area.top + area.bottom) / 2;
+      // The best place for one loop's circle, its `movable` agents moving onto it (null: it cannot be drawn).
+      const search = ring => {
+        const count = ring.names.length, radius = Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / count))), step = Math.PI * 2 / count;
+        const spots = ring.names.map(name => byName.has(name) ? at(byName.get(name)) : null);
+        if (spots.some(spot => !spot)) return;
+        const fixed = ring.names.map((name, i) => i).filter(i => !ring.movable.includes(ring.names[i]));
+        const others = shapes.filter(s => !ring.names.includes(s.name)), hub = shapes.find(s => s.name === hubName && ring.names.includes(s.name));
+        let best = null;
+        // The ring's line at (x, y): how far it comes into what stays and into the other loops.
+        const lineBad = (x, y) => {
+          let bad = hub ? Math.max(0, radius + RING_SPACE - boxNear(hub.box, x, y)) : 0;
+          for (const s of others) { bad += insideOf(s, x, y, radius); if (best && bad > best.bad) return bad; }
+          bands.forEach(band => {
+            const d = Math.hypot(x - band.x, y - band.y) || 1e-6, shared = ring.names.find(name => band.names.includes(name));
+            if (!shared) { bad += Math.max(0, radius + band.r + RING_APART - d); return; }
+            // Through a common agent: they touch there (the second meeting point inside its circle), each outside the other.
+            const s = placed.get(shared) || at(byName.get(shared)), ux = (band.x - x) / d, uy = (band.y - y) / d, along = (s.x - x) * ux + (s.y - y) * uy;
+            const sx = 2 * (x + ux * along) - s.x, sy = 2 * (y + uy * along) - s.y;
+            bad += Math.max(0, Math.hypot(sx - s.x, sy - s.y) - (byName.get(shared).r + 10)) + Math.max(0, .9 * (radius + band.r) - d);
+          });
+          return bad;
+        };
+        const consider = (x, y, start, dir, line) => {
+          let bad = line, moved = 0;
+          const made = [], list = [];
+          for (let i = 0; i < count; i++) {
+            const name = ring.names[i];
+            if (!ring.movable.includes(name)) continue;
+            const a = start + dir * i * step, px = x + radius * Math.cos(a), py = y + radius * Math.sin(a), m = shapeOf(byName.get(name), { x: px, y: py });
+            for (const s of others) bad += clashOf(m, s);
+            bands.forEach(band => { if (!band.names.includes(name)) bad += insideOf(m, band.x, band.y, band.r); });
+            if (best && bad > best.bad + 1e-6) return;
+            moved += Math.hypot(px - spots[i].x, py - spots[i].y); made.push([name, px, py]); list.push(m);
+          }
+          list.push({ x, y, r: radius, box: { left: x, right: x, top: y, bottom: y } });
+          const e = extent(list), grown = Math.max(0, area.left - e.left) + Math.max(0, e.right - area.right) + Math.max(0, area.top - e.top) + Math.max(0, e.bottom - area.bottom);
+          const cost = moved + 3 * grown + 1000 * (Math.max(0, centre - half - e.left) + Math.max(0, e.right - centre - half) + Math.max(0, middle - halfY - e.top) + Math.max(0, e.bottom - middle - halfY));
+          if (!best || bad < best.bad - 1e-6 || cost < best.cost) best = { bad, cost, x, y, start, dir, made };
+        };
+        if (fixed.length === 1) {
+          // One agent stays (the orchestrator, a seat, one on an earlier loop): the circle passes through it.
+          const i = fixed[0], f = spots[i];
+          for (let k = 0; k < 120; k++) for (const dir of [1, -1]) {
+            const angle = k * Math.PI / 60, x = f.x + radius * Math.cos(angle), y = f.y + radius * Math.sin(angle);
+            consider(x, y, Math.atan2(f.y - y, f.x - x) - dir * i * step, dir, lineBad(x, y));
+          }
+        } else if (!fixed.length) {
+          const turns = Array.from({ length: 12 }, (_, k) => k * step / 12);
+          const tryAt = (x, y) => { const line = lineBad(x, y); if (best && line > best.bad + 1e-6) return; turns.forEach(turn => { consider(x, y, turn, 1, line); consider(x, y, turn, -1, line); }); };
+          const reach = radius + 140;
+          for (let x = area.left - reach; x <= area.right + reach; x += 24) for (let y = area.top - reach; y <= area.bottom + reach; y += 24) tryAt(x, y);
+          if (best) { const cx = best.x, cy = best.y; for (let dx = -24; dx <= 24; dx += 6) for (let dy = -24; dy <= 24; dy += 6) tryAt(cx + dx, cy + dy); }
+        } else {
+          // Two or more stay where they are (the council's seats): the circle round their middle, turned so the others move least.
+          const x = spots.reduce((sum, spot) => sum + spot.x, 0) / count, y = spots.reduce((sum, spot) => sum + spot.y, 0) / count;
+          const line = lineBad(x, y);
+          for (let k = 0; k < 72; k++) consider(x, y, k * Math.PI / 36, 1, line);
+        }
+        return best;
+      };
+      rings.forEach(full => {
+        // An agent the user put somewhere stays there and the circle goes through it, unless the circle would then run
+        // into something; then it moves onto a circle in free space like the rest.
+        let ring = { ...full, movable: full.movable.filter(name => !byName.get(name)?.pinned) }, best = search(ring);
+        if (ring.movable.length < full.movable.length && (!best || best.bad > .5)) { const other = search(full); if (other && (!best || other.bad < best.bad)) { ring = full; best = other; } }
+        if (!best) return;
+        const count = ring.names.length, radius = Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / count)));
+        const shift = placedByUser[ring.key], sx = shift && Number.isFinite(shift.dx) ? shift.dx : 0, sy = shift && Number.isFinite(shift.dy) ? shift.dy : 0;
+        best.made.forEach(([name, x, y]) => {
+          const body = placed.get(name);
+          if (!body) return;
+          Object.assign(body, { x: x + sx, y: y + sy, still: true, ring: ring.key });
+          const stayed = shapes.findIndex(shape => shape.name === name);
+          if (stayed >= 0) shapes.splice(stayed, 1);
+          shapes.push(shapeOf(byName.get(name), body));
+        });
+        bands.push({ x: best.x + sx, y: best.y + sy, r: radius, names: ring.names });
+      });
     }
     function positionStore() { try { return typeof localStorage === 'undefined' ? null : localStorage; } catch (_) { return null; } }
     function loadMoves() {
@@ -756,21 +903,9 @@
         return { name, ...seed, ...seat, ...(pinned ? { x: saved.x, y: saved.y } : {}), pinned, still: pinned || name === hubName };
       });
       const bodies = targets.filter(target => !target.parent), limit = body => Math.max(0, rect.width / 2 - body.reach - EDGE);
-      // Placed loop rings: an agent not on one keeps its circle and name (RING_CLEAR beyond its reach) off the ring's line.
-      const bands = [];
       const settle = () => {
         for (let iteration = 0; iteration < 80; iteration++) {
           let moved = false;
-          bands.forEach(band => bodies.forEach(body => {
-            if (body.still || band.names.includes(body.name)) return;
-            let dx = body.x - band.x, dy = body.y - band.y, distance = Math.hypot(dx, dy);
-            const room = body.reach + RING_CLEAR, off = distance - band.r;
-            if (Math.abs(off) >= room) return;
-            if (distance < .001) { dx = 0; dy = 1; distance = 1; }
-            // Out of the ring unless it sits deep inside, then into the middle.
-            const outward = off >= 0 || distance > band.r - room / 2 || band.r < room * 2, by = outward ? room - off + .1 : -(room + off + .1);
-            body.x += dx / distance * by; body.y += dy / distance * by; moved = true;
-          }));
           for (let i = 0; i < bodies.length; i++) for (let j = i + 1; j < bodies.length; j++) {
             const a = bodies[i], b = bodies[j], room = a.reach + b.reach + 18;
             if (a.still && b.still) continue;
@@ -788,67 +923,20 @@
       };
       settle();
       const placed = new Map(bodies.map(body => [body.name, body]));
-      // Full loops: their moving agents go onto an even circle, in path order; the rest make room round them.
-      if (rings.length) {
-        const where = name => { const body = placed.get(name); if (body) return body; const seat = targets.find(target => target.name === name), owner = seat && placed.get(seat.parent); return owner ? { x: owner.x + seat.dx, y: owner.y + seat.dy } : null; };
-        rings.forEach(ring => {
-          const count = ring.names.length, radius = Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / count))), step = Math.PI * 2 / count;
-          const spots = ring.names.map(where);
-          if (spots.some(spot => !spot)) return;
-          const fixed = ring.names.map((name, i) => [name, i]).filter(([name]) => !ring.movable.includes(name));
-          let cx = spots.reduce((sum, spot) => sum + spot.x, 0) / count, cy = spots.reduce((sum, spot) => sum + spot.y, 0) / count, start = 0;
-          if (fixed.length === 1) {
-            // One agent stays (the hub, say): the circle passes through it.
-            const [, i] = fixed[0], f = spots[i], others = spots.filter((_, j) => j !== i);
-            const gx = others.reduce((sum, spot) => sum + spot.x, 0) / others.length, gy = others.reduce((sum, spot) => sum + spot.y, 0) / others.length;
-            let dx = gx - f.x, dy = gy - f.y, d = Math.hypot(dx, dy);
-            if (d < 1) { dx = f.x || 1; dy = f.y; d = Math.hypot(dx, dy) || 1; }
-            cx = f.x + dx / d * radius; cy = f.y + dy / d * radius;
-            start = Math.atan2(f.y - cy, f.x - cx) - i * step;
-          } else {
-            // Turned so the agents move as little as they can.
-            let least = Infinity;
-            for (let k = 0; k < 72; k++) {
-              const angle = k * Math.PI / 36;
-              const cost = ring.names.reduce((sum, name, i) => ring.movable.includes(name) ? sum + (cx + radius * Math.cos(angle + i * step) - spots[i].x) ** 2 + (cy + radius * Math.sin(angle + i * step) - spots[i].y) ** 2 : sum, 0);
-              if (cost < least) { least = cost; start = angle; }
-            }
-          }
-          const shift = placedByUser[ring.key];
-          if (shift && Number.isFinite(shift.dx)) { cx += shift.dx; cy += shift.dy; }
-          ring.names.forEach((name, i) => {
-            const body = placed.get(name);
-            if (!body || !ring.movable.includes(name)) return;
-            Object.assign(body, { x: cx + radius * Math.cos(start + i * step), y: cy + radius * Math.sin(start + i * step), still: true, ring: ring.key });
-          });
-          bands.push({ x: cx, y: cy, r: radius, names: ring.names, free: !fixed.length });
-        });
-        // A ring whose agents all move never sits on an agent that stays put and is on no ring (the hub, one the user
-        // placed): the ring goes, as a whole, off that agent's line, whichever side the agent is on.
-        for (let round = 0; round < 30; round++) {
-          let moved = false;
-          bands.forEach(band => {
-            if (!band.free) return;
-            placed.forEach(body => {
-              if (!body.still || body.ring || band.names.includes(body.name)) return;
-              const dx = band.x - body.x, dy = band.y - body.y, distance = Math.hypot(dx, dy) || 1, overlap = body.reach + RING_CLEAR - Math.abs(distance - band.r);
-              if (overlap <= 0) return;
-              const by = Math.min(overlap + 1, 24) * (distance >= band.r ? 1 : -1), ox = dx / distance * by, oy = dy / distance * by;
-              band.x += ox; band.y += oy;
-              band.names.forEach(name => { const member = placed.get(name); if (member) { member.x += ox; member.y += oy; } });
-              moved = true;
-            });
-          });
-          if (!moved) break;
-        }
-        settle();
-      }
+      // Full loops: their moving agents go onto an even circle, in path order, in free space (placeRings); nothing else moves.
+      if (rings.length) placeRings(rings, placed, targets, placedByUser, compact ? { width: rect.width, height: canvasHeight } : { width: rect.width - DETAIL_WIDTH, height: rect.height });
       const before = new Map(Array.from(positions, ([name, point]) => [name, { x: point.x, y: point.y }]));
+      // What this layout moved: agents new to the picture, and those going onto, off or along a loop's circle (`steady`
+      // when nothing else moved: then the camera stays where it is, see settleCamera).
+      const changed = [];
+      let steady = true;
       targets.forEach(target => {
         if (target.parent) { const owner = placed.get(target.parent); target.x = owner.x + target.dx; target.y = owner.y + target.dy; }
-        const point = positions.get(target.name) || {};
-        positions.set(target.name, Object.assign(point, { x: target.x, y: target.y, r: target.r, group: target.group, parent: target.parent, dx: target.dx, dy: target.dy, fixed: target.pinned, ring: target.ring || '' }));
+        const point = positions.get(target.name) || {}, was = before.get(target.name);
+        if (!was || Math.hypot(was.x - target.x, was.y - target.y) > .5) { changed.push(target.name); if (was && !target.ring && !point.ring && !(target.parent && placed.get(target.parent)?.ring)) steady = false; }
+        positions.set(target.name, Object.assign(point, { x: target.x, y: target.y, r: target.r, reach: target.reach, group: target.group, parent: target.parent, dx: target.dx, dy: target.dy, fixed: target.pinned, ring: target.ring || '' }));
       });
+      layoutChange = { changed, steady: steady && before.size > 0 };
       if (glide) glideFrom(before);
     }
     function reducedMotion() { return root.dataset.agMotion === 'none' || !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches; }
@@ -3616,7 +3704,8 @@
         else return;
         event.preventDefault(); camera.touched = true;
         const before = copyMoves(); moveNode(key, x, y); finishMove(before, { agent: key, by: 'key' });
-        if (arrangement === 'compact') { clampPan(); transform(); } else fitView(false);
+        // The user's own pan and zoom stay (n8 major 6): only an automatic view is fitted again.
+        if (arrangement === 'compact' || camera.own) { clampPan(); transform(); } else fitView(false);
         return;
       }
       if (event.target !== viewport) return;
@@ -3770,7 +3859,9 @@
       if (root.clientWidth > 0 && viewport.clientWidth > 0) {
         addPositions(visibleAgents);
         const labelsChanged = renderNodes(visibleAgents); updateEdges();
-        if (!camera.initialized || previousLayout !== layoutSignature || (labelsChanged && !camera.touched)) fitView(false);
+        if (!camera.initialized) fitView(false);
+        else if (previousLayout !== layoutSignature) settleCamera();
+        else if (labelsChanged && !camera.touched) fitView(false);
       }
       root.dataset.state = visibleAgents.length || graph ? 'ready' : 'empty';
       showEmpty();
