@@ -1,14 +1,16 @@
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { readFileSync } from 'node:fs';
+import { availableParallelism } from 'node:os';
 
 // The view checks run as SHARDS pages at once, each in its own Chrome (own profile, so nothing a page stores
 // reaches another, and every page is a visible foreground tab with real animation frames). Page k runs every
 // SHARDS-th test from the k-th (view-test.html); the lines are merged into one result.
 const [chrome, work] = process.argv.slice(2);
-const SHARDS = Math.max(1, Number(process.env.AGENTGRAPH_VIEW_SHARDS) || 4);
+// Four pages at least, eight at most, two thirds of the processors between (272 checks: 81 s at 4, 47 s at 8).
+const SHARDS = Math.max(1, Number(process.env.AGENTGRAPH_VIEW_SHARDS) || Math.min(8, Math.max(4, Math.floor(availableParallelism() * 2 / 3))));
 const browsers = [];
-const timeout = setTimeout(() => { console.error('View checks timed out'); browsers.forEach(b => b.kill()); process.exit(1); }, 150000);  // the suite takes about 62 s; a hang is cut off here
+const timeout = setTimeout(() => { console.error('View checks timed out'); browsers.forEach(b => b.kill()); process.exit(1); }, 150000);  // a hang is cut off here
 
 async function runPage(shard) {
   const browser = spawn(chrome, ['--headless=new', '--disable-gpu', '--no-first-run', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--window-size=1400,900', '--remote-debugging-port=0', '--user-data-dir=' + work + '/profile-' + shard, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
