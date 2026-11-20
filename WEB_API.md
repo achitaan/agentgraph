@@ -241,7 +241,8 @@ Rules:
 //   for 1 s or until the pointer leaves the list; undo puts the skill back at its old place in the list;
 //   an error line wraps and is scrolled into view.
 // options.actions.roster: optional (request) => Promise. Contract n84: { op: "add", name, template?:
-//   "verifier", copy_of?, model? }, { op: "remove", name } (resolves with { record, message }) and
+//   "blank" | "verifier", copy_of?, model? }, { op: "remove", name } (resolves with { record, message }),
+//   { op: "rename", name, to } (resolves with { agent, renamed, record, message }) and
 //   { op: "restore", record }. Shown only when the snapshot's roster.editable is true (else the hub's
 //   details give roster.why). With it: a "+" glyph on the canvas (aria-label "Add an agent", key N)
 //   opens a menu: Blank agent (model roster.models[0]), Verifier, or a copy of any agent. The new circle
@@ -250,8 +251,12 @@ Rules:
 //   On the drop the view asks { op: "add" } under the first free name (verifier-2, impl-claude-2,
 //   agent-1), keeps the dropped place, opens the details with the name selected (Alt+arrows move it,
 //   Enter renames it) and shows the reply's message as the success line (the view never says when it
-//   applies by itself). Rename is not in the contract: for an added agent on no flow or group it is
-//   { op: "add", copy_of } under the new name, then { op: "remove" } of the old one. An agent with
+//   applies by itself). Rename (any added agent, on flows and in groups too) is one request,
+//   { op: "rename", name: OLD, to: NEW }; its place in every layout moves to the new name and the details
+//   say "Renamed OLD to NEW.". A refusal changes nothing in the view (name, place, lines, saved places,
+//   undo) and is the agent's error line, announced. Undo sends { op: "restore", record } with the reply's
+//   record and moves the place back; a refused undo changes nothing, says why and stays to try again.
+//   Renaming an agent just added is part of adding it (undo removes it under the new name). An agent with
 //   added: true draws no line at all (not even the hub's spoke) until it is on a flow or a group, has a
 //   busy session or a task-graph step. Delete rule: Delete removes, in this order, the focused flow,
 //   group line or agent, else the picked flow, else the picked group line, else the lone armed agent,
@@ -273,6 +278,80 @@ Rules:
 //   no text). Delete on a picked group line takes that member out; a new group opens with its
 //   instruction focused and selected. Flow and group instructions save after a 700 ms pause in typing
 //   and on pagehide; the state reads "Saving" or "Saved", never asks the user to save.
+// A path's details (contract n96; the user's word for a flow is path). Nothing of this is drawn in the graph.
+//   Name: a field saved with Enter or on leaving it as { op: "name", id, name } through actions.flow (empty
+//   clears it); Escape puts the saved name back; a refusal shows as the field's error line and in the live
+//   region with the typed name kept; Ctrl/Cmd+Z puts the old name back. Read-only hosts show a name, no field.
+//   Run: a goal box (required, at most 4,000 characters counted as characters; a counter "N of 4,000" from
+//   3,600, "Too long: …" past the limit). Enter is a new line; Ctrl/Cmd+Enter or the button runs. With
+//   options.actions.run the button is Run and sends { flow: id, goal }; while it is out the button is busy
+//   ("Sending…", disabled) and nothing fires twice; the result line is the reply's message, else "Sent to
+//   the orchestrator (session S).", or the rejection's message. Without it the button is "Copy run message":
+//   it asks actions.flow { op: "prompt", id, goal }, puts reply.text on the clipboard and says so; when the
+//   clipboard is refused or missing it shows the text read-only, focused and selected. A goal stays (closing
+//   and reopening the details, refreshes) until it is sent. Sending is not a change to the structure and has
+//   no undo. No Run without actions.run or actions.flow.
+//   Cost (when the snapshot carries structure.flows[].stats): runs, passed, rounds (avg · most), cost
+//   (total · avg), last run; stats null reads "Not run yet"; a null field reads "—", never 0. No chart.
+//   Command: a switch "Use as a command" (role switch). Without a name it is aria-disabled and says "Give
+//   this path a name to use it as a command." On sends { op: "command", id, on }; on, it shows /NAME (from
+//   structure.flows[].command) and when it applies, as the back end reports it: the command reply's live
+//   (boolean) and applies (a sentence), else the snapshot's structure.commands_live and
+//   structure.commands_applies, in plain words: live true reads "Live now."; live false (or a sentence that
+//   speaks of a reload or restart) reads, after turning it on, "Not in OpenCode yet: /NAME works once
+//   OpenCode reloads (type /reload) or restarts." ("(type /reload)" only when the sentence names /reload),
+//   at load "A new command works once OpenCode reloads … or restarts.", and after turning it off
+//   "/NAME stays in OpenCode until OpenCode reloads … or restarts."; each is announced with the change. A
+//   sentence that names neither is shown as sent. A refusal is the switch's error line and is announced.
+//   Ctrl/Cmd+Z turns it back.
+//   Undo of a removed path re-adds it, then names it and turns its command on again (add carries neither).
+//   Keys: G on a focused path, or on the canvas with a path picked, opens its details at the goal box (the
+//   path's aria-keyshortcuts end with G when it can run).
+//   Fit (the button or F) never takes names under 11 px either; past that the graph pans.
+// The figures row (cost, "! N", "N working", tokens, the context bar and number, the summary dots) keeps one
+//   row in the pane the details leave, never overlapping or clipped. What does not fit is dropped, least important
+//   first: the dots, the tokens, the context bar, the working count; the cost and "! N" always stay. It is measured
+//   (the pane, not the whole view), on every snapshot and every resize, on top of two fixed steps for a narrow view
+//   (330 px: dots and tokens; 300 px: the bar). With the compact sheet open the row stays, in its own strip above
+//   the canvas.
+// Refit: opening or closing the details refits the graph into the space left (every circle and name clear of the
+//   sheet, the figures and the controls; names at 11 px or more, past that it pans), unless the user has panned or
+//   zoomed since the last fit: then their view stays. A change of the pane's own size or of arrangement refits.
+// Zoom floor: wheel, Ctrl+wheel, pinch, the - key and Fit all stop where names are 11 px on screen (12 px names
+//   at scale 11/12). The background pans, like an agent drags, only once the pointer has moved more than 5 px.
+// A refused path keeps the reason as the tooltip of its first agent and of the newest agent (which shakes and
+//   shows it in its details).
+// A blank agent is asked for as { op: "add", name, template: "blank" (, model) } (the back end now takes a name
+//   alone as a blank agent too; the view still names the template). Any refused add removes the new
+//   circle at once; the details keep the reason (role alert, announced) with Try again (puts the circle back where it
+//   was and asks again) and Cancel. Back-end reasons in developer words are said plainly (an agent with no file in the
+//   structure folder, a missing description or model, a taken name); anything else is shown as sent.
+// Delete on an agent that stays (the orchestrator, the council, a seat, one the roster keeps) shakes it, sets the
+//   reason as its tooltip and announces it, with the details open or closed; nothing is asked of the host.
+// After a skill save, create or delete, focus stays on the control used (Save, or the text box after Ctrl/Cmd+Enter),
+//   goes to the new skill's row, or to the agent's skill list after a delete; never to the close button.
+// Undo of a skill change puts the skill back in its place in the list and keeps that order across reloads (same
+//   storage as the positions, key "<positions key>:skill-order"), although the back end appends it to the file.
+// Loop rings keep clear of every agent not on them: agents that can move are pushed off a ring's line (32 units
+//   beyond their reach, room for the name), a later ring whose agents all move is moved off an earlier ring and off
+//   the hub or an agent that stays put. A click off an agent picks the line nearest the pointer by distance to the
+//   stroke (unchanged); a click on an agent (circle, name or hover halo) is the agent's.
+// Narrow panes: when every agent cannot fit at the 11 px floor (18 agents beside the 340 px sheet at a 760 px pane,
+//   or above the sheet at 520 px), the graph stays at 11 px and pans: the opened agent is wholly visible and panning
+//   reaches every agent.
+// No write from a stale view (agentgraph contract n8 r4): when snapshot items (structure.flows, structure.teams,
+//   agents, skills) and skillfile { op: "read" } replies carry `rev`, every write that names one of them sends
+//   `expect` with the rev the view shows: flow text, name, command, remove and prompt; run (the flow's rev); team
+//   members, text and remove; roster rename and remove; skills; skillfile write and delete. Adds, reads and restores
+//   (undo of a rename, delete or skill delete) send none. An instruction box or path name sends the rev it was drawn
+//   with, so a change drawn while it is being typed is not overwritten. A write's reply rev (reply.flow.rev,
+//   reply.team.rev, a skillfile reply's rev) is the one shown until a snapshot fetched after it is drawn, and writes
+//   to one thing go one after another, so saves in a row each expect what the last one wrote. A refusal with
+//   status 409 (or error.stale, or a message saying it "changed since you opened it") refreshes the view, keeps
+//   what was typed (instruction, path name, new agent name, skill text, run goal) and says "This was changed
+//   somewhere else since you opened it. The view now shows the latest; try again." (announced); trying again
+//   expects the latest rev. A snapshot without rev sends no expect. index.html passes the response status and
+//   rev on the thrown error.
 // options.motion: "full" (default) or "none" for a still picture (tests, screenshots). The system's
 //   reduced-motion setting is always honoured.
 // options.scheme: "auto" (default; follows a data-color-scheme on an ancestor or the document element,

@@ -160,6 +160,7 @@
 .agentgraph .ag-team-select { max-width: 100%; min-width: 0; padding: 4px 6px; border: 1px solid var(--ag-line); border-radius: 5px; background: var(--ag-paper); color: var(--ag-ink); font: inherit; cursor: pointer; }
 .agentgraph .ag-text-button { padding: 6px 0; border: 0; background: none; font-size: 11px; color: var(--ag-muted); text-decoration: underline; text-underline-offset: 4px; white-space: nowrap; }
 .agentgraph .ag-text-button:hover { color: var(--ag-work); }
+.agentgraph .ag-text-button[aria-disabled="true"] { cursor: progress; opacity: 0.6; }
 .agentgraph .ag-notice { flex: 0 0 auto; padding: 6px 12px; background: var(--ag-notice-bg); color: var(--ag-notice-ink); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agentgraph .ag-network { position: relative; flex: 1; display: flex; min-height: 0; min-width: 0; }
 .agentgraph .ag-activity { position: absolute; top: 10px; left: 12px; z-index: 1; color: var(--ag-work); font-size: 10px; font-variant-numeric: tabular-nums; pointer-events: none; }
@@ -350,6 +351,8 @@
 @keyframes ag-breathe { 50% { fill: var(--ag-breathe-fill); stroke: var(--ag-breathe-stroke); } }
 .agentgraph.ag-details-open:not(.ag-compact) .ag-network { margin-right: 340px; }
 .agentgraph.ag-details-open.ag-compact .ag-network { margin-bottom: var(--ag-sheet-height, 0px); }
+/* With the sheet open the short canvas pans: the figures get their own strip above it, so nothing passes under them. */
+.agentgraph.ag-details-open.ag-compact .ag-viewport { margin-top: 28px; }
 @container (max-width: 650px) {
   .agentgraph .ag-detail { inset: auto 0 0; height: var(--ag-sheet-height, 60%); max-height: 100%; min-height: 0; width: 100%; border-left: 0; border-top: 1px solid var(--ag-line); border-radius: 14px 14px 0 0; box-shadow: 0 -15px 40px var(--ag-panel-shadow); }
 }
@@ -358,10 +361,9 @@
 }
 
 .agentgraph .ag-close:hover { background: var(--ag-control-hover); color: var(--ag-ink); }
-/* While the compact sheet is open the canvas above it is short: the controls, the figures and the status line give
-   it all their room (the figures are in the run details). */
-.agentgraph.ag-details-open.ag-compact .ag-controls, .agentgraph.ag-details-open.ag-compact .ag-pan-cue,
-.agentgraph.ag-details-open.ag-compact .ag-usage, .agentgraph.ag-details-open.ag-compact .ag-network > .ag-status { display: none; }
+/* While the compact sheet is open the canvas above it is short: the controls give it their room. The figures row
+   stays (cost and "! N" always show; the rest drops as the pane narrows, see fitFigures). */
+.agentgraph.ag-details-open.ag-compact .ag-controls, .agentgraph.ag-details-open.ag-compact .ag-pan-cue { display: none; }
 
 /* Motion. Ambient movement is small and stops for anyone who asks for less; what moves most is what is working. */
 .agentgraph .ag-core { transition: scale .18s ease, fill .35s ease, stroke .35s ease; }
@@ -408,8 +410,15 @@
 .agentgraph .ag-wear-history { fill: none; stroke: var(--ag-muted); stroke-width: 1.2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
 .agentgraph .ag-wear-last { fill: var(--ag-work); }
 .agentgraph .ag-detail-section .ag-wear-fact { margin: 0 0 3px; color: var(--ag-muted); }
-@container (max-width: 330px) { .agentgraph .ag-usage-tokens { display: none; } }
-@container (max-width: 300px) { .agentgraph .ag-wear-bar, .agentgraph .ag-wear-dots, .agentgraph .ag-wear-count { display: none; } }
+/* The figures row drops, least important first, what does not fit in the pane (fitFigures in app.js). */
+.agentgraph .ag-network.ag-drop-dots .ag-wear-dots, .agentgraph .ag-network.ag-drop-dots .ag-wear-count,
+.agentgraph .ag-network.ag-drop-tokens .ag-usage-tokens,
+.agentgraph .ag-network.ag-drop-context .ag-usage-context,
+.agentgraph .ag-network.ag-drop-counts .ag-activity { display: none; }
+.agentgraph .ag-network > .ag-status, .agentgraph .ag-usage { white-space: nowrap; }
+/* A narrow view always drops them (in the same order: dots and tokens, then the bar); the measuring adds to that. */
+@container (max-width: 330px) { .agentgraph .ag-usage-tokens, .agentgraph .ag-wear-dots, .agentgraph .ag-wear-count { display: none; } }
+@container (max-width: 300px) { .agentgraph .ag-wear-bar { display: none; } }
 .agentgraph .ag-alert { display: none; fill: var(--ag-danger); stroke: var(--ag-bg); stroke-width: 2; pointer-events: none; }
 .agentgraph .ag-agent[data-attention="true"] .ag-alert { display: initial; }
 .agentgraph .ag-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px 10px; margin: 0 0 12px; }
@@ -552,3 +561,20 @@
 .agentgraph .ag-draft .ag-core { fill: var(--ag-node-fill); stroke: var(--ag-work); stroke-width: 1.6; opacity: .85; }
 .agentgraph .ag-draft[data-following="true"] .ag-core { opacity: .6; }
 .agentgraph .ag-rename { display: block; margin: 0 0 12px; }
+
+/* A path's name, run, cost and command (in its details only; nothing is added to the graph). */
+.agentgraph .ag-path-run .ag-run-goal { min-height: 58px; }
+.agentgraph .ag-detail-section .ag-run-count { margin: 0; color: var(--ag-muted); white-space: normal; }
+.agentgraph .ag-detail-section .ag-run-count[data-kind="error"] { color: var(--ag-danger); }
+.agentgraph .ag-run-go { font-size: 12px; }
+.agentgraph .ag-run-go[aria-busy="true"] { cursor: progress; text-decoration: none; }
+.agentgraph .ag-detail-section .ag-run-note { margin: 6px 0 0; white-space: normal; overflow-wrap: anywhere; }
+.agentgraph .ag-run-copy { margin-top: 6px; min-height: 120px; }
+.agentgraph .ag-detail-section .ag-path-none { margin: 0; color: var(--ag-muted); }
+.agentgraph .ag-switch { display: inline-flex; align-items: center; gap: 8px; padding: 4px 0; border: 0; background: none; color: var(--ag-ink); font: inherit; font-size: 12px; cursor: pointer; }
+.agentgraph .ag-switch::before { content: ""; box-sizing: border-box; width: 26px; height: 14px; border-radius: 7px; border: 1px solid var(--ag-control-border); background: var(--ag-control-bg) radial-gradient(circle at 6px 50%, var(--ag-muted) 4px, transparent 4.5px); }
+.agentgraph .ag-switch[aria-checked="true"]::before { border-color: var(--ag-work); background: var(--ag-control-bg) radial-gradient(circle at 18px 50%, var(--ag-work) 4px, transparent 4.5px); }
+.agentgraph .ag-switch[aria-disabled="true"], .agentgraph .ag-switch:disabled { color: var(--ag-muted); cursor: not-allowed; }
+.agentgraph .ag-switch:focus-visible { outline: 2px solid var(--ag-work); outline-offset: 2px; border-radius: 4px; }
+.agentgraph .ag-detail-section .ag-command-name { margin: 6px 0 0; font-size: 12px; color: var(--ag-ink); }
+.agentgraph .ag-detail-section .ag-command-applies { margin: 2px 0 0; color: var(--ag-muted); white-space: normal; }

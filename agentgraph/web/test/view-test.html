@@ -34,9 +34,51 @@
     }
     // Moved positions are remembered in localStorage; every check starts from the automatic layout.
     const clearPositions = () => { try { localStorage.clear(); } catch (_) { /* no storage */ } };
+    // ---- Stale writes (contract n8 r4): the suite's back ends report `rev` and check `expect` ----
+    // A host made for a fixture turns revs on (an older back end: { revs: false }). A rev is a hash of what the thing is
+    // stored as, so a fixture changed by a check (as if elsewhere) gets a new one; the snapshot carries the rev as it was
+    // at the last write or fetch. A write that names a thing with `expect` other than its rev now is refused with 409;
+    // a write without `expect` for a thing whose rev the view was shown is refused too (the view must always send it).
+    const REVS = Symbol('revs'), SKILL_TEXTS = Symbol('skill texts');
+    const hashOf = value => { let h = 0x811c9dc5; for (const ch of JSON.stringify(value)) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8, '0'); };
+    const STORED = {
+      flow: item => [item.id, item.path, item.text, item.name ?? null, item.command ?? null],
+      team: item => [item.id, item.lead, item.members, item.text],
+      agent: item => [item.name, item.model ?? null, item.skills ?? null, item.added ?? null, item.description ?? null, item.variant ?? null],
+      skill: (item, data) => [item.name, item.description ?? null, data[SKILL_TEXTS]?.[item.name] ?? null]
+    };
+    const revNow = (data, kind, item) => hashOf(STORED[kind](item, data));
+    function stampRevs(data) {
+      if (!data || !data[REVS]) return data;
+      (data.structure?.flows || []).forEach(item => { item.rev = revNow(data, 'flow', item); });
+      (data.structure?.teams || []).forEach(item => { item.rev = revNow(data, 'team', item); });
+      (data.agents || []).forEach(item => { item.rev = revNow(data, 'agent', item); });
+      (data.skills || []).forEach(item => { item.rev = revNow(data, 'skill', item); });
+      return data;
+    }
+    function enableRevs(data, options = {}) { if (options.revs !== false && data && !data[REVS]) { data[REVS] = true; stampRevs(data); } }
+    // Refused as agentgraph refuses a stale write (status 409, its plain message and the current rev).
+    function checkExpect(data, kind, item, request, expects) {
+      if (!data[REVS] || !item) return;
+      expects.push(kind + ':' + (item.id || item.name) + ':' + request.op + ':' + (request.expect ?? 'none'));
+      const now = revNow(data, kind, item);
+      if (request.expect === undefined) { if (item.rev !== undefined) throw new Error('no expect was sent for ' + kind + ' ' + (item.id || item.name) + ' (the view must always send it)'); return; }
+      if (request.expect !== now) { const error = new Error('changed since you opened it; reload and try again'); error.status = 409; error.rev = now; throw error; }
+    }
+    // A write's reply carries the rev the thing has after it (as the snapshot will).
+    function fresh(data, reply) {
+      stampRevs(data);
+      if (!data[REVS] || !reply || typeof reply !== 'object') return reply;
+      const flow = reply.flow && data.structure?.flows?.find(item => item.id === reply.flow.id), team = reply.team && data.structure?.teams?.find(item => item.id === reply.team.id);
+      if (flow) reply.flow.rev = flow.rev;
+      if (team) reply.team.rev = team.rev;
+      return reply;
+    }
+    // The calls a check reads are the requests without `expect`, which checkExpect checks on each of them.
+    const withoutExpect = request => { const copy = JSON.parse(JSON.stringify(request)); delete copy.expect; return copy; };
     async function using(data, run, options = {}) {
       clearPositions();
-      const root = host(), app = AgentGraph.mount(root, { fetchSnapshot: async () => data, intervalMs: 60000, motion: 'none', ...options });
+      const root = host(), app = AgentGraph.mount(root, { fetchSnapshot: async () => stampRevs(data), intervalMs: 60000, motion: 'none', ...options });
       try { await app.refresh(); await run(root, app); } finally { app.destroy(); root.remove(); }
     }
     function open(root, name) { root.querySelector('[data-agent="' + name + '"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); }
@@ -44,11 +86,19 @@
     function context(target, p = {}) { const e = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: p.x || 0, clientY: p.y || 0 }); target.dispatchEvent(e); return e.defaultPrevented; }
     function move(root, name) { root.querySelector('[data-agent="' + name + '"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', shiftKey: true, bubbles: true })); }
     const edge = (root, kind, name) => [...root.querySelectorAll('line[data-edge]')].find(e => e.dataset.kind === kind && e.dataset.edge === name);
+    // Resize, then wait until the view has handled it. The view reacts to a ResizeObserver notice with a frame of its own;
+    // under load the first notice can come after any fixed sleep, and the view's frame then runs after the check. So this
+    // watches the same elements and waits until two whole frames pass with no new notice (the view's frame, asked for in
+    // the frame that saw the notice and before ours, has then run).
     async function resizeTo(root, width, height) {
+      let seen = 0;
+      const watch = new ResizeObserver(() => { seen++; }), frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+      watch.observe(root); const viewport = root.querySelector('.ag-viewport'); if (viewport) watch.observe(viewport);
       root.style.width = width + 'px'; root.style.height = height + 'px';
       root.getBoundingClientRect();
       await sleep(150);
-      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      for (let last = -1, rounds = 0; last !== seen && rounds < 30; rounds++) { last = seen; await frame(); await frame(); }
+      watch.disconnect();
     }
     function circleBounds(root) {
       return [...root.querySelectorAll('[data-agent]')].map(node => ({ name: node.dataset.agent, bounds: node.querySelector('.ag-halo').getBoundingClientRect() }));
@@ -488,7 +538,7 @@
     await test('missing loops remain backward compatible', async () => {
       await using(fixture(), root => assert(!root.querySelector('[data-loop]'), 'missing loops drew a circuit'));
     });
-    await test('readable 400 and 320 panels reflow across the width and Fit offers an overview', async () => {
+    await test('readable 400 and 320 panels reflow across the width and Fit shows the whole graph as far as names stay 11 px', async () => {
       await using(loopFixture(crowdedFixture()), async root => {
         for (const [width, height] of [[400, 820], [320, 700]]) {
           await resizeTo(root, width, height); assertFits(root);
@@ -505,7 +555,11 @@
           assert(root.querySelector('.ag-detail').hidden && (!overflowing || stage.getAttribute('transform') !== beforePan), 'dragging on a loop opened details or did not pan an overflowing canvas');
           root.querySelector('.ag-viewport').dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -100000 }));
           root.querySelector('.ag-fit').click();
-          circleBounds(root).forEach(({ name, bounds: b }) => assert(b.left >= viewport.left - .1 && b.right <= viewport.right + .1 && b.top >= viewport.top - .1 && b.bottom <= viewport.bottom + .1, 'Fit does not show ' + name));
+          // Pass n98 (user rule): Fit never takes names under 11 px. Every circle shows when that allows it; when it
+          // does not, Fit stops at 11 px with the hub in view and the rest a pan away.
+          const fitScale = root.querySelector('.ag-drawing > g').getCTM().a, atFloor = Math.abs(fitScale - 11 / 12) < .001;
+          assert(fitScale >= 11 / 12 - .0001, 'Fit took names under 11 px');
+          circleBounds(root).filter(({ name }) => !atFloor || name === 'orchestrator').forEach(({ name, bounds: b }) => assert(b.left >= viewport.left - .1 && b.right <= viewport.right + .1 && b.top >= viewport.top - .1 && b.bottom <= viewport.bottom + .1, 'Fit does not show ' + name));
           assert(root.querySelector('.ag-drawing > g').getCTM().a <= 1.0001, 'manual Fit enlarged the sidebar picture');
         }
       });
@@ -1468,23 +1522,32 @@
     }
     function flowFixture(flows = []) { const data = fixture(); data.structure = { source: 'folder', flows }; return data; }
     function flowHost(data, options = {}) {
-      const calls = [];
+      const calls = [], expects = options.expects || [];
       let made = 0;
+      enableRevs(data, options);
       const flow = async request => {
-        calls.push(JSON.parse(JSON.stringify(request)));
+        calls.push(withoutExpect(request));
         if (options.gate) await options.gate();
         if (options.fail) throw new Error(options.fail);
+        try { return fresh(data, await change(request)); } finally { stampRevs(data); }
+      };
+      const change = async request => {
         const flows = data.structure.flows;
         if (request.op === 'add') {
+          // Refused as agentgraph's structure refuses it: too short, or an agent with no file in the structure folder.
+          if (!Array.isArray(request.path) || request.path.length < 2) throw new Error('a flow needs at least two agents');
+          const unknown = data.agents ? request.path.find(name => !data.agents.some(a => a.name === name)) : null;
+          if (unknown) throw new Error('unknown agent ' + unknown + ': there is no ' + unknown + '.md in the structure folder');
           const item = { id: request.path.join('-') + '-' + (++made), path: request.path.slice(), text: request.text ?? 'Made from ' + request.path.join(' → '), source: 'drawn' };
           flows.push(item); return { flow: { ...item }, flows: flows.slice() };
         }
         const item = flows.find(f => f.id === request.id);
         if (!item) throw new Error('there is no flow ' + request.id);
+        checkExpect(data, 'flow', item, request, expects);
         if (request.op === 'text') { item.text = request.text; return { flow: { ...item }, flows: flows.slice() }; }
         flows.splice(flows.indexOf(item), 1); return { flows: flows.slice() };
       };
-      return { calls, flow };
+      return { calls, expects, flow };
     }
     const calls = host => JSON.stringify(host.calls);
     await test('without actions.flow flows are drawn, a left click does nothing, a right-click opens an agent\'s details, and a flow\'s details are read-only', async () => {
@@ -1802,13 +1865,17 @@
         await app.refresh();
         assert(root.querySelector('[data-route-text]') === box && box.value === 'Typed', 'a refresh clobbered the text being typed');
         leave(box); await settled();
-        assert(calls(host) === JSON.stringify([{ op: 'text', id: 'f1', text: 'Typed' }]) && state() === 'Saved', 'leaving the box did not save: ' + calls(host) + ' ' + state());
+        // Contract n8 r4: the text changed elsewhere while it was typed, so leaving the box sends the save, which is
+        // refused as stale; the typing stays and says so, and trying again (Ctrl+Enter) saves it.
+        assert(calls(host) === JSON.stringify([{ op: 'text', id: 'f1', text: 'Typed' }]) && /changed somewhere else/.test(state()) && root.querySelector('[data-route-text]').value === 'Typed' && data.structure.flows[0].text === 'Changed elsewhere.', 'leaving the box did not send the save, or a stale save was not refused with the typing kept: ' + calls(host) + ' ' + state());
+        const retry = root.querySelector('[data-route-text]'); retry.focus(); press(retry, 'Enter', { ctrlKey: true }); await settled();
+        assert(host.calls.length === 2 && host.calls[1].text === 'Typed' && state() === 'Saved' && data.structure.flows[0].text === 'Typed', 'trying again did not save: ' + calls(host) + ' ' + state());
         const again = root.querySelector('[data-route-text]');
         again.focus(); again.value = 'Line one\nline two'; again.dispatchEvent(new Event('input', { bubbles: true }));
         press(again, 'Enter', { ctrlKey: true }); await settled();
-        assert(host.calls.length === 2 && host.calls[1].text === 'Line one\nline two' && state() === 'Saved', 'Ctrl+Enter did not save');
+        assert(host.calls.length === 3 && host.calls[2].text === 'Line one\nline two' && state() === 'Saved', 'Ctrl+Enter did not save');
         leave(again); await settled();
-        assert(host.calls.length === 2, 'leaving an unchanged box saved again');
+        assert(host.calls.length === 3, 'leaving an unchanged box saved again');
         press(root.querySelector('[data-route-text]'), 'Backspace'); await settle();
         assert(routeOf(root, 'f1'), 'Backspace in the text box removed the flow');
       }, { actions: { flow: host.flow } });
@@ -2122,18 +2189,21 @@
       return data;
     }
     function skillHost(data, options = {}) {
-      const calls = [];
+      const calls = [], expects = options.expects || [];
+      enableRevs(data, options);
       const skills = async request => {
-        calls.push(JSON.parse(JSON.stringify(request)));
+        calls.push(withoutExpect(request));
         if (options.gate) await options.gate();
         if (options.fail) throw new Error(options.fail);
         const agent = data.agents.find(a => a.name === request.agent), names = data.skills.map(skill => skill.name), old = agent.skills;
+        try { checkExpect(data, 'agent', agent, request, expects); } finally { stampRevs(data); }
         if (request.all) agent.skills = ['*'];
         else if (request.on) agent.skills = old.includes('*') || old.includes(request.skill) ? old : [...old, request.skill];
         else agent.skills = (old.includes('*') ? names : old).filter(name => name !== request.skill);
+        stampRevs(data);
         return { agent: agent.name, skills: agent.skills.slice(), warnings: options.warn && !request.on ? [options.warn] : [], changed: true, message: 'restart' };
       };
-      return { calls, skills };
+      return { calls, expects, skills };
     }
     const skillRows = root => [...root.querySelectorAll('.ag-detail-scroll .ag-skill-row')];
     const skillSectionOf = root => [...root.querySelectorAll('.ag-detail-section')].find(item => /^Skills/.test(item.querySelector('h3').textContent));
@@ -2376,7 +2446,7 @@
         const words = () => [...root.querySelectorAll('.ag-drawing text, .ag-drawing foreignObject')].map(item => item.textContent).join('|'), unpicked = words();
         clickStep(root, 'f1'); await settle();
         assert(picked(root, 'f1') && !picked(root, 'f2') && !detailOpen(root) && !host.calls.length && !root.dataset.agTrail, 'a left click did not pick the flow alone');
-        assert(routeOf(root, 'f1').getAttribute('aria-keyshortcuts') === 'Enter I Shift+F10 ContextMenu Delete Backspace', 'a flow does not announce Delete');
+        assert(routeOf(root, 'f1').getAttribute('aria-keyshortcuts') === 'Enter I Shift+F10 ContextMenu Delete Backspace G', 'a flow does not announce Delete');
         assert(routeOf(root, 'f1').getAttribute('aria-pressed') === 'true' && root.querySelector('.ag-routes').dataset.selecting !== 'true', 'the pick is not announced, or it dims the other flows');
         const step = routeOf(root, 'f1').querySelector('.ag-route-step'), other = routeOf(root, 'f2').querySelector('.ag-route-step');
         assert(getComputedStyle(step).stroke !== getComputedStyle(other).stroke && getComputedStyle(step).animationName === 'none', 'the picked flow does not look picked, or it moves');
@@ -2929,17 +2999,29 @@
       return data;
     }
     function worldHost(data, options = {}) {
-      const calls = [], texts = { alpha: 'Alpha text.', beta: 'Beta text.', gamma: 'Gamma text.', delta: 'Delta text.' };
+      const calls = [], texts = { alpha: 'Alpha text.', beta: 'Beta text.', gamma: 'Gamma text.', delta: 'Delta text.' }, expects = [];
       let made = 0, teamsMade = 0;
-      const log = (kind, request) => calls.push(kind + ' ' + JSON.stringify(request));
-      const roster = async request => {
+      data[SKILL_TEXTS] = texts;
+      enableRevs(data, options);
+      const log = (kind, request) => calls.push(kind + ' ' + JSON.stringify(withoutExpect(request)));
+      // Each write is checked against `expect` first and every rev is brought up to date after it.
+      const stamping = fn => async request => { try { return fresh(data, await fn(request)); } finally { stampRevs(data); } };
+      const roster = stamping(async request => {
         log('roster', request);
         if (options.gate) await options.gate();
         if (options.fail) throw new Error(options.fail);
+        if (['rename', 'remove', 'text'].includes(request.op)) checkExpect(data, 'agent', data.agents.find(a => a.name === request.name), request, expects);
         if (request.op === 'add') {
-          if (data.agents.some(a => a.name === request.name)) throw new Error(request.name + ' already exists');
+          // Refused as agentgraph's roster refuses it (n89: the fake accepted what the real one refused; a name alone is a
+          // blank agent in both now).
+          if (typeof request.name !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(request.name)) throw new Error('invalid name ' + JSON.stringify(request.name) + ': a lowercase letter, then letters, digits, - or _');
+          if (data.agents.some(a => a.name === request.name)) throw new Error("'" + request.name + "' is already an agent file in the agents folder (" + request.name + '.md)');
+          if (request.copy_of !== undefined && request.template !== undefined) throw new Error('give either copy_of or template, not both');
+          if (request.template !== undefined && !['blank', 'verifier'].includes(request.template)) throw new Error("unknown template '" + request.template + "': use blank or verifier");
+          if (request.model !== undefined && !/^[^/\s]+\/\S+$/.test(request.model)) throw new Error('model is required (expected provider/model)');
           const source = request.copy_of && data.agents.find(a => a.name === request.copy_of);
-          if (request.copy_of && !source) throw new Error('there is no agent ' + request.copy_of);
+          if (request.copy_of && !source) throw new Error("there is no agent '" + request.copy_of + "' to copy");
+          if (source && (source.group === 'hub' || source.name === 'council' || source.parent === 'council')) throw new Error("'" + request.copy_of + "' is the orchestrator, the council or a council seat and cannot be copied");
           data.agents.push(agent(request.name, request.template === 'verifier' ? 'verify' : source ? source.group : 'build', { added: true, removable: true, model: source ? source.model : request.model || 'Verifier model', skills: [], skills_editable: true }));
           return { agent: { name: request.name }, message: LIVE };
         }
@@ -2950,17 +3032,49 @@
           data.structure.flows = data.structure.flows.filter(f => !flows.includes(f));
           return { record: { agent: gone, index, flows }, message: gone.added ? LIVE : RESTART };
         }
+        if (request.op === 'rename') {
+          // As agentgraph's rename: exactly { op, name, to } (and expect); only an added agent; the new name passes a new agent's checks
+          // and is not taken; one step over the agent, its flows (paths) and its groups (lead, members); ids are kept.
+          if (Object.keys(request).filter(key => key !== 'expect').sort().join() !== 'name,op,to') throw new Error('rename takes exactly op, name and to (and expect)');
+          const item = data.agents.find(a => a.name === request.name), to = request.to;
+          if (item && (item.group === 'hub' || item.name === 'council' || item.parent === 'council')) throw new Error('The orchestrator, the council and council seats cannot be renamed.');
+          if (!item) throw new Error("there is no added agent '" + request.name + "'");
+          if (!item.added) throw new Error("'" + item.name + "' is one of the plugin's agents, not one added here; only an added agent can be renamed (copy it under the new name instead)");
+          if (to === item.name) throw new Error("'" + to + "' already has that name");
+          if (typeof to !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(to)) throw new Error('invalid name ' + JSON.stringify(to) + ': a lowercase letter, then letters, digits, - or _');
+          if (data.agents.some(a => a.name === to)) throw new Error("'" + to + "' is already an agent file in the agents folder (" + to + '.md)');
+          const from = item.name, swap = name => name === from ? to : name;
+          item.name = to;
+          const flows = data.structure.flows.filter(f => f.path.includes(from)).map(f => f.id), teams = (data.structure.teams || []).filter(t => t.lead === from || t.members.includes(from)).map(t => t.id);
+          data.structure.flows.forEach(f => { f.path = f.path.map(swap); });
+          (data.structure.teams || []).forEach(t => { t.lead = swap(t.lead); t.members = t.members.map(swap); });
+          return { agent: to, action: 'renamed', renamed: { from, to, flows, teams, memberships: [], files: [], commands: [] }, record: { op: 'rename', agent: from, to }, file: to + '.md', message: LIVE };
+        }
         if (request.op === 'restore') {
-          const record = request.record; data.agents.splice(record.index, 0, record.agent); data.structure.flows.push(...record.flows);
+          const record = request.record;
+          if (record?.op === 'rename') {
+            // Refused (nothing changed) when the renamed agent is gone or the old name now belongs to another agent.
+            const item = data.agents.find(a => a.name === record.to);
+            if (!item) throw new Error("the rename cannot be undone: '" + record.to + "' was changed or removed since");
+            if (data.agents.some(a => a.name === record.agent)) throw new Error("the rename cannot be undone: '" + record.agent + "' now belongs to another agent");
+            const swap = name => name === record.to ? record.agent : name;
+            item.name = record.agent;
+            data.structure.flows.forEach(f => { f.path = f.path.map(swap); });
+            (data.structure.teams || []).forEach(t => { t.lead = swap(t.lead); t.members = t.members.map(swap); });
+            return { agent: record.agent, message: LIVE };
+          }
+          data.agents.splice(record.index, 0, record.agent); data.structure.flows.push(...record.flows);
           return { message: record.agent.added ? LIVE : RESTART };
         }
         throw new Error('unknown roster op ' + request.op);
-      };
-      const skillfile = async request => {
+      });
+      const skillfile = stamping(async request => {
         log('skillfile', request);
         if (options.gate) await options.gate();
         if (options.skillFail) throw new Error(options.skillFail);
         const info = data.skills.find(skill => skill.name === request.id);
+        if (['write', 'delete'].includes(request.op)) checkExpect(data, 'skill', info, request, expects);
+        if (request.op === 'read' && data[REVS] && info) return { id: request.id, description: info.description || '', text: texts[request.id], rev: revNow(data, 'skill', info) };
         if (request.op === 'read') return { id: request.id, description: info?.description || '', text: texts[request.id] };
         if (request.op === 'write') {
           if (options.changed) throw new Error(request.id + ' changed on disk since it was read; your text is kept');
@@ -2983,23 +3097,24 @@
           return {};
         }
         throw new Error('unknown skillfile op ' + request.op);
-      };
-      const team = async request => {
+      });
+      const team = stamping(async request => {
         log('team', request);
         if (options.gate) await options.gate();
         const teams = data.structure.teams;
         if (request.op === 'add') { const item = { id: 'team-' + (++teamsMade), lead: request.lead, members: request.members.slice(), text: request.text || 'Members report to ' + request.lead + '.' }; teams.push(item); return { team: { ...item } }; }
         const item = teams.find(t => t.id === request.id);
         if (!item) throw new Error('there is no group ' + request.id);
+        checkExpect(data, 'team', item, request, expects);
         if (request.op === 'members') item.members = request.members.slice();
         else if (request.op === 'text') item.text = request.text || 'Members report to ' + item.lead + '.';
         else if (request.op === 'remove') teams.splice(teams.indexOf(item), 1);
         return { team: { ...item } };
-      };
-      const skillDouble = skillHost(data), flowDouble = flowHost(data, options.flow || {});
+      });
+      const skillDouble = skillHost(data, { revs: options.revs, expects }), flowDouble = flowHost(data, { ...(options.flow || {}), revs: options.revs, expects });
       const skills = async request => { log('skills', request); return skillDouble.skills(request); };
       const flow = async request => { log('flow', request); return flowDouble.flow(request); };
-      return { calls, roster, skillfile, team, skills, flow, texts, actions: { roster, skillfile, team, skills, flow } };
+      return { calls, expects, roster, skillfile, team, skills, flow, texts, actions: { roster, skillfile, team, skills, flow } };
     }
     const viewportOf = root => root.querySelector('.ag-viewport');
     const undoKey = target => press(target, 'z', { ctrlKey: true });
@@ -3067,9 +3182,9 @@
         data.totals = { ...data.totals, cost: 1 }; await app.refresh(); await settle();
         assert(near(at(root, 'verifier-3'), place), 'the dropped place was not kept');
         assert(root.querySelector('.ag-detail [data-rename]') === box && document.activeElement === box, 'a refresh rebuilt the name box under the user');
-        // Typing a name and Enter renames it (a copy under the new name, then the old one deleted); its place goes too.
+        // Typing a name and Enter renames it (one rename request); its place goes too.
         const name = root.querySelector('.ag-detail [data-rename]'); name.value = 'checker'; press(name, 'Enter'); await settled();
-        assert(host.calls.slice(1).join(' | ') === 'roster ' + JSON.stringify({ op: 'add', name: 'checker', copy_of: 'verifier-3' }) + ' | roster ' + JSON.stringify({ op: 'remove', name: 'verifier-3' }), 'renaming did not copy then delete: ' + host.calls.join(' | '));
+        assert(host.calls.slice(1).join(' | ') === 'roster ' + JSON.stringify({ op: 'rename', name: 'verifier-3', to: 'checker' }), 'renaming was not one rename request: ' + host.calls.join(' | '));
         assert(nodeOf(root, 'checker') && !nodeOf(root, 'verifier-3') && near(at(root, 'checker'), place), 'the renamed agent did not keep the place');
         // Undo deletes it (adding and naming were one step).
         undoKey(viewportOf(root)); await settled();
@@ -3097,7 +3212,7 @@
         // By keyboard: n, the first item (blank) with Enter; placed at once at a free spot; Alt+arrows move it.
         viewportOf(root).focus(); press(viewportOf(root), 'n'); await settle();
         document.activeElement.click(); await settled();
-        assert(host.calls[1] === 'roster ' + JSON.stringify({ op: 'add', name: 'agent-1', model: 'test/model-a' }), 'the keyboard did not add a blank agent with the first model: ' + host.calls.join(' | '));
+        assert(host.calls[1] === 'roster ' + JSON.stringify({ op: 'add', name: 'agent-1', template: 'blank', model: 'test/model-a' }), 'the keyboard did not add a blank agent with the first model: ' + host.calls.join(' | '));
         assert(nodeOf(root, 'agent-1') && !overlapping(root, 'agent-1').length, 'the keyboard did not place it at a free spot');
         const box = root.querySelector('.ag-detail [data-rename]'), before = at(root, 'agent-1');
         assert(document.activeElement === box, 'the name is not focused after a keyboard add');
@@ -3633,6 +3748,1150 @@
         const danger = (() => { const i = document.createElement('i'); i.style.color = getComputedStyle(root).getPropertyValue('--ag-danger').trim(); root.append(i); const c = getComputedStyle(i).color; i.remove(); return c; })();
         assert([...root.querySelectorAll('.ag-halo')].every(halo => getComputedStyle(halo).stroke !== danger), 'a red ring stays');
       }, { actions: { flow: host.flow } });
+    });
+    // ---- Pass n98: run a path, what it costs, a path as a command (contract n96 r1) ----
+    await test('Fit never takes agent names under 11 px on screen, in a wide and in a narrow canvas, with the details open or closed', async () => {
+      for (const [width, height] of [[1400, 900], [640, 360], [420, 300], [300, 520]]) for (const details of [false, true]) {
+        const data = trialRoster();
+        await using(data, async root => {
+          await resizeTo(root, width, height);
+          if (details) { open(root, 'impl-hard'); await sleep(30); }
+          root.querySelector('.ag-fit').click(); await settle();
+          const scale = root.querySelector('.ag-drawing > g').getCTM().a, name = root.querySelector('[data-agent="impl-hard"] .ag-agent-name');
+          const px = parseFloat(getComputedStyle(name).fontSize) * scale;
+          assert(px >= 11 - .01, width + 'x' + height + (details ? ' with details' : '') + ': Fit took names to ' + px.toFixed(2) + ' px');
+        });
+      }
+    });
+    // A path's name, run, cost and command (contract n96 r1). One double for actions.flow's new ops and actions.run.
+    const PATH = ['impl-hard', 'reviewer', 'impl-hard'];
+    function pathFixture(extra = {}) {
+      return worldFixture([{ id: 'f1', path: PATH.slice(), text: 'Check it.', source: 'drawn', name: null, command: null, stats: null, ...extra }]);
+    }
+    function pathHost(data, options = {}) {
+      const calls = [], expects = [], base = flowHost(data, { revs: options.revs, expects });
+      let gate = null;
+      const flow = async request => {
+        calls.push(withoutExpect(request));
+        if (options.gate && request.op !== 'prompt') await options.gate();
+        const item = data.structure.flows.find(f => f.id === request.id);
+        if (['name', 'command', 'prompt'].includes(request.op)) { try { checkExpect(data, 'flow', item, request, expects); } finally { stampRevs(data); } }
+        try { return fresh(data, await answer(request, item)); } finally { stampRevs(data); }
+      };
+      const answer = async (request, item) => {
+        if (request.op === 'name') {
+          if (options.nameFail) throw new Error(options.nameFail);
+          if (!item) throw new Error('there is no flow ' + request.id);
+          item.name = request.name || null; if (item.command) item.command = item.name;
+          return { flow: { ...item }, flows: data.structure.flows.slice() };
+        }
+        if (request.op === 'command') {
+          if (options.commandFail) throw new Error(options.commandFail);
+          if (!item.name) throw new Error('a command needs a name');
+          item.command = request.on ? item.name : null;
+          // As agentgraph's server answers: the sentence on when it applies and whether it is live at once.
+          return { flow: { ...item }, flows: data.structure.flows.slice(), ...(options.live !== undefined ? { live: options.live, applies: options.applies || 'OpenCode reads its commands folder when it starts and when its configuration is reloaded (Desktop: the /reload command), not at once: /' + item.name + ' is ' + (request.on ? 'there' : 'gone') + ' after a reload or a restart.' } : {}) };
+        }
+        if (request.op === 'prompt') {
+          if (options.promptFail) throw new Error(options.promptFail);
+          return { text: 'RUN MESSAGE for ' + request.id + '\nGoal:\n' + request.goal };
+        }
+        const reply = await base.flow(request);
+        return reply;
+      };
+      const runs = [];
+      const run = async request => {
+        runs.push(withoutExpect(request));
+        checkExpect(data, 'flow', data.structure.flows.find(f => f.id === request.flow), { ...request, op: 'run' }, expects);
+        if (options.runGate) await options.runGate();
+        if (options.runFail) throw new Error(options.runFail);
+        return options.runReply || { sent: true, session: 'ses_1' };
+      };
+      return { calls, runs, expects, flow, run, actions: options.noRun ? { flow } : { flow, run } };
+    }
+    const pathDetail = root => root.querySelector('.ag-detail');
+    const goalBox = root => root.querySelector('[data-run-goal]');
+    const runButton = root => root.querySelector('[data-run-go]');
+    const runNote = root => root.querySelector('.ag-run-note');
+    const liveRegion = root => root.querySelector('.ag-sr-only[aria-live]')?.textContent || '';
+    const typeIn = (box, value) => { box.value = value; box.dispatchEvent(new Event('input', { bubbles: true })); };
+    function withClipboard(writeText, run) {
+      const had = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: writeText ? { writeText } : undefined });
+      return Promise.resolve().then(run).finally(() => { if (had) Object.defineProperty(navigator, 'clipboard', had); else delete navigator.clipboard; });
+    }
+    await test('path name: a field in the details, saved with Enter as { op: "name" }, said in the live region, undoable; a refusal keeps the typed name and says why; read-only shows a name and offers no field without one', async () => {
+      const data = pathFixture(), host = pathHost(data);
+      await using(data, async root => {
+        openStep(root, 'f1'); await settle();
+        const field = root.querySelector('[data-route-name]');
+        assert(field && field.value === '' && !field.readOnly && field.getAttribute('aria-label') === 'Name of this path', 'the path has no name field');
+        field.focus(); field.value = 'review-loop'; press(field, 'Enter'); await settled();
+        assert(JSON.stringify(host.calls) === JSON.stringify([{ op: 'name', id: 'f1', name: 'review-loop' }]), 'Enter did not name the path: ' + JSON.stringify(host.calls));
+        assert(data.structure.flows[0].name === 'review-loop' && root.querySelector('[data-route-name]').value === 'review-loop', 'the name is not shown after saving');
+        await sleep(60); assert(/Named review-loop/.test(liveRegion(root)), 'naming is not announced');
+        assert(![...root.querySelectorAll('.ag-drawing text')].some(t => t.textContent.includes('review-loop')), 'the name was drawn in the graph');
+        undoKey(viewportOf(root)); await settled();
+        assert(JSON.stringify(host.calls.at(-1)) === JSON.stringify({ op: 'name', id: 'f1', name: '' }) && !data.structure.flows[0].name, 'undo did not clear the name');
+      }, { actions: host.actions });
+      const refused = pathFixture(), refusing = pathHost(refused, { nameFail: 'flow f2 already has the name review-loop; a name is unique among paths' });
+      await using(refused, async root => {
+        openStep(root, 'f1'); await settle();
+        const field = root.querySelector('[data-route-name]');
+        field.focus(); field.value = 'review-loop'; press(field, 'Enter'); await settled();
+        const error = root.querySelector('.ag-path-name-error');
+        assert(error?.textContent === 'flow f2 already has the name review-loop; a name is unique among paths' && error.getAttribute('role') === 'alert', 'a refused name does not say why');
+        assert(root.querySelector('[data-route-name]').value === 'review-loop', 'the refused name was not kept in the field');
+        await sleep(60); assert(liveRegion(root).includes('already has the name'), 'the refusal is not announced');
+        // Escape puts the saved name back.
+        press(root.querySelector('[data-route-name]'), 'Escape');
+        assert(root.querySelector('[data-route-name]').value === '', 'Escape did not put the saved name back');
+      }, { actions: refusing.actions });
+      const readOnly = pathFixture({ name: 'review-loop' });
+      await using(readOnly, async root => {
+        openStep(root, 'f1'); await settle();
+        assert(root.querySelector('[data-route-name]')?.readOnly && root.querySelector('[data-route-name]').value === 'review-loop', 'read-only details do not show the name');
+      });
+      const unnamed = pathFixture();
+      await using(unnamed, async root => { openStep(root, 'f1'); await settle(); assert(!root.querySelector('[data-route-name]') && !goalBox(root) && !root.querySelector('[data-route-command]'), 'read-only details offer a name, a run or a command'); });
+    });
+    await test('path run with actions.run: a goal is required; Enter is a new line and Cmd/Ctrl+Enter runs; busy while sending, never twice; the result line is the host\'s; the goal goes once sent', async () => {
+      let release; const gate = () => new Promise(resolve => { release = resolve; });
+      const data = pathFixture(), host = pathHost(data, { runGate: gate });
+      await using(data, async root => {
+        openStep(root, 'f1'); await settle();
+        assert(runButton(root)?.textContent === 'Run' && goalBox(root)?.getAttribute('aria-required') === 'true', 'there is no Run with a required goal');
+        runButton(root).click(); await settle();
+        assert(!host.runs.length && runNote(root)?.textContent === 'A goal is required.' && runNote(root).getAttribute('role') === 'alert' && document.activeElement === goalBox(root), 'an empty goal was not refused at the box');
+        goalBox(root).focus(); typeIn(goalBox(root), 'Ship the parser');
+        assert(!runNote(root), 'the refusal stayed once a goal was typed');
+        press(goalBox(root), 'Enter'); await settle();
+        assert(!host.runs.length, 'Enter alone ran the path');
+        press(goalBox(root), 'Enter', { metaKey: true }); await settle();
+        assert(JSON.stringify(host.runs) === JSON.stringify([{ flow: 'f1', goal: 'Ship the parser' }]), 'Cmd+Enter did not run with { flow, goal }: ' + JSON.stringify(host.runs));
+        assert(runButton(root).disabled && runButton(root).getAttribute('aria-busy') === 'true' && runButton(root).textContent === 'Sending…', 'the control is not busy while sending');
+        press(goalBox(root), 'Enter', { ctrlKey: true }); runButton(root).click(); await settle();
+        assert(host.runs.length === 1, 'a second run went while the first was out');
+        release(); await settled();
+        assert(runNote(root)?.textContent === 'Sent to the orchestrator (session ses_1).' && runNote(root).dataset.kind === 'done' && !runButton(root).disabled, 'the sent line is not shown: ' + runNote(root)?.textContent);
+        assert(goalBox(root).value === '', 'the goal stayed after it was sent');
+      }, { actions: host.actions });
+      const second = pathFixture(), worded = pathHost(second, { runReply: { sent: true, session: 'ses_9', message: 'Sent to the build session.' } });
+      await using(second, async root => {
+        openStep(root, 'f1'); await settle(); typeIn(goalBox(root), 'Go'); runButton(root).click(); await settled();
+        assert(runNote(root)?.textContent === 'Sent to the build session.', 'the host\'s message is not the result line');
+      }, { actions: worded.actions });
+      const third = pathFixture(), failing = pathHost(third, { runFail: 'the orchestrator session is not open' });
+      await using(third, async root => {
+        openStep(root, 'f1'); await settle(); typeIn(goalBox(root), 'Go'); runButton(root).click(); await settled();
+        assert(runNote(root)?.textContent === 'the orchestrator session is not open' && runNote(root).dataset.kind === 'error' && goalBox(root).value === 'Go' && !runButton(root).disabled, 'a refused run does not say why or lost the goal');
+        await sleep(60); assert(liveRegion(root).includes('the orchestrator session is not open'), 'a refused run is not announced');
+      }, { actions: failing.actions });
+    });
+    await test('path run: the goal survives closing and reopening the details and a refresh while typing; a counter shows near 4,000 characters, counted as characters, and an over-long goal is refused', async () => {
+      const data = pathFixture(), host = pathHost(data);
+      await using(data, async (root, app) => {
+        openStep(root, 'f1'); await settle();
+        goalBox(root).focus(); typeIn(goalBox(root), 'Half a goal'); goalBox(root).setSelectionRange(4, 4);
+        await app.refresh(); await settle();
+        assert(goalBox(root).value === 'Half a goal' && document.activeElement === goalBox(root), 'a refresh lost the goal or its focus');
+        root.querySelector('.ag-close').click(); await settle();
+        openStep(root, 'f1'); await settle();
+        assert(goalBox(root).value === 'Half a goal', 'the goal did not survive closing the details');
+        const count = () => root.querySelector('[data-run-count]');
+        typeIn(goalBox(root), 'x'.repeat(3599)); assert(count().textContent === '', 'the counter shows far from the limit');
+        typeIn(goalBox(root), 'x'.repeat(3700)); assert(count().textContent === '3,700 of 4,000' && count().dataset.kind === 'near', 'no counter near the limit: ' + count().textContent);
+        typeIn(goalBox(root), '😀'.repeat(4000)); assert(count().textContent === '4,000 of 4,000', 'the limit counts UTF-16 units, not characters');
+        typeIn(goalBox(root), 'x'.repeat(4001)); assert(count().textContent === 'Too long: 4,001 of 4,000 characters' && count().dataset.kind === 'error', 'an over-long goal is not marked');
+        runButton(root).click(); await settle();
+        assert(!host.runs.length && runNote(root)?.dataset.kind === 'error', 'an over-long goal was sent');
+      }, { actions: host.actions });
+    });
+    await test('path run without actions.run: "Copy run message" asks { op: "prompt" } and puts the text on the clipboard; refused, it shows the text selected in a box', async () => {
+      const data = pathFixture(), host = pathHost(data, { noRun: true });
+      await using(data, async root => {
+        openStep(root, 'f1'); await settle();
+        assert(runButton(root)?.textContent === 'Copy run message', 'the web page does not offer to copy the run message');
+        const copied = [];
+        await withClipboard(async value => { copied.push(value); }, async () => {
+          typeIn(goalBox(root), 'Ship it'); press(goalBox(root), 'Enter', { ctrlKey: true }); await settled();
+        });
+        assert(JSON.stringify(host.calls) === JSON.stringify([{ op: 'prompt', id: 'f1', goal: 'Ship it' }]), 'the prompt was not asked for: ' + JSON.stringify(host.calls));
+        assert(copied[0] === 'RUN MESSAGE for f1\nGoal:\nShip it', 'the text did not go on the clipboard');
+        assert(/^Copied the run message/.test(runNote(root)?.textContent || '') && !root.querySelector('[data-run-copy]'), 'copying is not said');
+        await withClipboard(async () => { throw new DOMException('denied', 'NotAllowedError'); }, async () => { runButton(root).click(); await settled(); });
+        const box = root.querySelector('[data-run-copy]');
+        assert(box && box.readOnly && box.value === 'RUN MESSAGE for f1\nGoal:\nShip it' && document.activeElement === box && box.selectionStart === 0 && box.selectionEnd === box.value.length, 'a refused clipboard does not show the text selected');
+        assert(/clipboard was refused/.test(runNote(root)?.textContent || ''), 'the refusal of the clipboard is not said');
+        await withClipboard(null, async () => { runButton(root).click(); await settled(); });
+        assert(root.querySelector('[data-run-copy]'), 'with no clipboard at all the text is not shown');
+      }, { actions: host.actions });
+      const failing = pathFixture(), refusing = pathHost(failing, { noRun: true, promptFail: 'a goal is at most 4000 characters' });
+      await using(failing, async root => {
+        openStep(root, 'f1'); await settle(); typeIn(goalBox(root), 'Go'); runButton(root).click(); await settled();
+        assert(runNote(root)?.textContent === 'a goal is at most 4000 characters' && runNote(root).dataset.kind === 'error', 'a refused prompt does not say why');
+      }, { actions: refusing.actions });
+    });
+    await test('path cost: stats as one block (runs, passed, rounds, cost, last run); null stats say "Not run yet"; a null field is a dash, never a zero; no chart', async () => {
+      const now = Date.now() / 1000;
+      const cases = [
+        [{ runs: 4, passed: 3, rounds: { avg: 2.25, max: 4 }, cost: { total: 1.2345, avg: 0.308625 }, last: now - 7200 }, ['4', '3', '2.3 avg · 4 most', '$1.23 total · $0.31 avg', '2h ago']],
+        [{ runs: 2, passed: 0, rounds: { avg: null, max: null }, cost: { total: null, avg: null }, last: null }, ['2', '0', '— avg · — most', '— total · — avg', '—']],
+        [{ runs: 1, passed: 1, rounds: { avg: 1, max: 1 }, cost: { total: null, avg: null }, last: new Date((now - 120) * 1000).toISOString() }, ['1', '1', '1 avg · 1 most', '— total · — avg', '2m ago']]];
+      for (const [stats, expected] of cases) {
+        const data = pathFixture({ stats });
+        await using(data, async root => {
+          openStep(root, 'f1'); await settle();
+          const block = root.querySelector('.ag-path-cost'), labels = [...block.querySelectorAll('.ag-stat-label')].map(n => n.textContent), values = [...block.querySelectorAll('.ag-stat-value')].map(n => n.textContent);
+          assert(labels.join() === 'Runs,Passed,Rounds,Cost,Last run', 'the block does not have its five lines: ' + labels);
+          assert(JSON.stringify(values) === JSON.stringify(expected), 'stats shown as ' + JSON.stringify(values) + ', not ' + JSON.stringify(expected));
+          assert(!block.querySelector('svg, canvas'), 'the cost block has a chart');
+        });
+      }
+      const never = pathFixture({ stats: null });
+      await using(never, async root => { openStep(root, 'f1'); await settle(); assert(root.querySelector('.ag-path-cost')?.textContent === 'CostNot run yet' || root.querySelector('.ag-path-cost .ag-path-none')?.textContent === 'Not run yet', 'null stats do not say "Not run yet"'); assert(!root.querySelector('.ag-path-cost .ag-stat'), 'null stats show numbers'); });
+    });
+    await test('path command: the switch needs a name (it says why without one); on it shows /NAME and when it applies as the back end reports; off; refused; every change undoes', async () => {
+      const data = pathFixture(), host = pathHost(data, { live: true });
+      await using(data, async root => {
+        openStep(root, 'f1'); await settle();
+        let toggle = root.querySelector('[data-route-command]');
+        assert(toggle && toggle.getAttribute('role') === 'switch' && toggle.getAttribute('aria-checked') === 'false' && toggle.textContent === 'Use as a command', 'there is no command switch');
+        assert(toggle.getAttribute('aria-disabled') === 'true' && root.querySelector('#' + toggle.getAttribute('aria-describedby'))?.textContent === 'Give this path a name to use it as a command.', 'without a name the switch does not say why it is off');
+        toggle.click(); await settled();
+        assert(!host.calls.length, 'the switch asked for a command without a name');
+        const field = root.querySelector('[data-route-name]'); field.value = 'review-loop'; press(field, 'Enter'); await settled();
+        toggle = root.querySelector('[data-route-command]');
+        assert(toggle.getAttribute('aria-disabled') !== 'true' && !root.querySelector('.ag-command-reason'), 'a named path cannot be a command');
+        toggle.focus(); toggle.click(); await settled();
+        assert(JSON.stringify(host.calls.at(-1)) === JSON.stringify({ op: 'command', id: 'f1', on: true }), 'the switch did not turn the command on');
+        assert(root.querySelector('[data-route-command]').getAttribute('aria-checked') === 'true' && root.querySelector('.ag-command-name')?.textContent === '/review-loop' && root.querySelector('.ag-command-applies')?.textContent === 'Live now.', 'on does not show /NAME and that it is live now');
+        assert(document.activeElement === root.querySelector('[data-route-command]'), 'focus left the switch');
+        assert(![...root.querySelectorAll('.ag-drawing text')].some(t => t.textContent.includes('/')), 'the command was drawn in the graph');
+        root.querySelector('[data-route-command]').click(); await settled();
+        assert(JSON.stringify(host.calls.at(-1)) === JSON.stringify({ op: 'command', id: 'f1', on: false }) && root.querySelector('[data-route-command]').getAttribute('aria-checked') === 'false' && !root.querySelector('.ag-command-name'), 'the switch did not turn the command off');
+        undoKey(viewportOf(root)); await settled();
+        assert(JSON.stringify(host.calls.at(-1)) === JSON.stringify({ op: 'command', id: 'f1', on: true }) && root.querySelector('[data-route-command]').getAttribute('aria-checked') === 'true', 'undo did not turn it back on');
+        undoKey(viewportOf(root)); await settled();
+        assert(JSON.stringify(host.calls.at(-1)) === JSON.stringify({ op: 'command', id: 'f1', on: false }), 'undo did not turn it off again');
+      }, { actions: host.actions });
+      const later = pathFixture({ name: 'review-loop' }), restarting = pathHost(later, { live: false });
+      await using(later, async root => {
+        openStep(root, 'f1'); await settle(); root.querySelector('[data-route-command]').click(); await settled();
+        assert(root.querySelector('.ag-command-applies')?.textContent === 'Not in OpenCode yet: /review-loop works once OpenCode reloads (type /reload) or restarts.', 'a command live after a reload is not said so in plain words: ' + root.querySelector('.ag-command-applies')?.textContent);
+      }, { actions: restarting.actions });
+      // A command already on when the view opens: what the snapshot reports (structure.commands_live / commands_applies).
+      const loaded = pathFixture({ name: 'review-loop', command: 'review-loop' });
+      loaded.structure.commands_live = false; loaded.structure.commands_applies = 'OpenCode reads its commands folder when it starts and when its configuration is reloaded (Desktop: the /reload command), not at once: a new command is there after a reload or a restart.';
+      await using(loaded, async root => {
+        openStep(root, 'f1'); await settle();
+        assert(root.querySelector('.ag-command-name')?.textContent === '/review-loop' && root.querySelector('.ag-command-applies')?.textContent === 'A new command works once OpenCode reloads (type /reload) or restarts.', 'a command on at load does not say when it applies from the snapshot');
+      }, { actions: pathHost(loaded, { live: false }).actions });
+      const taken = pathFixture({ name: 'review' }), refusing = pathHost(taken, { commandFail: '/review is an OpenCode command; choose another name' });
+      await using(taken, async root => {
+        openStep(root, 'f1'); await settle(); root.querySelector('[data-route-command]').click(); await settled();
+        const error = root.querySelector('.ag-command-error');
+        assert(error?.textContent === '/review is an OpenCode command; choose another name' && error.getAttribute('role') === 'alert' && root.querySelector('[data-route-command]').getAttribute('aria-checked') === 'false', 'a refused command does not say why or shows as on');
+        await sleep(60); assert(liveRegion(root).includes('/review is an OpenCode command'), 'the refusal is not announced');
+      }, { actions: refusing.actions });
+    });
+    await test('path command: when it applies is said in plain words from the back end\'s reply: on, not in OpenCode until it reloads (/reload) or restarts; off, OpenCode keeps it until then; both announced; a sentence that names neither is shown as sent; at load the snapshot\'s commands_live decides', async () => {
+      const data = pathFixture({ name: 'review-loop' }), host = pathHost(data, { live: false });
+      await using(data, async root => {
+        openStep(root, 'f1'); await settle(); root.querySelector('[data-route-command]').click(); await settled();
+        const on = 'Not in OpenCode yet: /review-loop works once OpenCode reloads (type /reload) or restarts.';
+        assert(root.querySelector('.ag-command-applies')?.textContent === on, 'on is not said plainly: ' + root.querySelector('.ag-command-applies')?.textContent);
+        assert(!root.querySelector('.ag-detail').textContent.includes('commands folder'), 'the details still give the back end\'s developer words');
+        await sleep(60); assert(liveRegion(root).includes('/review-loop is a command. ' + on), 'on is not announced plainly: ' + liveRegion(root));
+        root.querySelector('[data-route-command]').click(); await settled();
+        const off = '/review-loop stays in OpenCode until OpenCode reloads (type /reload) or restarts.';
+        assert(root.querySelector('[data-route-command]').getAttribute('aria-checked') === 'false' && root.querySelector('.ag-command-applies')?.textContent === off, 'off does not say OpenCode keeps it until a reload: ' + root.querySelector('.ag-command-applies')?.textContent);
+        await sleep(60); assert(liveRegion(root).includes('No longer a command. ' + off), 'off is not announced plainly: ' + liveRegion(root));
+      }, { actions: host.actions });
+      const other = pathFixture({ name: 'review-loop' }), host2 = pathHost(other, { live: false, applies: 'Commands are read at the start of each session.' });
+      await using(other, async root => {
+        openStep(root, 'f1'); await settle(); root.querySelector('[data-route-command]').click(); await settled();
+        assert(root.querySelector('.ag-command-applies')?.textContent === 'Commands are read at the start of each session.', 'a sentence that names no reload or restart is not shown as sent: ' + root.querySelector('.ag-command-applies')?.textContent);
+      }, { actions: host2.actions });
+      // At load the snapshot decides: a back end that reports new commands live says so, whatever its sentence.
+      const live = pathFixture({ name: 'review-loop', command: 'review-loop' });
+      live.structure.commands_live = true; live.structure.commands_applies = 'OpenCode watches its commands folder; a new command is there after a reload or a restart at the latest.';
+      await using(live, async root => {
+        openStep(root, 'f1'); await settle();
+        assert(root.querySelector('.ag-command-applies')?.textContent === 'Live now.', 'a snapshot that reports commands live is not said so: ' + root.querySelector('.ag-command-applies')?.textContent);
+      }, { actions: pathHost(live, { live: true }).actions });
+    });
+    await test('path key G: on a focused or a picked path it opens the details at the goal box; the path announces G; nothing without a way to run', async () => {
+      const data = pathFixture(), host = pathHost(data);
+      await using(data, async root => {
+        assert(routeOf(root, 'f1').getAttribute('aria-keyshortcuts').split(' ').includes('G'), 'the path does not announce G');
+        routeOf(root, 'f1').focus(); press(routeOf(root, 'f1'), 'g'); await settle();
+        assert(detailOpen(root) && document.activeElement === goalBox(root) && goalBox(root).dataset.runGoal === 'f1', 'G on a focused path did not open its goal box');
+        root.querySelector('.ag-close').click(); await settle();
+        clickStep(root, 'f1'); await settle();
+        assert(picked(root, 'f1') && !detailOpen(root), 'the path was not picked');
+        viewportOf(root).focus(); press(viewportOf(root), 'g'); await settle();
+        assert(detailOpen(root) && document.activeElement === goalBox(root), 'G with a picked path did not open its goal box');
+        // G with nothing picked does nothing; nor on an agent.
+        root.querySelector('.ag-close').click(); await settle(); press(viewportOf(root), 'Escape'); await settle();
+        press(viewportOf(root), 'g'); press(nodeOf(root, 'reviewer'), 'g'); await settle();
+        assert(!detailOpen(root), 'G opened something without a picked path');
+      }, { actions: host.actions });
+      await using(pathFixture(), async root => {
+        assert(!(routeOf(root, 'f1').getAttribute('aria-keyshortcuts') || '').includes('G'), 'a read-only path announces G');
+        routeOf(root, 'f1').focus(); press(routeOf(root, 'f1'), 'g'); await settle();
+        assert(!detailOpen(root), 'G opened a read-only path');
+      });
+    });
+    await test('path undo: a removed path comes back with its name and its command', async () => {
+      const data = pathFixture({ name: 'review-loop', command: 'review-loop' }), host = pathHost(data, { live: true });
+      await using(data, async root => {
+        clickStep(root, 'f1'); await settle(); press(viewportOf(root), 'Delete'); await settled();
+        assert(!data.structure.flows.length, 'the path was not removed');
+        undoKey(viewportOf(root)); await settled(); await settled();
+        const ops = host.calls.map(call => call.op).join();
+        assert(ops === 'remove,add,name,command', 'undo did not add, name and turn the command on: ' + JSON.stringify(host.calls));
+        const back = data.structure.flows[0];
+        assert(back && back.name === 'review-loop' && back.command === 'review-loop' && JSON.stringify(host.calls.at(-1)) === JSON.stringify({ op: 'command', id: back.id, on: true }), 'the path came back without its name or command');
+      }, { actions: host.actions });
+    });
+    // ---- "gets smoshed when side bar opens there" (user, with a screenshot): the figures row and the refit ----
+    // Long figures: $755.27, 3 working, a three-digit count, ! 4, 4.1M↓, a 111k context bar and 7 summaries.
+    function longFigures() {
+      const data = trialRoster();
+      data.totals = { sessions: 9, running: 3, cost: 755.27, tokens_in: 987000, tokens_out: 4100000, context: 111000 };
+      ['impl-openai', 'impl-claude', 'reviewer'].forEach(name => { data.agents.find(a => a.name === name).busy = 1; });
+      data.graph.nodes.push(step('bad-1', 'reviewer', { status: 'failed' }), step('bad-2', 'verifier', { status: 'blocked' }), step('bad-3', 'researcher', { status: 'failed' }), step('bad-4', 'oracle', { status: 'failed' }));
+      data.root = { agent: 'orchestrator', context: 111000, wear: { context: 111000, window: 1000000, window_known: true, compact_at: 250000, summaries: 7, turns: 659, turns_since_summary: 40, history: [30000, 90000, 111000], per_turn: { start: 0.07, recent: 0.31 }, level: 'long' } };
+      return data;
+    }
+    // The figures in the row, least important last: [element, level] (level 0 always stays; higher levels drop first).
+    function figureParts(root) {
+      const q = selector => root.querySelector(selector);
+      // The user's order of dropping: dots, the download (token) figure, the context bar, the counts.
+      return [[q('.ag-usage-cost'), 0, 'cost'], [q('.ag-attention'), 0, '! N'], [q('.ag-activity'), 1, 'working'],
+        [q('.ag-wear-bar'), 2, 'context bar'], [q('.ag-wear-number'), 2, 'context'], [q('.ag-usage-tokens'), 3, 'tokens'], [q('.ag-wear-dots'), 4, 'dots'], [q('.ag-wear-count'), 4, 'summaries']];
+    }
+    const shown = element => !!element && element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden' && element.getBoundingClientRect().width > 0;
+    // Pane widths with the details open beside the graph (wide) and below it (narrow), as the user saw it.
+    function figureProblems(root, label) {
+      const problems = [], network = root.querySelector('.ag-network').getBoundingClientRect(), parts = figureParts(root);
+      const visible = parts.filter(([element]) => shown(element));
+      ['cost', '! N'].forEach(name => { if (!visible.some(part => part[2] === name)) problems.push(name + ' is not shown'); });
+      for (let i = 0; i < visible.length; i++) for (let j = i + 1; j < visible.length; j++) {
+        const a = visible[i][0].getBoundingClientRect(), b = visible[j][0].getBoundingClientRect();
+        if (Math.min(a.right, b.right) - Math.max(a.left, b.left) > .5 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > .5) problems.push(visible[i][2] + ' overlaps ' + visible[j][2]);
+      }
+      visible.forEach(([element, , name]) => {
+        const b = element.getBoundingClientRect();
+        if (b.left < network.left - .5 || b.right > network.right + .5 || b.top < network.top - .5) problems.push(name + ' is cut off by the pane edge');
+        if (element.scrollWidth > element.clientWidth + 1 && element.clientWidth > 0 && getComputedStyle(element).overflow !== 'visible') problems.push(name + ' is clipped');
+      });
+      // Least important first: nothing of a level shows while a less important level is dropped.
+      const dropped = parts.filter(([element, level]) => element && level > 0 && !shown(element)).map(part => part[1]);
+      const kept = parts.filter(([element, level]) => element && level > 0 && shown(element)).map(part => part[1]);
+      if (dropped.length && kept.length && Math.min(...dropped) < Math.max(...kept)) problems.push('dropped level ' + Math.min(...dropped) + ' while level ' + Math.max(...kept) + ' shows');
+      // One row: no figure wraps onto the graph.
+      const tops = visible.map(([element]) => element.getBoundingClientRect()), row = Math.max(...tops.map(b => b.bottom)) - Math.min(...tops.map(b => b.top));
+      if (row > 26) problems.push('the figures take ' + Math.round(row) + ' px: they wrap');
+      return problems.map(problem => label + ': ' + problem);
+    }
+    // One check per pane width and scheme: the details beside the graph (the view 340 px wider) and below it (compact),
+    // open and closed.
+    async function figuresRowAt(pane, scheme) {
+      const problems = [], said = [];
+      for (const [width, height] of [[pane + 340, 700], [pane, 700]]) {
+        await using(longFigures(), async root => {
+          await resizeTo(root, width, height);
+          for (const details of [true, false]) {
+            if (details) { open(root, 'impl-hard'); await sleep(30); await resizeTo(root, width, height); } else { root.querySelector('.ag-close').click(); await settle(); await resizeTo(root, width, height); }
+            const label = width + 'x' + height + ' (pane ' + Math.round(root.querySelector('.ag-network').getBoundingClientRect().width) + ')' + (details ? ' open' : ' closed');
+            problems.push(...figureProblems(root, label));
+            said.push(label + ' ' + figureParts(root).filter(([element]) => shown(element)).map(part => part[2]).join('|'));
+          }
+        }, { scheme });
+      }
+      window.__figureRows = (window.__figureRows || []).concat(said);
+      assert(!problems.length, problems.slice(0, 6).join('; '));
+    }
+    const FIGURES_ROW = ' px pane: details beside or below the graph, open or closed, no two figures overlap, none is cut, one row, dropping dots, tokens, context bar, counts in that order; cost and ! N stay';
+    await test('figures row (light) at a 760' + FIGURES_ROW, () => figuresRowAt(760, 'light'));
+    await test('figures row (dark) at a 760' + FIGURES_ROW, () => figuresRowAt(760, 'dark'));
+    await test('figures row (light) at a 620' + FIGURES_ROW, () => figuresRowAt(620, 'light'));
+    await test('figures row (dark) at a 620' + FIGURES_ROW, () => figuresRowAt(620, 'dark'));
+    await test('figures row (light) at a 520' + FIGURES_ROW, () => figuresRowAt(520, 'light'));
+    await test('figures row (dark) at a 520' + FIGURES_ROW, () => figuresRowAt(520, 'dark'));
+    await test('figures row (light) at a 420' + FIGURES_ROW, () => figuresRowAt(420, 'light'));
+    await test('figures row (dark) at a 420' + FIGURES_ROW, () => figuresRowAt(420, 'dark'));
+    await test('figures row (light) at a 360' + FIGURES_ROW, () => figuresRowAt(360, 'light'));
+    await test('figures row (dark) at a 360' + FIGURES_ROW, () => figuresRowAt(360, 'dark'));
+    await test('figures row: when the figures grow without a resize (a new snapshot), the row is measured again: no overlap, cost and ! N stay', async () => {
+      const problems = [];
+      for (const [width, details] of [[700, true], [360, false]]) {
+        const data = longFigures(), long = { totals: data.totals, root: data.root, nodes: data.graph.nodes.slice() };
+        data.totals = { sessions: 1, running: 0, cost: 1, tokens_in: 10, tokens_out: 10, context: 1000 }; data.root = { agent: 'orchestrator', context: 1000 };
+        data.graph.nodes = data.graph.nodes.filter(node => !/^bad-/.test(node.id)); data.agents.forEach(a => { a.busy = 0; });
+        await using(data, async (root, app) => {
+          await resizeTo(root, width, 700);
+          if (details) { open(root, 'impl-hard'); await sleep(30); await resizeTo(root, width, 700); }
+          Object.assign(data, { totals: long.totals, root: long.root }); data.graph.nodes = long.nodes;
+          ['impl-openai', 'impl-claude', 'reviewer'].forEach(name => { data.agents.find(a => a.name === name).busy = 1; });
+          await app.refresh(); await settle();
+          problems.push(...figureProblems(root, width + (details ? ' open' : ' closed') + ' after a refresh'));
+        });
+      }
+      assert(!problems.length, problems.slice(0, 6).join('; '));
+    });
+    // Every agent's circle and name inside the canvas left visible (not under the sheet, the figures or the controls).
+    function outsideVisible(root) {
+      const view = root.querySelector('.ag-viewport').getBoundingClientRect(), out = [];
+      const covers = [...root.querySelectorAll('.ag-usage, .ag-network > .ag-status, .ag-controls, .ag-detail')].filter(item => !item.hidden && item.getClientRects().length).map(item => item.getBoundingClientRect());
+      root.querySelectorAll('.ag-drawing [data-agent]').forEach(node => node.querySelectorAll('.ag-core, .ag-agent-name').forEach(part => {
+        if (!part.getClientRects().length || getComputedStyle(part).display === 'none') return;
+        const b = part.getBoundingClientRect();
+        if (b.left < view.left - .5 || b.right > view.right + .5 || b.top < view.top - .5 || b.bottom > view.bottom + .5) out.push(node.dataset.agent + ' outside the canvas');
+        else if (covers.some(c => Math.min(b.right, c.right) - Math.max(b.left, c.left) > .5 && Math.min(b.bottom, c.bottom) - Math.max(b.top, c.top) > .5)) out.push(node.dataset.agent + ' under a cover');
+      }));
+      return out;
+    }
+    await test('refit: opening and closing the details, or resizing the pane, refits the graph into the space left (every circle and name inside, none under the sheet or the figures) unless the user has panned or zoomed (then opening or closing the details leaves their view alone); names stay 11 px or more', async () => {
+      const problems = [];
+      for (const [width, height] of [[1200, 800], [960, 700], [760, 700], [700, 700], [620, 700], [420, 700], [360, 700]]) {
+        const data = longFigures(); data.agents = data.agents.filter(a => !['explorer', 'oracle-lite', 'designer'].includes(a.name));
+        await using(data, async root => {
+          await resizeTo(root, width, height);
+          const fits = () => (12 * root.querySelector('.ag-drawing > g').getCTM().a) > 11 + .01;
+          const check = label => { const scale = root.querySelector('.ag-drawing > g').getCTM().a; if (12 * scale < 11 - .01) problems.push(width + ' ' + label + ': names at ' + (12 * scale).toFixed(1) + ' px'); if (fits()) problems.push(...outsideVisible(root).map(problem => width + ' ' + label + ': ' + problem)); };
+          check('at rest');
+          open(root, 'impl-hard'); await sleep(30); await resizeTo(root, width, height); check('details open');
+          root.querySelector('.ag-close').click(); await settle(); await resizeTo(root, width, height); check('details closed');
+          await resizeTo(root, Math.round(width * .8), height); check('pane narrowed');
+          await resizeTo(root, width, height);
+        });
+      }
+      // A view the user panned or zoomed is left alone when the details open or close (Fit hands it back).
+      for (const key of ['ArrowLeft', '+']) await using(longFigures(), async root => {
+        await resizeTo(root, 1200, 800);
+        const viewport = root.querySelector('.ag-viewport'), stage = root.querySelector('.ag-drawing > g');
+        const at0 = stage.getCTM();
+        viewport.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })); await settle();
+        const before = stage.getCTM();
+        if (Math.abs(before.e - at0.e) + Math.abs(before.f - at0.f) + Math.abs(before.a - at0.a) < .01) problems.push(key + ' did not move the view (the test needs it to)');
+        const same = (m, label) => { const now = stage.getCTM(); if (Math.abs(now.a - m.a) > .001 || Math.abs(now.e - m.e) > .5 || Math.abs(now.f - m.f) > .5) problems.push(label + ' after ' + key + ' moved the user\'s view'); };
+        // An agent already well clear of where the sheet comes (opening details on an agent under it pans to it: reveal).
+        const view = viewport.getBoundingClientRect();
+        const clear = [...root.querySelectorAll('.ag-drawing [data-agent]')].map(node => [node.dataset.agent, node.querySelector('.ag-core').getBoundingClientRect()])
+          .filter(([, b]) => b.left > view.left + 20 && b.top > view.top + 60 && b.bottom < view.bottom - 20).sort((a, b) => a[1].left - b[1].left)[0][0];
+        open(root, clear); await sleep(30); await resizeTo(root, 1200, 800); same(before, 'opening the details');
+        root.querySelector('.ag-close').click(); await settle(); await resizeTo(root, 1200, 800); same(before, 'closing the details');
+        root.querySelector('.ag-fit').click(); await settle();
+        open(root, 'impl-hard'); await sleep(30); await resizeTo(root, 1200, 800);
+        if (outsideVisible(root).length) problems.push('after Fit, opening the details did not refit: ' + outsideVisible(root)[0]);
+      });
+      assert(!problems.length, problems.slice(0, 6).join('; '));
+    });
+    // ---- Verifier n88 r1: findings and rulings ----
+    await test('n88 finding 1: Backspace never deletes an agent: on an open or a focused removable agent it sends no roster remove and the agent stays drawn; Delete on it still does', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      data.agents.push(agent('scout', 'build', { added: true, removable: true }));
+      await using(data, async root => {
+        open(root, 'scout'); await settle();
+        press(viewportOf(root), 'Backspace'); await settled();
+        assert(!host.calls.length && nodeOf(root, 'scout'), 'Backspace with scout open deleted it: ' + host.calls.join(' | '));
+        root.querySelector('.ag-close').click(); await settle();
+        nodeOf(root, 'scout').focus(); press(nodeOf(root, 'scout'), 'Backspace'); await settled();
+        assert(!host.calls.length && nodeOf(root, 'scout'), 'Backspace on the focused scout deleted it: ' + host.calls.join(' | '));
+        press(nodeOf(root, 'scout'), 'Delete'); await settled();
+        assert(host.calls.join() === 'roster ' + JSON.stringify({ op: 'remove', name: 'scout' }) && !nodeOf(root, 'scout'), 'Delete on the focused scout did not remove it: ' + host.calls.join(' | '));
+      }, { actions: host.actions });
+    });
+    const renameTo = async (root, from, to) => {
+      open(root, from); await settle();
+      const box = root.querySelector('.ag-detail [data-rename]');
+      assert(box, from + ' offers no name box');
+      box.focus(); box.value = to; press(box, 'Enter'); await settled(); await settled();
+    };
+    // An added agent on a path and in a group (the back end's one-step rename supersedes n88 finding 2's copy-and-delete).
+    const tiedScout = () => {
+      const data = worldFixture();
+      data.agents.push(agent('scout', 'build', { added: true, removable: true }));
+      data.structure.flows.push({ id: 'fs', path: ['scout', 'reviewer'], text: 'Look.', source: 'drawn' });
+      data.structure.teams = [{ id: 't1', lead: 'impl-claude', members: ['scout'], text: '' }];
+      return data;
+    };
+    await test('rename: one roster request { op: "rename", name, to }, also for an added agent on a path and in a group (their ids kept, their lines follow); undo sends { op: "restore", record } with the reply\'s record and gives the old name back', async () => {
+      const data = tiedScout(), host = worldHost(data);
+      await using(data, async root => {
+        await renameTo(root, 'scout', 'finder');
+        assert(host.calls.join(' | ') === 'roster ' + JSON.stringify({ op: 'rename', name: 'scout', to: 'finder' }), 'the rename was not one request: ' + host.calls.join(' | '));
+        assert(nodeOf(root, 'finder') && !nodeOf(root, 'scout') && titleOf(root) === 'finder', 'the renamed agent is not drawn and open under its new name');
+        assert(routeOf(root, 'fs') && data.structure.flows.find(f => f.id === 'fs').path.join() === 'finder,reviewer', 'the path through it lost its id or its agent');
+        assert(root.querySelector('.ag-drawing [data-team-edge*="finder"]'), 'its group line does not follow the new name');
+        assert(noteLines(root).includes('done:Renamed scout to finder.'), 'the rename is not said: ' + noteLines(root));
+        host.calls.length = 0;
+        undoKey(viewportOf(root)); await settled(); await settled();
+        assert(host.calls.join(' | ') === 'roster ' + JSON.stringify({ op: 'restore', record: { op: 'rename', agent: 'scout', to: 'finder' } }), 'undo did not send the rename\'s record: ' + host.calls.join(' | '));
+        assert(nodeOf(root, 'scout') && !nodeOf(root, 'finder') && routeOf(root, 'fs') && data.structure.teams[0].members.join() === 'scout', 'undo did not give the old name back with its path and group');
+      }, { actions: host.actions });
+    });
+    await test('rename: the place goes with the new name and comes back with undo', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      data.agents.push(agent('scout', 'build', { added: true, removable: true }));
+      await using(data, async root => {
+        open(root, 'scout'); await settle();
+        const box = root.querySelector('.ag-detail [data-rename]'); box.focus();
+        press(box, 'ArrowRight', { altKey: true }); press(box, 'ArrowRight', { altKey: true }); await settle();
+        const place = at(root, 'scout');
+        await renameTo(root, 'scout', 'finder');
+        assert(near(at(root, 'finder'), place), 'the renamed agent did not keep its place: ' + place + ' → ' + at(root, 'finder'));
+        undoKey(viewportOf(root)); await settled(); await settled();
+        assert(nodeOf(root, 'scout') && near(at(root, 'scout'), place), 'undo did not bring the place back with the old name');
+      }, { actions: host.actions });
+    });
+    await test('rename: a refused rename changes nothing in the view (name, place, paths, groups, details, saved places, undo) and says why, plainly and aloud', async () => {
+      const data = tiedScout(), host = worldHost(data), said = 'the command file review-loop.md was changed by hand; it is never replaced, so scout was not renamed';
+      const actions = { ...host.actions, roster: async request => { if (request.op === 'rename') { host.calls.push('roster ' + JSON.stringify(withoutExpect(request))); throw new Error(said); } return host.actions.roster(request); } };
+      await using(data, async root => {
+        open(root, 'scout'); await settle();
+        const box = root.querySelector('.ag-detail [data-rename]'); box.focus();
+        press(box, 'ArrowRight', { altKey: true }); await settle();
+        const place = at(root, 'scout'), stored = localStorage.getItem('agentgraph.positions.v1'), lines = [...root.querySelectorAll('.ag-drawing [data-edge], .ag-drawing [data-team-edge], .ag-route-step')].map(item => item.dataset.edge || item.dataset.teamEdge || item.getAttribute('d')).join('|');
+        await renameTo(root, 'scout', 'finder');
+        assert(host.calls.join(' | ') === 'roster ' + JSON.stringify({ op: 'rename', name: 'scout', to: 'finder' }), 'the refused rename asked more: ' + host.calls.join(' | '));
+        assert(nodeOf(root, 'scout') && !nodeOf(root, 'finder') && titleOf(root) === 'scout' && near(at(root, 'scout'), place), 'the refused rename changed the agent or its place');
+        assert(localStorage.getItem('agentgraph.positions.v1') === stored, 'the refused rename changed the saved places');
+        assert([...root.querySelectorAll('.ag-drawing [data-edge], .ag-drawing [data-team-edge], .ag-route-step')].map(item => item.dataset.edge || item.dataset.teamEdge || item.getAttribute('d')).join('|') === lines, 'the refused rename changed the lines');
+        assert(noteLines(root).includes('error:' + said), 'the refusal is not said: ' + noteLines(root));
+        await sleep(60); assert(liveRegion(root).includes(said), 'the refusal is not announced');
+        host.calls.length = 0; undoKey(viewportOf(root)); await settled();
+        assert(!host.calls.some(call => /rename|restore/.test(call)) && nodeOf(root, 'scout'), 'a refused rename left an undo step: ' + host.calls.join(' | '));
+      }, { actions });
+    });
+    await test('rename: a refused undo (the old name now belongs to another agent) changes nothing, says why, and keeps the step for later', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      data.agents.push(agent('scout', 'build', { added: true, removable: true }));
+      await using(data, async (root, app) => {
+        await renameTo(root, 'scout', 'finder');
+        data.agents.push(agent('scout', 'build', { added: true, removable: true })); await app.refresh(); await settle();
+        host.calls.length = 0; undoKey(viewportOf(root)); await settled(); await settled();
+        assert(host.calls.length === 1 && /"op":"restore"/.test(host.calls[0]), 'undo did not ask once: ' + host.calls.join(' | '));
+        assert(nodeOf(root, 'finder') && nodeOf(root, 'scout'), 'the refused undo changed the agents');
+        await sleep(60); assert(liveRegion(root).includes('now belongs to another agent'), 'the refused undo does not say why: ' + liveRegion(root));
+        data.agents.splice(data.agents.findIndex(a => a.name === 'scout'), 1); await app.refresh(); await settle();
+        host.calls.length = 0; undoKey(viewportOf(root)); await settled(); await settled();
+        assert(nodeOf(root, 'scout') && !nodeOf(root, 'finder'), 'the undo kept after a refusal did not work later: ' + host.calls.join(' | '));
+      }, { actions: host.actions });
+    });
+    await test('n88 ruling 3: names are never drawn under 11 px at any zoom the user can reach: wheel, Ctrl+wheel, pinch, the - key and Fit stop at the 11 px floor', async () => {
+      const data = trialRoster();
+      await using(data, async root => {
+        await resizeTo(root, 900, 700);
+        const viewport = viewportOf(root), scale = () => root.querySelector('.ag-drawing > g').getCTM().a;
+        const px = () => parseFloat(getComputedStyle(root.querySelector('[data-agent="impl-hard"] .ag-agent-name')).fontSize) * scale();
+        const centre0 = middleOf(viewport), problems = [];
+        const atFloor = label => { if (px() < 11 - .01) problems.push(label + ' took names to ' + px().toFixed(2) + ' px'); };
+        for (let i = 0; i < 40; i++) viewport.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 160, clientX: centre0.x, clientY: centre0.y }));
+        atFloor('the wheel');
+        if (Math.abs(px() - 11) > .05) problems.push('the wheel did not reach the floor: ' + px().toFixed(2) + ' px');
+        root.querySelector('.ag-fit').click(); await settle(); atFloor('Fit');
+        for (let i = 0; i < 40; i++) viewport.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: 160, clientX: centre0.x, clientY: centre0.y }));
+        atFloor('Ctrl+wheel');
+        root.querySelector('.ag-fit').click(); await settle();
+        viewport.focus(); for (let i = 0; i < 30; i++) press(viewport, '-'); await settle(); atFloor('the - key');
+        root.querySelector('.ag-fit').click(); await settle();
+        // Pinch: two touches drawn together.
+        const p = emptyPoint(root), touch = (type, id, x) => viewport.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: id, pointerType: 'touch', isPrimary: id === 11, button: type === 'pointermove' ? -1 : 0, buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: centre0.y }));
+        touch('pointerdown', 11, centre0.x - 200); touch('pointerdown', 12, centre0.x + 200);
+        for (let step = 1; step <= 10; step++) { touch('pointermove', 11, centre0.x - 200 + step * 19); touch('pointermove', 12, centre0.x + 200 - step * 19); }
+        atFloor('a pinch');
+        touch('pointerup', 11, centre0.x - 10); touch('pointerup', 12, centre0.x + 10);
+        assert(p && !problems.length, problems.join('; '));
+      });
+    });
+    await test('n88 ruling 4: one drag threshold: the background pans, like an agent moves, only past 5 px', async () => {
+      const data = flowFixture();
+      await using(data, async root => {
+        const viewport = viewportOf(root), stage = root.querySelector('.ag-drawing > g');
+        const box = viewport.getBoundingClientRect();
+        // A point of bare background (nothing of the graph under it).
+        let start = null;
+        for (let y = box.top + 60; y < box.bottom - 40 && !start; y += 13) for (let x = box.left + 40; x < box.right - 40 && !start; x += 13) { if (document.elementFromPoint(x, y) === viewport || document.elementFromPoint(x, y)?.matches?.('.ag-drawing')) start = { x, y }; }
+        assert(start, 'no bare background found');
+        const camera = () => stage.getAttribute('transform');
+        const panBy = distance => {
+          const before = camera();
+          pointerAt(viewport, 'pointerdown', start); pointerAt(viewport, 'pointermove', { x: start.x + distance, y: start.y });
+          const moved = camera() !== before || viewport.dataset.dragging === 'true';
+          pointerAt(viewport, 'pointerup', { x: start.x + distance, y: start.y });
+          return moved;
+        };
+        assert(!panBy(4.5), 'the background panned at 4.5 px');
+        assert(!panBy(5), 'the background panned at 5 px');
+        await sleep(600);
+        assert(panBy(6), 'the background did not pan at 6 px');
+        await sleep(600);
+        // An agent: the same threshold.
+        const p = centre(root, 'impl-openai'), node = nodeOf(root, 'impl-openai'), before = at(root, 'impl-openai').join();
+        pointerAt(node, 'pointerdown', p); pointerAt(viewport, 'pointermove', { x: p.x + 5, y: p.y });
+        const still = at(root, 'impl-openai').join() === before;
+        pointerAt(viewport, 'pointermove', { x: p.x + 6, y: p.y });
+        const went = at(root, 'impl-openai').join() !== before;
+        pointerAt(viewport, 'pointerup', { x: p.x + 6, y: p.y }); press(viewport, 'Escape');
+        assert(still && went, 'an agent does not move only past 5 px: ' + still + ' ' + went);
+      });
+    });
+    await test('n88 ruling 5: a refused path keeps the reason as the first agent\'s tooltip as well as the newest agent\'s', async () => {
+      const said = 'reviewer cannot get the work back straight after it returned to impl-claude';
+      const data = flowFixture(), host = flowHost(data, { fail: said });
+      await using(data, async root => {
+        tap(root, 'impl-claude'); tap(root, 'reviewer'); press(root.querySelector('.ag-viewport'), 'Enter'); await settled();
+        assert(nodeOf(root, 'impl-claude').querySelector('title').textContent === said, 'the first agent\'s tooltip is not the reason: ' + nodeOf(root, 'impl-claude').querySelector('title').textContent);
+        assert(nodeOf(root, 'reviewer').querySelector('title').textContent === said, 'the newest agent\'s tooltip is not the reason');
+      }, { actions: { flow: host.flow } });
+    });
+    // ---- Second real-browser trial n89 r1: the rulings ----
+    await test('n89 item 1: a blank agent is added with template "blank" (the trial\'s back end refused a name alone; the view names the template)', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      await using(data, async root => {
+        viewportOf(root).focus(); press(viewportOf(root), 'n'); await settle();
+        document.activeElement.click(); await settled();
+        assert(host.calls[0] === 'roster ' + JSON.stringify({ op: 'add', name: 'agent-1', template: 'blank', model: 'test/model-a' }), 'the blank agent was not asked for with template blank: ' + host.calls.join(' | '));
+        assert(nodeOf(root, 'agent-1') && !root.querySelector('[data-draft]'), 'the blank agent was not added');
+      }, { actions: host.actions });
+    });
+    await test('n89 item 1: a refused add clears the new circle at once; the details say why in plain words; Try again puts it back and asks again; Cancel closes', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      let refuse = 1;
+      const actions = { ...host.actions, roster: async request => {
+        if (request.op === 'add' && refuse) { refuse--; host.calls.push('roster ' + JSON.stringify(request)); throw new Error('description is required (or start from a template or a copy of an agent)'); }
+        return host.actions.roster(request);
+      } };
+      await using(data, async root => {
+        viewportOf(root).focus(); press(viewportOf(root), 'n'); await settle();
+        document.activeElement.click(); await settled();
+        assert(host.calls.length === 1 && !nodeOf(root, 'agent-1'), 'the refused agent was added');
+        assert(!root.querySelector('[data-draft]'), 'the new circle stayed after the refusal');
+        const line = root.querySelector('.ag-detail .ag-form-error');
+        assert(detailOpen(root) && line?.textContent === 'A blank agent needs a description here: start from the verifier or from a copy of an agent instead.' && line.getAttribute('role') === 'alert', 'the details do not say why in plain words: ' + (line?.textContent || 'none'));
+        await sleep(60); assert(root.querySelector('.ag-sr-only[aria-live]').textContent.includes('A blank agent needs a description'), 'the refusal is not announced');
+        root.querySelector('.ag-detail [data-draft-retry]').click(); await settled();
+        assert(host.calls.length === 2 && nodeOf(root, 'agent-1') && !root.querySelector('[data-draft]'), 'Try again did not ask again and add it: ' + host.calls.join(' | '));
+        // Cancel after a refusal closes and leaves nothing.
+        refuse = 1; root.querySelector('.ag-close').click(); await settle();
+        viewportOf(root).focus(); press(viewportOf(root), 'n'); await settle(); document.activeElement.click(); await settled();
+        assert(!root.querySelector('[data-draft]') && detailOpen(root), 'a second refusal kept the circle');
+        root.querySelector('.ag-detail [data-draft-cancel]').click(); await settle();
+        assert(!detailOpen(root) && !root.querySelector('[data-draft]') && !nodeOf(root, 'agent-2'), 'Cancel did not close and clear');
+      }, { actions });
+    });
+    await test('n89 item 1: the suite\'s roster refuses what agentgraph\'s refuses: a bad name, a taken name, a copy and a template at once, an unknown template, a copy of the orchestrator, a missing copy, a bad model; a name alone is a blank agent, as agentgraph now takes it; a rename of a default agent, a seat, to a taken or a bad name', async () => {
+      const data = worldFixture(), host = worldHost(data), refused = [];
+      data.agents.push(agent('scout', 'build', { added: true, removable: true }));
+      for (const request of [{ op: 'add', name: 'Bad Name', template: 'blank' }, { op: 'add', name: 'oracle', template: 'blank' }, { op: 'add', name: 'x1', template: 'verifier', copy_of: 'oracle' },
+        { op: 'add', name: 'x2', template: 'other' }, { op: 'add', name: 'x4', copy_of: 'orchestrator' }, { op: 'add', name: 'x5', copy_of: 'nobody' }, { op: 'add', name: 'x6', template: 'blank', model: 'no-slash' },
+        { op: 'rename', name: 'oracle', to: 'r1' }, { op: 'rename', name: 'councillor-claude', to: 'r2' }, { op: 'rename', name: 'scout', to: 'oracle' }, { op: 'rename', name: 'scout', to: 'R 3' }, { op: 'rename', name: 'nobody', to: 'r4' }, { op: 'rename', name: 'scout', to: 'r5', copy_of: 'x' }]) {
+        try { await host.actions.roster(request); } catch (error) { refused.push(request.to || request.name); }
+      }
+      assert(refused.join() === 'Bad Name,oracle,x1,x2,x4,x5,x6,r1,r2,oracle,R 3,r4,r5', 'the fake roster accepted what agentgraph refuses: only refused ' + refused.join());
+      await host.actions.roster({ op: 'add', name: 'x3' });
+      assert(data.agents.some(a => a.name === 'x3' && a.added), 'the fake roster refused a name alone, which agentgraph now adds as a blank agent');
+      const flows = flowHost(flowFixture()), wrong = [];
+      for (const path of [['impl-claude'], ['impl-claude', 'nobody']]) { try { await flows.flow({ op: 'add', path }); } catch (error) { wrong.push(path.join('>')); } }
+      assert(wrong.length === 2, 'the fake flows accepted a path agentgraph refuses: ' + wrong.join());
+    });
+    await test('n89 item 9: a back end reason in developer words is said plainly (an agent with no file in the structure folder)', async () => {
+      const said = 'unknown agent build: there is no build.md in the structure folder';
+      const data = flowFixture(), host = flowHost(data, { fail: said });
+      await using(data, async root => {
+        tap(root, 'impl-claude'); tap(root, 'reviewer'); press(root.querySelector('.ag-viewport'), 'Enter'); await settled();
+        const plain = 'build is one of OpenCode\'s own agents, not one of this toolkit\'s, so it cannot be on a path or in a group.';
+        const line = root.querySelector('.ag-detail .ag-agent-note[data-kind="error"]');
+        assert(line?.textContent === plain, 'the reason is not in plain words: ' + (line?.textContent || 'none'));
+        assert(nodeOf(root, 'reviewer').querySelector('title').textContent === plain, 'the tooltip keeps the developer words');
+        assert(!root.querySelector('.ag-detail').textContent.includes('structure folder'), 'the details still speak of the structure folder');
+      }, { actions: { flow: host.flow } });
+    });
+    await test('n89 item 6: Delete on the orchestrator, the council or a seat says why with the details closed: it shakes, the reason is its tooltip and is announced', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      await using(data, async root => {
+        for (const [name, why] of [['orchestrator', 'The orchestrator cannot be deleted.'], ['council', 'The council cannot be deleted'], ['councillor-claude', 'A council seat cannot be deleted.']]) {
+          assert(!detailOpen(root), 'the details are open before Delete on ' + name);
+          nodeOf(root, name).focus(); press(nodeOf(root, name), 'Delete'); await sleep(60);
+          const node = nodeOf(root, name), live = root.querySelector('.ag-sr-only[aria-live]').textContent;
+          assert(node.dataset.shake === 'true' || node.querySelector('title')?.textContent.startsWith(why), name + ' did not shake');
+          assert(node.querySelector('title')?.textContent.startsWith(why), name + '\'s tooltip does not say why: ' + node.querySelector('title')?.textContent);
+          assert(live.startsWith(why), 'the reason for ' + name + ' was not announced: ' + live);
+          assert(!detailOpen(root) && !host.calls.length && nodeOf(root, name), 'Delete on ' + name + ' opened the details or asked for something: ' + host.calls.join(' | '));
+          await sleep(450);
+        }
+      }, { actions: host.actions });
+    });
+    await test('n89 item 7: after a skill save (button or Ctrl+Enter), create and delete, focus stays on the control used or goes to the skill\'s row, never the close button', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      data.agents.find(a => a.name === 'reviewer').skills = ['gamma'];
+      const where = () => { const now = document.activeElement; return now?.dataset ? Object.keys(now.dataset).join(',') + ':' + (now.className?.baseVal ?? now.className) : String(now); };
+      await using(data, async root => {
+        open(root, 'reviewer'); await settle();
+        const opener = skillOpener(root, 'gamma'); opener.focus(); opener.click(); await settled();
+        let box = root.querySelector('[data-skill-text]'); box.value = 'Gamma, better.'; box.dispatchEvent(new Event('input', { bubbles: true }));
+        const save = root.querySelector('[data-skill-save]'); save.focus(); save.click(); await settled();
+        assert(document.activeElement === root.querySelector('[data-skill-save]'), 'after Save focus went to ' + where());
+        box = root.querySelector('[data-skill-text]'); box.focus(); box.value = 'Gamma, best.'; box.dispatchEvent(new Event('input', { bubbles: true }));
+        press(box, 'Enter', { ctrlKey: true }); await settled();
+        assert(host.texts.gamma === 'Gamma, best.' && document.activeElement === root.querySelector('[data-skill-text]'), 'after Ctrl+Enter focus went to ' + where());
+        // Create: focus goes to the new skill's row.
+        open(root, 'reviewer'); await settle();
+        const fresh = root.querySelector('.ag-detail [data-skill-new]'); fresh.focus(); fresh.click(); await settle();
+        const form = root.querySelector('[data-form="new-skill:reviewer"]');
+        form.querySelector('[data-new="id"]').value = 'epsilon'; form.querySelector('[data-new="description"]').value = 'Fifth'; form.querySelector('[data-new="text"]').value = 'Epsilon text.';
+        const submit = form.querySelector('[type="submit"]'); submit.focus(); submit.click(); await settled();
+        assert(document.activeElement?.closest('.ag-skill-row')?.dataset.skill === 'epsilon', 'after New skill focus went to ' + where());
+      }, { actions: host.actions });
+      // Delete: focus goes to the agent's skill list.
+      const third = worldFixture(), deleting = worldHost(third);
+      await using(third, async root => {
+        open(root, 'impl-openai'); await settle(); const opener = skillOpener(root, 'alpha'); opener.focus(); opener.click(); await settled();
+        third.agents.find(a => a.name === 'impl-openai').skills = ['beta'];
+        const remove = root.querySelector('[data-skill-delete]'); remove.focus(); remove.click(); await settled();
+        const section = [...root.querySelectorAll('.ag-detail-section')].find(item => /^Skills/.test(item.querySelector('h3').textContent));
+        assert(!third.skills.some(skill => skill.name === 'alpha') && titleOf(root) === 'impl-openai', 'the skill was not deleted');
+        assert(section?.contains(document.activeElement) && document.activeElement !== root.querySelector('.ag-close'), 'after Delete skill focus went to ' + where());
+      }, { actions: deleting.actions });
+    });
+    await test('n89 item 7: a refresh that draws an agent\'s details again keeps focus on the skill row in use, or on the skill list when its row went', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      data.agents.find(a => a.name === 'reviewer').skills = ['gamma'];
+      await using(data, async (root, app) => {
+        open(root, 'reviewer'); await settle();
+        let opener = skillOpener(root, 'gamma'); opener.focus();
+        data.totals = { ...data.totals, cost: (data.totals?.cost || 0) + 1 }; await app.refresh(); await settle();
+        assert(!opener.isConnected && document.activeElement === skillOpener(root, 'gamma'), 'a refresh lost the focus on the skill\'s row: ' + (document.activeElement?.className || document.activeElement?.tagName) + (opener.isConnected ? ' (not redrawn)' : ''));
+        // Not merely the first control of the section: the second row keeps it too.
+        open(root, 'impl-openai'); await settle();
+        opener = skillOpener(root, 'beta'); opener.focus();
+        data.totals = { ...data.totals, cost: (data.totals?.cost || 0) + 1 }; await app.refresh(); await settle();
+        assert(!opener.isConnected && document.activeElement === skillOpener(root, 'beta'), 'a refresh moved the focus off the second skill\'s row: ' + (document.activeElement?.textContent || document.activeElement?.tagName));
+        open(root, 'impl-openai'); await settle();
+        const row = skillOpener(root, 'alpha'); row.focus();
+        data.agents.find(a => a.name === 'impl-openai').skills = ['beta']; await app.refresh(); await settle();
+        const section = [...root.querySelectorAll('.ag-detail-section')].find(item => /^Skills/.test(item.querySelector('h3').textContent));
+        assert(section?.contains(document.activeElement), 'a refresh that took the focused row away lost the focus: ' + (document.activeElement?.className || document.activeElement?.tagName));
+      }, { actions: host.actions });
+    });
+    await test('n89 item 8: an undone skill keeps its place in the list after the view is opened again (the back end appends it)', async () => {
+      const data = worldFixture(), world = worldHost(data);
+      await using(data, async root => {
+        open(root, 'impl-openai'); await settle();
+        skillButton(root, 'remove:alpha').click(); await settled();
+        undoKey(viewportOf(root)); await settled(); await sleep(1100);
+        assert(data.agents.find(a => a.name === 'impl-openai').skills.join() === 'beta,alpha', 'the double did not append alpha');
+        // A reload: a new view on the same storage.
+        const again = host(), app = AgentGraph.mount(again, { fetchSnapshot: async () => data, intervalMs: 60000, motion: 'none', actions: world.actions });
+        try {
+          await app.refresh(); open(again, 'impl-openai'); await settle();
+          const listed = skillRows(again).filter(row => !row.closest('details')).map(row => row.dataset.skill);
+          assert(listed.join() === 'alpha,beta', 'after a reload alpha is not back in its place: ' + listed);
+        } finally { app.destroy(); again.remove(); }
+      }, { actions: world.actions });
+    });
+    // The trial's own roster: the preset's agents, OpenCode's build agent and three added agents (n89).
+    function n89Roster() {
+      const data = trialRoster();
+      data.agents.push(agent('designer-2', 'build', { added: true }), agent('oracle-2', 'decide', { added: true }), agent('verifier-2', 'verify', { added: true }));
+      return data;
+    }
+    const renderedNames = root => [...root.querySelectorAll('.ag-drawing [data-agent] .ag-agent-name')].filter(name => name.getClientRects().length && getComputedStyle(name).display !== 'none')
+      .map(name => [name.closest('[data-agent]').dataset.agent, parseFloat(getComputedStyle(name).fontSize) * name.getScreenCTM().a]);
+    await test('n89 item 2: zoomed out as far as the wheel and the - key go (1400x900, light and dark), every agent name is drawn 11 px or more', async () => {
+      const problems = [];
+      for (const scheme of ['light', 'dark']) {
+        await using(n89Roster(), async root => {
+          await resizeTo(root, 1400, 900);
+          const viewport = viewportOf(root), centre = middleOf(viewport);
+          const small = label => renderedNames(root).filter(([, px]) => px < 11 - .01).slice(0, 3).forEach(([name, px]) => problems.push(scheme + ' ' + label + ': ' + name + ' at ' + px.toFixed(1) + ' px'));
+          for (let i = 0; i < 60; i++) viewport.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 240, clientX: centre.x, clientY: centre.y }));
+          await settle(); small('wheel to its limit');
+          root.querySelector('.ag-fit').click(); await settle(); small('Fit');
+          viewport.focus(); for (let i = 0; i < 40; i++) press(viewport, '-'); await settle(); small('- to its limit');
+          for (let i = 0; i < 60; i++) viewport.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: 240, clientX: centre.x, clientY: centre.y }));
+          await settle(); small('Ctrl+wheel to its limit');
+          if (!renderedNames(root).length) problems.push(scheme + ': no names drawn');
+        }, { scheme });
+      }
+      assert(!problems.length, problems.slice(0, 6).join('; '));
+    });
+    // Which agents are wholly in the canvas left visible (circle and name, not under the sheet, the figures or the controls).
+    const wholeAgents = root => { const out = new Set(outsideVisible(root).map(line => line.split(' ')[0])); return renderedNames(root).map(([name]) => name).filter(name => !out.has(name)); };
+    // n89 item 3: 18 agents (the trial's roster) do not fit at 11 px beside a 340 px sheet at 760 px, nor above the sheet at
+    // 520 px (measured: they need a canvas about 560 px wide). Then, as the screenshot brief says, the graph stays at 11 px
+    // and pans: the opened agent is wholly visible, nothing of the graph is under the sheet, and panning reaches every agent.
+    const N89_NARROW = ': at 760 and 520 px every agent is in the visible canvas, none under the figures, the controls or the sheet, none cut; where 18 agents cannot fit at 11 px (details open) the opened agent is wholly visible and panning brings every agent into view';
+    {
+      const n89Narrow = async scheme => {
+        const problems = [];
+        for (const width of [760, 520]) {
+          await using(n89Roster(), async root => {
+            await resizeTo(root, width, 700);
+            for (const details of [false, true, false]) {
+              if (details) { open(root, 'impl-hard'); await sleep(30); } else if (detailOpen(root)) { root.querySelector('.ag-close').click(); await settle(); }
+              await resizeTo(root, width, 700);
+              const label = width + ' ' + (details ? 'open' : 'closed'), names = renderedNames(root);
+              problems.push(...figureProblems(root, label).filter(line => !/! N is not shown/.test(line)));
+              names.filter(([, px]) => px < 11 - .01).slice(0, 2).forEach(([name, px]) => problems.push(label + ': ' + name + ' at ' + px.toFixed(1) + ' px'));
+              // Nothing of the graph is drawn under the sheet: the canvas ends where the sheet starts.
+              if (details) {
+                const sheet = root.querySelector('.ag-detail').getBoundingClientRect();
+                [...root.querySelectorAll('.ag-drawing [data-agent] .ag-core, .ag-drawing [data-agent] .ag-agent-name')].forEach(part => {
+                  const b = part.getBoundingClientRect(), view = root.querySelector('.ag-viewport').getBoundingClientRect();
+                  const seen = { left: Math.max(b.left, view.left), right: Math.min(b.right, view.right), top: Math.max(b.top, view.top), bottom: Math.min(b.bottom, view.bottom) };
+                  if (seen.right - seen.left > .5 && seen.bottom - seen.top > .5 && Math.min(seen.right, sheet.right) - Math.max(seen.left, sheet.left) > .5 && Math.min(seen.bottom, sheet.bottom) - Math.max(seen.top, sheet.top) > .5) problems.push(label + ': ' + part.closest('[data-agent]').dataset.agent + ' drawn under the sheet');
+                });
+              }
+              const whole = wholeAgents(root);
+              if (!details) { if (whole.length !== names.length) problems.push(label + ': not wholly visible: ' + names.map(([name]) => name).filter(name => !whole.includes(name)).join(',')); continue; }
+              if (!whole.includes('impl-hard')) problems.push(label + ': the opened agent impl-hard is not wholly visible');
+              // Panning reaches every agent (arrow keys on the canvas, 45 px a press, each way and back).
+              const seen = new Set(whole), viewport = viewportOf(root); viewport.focus();
+              for (const [there, back] of [['ArrowLeft', 'ArrowRight'], ['ArrowRight', 'ArrowLeft'], ['ArrowUp', 'ArrowDown'], ['ArrowDown', 'ArrowUp']]) {
+                for (let i = 0; i < 24; i++) { press(viewport, there); wholeAgents(root).forEach(name => seen.add(name)); }
+                for (let i = 0; i < 24; i++) press(viewport, back);
+              }
+              for (const [x, y] of [['ArrowLeft', 'ArrowUp'], ['ArrowLeft', 'ArrowDown'], ['ArrowRight', 'ArrowUp'], ['ArrowRight', 'ArrowDown']]) {
+                for (let i = 0; i < 24; i++) { press(viewport, x); press(viewport, y); wholeAgents(root).forEach(name => seen.add(name)); }
+                root.querySelector('.ag-fit').click(); await settle();
+              }
+              const never = names.map(([name]) => name).filter(name => !seen.has(name));
+              if (never.length) problems.push(label + ': panning never brings into view: ' + never.join(','));
+            }
+          }, { scheme });
+        }
+        assert(!problems.length, problems.slice(0, 8).join('; '));
+      };
+      await test('n89 item 3 (light)' + N89_NARROW, () => n89Narrow('light'));
+      await test('n89 item 3 (dark)' + N89_NARROW, () => n89Narrow('dark'));
+    }
+    // The trial's loops (n89): A→B→A, a three-agent cycle, A,B,C,B, and loops beside and across each other.
+    const N89_LOOPS = [
+      { id: 'aba', path: ['researcher', 'oracle', 'researcher'] }, { id: 'ex', path: ['explorer', 'researcher', 'explorer'] },
+      { id: 'cyc', path: ['reviewer', 'designer', 'impl-hard', 'reviewer'] }, { id: 'abcb', path: ['impl-claude', 'impl-openai', 'verifier', 'impl-openai'] },
+      { id: 'side', path: ['oracle-lite', 'oracle', 'oracle-lite'] }];
+    function n89Loops() {
+      const data = n89Roster();
+      data.structure = { source: 'folder', flows: N89_LOOPS.map(loop => ({ ...loop, text: loop.id, source: 'drawn' })) };
+      return data;
+    }
+    // A view whose agents start where `places` puts them (as if the user had dragged them there).
+    async function usingPlaced(data, places, run, options = {}) {
+      clearPositions();
+      localStorage.setItem('agentgraph.positions.v1', JSON.stringify({ version: 1, layouts: { 'main:wide': places } }));
+      const root = host(), app = AgentGraph.mount(root, { fetchSnapshot: async () => stampRevs(data), intervalMs: 60000, motion: 'none', ...options });
+      try { await app.refresh(); await run(root, app); } finally { app.destroy(); root.remove(); clearPositions(); }
+    }
+    // Two loops that cross (two pairs on crossing diagonals) and two that run side by side (nearly concentric).
+    // Two-agent loops are circles of 82 units (RING_MIN). Rings through the hub cannot move off each other, so two of
+    // them, to agents placed near each other, run side by side and cross near the hub; two free rings are moved apart.
+    const NEAR_PX = 40;
+    const boxed = item => ({ ...item, box: { left: Math.min(...item.points.map(q => q.x)), right: Math.max(...item.points.map(q => q.x)), top: Math.min(...item.points.map(q => q.y)), bottom: Math.max(...item.points.map(q => q.y)) } });
+    const N89_PICKS = [
+      { flows: [{ id: 'hub-1', path: ['orchestrator', 'researcher', 'orchestrator'] }, { id: 'hub-2', path: ['orchestrator', 'oracle', 'orchestrator'] }],
+        places: { researcher: { x: -11, y: -164 }, oracle: { x: 11, y: -164 } } },
+      { flows: [{ id: 'hub-3', path: ['orchestrator', 'explorer', 'orchestrator'] }, { id: 'hub-4', path: ['orchestrator', 'oracle-lite', 'orchestrator'] }],
+        places: { explorer: { x: -190, y: -40 }, 'oracle-lite': { x: -150, y: 120 } } },
+      { flows: [{ id: 'across-1', path: ['researcher', 'oracle', 'researcher'] }, { id: 'across-2', path: ['explorer', 'oracle-lite', 'explorer'] }],
+        places: { researcher: { x: -232, y: -200 }, oracle: { x: -68, y: -200 }, explorer: { x: -158, y: -258 }, 'oracle-lite': { x: -42, y: -142 } } }];
+    // Loops and agents where the user put them: two free rings dragged across each other, and agents left on a ring's line.
+    const N89_PLACED = [
+      { flows: [{ id: 'across-1', path: ['researcher', 'oracle', 'researcher'] }, { id: 'across-2', path: ['explorer', 'oracle-lite', 'explorer'] }],
+        places: { researcher: { x: -232, y: -200 }, oracle: { x: -68, y: -200 }, explorer: { x: -158, y: -258 }, 'oracle-lite': { x: -42, y: -142 } } }];
+    await test('n89 item 4: every loop ring (A→B→A, a cycle, A,B,C,B, loops beside each other, two rings dragged across each other) keeps clear of every circle and name not on it, at 1400x900, 1100x760 and 900x700', async () => {
+      const problems = [];
+      const clear = (root, label, flows) => {
+        const shapes = agentShapes(root);
+        flows.forEach(loop => {
+          const group = routeOf(root, loop.id);
+          if (!group) { problems.push(label + ': ' + loop.id + ' is not drawn'); return; }
+          group.querySelectorAll('.ag-route-step').forEach((step, i) => {
+            const { worst, into } = intrusion(pointsOf(step, 160), shapes, loop.path);
+            if (worst > 0) problems.push(label + ': ' + loop.id + ' step ' + i + ' runs ' + worst.toFixed(1) + ' px into ' + into);
+          });
+        });
+      };
+      for (const [width, height] of [[1400, 900], [1100, 760], [900, 700]]) {
+        await using(n89Loops(), async root => { await resizeTo(root, width, height); await settle(); clear(root, String(width), N89_LOOPS); });
+        for (const scene of N89_PLACED) {
+          const data = n89Roster();
+          data.structure = { source: 'folder', flows: scene.flows.map(flow => ({ ...flow, text: flow.id, source: 'drawn' })) };
+          await usingPlaced(data, scene.places, async root => { await resizeTo(root, width, height); await settle(); clear(root, width + ' placed', scene.flows); });
+        }
+      }
+      assert(!problems.length, problems.slice(0, 8).join('; '));
+    });
+    await test('n89 item 5: a click 6 px off a loop picks that loop where two loops cross or run side by side (true distance to the stroke, not band order), at several points each side', async () => {
+      const problems = [];
+      let tried = 0, contested = 0;
+      for (const scene of N89_PICKS) {
+        const data = n89Roster();
+        data.structure = { source: 'folder', flows: scene.flows.map(flow => ({ ...flow, text: flow.id, source: 'drawn' })) };
+        await usingPlaced(data, scene.places, async root => {
+          await resizeTo(root, 1300, 850); await settle();
+          const steps = scene.flows.flatMap(loop => [...(routeOf(root, loop.id)?.querySelectorAll('.ag-route-step') || [])].map(step => boxed({ id: loop.id, step, points: pointsOf(step, 600) })));
+          // Every line that takes clicks (loops, flows, spokes, group lines), each as its owner: the truth is the nearest.
+          const lines = [...root.querySelectorAll('.ag-route-hit, .ag-team-hit, .ag-line-hit')].filter(line => line.getClientRects().length).map(line => {
+            const owner = line.closest('[data-route], [data-team-line], [data-loop-id], [data-work-loop-id]');
+            return boxed({ id: owner?.dataset.route || 'other', points: pointsOf(line, 600) });
+          });
+          // Distances only matter within a few px of a click (its line is 6 px away): lines whose box is farther than
+          // NEAR_PX count as far, which leaves every decision below as it was and saves most of the work.
+          const within = (item, p) => p.x >= item.box.left - NEAR_PX && p.x <= item.box.right + NEAR_PX && p.y >= item.box.top - NEAR_PX && p.y <= item.box.bottom + NEAR_PX;
+          const closest = (item, p) => { let least = Infinity; if (within(item, p)) item.points.forEach(q => { const d = (q.x - p.x) ** 2 + (q.y - p.y) ** 2; if (d < least) least = d; }); return Math.sqrt(least); };
+          const nearest = p => { let best = null, least = Infinity; lines.forEach(item => { const d = closest(item, p); if (d < least) { least = d; best = item.id; } }); return { id: best, least }; };
+          const agents = agentShapes(root), view = viewportOf(root).getBoundingClientRect();
+          for (const item of steps) {
+            for (let k = 1; k < 64; k++) {
+              const t = k / 64, length = item.step.getTotalLength(), m = item.step.getScreenCTM();
+              const p = item.step.getPointAtLength(length * t).matrixTransform(m), q = item.step.getPointAtLength(Math.min(length, length * t + 1)).matrixTransform(m);
+              const d = Math.hypot(q.x - p.x, q.y - p.y) || 1, nx = -(q.y - p.y) / d, ny = (q.x - p.x) / d;
+              for (const side of [1, -1]) {
+                const at = { x: p.x + nx * 6 * side, y: p.y + ny * 6 * side };
+                if (at.x < view.left + 4 || at.x > view.right - 4 || at.y < view.top + 4 || at.y > view.bottom - 4) continue;
+                if (agents.some(a => Math.hypot(at.x - a.x, at.y - a.y) < a.r + 4 || (a.label && at.x > a.label.left - 2 && at.x < a.label.right + 2 && at.y > a.label.top - 2 && at.y < a.label.bottom + 2))) continue;
+                const under = document.elementFromPoint(at.x, at.y);
+                // On an agent (its circle, name or hover halo) a click is the agent's, as in the trial's count.
+                if (!under || !viewportOf(root).contains(under) || under.closest('[data-agent]')) continue;
+                // Judged by the true distance: only where this loop is the nearest drawn loop (by more than half a px).
+                const truth = nearest(at), rival = Math.min(Infinity, ...lines.filter(other => other.id !== item.id).map(other => closest(other, at)));
+                if (truth.id !== item.id || rival - truth.least < .5) continue;
+                // Every click where the other loop is near; elsewhere one in eight.
+                if (rival >= 10 && k % 8) continue;
+                tried++;
+                if (Math.min(Infinity, ...steps.filter(other => other.id !== item.id).map(other => closest(other, at))) < 8) contested++;
+                // The pick is made on pointerup; it is read at once and the details closed again in the same task, so the
+                // pane never changes size between clicks (the drawing stays where the lines were measured).
+                clickAt(root, at);
+                const got = [...root.querySelectorAll('[data-route][data-selected="true"]')].map(group => group.dataset.route);
+                if (got.join() !== item.id) problems.push(item.id + ' at ' + t.toFixed(2) + (side > 0 ? '+' : '-') + '6px (' + truth.least.toFixed(1) + ' px; the other ' + rival.toFixed(1) + ' px) picked ' + (got.join() || 'nothing'));
+                viewportOf(root).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+                if (tried % 16 === 0) await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                assert(!detailOpen(root) && !root.querySelector('[data-route][data-selected="true"]'), 'Escape did not close the details between clicks');
+              }
+            }
+          }
+        }, { actions: worldHost(data).actions });
+      }
+      assert(tried >= 40 && contested >= 8, 'too few clicks to tell: ' + tried + ' tried, ' + contested + ' with the other loop within its 8 px band');
+      assert(!problems.length, problems.length + '/' + tried + ' picked the wrong loop: ' + problems.slice(0, 6).join('; '));
+    });
+    // ---- No write from a stale view (contract n8 r4) ----
+    const STALE = 'This was changed somewhere else since you opened it. The view now shows the latest; try again.';
+    const REV = /^[0-9a-f]{8}$/;
+    // A change made elsewhere: the stored thing changes, this view has not refreshed.
+    const reopen = async (root, name) => { root.querySelector('.ag-close')?.click(); await settle(); open(root, name); await settle(); assert(titleOf(root) === name, name + ' did not open: ' + titleOf(root)); };
+    const flowElsewhere = data => { data.structure.flows[0].text += ' (changed elsewhere)'; };
+    await test('stale paths: a stale write is refused and said plainly, the latest shown, what was typed kept, and trying again goes through: text, name, command, remove', async () => {
+      const problems = [];
+      { const data = pathFixture(), host = pathHost(data);
+        await using(data, async root => {
+          openStep(root, 'f1'); await settle(); flowElsewhere(data);
+          const box = root.querySelector('[data-route-text]'); box.focus(); typeIn(box, 'Mine.'); press(box, 'Enter', { ctrlKey: true }); await settled(); await settled();
+          const now = root.querySelector('[data-route-text]');
+          if (!(now.value === 'Mine.' && root.querySelector('[data-route-state]').textContent === STALE && data.structure.flows[0].text.endsWith('(changed elsewhere)'))) problems.push('text: ' + now.value + ' / ' + root.querySelector('[data-route-state]').textContent);
+          press(now, 'Enter', { ctrlKey: true }); await settled();
+          if (data.structure.flows[0].text !== 'Mine.') problems.push('text: trying again did not save');
+        }, { actions: host.actions }); }
+      { const data = pathFixture(), host = pathHost(data);
+        await using(data, async root => {
+          openStep(root, 'f1'); await settle(); flowElsewhere(data);
+          const field = root.querySelector('[data-route-name]'); field.focus(); field.value = 'mine'; press(field, 'Enter'); await settled();
+          const now = root.querySelector('[data-route-name]');
+          if (!(now.value === 'mine' && root.querySelector('.ag-path-name-error')?.textContent === STALE && !data.structure.flows[0].name)) problems.push('name: ' + now.value + ' / ' + root.querySelector('.ag-path-name-error')?.textContent);
+          await sleep(60); if (!liveRegion(root).includes(STALE)) problems.push('name: not announced');
+          now.focus(); press(now, 'Enter'); await settled();
+          if (data.structure.flows[0].name !== 'mine') problems.push('name: trying again did not save');
+        }, { actions: host.actions }); }
+      { const data = pathFixture({ name: 'review-loop' }), host = pathHost(data, { live: false });
+        await using(data, async root => {
+          openStep(root, 'f1'); await settle(); flowElsewhere(data);
+          root.querySelector('[data-route-command]').click(); await settled();
+          if (!(root.querySelector('.ag-command-error')?.textContent === STALE && root.querySelector('[data-route-command]').getAttribute('aria-checked') === 'false' && !data.structure.flows[0].command)) problems.push('command: ' + root.querySelector('.ag-command-error')?.textContent);
+          root.querySelector('[data-route-command]').click(); await settled();
+          if (data.structure.flows[0].command !== 'review-loop') problems.push('command: trying again did not turn it on');
+        }, { actions: host.actions }); }
+      { const data = pathFixture(), host = pathHost(data);
+        await using(data, async root => {
+          openStep(root, 'f1'); await settle(); flowElsewhere(data);
+          press(viewportOf(root), 'Delete'); await settled();
+          if (!(routeOf(root, 'f1') && data.structure.flows.length === 1 && root.querySelector('[data-route-state]')?.textContent === STALE)) problems.push('remove: ' + root.querySelector('[data-route-state]')?.textContent);
+          if (!root.querySelector('[data-route-text]')?.value.includes('(changed elsewhere)')) problems.push('remove: the latest is not shown');
+          press(viewportOf(root), 'Delete'); await settled();
+          if (routeOf(root, 'f1') || data.structure.flows.length) problems.push('remove: trying again did not remove it');
+        }, { actions: host.actions }); }
+      assert(!problems.length, problems.join('; '));
+    });
+    await test('stale paths and groups: a change that arrives (and is drawn) while an instruction is being typed is not overwritten: the save expects the rev the box was drawn with, is refused, and keeps the typing', async () => {
+      const problems = [];
+      { const data = pathFixture(), host = pathHost(data);
+        await using(data, async (root, app) => {
+          openStep(root, 'f1'); await settle();
+          const box = root.querySelector('[data-route-text]'); box.focus(); typeIn(box, 'Mine.');
+          flowElsewhere(data); await app.refresh(); await settle();
+          press(box, 'Enter', { ctrlKey: true }); await settled();
+          if (!(root.querySelector('[data-route-text]').value === 'Mine.' && root.querySelector('[data-route-state]').textContent === STALE && data.structure.flows[0].text.endsWith('(changed elsewhere)'))) problems.push('path: ' + root.querySelector('[data-route-state]').textContent + ' / ' + data.structure.flows[0].text);
+        }, { actions: host.actions }); }
+      { const data = worldFixture(), host = worldHost(data);
+        data.structure.teams = [{ id: 't1', lead: 'impl-claude', members: ['oracle'], text: 'Report.' }];
+        await using(data, async (root, app) => {
+          open(root, 'impl-claude'); await settle();
+          const box = root.querySelector('[data-team-text]'); box.focus(); typeIn(box, 'Mine.');
+          data.structure.teams[0].text = 'Changed elsewhere.'; await app.refresh(); await settle();
+          press(box, 'Enter', { ctrlKey: true }); await settled();
+          if (!(root.querySelector('[data-team-text]').value === 'Mine.' && root.querySelector('[data-team-state]').textContent === STALE && data.structure.teams[0].text === 'Changed elsewhere.')) problems.push('group: ' + root.querySelector('[data-team-state]').textContent + ' / ' + data.structure.teams[0].text);
+        }, { actions: host.actions }); }
+      assert(!problems.length, problems.join('; '));
+    });
+    await test('stale paths: Run and Copy run message keep the goal and say so plainly when the path changed elsewhere, then go through', async () => {
+      const problems = [];
+      for (const noRun of [false, true]) {
+        const data = pathFixture(), host = pathHost(data, { noRun });
+        await using(data, async root => {
+          openStep(root, 'f1'); await settle(); flowElsewhere(data);
+          typeIn(goalBox(root), 'Ship it'); runButton(root).click(); await settled();
+          const label = noRun ? 'copy' : 'run';
+          if (!(runNote(root)?.textContent === STALE && goalBox(root).value === 'Ship it')) problems.push(label + ': ' + runNote(root)?.textContent + ' / ' + goalBox(root).value);
+          await withClipboard(async () => {}, async () => { runButton(root).click(); await settled(); });
+          if (noRun ? !/Copied the run message/.test(runNote(root)?.textContent || '') : host.runs.length !== 2 || !/Sent/.test(runNote(root)?.textContent || '')) problems.push(label + ': trying again did not go: ' + runNote(root)?.textContent);
+        }, { actions: host.actions });
+      }
+      assert(!problems.length, problems.join('; '));
+    });
+    await test('stale groups: members, text and remove: a stale write is refused and said plainly, the typed instruction kept, and trying again goes through', async () => {
+      const problems = [], fixture = () => { const data = worldFixture(); data.structure.teams = [{ id: 't1', lead: 'impl-claude', members: ['oracle', 'researcher'], text: 'Report to impl-claude.' }]; return data; };
+      const elsewhere = data => { data.structure.teams[0].text = 'Changed elsewhere.'; };
+      { const data = fixture(), host = worldHost(data);
+        await using(data, async root => {
+          open(root, 'impl-claude'); await settle(); elsewhere(data);
+          const box = root.querySelector('[data-team-text]'); box.focus(); typeIn(box, 'Mine.'); press(box, 'Enter', { ctrlKey: true }); await settled();
+          const now = root.querySelector('[data-team-text]');
+          if (!(now.value === 'Mine.' && root.querySelector('[data-team-state]').textContent === STALE && data.structure.teams[0].text === 'Changed elsewhere.')) problems.push('text: ' + now.value + ' / ' + root.querySelector('[data-team-state]').textContent);
+          press(now, 'Enter', { ctrlKey: true }); await settled();
+          if (data.structure.teams[0].text !== 'Mine.') problems.push('text: trying again did not save');
+        }, { actions: host.actions }); }
+      for (const [label, control] of [['members', '[data-team-drop="researcher"]'], ['remove', '[data-team-remove="t1"]']]) {
+        const data = fixture(), host = worldHost(data);
+        await using(data, async root => {
+          open(root, 'impl-claude'); await settle(); elsewhere(data);
+          root.querySelector(control).click(); await settled();
+          if (!(noteLines(root).includes('error:' + STALE) && data.structure.teams.length === 1 && data.structure.teams[0].members.length === 2)) problems.push(label + ': ' + noteLines(root));
+          root.querySelector(control).click(); await settled();
+          if (label === 'members' ? data.structure.teams[0]?.members.join() !== 'oracle' : data.structure.teams.length) problems.push(label + ': trying again did not go: ' + host.calls.join(' | '));
+        }, { actions: host.actions });
+      }
+      assert(!problems.length, problems.join('; '));
+    });
+    await test('stale agents: rename, delete and a skill change: a stale write is refused and said plainly, the typed name kept, and trying again goes through', async () => {
+      const problems = [], fixture = () => { const data = worldFixture(); data.agents.push(agent('scout', 'build', { added: true, removable: true, skills: ['alpha'], skills_editable: true })); return data; };
+      const elsewhere = data => { data.agents.find(a => a.name === 'scout').model = 'test/model-b'; };
+      { const data = fixture(), host = worldHost(data);
+        await using(data, async root => {
+          open(root, 'scout'); await settle(); elsewhere(data);
+          await renameTo(root, 'scout', 'finder');
+          const box = root.querySelector('.ag-detail [data-rename]');
+          if (!(nodeOf(root, 'scout') && !nodeOf(root, 'finder') && noteLines(root).includes('error:' + STALE) && box?.value === 'finder')) problems.push('rename: ' + noteLines(root) + ' / ' + box?.value);
+          press(box, 'Enter'); await settled(); await settled();
+          if (!nodeOf(root, 'finder')) problems.push('rename: trying again did not rename');
+        }, { actions: host.actions }); }
+      { const data = fixture(), host = worldHost(data);
+        await using(data, async root => {
+          open(root, 'scout'); await settle(); elsewhere(data);
+          root.querySelector('[data-agent-remove]').click(); await settled();
+          if (!(nodeOf(root, 'scout') && noteLines(root).includes('error:' + STALE))) problems.push('delete: ' + noteLines(root));
+          root.querySelector('[data-agent-remove]').click(); await settled();
+          if (nodeOf(root, 'scout')) problems.push('delete: trying again did not delete');
+        }, { actions: host.actions }); }
+      { const data = fixture(), host = worldHost(data);
+        await using(data, async root => {
+          open(root, 'scout'); await settle(); elsewhere(data);
+          skillButton(root, 'remove:alpha').click(); await settled();
+          if (!(skillLines(root).includes('error:' + STALE) && data.agents.find(a => a.name === 'scout').skills.join() === 'alpha')) problems.push('skills: ' + skillLines(root));
+          skillButton(root, 'remove:alpha').click(); await settled();
+          if (data.agents.find(a => a.name === 'scout').skills.length) problems.push('skills: trying again did not remove it');
+        }, { actions: host.actions }); }
+      assert(!problems.length, problems.join('; '));
+    });
+    await test('stale skills: a skill\'s text write and delete: a stale write is refused and said plainly, the typed text kept, and trying again goes through', async () => {
+      const problems = [];
+      for (const label of ['write', 'delete']) {
+        const data = worldFixture(), host = worldHost(data);
+        data.agents.find(a => a.name === 'reviewer').skills = ['gamma'];
+        await using(data, async root => {
+          open(root, 'reviewer'); await settle(); skillOpener(root, 'gamma').click(); await settled();
+          host.texts.gamma = 'Changed elsewhere.';
+          const box = root.querySelector('[data-skill-text]'); typeIn(box, 'Mine.');
+          root.querySelector(label === 'write' ? '[data-skill-save]' : '[data-skill-delete]').click(); await settled();
+          if (!(root.querySelector('.ag-form-error')?.textContent === STALE && root.querySelector('[data-skill-text]')?.value === 'Mine.' && host.texts.gamma === 'Changed elsewhere.' && data.skills.some(skill => skill.name === 'gamma'))) problems.push(label + ': ' + root.querySelector('.ag-form-error')?.textContent + ' / ' + root.querySelector('[data-skill-text]')?.value);
+          if (label === 'write') { root.querySelector('[data-skill-save]').click(); await settled(); if (host.texts.gamma !== 'Mine.') problems.push('write: trying again did not save'); }
+          else { data.agents.find(a => a.name === 'reviewer').skills = []; root.querySelector('[data-skill-delete]').click(); await settled(); if (data.skills.some(skill => skill.name === 'gamma')) problems.push('delete: trying again did not delete: ' + host.calls.join(' | ')); }
+        }, { actions: host.actions });
+      }
+      assert(!problems.length, problems.join('; '));
+    });
+    await test('stale: every write that names a thing sends expect, the rev the view shows (reply revs for writes in a row); adds, reads and restores send none', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      data.structure.flows = [{ id: 'f1', path: ['impl-claude', 'reviewer'], text: 'Look.', source: 'drawn' }];
+      data.structure.teams = [{ id: 't1', lead: 'impl-claude', members: ['oracle', 'researcher'], text: 'Report.' }];
+      data.agents.push(agent('scout', 'build', { added: true, removable: true, skills: ['alpha'], skills_editable: true }));
+      const shown = (kind, key) => (kind === 'flow' ? data.structure.flows : kind === 'team' ? data.structure.teams : kind === 'agent' ? data.agents : data.skills).find(item => (item.id || item.name) === key)?.rev;
+      const sent = [];
+      const watch = fn => async request => { const [kind, key] = request.op === 'rename' || (request.op === 'remove' && request.name) ? ['agent', request.name] : request.agent ? ['agent', request.agent] : request.lead !== undefined || /^t\d/.test(request.id || '') ? ['team', request.id] : request.op === 'write' || request.op === 'delete' || request.op === 'read' || request.op === 'restore' || request.op === 'create' ? ['skill', request.id] : ['flow', request.id]; sent.push({ op: request.op, kind, key, expect: request.expect, shown: shown(kind, key) }); return fn(request); };
+      const actions = Object.fromEntries(Object.entries(host.actions).map(([name, fn]) => [name, watch(fn)]));
+      await using(data, async root => {
+        openStep(root, 'f1'); await settle();
+        const box = root.querySelector('[data-route-text]'); box.focus(); typeIn(box, 'One.'); press(box, 'Enter', { ctrlKey: true }); await settled();
+        typeIn(box, 'Two.'); press(box, 'Enter', { ctrlKey: true }); await settled();
+        root.querySelector('.ag-close').click(); await settle();
+        open(root, 'impl-claude'); await settle();
+        const team = root.querySelector('[data-team-text]'); team.focus(); typeIn(team, 'Mine.'); press(team, 'Enter', { ctrlKey: true }); await settled();
+        root.querySelector('[data-team-drop="researcher"]').click(); await settled();
+        await reopen(root, 'scout'); skillButton(root, 'remove:alpha').click(); await settled();
+        await reopen(root, 'impl-openai'); skillOpener(root, 'beta').click(); await settled();
+        typeIn(root.querySelector('[data-skill-text]'), 'Beta, better.'); root.querySelector('[data-skill-save]').click(); await settled();
+        undoKey(viewportOf(root)); await settled();
+        await renameTo(root, 'scout', 'finder');
+        await reopen(root, 'finder'); root.querySelector('[data-agent-remove]').click(); await settled();
+        openStep(root, 'f1'); await settle(); press(viewportOf(root), 'Delete'); await settled();
+      }, { actions });
+      const writes = sent.filter(item => !['add', 'read', 'restore', 'create'].includes(item.op)), quiet = sent.filter(item => ['add', 'read', 'restore', 'create'].includes(item.op));
+      const ops = writes.map(item => item.kind + ':' + (item.op ?? 'skills')).join();
+      assert(['flow:text', 'team:text', 'team:members', 'agent:skills', 'skill:write', 'agent:rename', 'agent:remove', 'flow:remove'].every(op => ops.includes(op)), 'not every kind of write was made: ' + ops);
+      assert(writes.every(item => REV.test(item.expect || '') && (item.op === 'text' && item.kind === 'flow' || item.expect === item.shown)), 'a write went without expect, or with a rev other than the one shown: ' + writes.filter(item => !REV.test(item.expect || '') || (item.expect !== item.shown && !(item.op === 'text' && item.kind === 'flow'))).map(item => item.kind + ':' + item.op + ' ' + item.expect + ' shown ' + item.shown).join() + ' / all: ' + writes.filter(item => !REV.test(item.expect || '')).map(item => item.kind + ':' + item.op).join());
+      assert(host.expects.every(line => REV.test(line.split(':').at(-1))) && host.expects.length >= writes.length, 'the host saw a write without expect: ' + host.expects.join());
+      assert(!quiet.some(item => item.expect !== undefined), 'an add, read or restore sent expect: ' + quiet.filter(item => item.expect !== undefined).map(item => item.op).join());
+      const texts = writes.filter(item => item.kind === 'flow' && item.op === 'text');
+      assert(texts.length === 2 && texts[0].expect !== texts[1].expect, 'the second save in a row did not expect what the first wrote: ' + texts.map(item => item.expect).join());
+    });
+    await test('stale: a snapshot without rev (an older back end) sends no expect, and every write still goes through', async () => {
+      const data = worldFixture(), host = worldHost(data, { revs: false });
+      data.structure.flows = [{ id: 'f1', path: ['impl-claude', 'reviewer'], text: 'Look.', source: 'drawn' }];
+      data.structure.teams = [{ id: 't1', lead: 'impl-claude', members: ['oracle', 'researcher'], text: 'Report.' }];
+      data.agents.push(agent('scout', 'build', { added: true, removable: true, skills: ['alpha'], skills_editable: true }));
+      const sent = [], watch = fn => async request => { sent.push(request); return fn(request); };
+      const actions = Object.fromEntries(Object.entries(host.actions).map(([name, fn]) => [name, watch(fn)]));
+      await using(data, async root => {
+        assert(!JSON.stringify(data).includes('"rev"'), 'the older back end reports rev');
+        openStep(root, 'f1'); await settle();
+        const box = root.querySelector('[data-route-text]'); box.focus(); typeIn(box, 'One.'); press(box, 'Enter', { ctrlKey: true }); await settled();
+        root.querySelector('.ag-close').click(); await settle();
+        open(root, 'impl-claude'); await settle();
+        const team = root.querySelector('[data-team-text]'); team.focus(); typeIn(team, 'Mine.'); press(team, 'Enter', { ctrlKey: true }); await settled();
+        root.querySelector('[data-team-drop="researcher"]').click(); await settled();
+        await reopen(root, 'scout'); skillButton(root, 'remove:alpha').click(); await settled();
+        await reopen(root, 'impl-openai'); skillOpener(root, 'beta').click(); await settled();
+        typeIn(root.querySelector('[data-skill-text]'), 'Beta, better.'); root.querySelector('[data-skill-save]').click(); await settled();
+        await renameTo(root, 'scout', 'finder');
+        await reopen(root, 'finder'); root.querySelector('[data-agent-remove]').click(); await settled();
+        openStep(root, 'f1'); await settle(); press(viewportOf(root), 'Delete'); await settled();
+      }, { actions });
+      assert(sent.length >= 8 && !sent.some(request => 'expect' in request), 'an older back end was sent expect: ' + sent.filter(request => 'expect' in request).map(request => request.op).join());
+      assert(data.structure.flows.length === 0 && data.structure.teams[0].text === 'Mine.' && data.structure.teams[0].members.join() === 'oracle' && host.texts.beta === 'Beta, better.' && !data.agents.some(a => a.name === 'scout' || a.name === 'finder'), 'a write without expect did not go through: ' + host.calls.join(' | '));
     });
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
   })().catch(error => { document.getElementById('results').textContent = 'RESULT: FAIL ' + error.stack; });

@@ -27,7 +27,8 @@
         const response = await fetch(path, { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request) });
         let data = null;
         try { data = await response.json(); } catch (_) { /* the status says it */ }
-        if (!response.ok || !data || data.error) throw new Error(data?.error || failed + ' (' + response.status + ')');
+        // The status goes with the error, so a 409 (changed elsewhere since it was shown) is told apart from a refusal.
+        if (!response.ok || !data || data.error) throw Object.assign(new Error(data?.error || failed + ' (' + response.status + ')'), { status: response.status, rev: data?.rev });
         return data;
       };
       const flow = post('/api/structure/flow', 'The flow could not be changed');
