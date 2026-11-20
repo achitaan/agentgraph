@@ -335,7 +335,11 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   says where it went ("Changed in every preset that lists A and in SKILLS.md.", or "in A's agent file."
 //   for an added agent) followed by the back end's message; a removed row stays in place, struck and inert,
 //   for 1 s or until the pointer leaves the list; undo puts the skill back at its old place in the list;
-//   an error line wraps and is scrolled into view.
+//   an error line wraps and is scrolled into view. The back end appends a skill added back, so the place is the
+//   view's: kept with the positions (same storage, key POSITIONS_KEY + ":skill-order"), it holds after a reload
+//   and after later changes to that agent's skills (a skill added after it goes last, where the back end puts
+//   it; "every skill" hands the order back to the back end). Another browser, or the Desktop panel's own
+//   storage, shows the file's order: for every view to agree the skills endpoint would need a place on an add.
 // options.actions.roster: optional (request) => Promise. The requests of POST /api/roster (section 3):
 //   { op: "add", name, template?: "blank" | "verifier", copy_of?, model?, variant?, description?, prompt?,
 //   skills?, read_only? } (a name alone adds a blank agent with the back end's defaults: description "An agent
@@ -345,8 +349,8 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   { agent, renamed, record, message, rev }) and { op: "restore", record }; text, rename and remove take an
 //   optional expect (the agent's rev). Shown only when the snapshot's roster.editable is true (else the hub's
 //   details give roster.why). With it: a "+" glyph on the canvas (aria-label "Add an agent", key N)
-//   opens a menu: Blank agent (the view sends template "blank" and model roster.models[0], which replaces
-//   the back end's default model), Verifier, or a copy of any agent. The new circle
+//   opens a menu: Blank agent (the view sends template "blank" and no model, so the back end's default, the
+//   default verifier's model, applies as on the command line), Verifier, or a copy of any agent. The new circle
 //   follows the pointer and is dropped by a click or a release (Escape cancels); it settles at the
 //   nearest free spot beside what it would cover. From the keyboard it is placed at once at a free spot.
 //   On the drop the view asks { op: "add" } under the first free name (verifier-2, impl-claude-2,
@@ -356,7 +360,7 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   { op: "rename", name: OLD, to: NEW }; its place in every layout moves to the new name and the details
 //   say "Renamed OLD to NEW.". A refusal changes nothing in the view (name, place, lines, saved places,
 //   undo) and is the agent's error line, announced. Undo sends { op: "restore", record } with the reply's
-//   record and moves the place back; a refused undo changes nothing, says why and stays to try again.
+//   record and moves the place back; a refused undo changes nothing and says what and why (see Undo below).
 //   Renaming an agent just added is part of adding it (undo removes it under the new name). An agent with
 //   added: true draws no line at all (not even the hub's spoke) until it is on a flow or a group, has a
 //   busy session or a task-graph step. Delete rule: Delete removes, in this order, the focused flow,
@@ -366,13 +370,23 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   or a group line, never an agent. The hub, the council and its seats are never removed (removable
 //   false shows the reason). Removing an agent says the back end's message; Ctrl/Cmd+Z sends
 //   { op: "restore", record } and brings back its flows and its place. Focus stays in the view after any
-//   delete, so Ctrl/Cmd+Z works straight after a mouse delete.
+//   delete, so Ctrl/Cmd+Z works straight after a mouse delete. While a new circle's add is out it stays drawn
+//   whatever the user opens; a refusal is always shown (the new agent's details with Try again), and a success
+//   opens the new agent only if the user has opened nothing else since the drop.
+//   An added agent's details have its instruction (the system prompt in its file) in a monospace box under the
+//   name: read with { op: "read", name } when the details open (text, rev), saved with
+//   { op: "text", name, text, expect } by the rules of a path's instruction (after a pause, on leaving the box,
+//   Ctrl/Cmd+Enter, on page hide; one undo step per editing session, undo sends { op: "text" } with the earlier
+//   text). A blank agent's is empty, with the placeholder "Say what this agent does.". Read-only (no box to
+//   type in) when roster.editable is false; a preset agent has none.
 // options.actions.skillfile: optional (request) => Promise. { op: "read", id } → { text, description, rev, ... },
 //   { op: "write", id, text } → { record, rev, ... }, { op: "create", id, description, text, assign? },
 //   { op: "delete", id } → { record } and { op: "restore", record }; write and delete take an optional expect
 //   (the skill's rev). Full shapes: POST /api/skillfile (section 3). A skill's name in an agent's
 //   details opens its text in an editor (Save, Delete, undo for each); a skill with editable false shows
-//   its text read-only with why. "New skill" makes one and gives it to the agent in one request.
+//   its text read-only with why. "New skill" makes one and gives it to the agent in one request. Text typed in
+//   a skill and not saved outlives the details (Escape, a click away): opened again the skill shows it as
+//   Changed, and its Save expects the rev it was typed against.
 // options.actions.team: optional (request) => Promise. { op: "add", lead, members, text? } → { team },
 //   { op: "members", id, members }, { op: "text", id, text } and { op: "remove", id }, each but add with an
 //   optional expect (the group's rev). structure.teams is [{ id, lead, members, text, rev }] (the user's word is group). Members sit evenly on one circle round
@@ -387,17 +401,20 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   Run: a goal box (required, at most 4,000 characters counted as characters; a counter "N of 4,000" from
 //   3,600, "Too long: …" past the limit). Enter is a new line; Ctrl/Cmd+Enter or the button runs. With
 //   options.actions.run the button is Run and sends { flow: id, goal }; while it is out the button is busy
-//   ("Sending…", disabled) and nothing fires twice; the result line is the reply's message, else "Sent to
-//   the orchestrator (session S).", or the rejection's message. (The view also reads { sent: false, message }
-//   as not sent. Desktop, the only host with run, resolves only { sent: true, session } and rejects on any
-//   failure, so neither message nor sent: false ever comes from it.) Without it the button is "Copy run message":
+//   ("Sending…", disabled) and nothing fires twice. Only a reply with sent === true reads as sent: its message,
+//   else "Sent to the orchestrator (session S).", and the goal is cleared. A rejection (Desktop, the only host
+//   with run, resolves { sent: true, session } and rejects on any failure) is the reason in plain words, else
+//   "Not sent"; { sent: false, message } is its message; any other reply reads "Not confirmed as sent. Look in
+//   the orchestrator's chat before you send it again."; in each of these the goal stays and the line is an
+//   announced error. Without it the button is "Copy run message":
 //   it asks actions.flow { op: "prompt", id, goal }, puts reply.text on the clipboard and says so; when the
 //   clipboard is refused or missing it shows the text read-only, focused and selected. A goal stays (closing
 //   and reopening the details, refreshes) until it is sent. Sending is not a change to the structure and has
 //   no undo. No Run without actions.run or actions.flow.
 //   Cost (when the snapshot carries structure.flows[].stats): runs, passed, rounds (avg · most), cost
-//   (total · avg), last run (stats.last, Unix seconds: the newest run's updated time); stats null reads "Not run
-//   yet"; a null field reads "—", never 0. No chart.
+//   (total · avg), last run (stats.last, Unix seconds: the newest run's updated time, read as "just now" under
+//   90 s, then "Nm ago", "Nh ago", "Nd ago"); stats null reads "Not run yet"; a null field reads "—", never 0.
+//   No chart.
 //   Command: a switch "Use as a command" (role switch). Without a name it is aria-disabled and says "Give
 //   this path a name to use it as a command." On sends { op: "command", id, on }; on, it shows /NAME (from
 //   structure.flows[].command) and when it applies, as the back end reports it: the command reply's live
@@ -409,8 +426,11 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   "/NAME stays in OpenCode until OpenCode reloads … or restarts."; each is announced with the change. A
 //   sentence that names neither is shown as sent. A refusal is the switch's error line and is announced.
 //   Ctrl/Cmd+Z turns it back.
-//   Undo of a removed path re-adds it, then names it and turns its command on again, three requests. (The back
-//   end's add can carry name and command in one request; the view does not use that.)
+//   Undo of a removed path is one request, { op: "add", path, text, name?, command?: true } (name when it had
+//   one, command when it was a command), so one undo cannot stop half way; refused, nothing comes back and the
+//   view says what could not be undone and why (see Undo below). Later steps that named the removed path (path
+//   steps only, never a group's with the same id) follow it to its new id. Remove and the command switch are not
+//   asked for again while their request is out (a double click, a held Enter or Delete asks once).
 //   Keys: G on a focused path, or on the canvas with a path picked, opens its details at the goal box (the
 //   path's aria-keyshortcuts end with G when it can run).
 //   Fit (the button or F) never takes names under 11 px either; past that the graph pans.
@@ -423,18 +443,21 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 // Refit: opening or closing the details refits the graph into the space left (every circle and name clear of the
 //   sheet, the figures and the controls; names at 11 px or more, past that it pans), unless the user has panned or
 //   zoomed since the last fit: then their view stays. A change of the pane's own size or of arrangement refits.
+//   A new layout (an agent added or removed, a loop drawn) and a keyboard nudge refit only while the view is not
+//   the user's: after a pan or zoom their view stays (the selected agent is brought into it); Fit hands it back.
 // Zoom floor: wheel, Ctrl+wheel, pinch, the - key and Fit all stop where names are 11 px on screen (12 px names
 //   at scale 11/12). The background pans, like an agent drags, only once the pointer has moved more than 5 px.
 // A refused path keeps the reason as the tooltip of its first agent and of the newest agent (which shakes and
 //   shows it in its details).
-// A blank agent is asked for as { op: "add", name, template: "blank" (, model: roster.models[0]) } (the back end
-//   takes a name alone as a blank agent too, with the default verifier's model; the view still names the template
-//   and its model). Any refused add removes the new
+// A blank agent is asked for as { op: "add", name, template: "blank" } with no model, so the back end's default
+//   (the default verifier's model) applies, as with `agentgraph agent add NAME`. Any refused add removes the new
 //   circle at once; the details keep the reason (role alert, announced) with Try again (puts the circle back where it
 //   was and asks again) and Cancel. Back-end reasons in developer words are said plainly (an agent with no file in the
 //   structure folder, a missing description or model, a taken name); anything else is shown as sent.
 // Delete on an agent that stays (the orchestrator, the council, a seat, one the roster keeps) shakes it, sets the
-//   reason as its tooltip and announces it, with the details open or closed; nothing is asked of the host.
+//   reason as its tooltip and announces it, with the details open or closed, and shows it for 6 s in the status
+//   line at the top left (11 px, never in the graph; aria-hidden, the live region says it); nothing is asked of
+//   the host.
 // After a skill save, create or delete, focus stays on the control used (Save, or the text box after Ctrl/Cmd+Enter),
 //   goes to the new skill's row, or to the agent's skill list after a delete; never to the close button.
 // Undo of a skill change puts the skill back in its place in the list and keeps that order across reloads (same
@@ -452,13 +475,39 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   members, text and remove; roster rename and remove; skills; skillfile write and delete. Adds, reads and restores
 //   (undo of a rename, delete or skill delete) send none. An instruction box or path name sends the rev it was drawn
 //   with, so a change drawn while it is being typed is not overwritten. A write's reply rev (reply.flow.rev,
-//   reply.team.rev, a skillfile reply's rev) is the one shown until a snapshot fetched after it is drawn, and writes
-//   to one thing go one after another, so saves in a row each expect what the last one wrote. A refusal with
+//   reply.team.rev, reply.rev of skills, roster text and rename (under the new name) and skillfile) is the one
+//   shown until a snapshot fetched after it is drawn, and writes to one thing go one after another, so saves in a
+//   row each expect what the last one wrote. The view's own accepted writes are remembered as moves from the rev
+//   they expected to the rev they were answered with, and every expect is carried along them: a field drawn (or a
+//   request queued, or an undo step made) at rev A expects B once this view's own write moved A to B, also when
+//   an older snapshot asked for before that write is drawn after it; a change made anywhere else breaks the chain
+//   and is refused. A group's members after a members change are the answer's (reply.team.members) until a
+//   snapshot fetched after it is drawn, so a second change before then builds on them. A refusal with
 //   status 409 (or error.stale, or a message saying it "changed since you opened it") refreshes the view, keeps
 //   what was typed (instruction, path name, new agent name, skill text, run goal) and says "This was changed
 //   somewhere else since you opened it. The view now shows the latest; try again." (announced); trying again
-//   expects the latest rev. A snapshot without rev sends no expect. index.html passes the response status and
-//   rev on the thrown error.
+//   expects the latest rev. An instruction box (a path's, a group's, an added agent's) refused as stale keeps the
+//   typing, drops the save queued behind it, takes the latest text as its saved text and stops saving by itself
+//   (pause, page hide) until the user saves it by leaving the box or Ctrl/Cmd+Enter; that save expects the latest
+//   and its undo goes back to the latest. A snapshot without rev sends no expect. index.html passes the response
+//   status and rev on the thrown error.
+// Undo (Ctrl/Cmd+Z): each step's request expects the rev its own write produced (carried along the view's later
+//   writes), so it never lands on a change made elsewhere since or on another thing that took the same id; adds
+//   whose reply has no rev (roster add, skillfile create) fall back to the rev shown. Refused (409, or a refusal
+//   with a reason), the step is dropped and the view says "Could not undo WHAT: WHY" (WHAT: the path's
+//   instruction, name or command, adding or removing the path, the skill change, deleting, adding or renaming the
+//   agent, the agent's instruction, the change to the skill, making the skill, making or removing the group, the
+//   group's members or instruction; WHY: the back end's reason, or "it was changed somewhere else since. The view
+//   now shows the latest."), so older steps stay reachable. With no answer within 15 s, a failed connection (a
+//   TypeError from fetch, or error.transport) or a change to the same thing still out, the step stays: "Not
+//   undone: … Ctrl+Z tries again.".
+// reset() drops the history and every answer to a write sent before it (neither said nor remembered).
+// A write, or the refresh after a stale refusal, that gets no answer within 15 s is given up: what was typed is
+//   kept, later writes to that thing go ahead, a late answer is dropped (never drawn over newer state), and the
+//   view says "agentgraph did not answer within 15 seconds, so the view stopped waiting. Try again." (after a
+//   stale refusal whose refresh hangs: "…and the latest did not load within 15 seconds. Try again."). A snapshot
+//   that does not come within 15 s leaves the drawing as it is. options.clock ({ setTimeout, clearTimeout })
+//   replaces the timer, for tests.
 // options.motion: "full" (default) or "none" for a still picture (tests, screenshots). The system's
 //   reduced-motion setting is always honoured.
 // options.scheme: "auto" (default; follows a data-color-scheme on an ancestor or the document element,
