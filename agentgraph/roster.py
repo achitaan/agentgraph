@@ -1,9 +1,12 @@
-"""Add, remove or restore agents in the plugin's preset file, with undo records."""
+"""Add, remove, rename or restore agents in the plugin's preset file and the agents folder, with undo records.
+
+Name checks cover the user-level setup only (the presets, `~/.config/opencode/` and its `agents/`, `agent/` and
+`opencode.json`), not a project's own `opencode.json` or `.opencode/agent(s)/` folders."""
 from __future__ import annotations
 
 import argparse
 import base64
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import copy
 import fcntl
 import hashlib
@@ -16,11 +19,12 @@ import stat
 import sys
 import unicodedata
 
-from . import agentfiles, skillset, sources
+from . import agentfiles, flowcommands, skillset, sources
 from . import structure as structure_module
 from . import teams as teams_module
 from .skillset import BACKUPS, CONFIG, MAP, SkillsetError
-from .snapshot_json import FLOW_FILES_LIMIT, FLOW_ID, FLOWS_FOLDER, STRUCTURE_DIR, TEAMS_FOLDER, read_flow, read_settings
+from .snapshot_json import (FLOW_FILES_LIMIT, FLOW_ID, FLOWS_FOLDER, STRUCTURE_DIR, TEAMS_FOLDER, flow_fields, hub_names,
+                            load_structure, read_flow, read_settings)
 
 RESTART = skillset.RESTART
 
@@ -896,8 +900,11 @@ def _structure_removal(root, root_fd, name, with_file):
         return []
     changes = []
     for file, data in _listing(root_fd, FLOWS_FOLDER):
-        flow = read_flow(data)
-        if flow is not None and name in flow[0]:
+        flow = flow_fields(data)
+        if flow is not None and name in flow["path"]:
+            if flow["command"] and flow["name"]:  # its command file is outside this record: never left behind
+                raise RosterError(f"flow {file[:-3]} through {name} has the command /{flow['name']}; turn it off first "
+                                  f"(agentgraph flow command {file[:-3]} --off), then remove {name}. Nothing was changed")
             changes.append({"folder": FLOWS_FOLDER, "name": file, "before": data, "after": None})
     groups = _listing(root_fd, TEAMS_FOLDER)
     if groups:
@@ -995,7 +1002,7 @@ def _revert(root_fd, changes):
 
 def _encode(changes):
     return [{"folder": change["folder"], "name": change["name"],
-             "before": base64.b64encode(change["before"]).decode("ascii"),
+             "before": None if change["before"] is None else base64.b64encode(change["before"]).decode("ascii"),
              "after": None if change["after"] is None else base64.b64encode(change["after"]).decode("ascii")}
             for change in changes]
 
@@ -1263,9 +1270,12 @@ def _plan_added(obj, name, *, model, variant, description, prompt, skills, read_
         if base["text"] is None or not str(base["text"]).strip():
             base["text"] = f"You are {name}, a copy of {copy_of}."
     else:
-        for value, kind in ((model, "model"), (description, "description"), (prompt, "prompt")):
-            if value is None:
-                raise RosterError(f"{kind} is required (or start from a template or a copy of an agent)")
+        # Blank (template "blank" or none; the view sends a name alone): a default description, an empty
+        # instruction the user then writes, and the model the verifier template would use (the presets' default
+        # verifier, a light checking model, so a blank agent costs little until the user picks its model).
+        spec = _source_spec(obj, "verifier")
+        base["model"] = _model_of(spec) if spec is not None else None
+        base["description"], base["text"] = agentfiles.BLANK_DESCRIPTION, ""
     if model is not None:
         base["model"] = model if "#" in model or not variant else _with_variant(model, variant)
     if variant is not None:
@@ -1337,17 +1347,26 @@ def add_agent(name, *, model=None, variant=None, description=None, prompt=None, 
     if read_settings((text_description + "\n").encode("utf-8"))[0]:
         raise RosterError("the description may not start like a structure setting (pool:, escalates_to: or seats:)")
     data = agentfiles.render(text_description, text_model, rules,
+                             "" if not text.strip() else  # a blank agent's instruction starts empty
                              agentfiles._clean_text(text, "the instruction", agentfiles.MAX_TEXT, single=False))
     root = Path(structure) if structure is not None else STRUCTURE_DIR
     with _structure_locked(root) as root_fd:
         file = _agent_file(root_fd, name, copy_of, agentfiles.parse(data)["description"])
         changes = [file] if file else []
-        _apply(root_fd, changes)
+        failed = []
         try:
-            agentfiles.replace(name, None, data, agents_dir=agents_dir)
-        except BaseException:
-            _revert(root_fd, changes)
-            raise
+            _apply(root_fd, changes, failed)
+            try:
+                agentfiles.replace(name, None, data, agents_dir=agents_dir)
+            except BaseException:
+                failed += _revert(root_fd, changes)
+                raise
+        except BaseException as exc:
+            if not failed:
+                raise
+            # A structure file that stays would hold the name: say which, so it can be deleted by hand.
+            raise RosterError(f"adding {name!r} failed ({exc}) and {', '.join(failed)} could not be taken back; "
+                              "delete it from the structure folder before adding the name again") from exc
     parsed = agentfiles.parse(data)
     return {"agent": name, "kind": "added", "action": "added", "presets": [], "changed": True,
             "file": str(Path(os.path.abspath(agents_dir)) / f"{name}.md"), "copy_of": copy_of, "template": template,
@@ -1455,8 +1474,10 @@ def _structure_back(root_fd, root, removed):
     return changes
 
 
-def _restore_added(record, *, backups, root, agents_dir):
+def _restore_added(record, *, backups, root, agents_dir, commands_dir=None, config=CONFIG):
     kind, name, data = agentfiles.load_record(record, backups)
+    if kind == "rename":
+        return _restore_rename(name, data, root=root, agents_dir=agents_dir, commands_dir=commands_dir, config=config)
     if kind == "text":
         return {"agent": name, "kind": "added", "action": "restored the instruction",
                 **agentfiles.restore_text(record, agents_dir=agents_dir, backups=backups)}
@@ -1466,6 +1487,12 @@ def _restore_added(record, *, backups, root, agents_dir):
     if file is None or not agentfiles.is_added(file) or agentfiles.parse(file) is None:
         raise RosterError("invalid undo record: the file is not an added agent's")
     removed = _decode(data)
+    # The name may have become taken or forbidden since the removal (a preset agent, a displayName...).
+    obj = skillset._parse(skillset._read(config, "config")[0])
+    try:
+        _check_new_name(obj, name, list(obj["presets"]), agents_dir)
+    except RosterError as exc:
+        raise RosterError(f"the name is taken: {exc}; nothing was restored") from None
     with _structure_locked(root) as root_fd:
         with agentfiles._folder(agents_dir, create=True) as fd:
             taken = agentfiles._taken(fd, name)
@@ -1484,15 +1511,17 @@ def _restore_added(record, *, backups, root, agents_dir):
 
 
 def restore_agent(record, *, config=CONFIG, map_path=MAP, backups=BACKUPS, structure=None, schema=None,
-                  agents_dir=AGENTS_DIR):
+                  agents_dir=AGENTS_DIR, commands_dir=None):
     """Put back everything a removal took out, from the record path it returned: an added agent's file byte for
     byte, or the preset entries and the SKILLS.md row; with the structure file, the flows with their text and the
     groups. Refused (and nothing changed) when any of it was changed or taken again since. The record of an
-    instruction change restores the earlier instruction exactly."""
+    instruction change restores the earlier instruction exactly; the record of a rename gives the agent its old
+    name back with everything the rename changed (`commands_dir`: where its path commands are)."""
     config, map_path = _start(config, map_path)
     root = Path(structure) if structure is not None else STRUCTURE_DIR
     if isinstance(record, str) and "-agent-files" + os.sep in record:
-        return _restore_added(record, backups=backups, root=root, agents_dir=agents_dir)
+        return _restore_added(record, backups=backups, root=root, agents_dir=agents_dir, commands_dir=commands_dir,
+                              config=config)
     path = _record_path(record, backups)
     data = _load_record(path)
     _check_record(data)
@@ -1514,6 +1543,310 @@ def restore_agent(record, *, config=CONFIG, map_path=MAP, backups=BACKUPS, struc
             "presets": [item["preset"] for item in data.get("presets", [])], "changed": True,
             "restored": _removed(removed, name), "backup": info["backup"], "previous": info["previous"],
             "warnings": problems, "message": RESTART}
+
+
+# --- rename an added agent -------------------------------------------------------------------------
+
+RENAME_PROTECTED = "The orchestrator, the council and council seats cannot be renamed."
+RENAME_DEFAULT = ("{name!r} is one of the plugin's agents, not one added here; only an added agent can be renamed "
+                  "(copy it under the new name instead)")
+
+
+def _renamed(names, name, to):
+    return [to if item == name else item for item in names]
+
+
+def _rename_changes(root, root_fd, name, to):
+    """(structure changes, [(flow before, flow after)] for each flow whose command is on, hubs) that move `name` to
+    `to` in the structure folder: its own file, every flow through it and every group it leads or is in. A generated
+    instruction follows the new name; one the user wrote is kept as it is. Refused when the folder already names
+    `to` anywhere."""
+    if root_fd is None:
+        return [], [], frozenset()
+    shape = load_structure(root)
+    hubs = hub_names(shape) if shape else frozenset()
+    loaded = {flow["id"] + ".md": flow for flow in (shape["flows"] if shape else [])}
+    changes, commands = [], []
+    for file, data in _listing(root_fd, FLOWS_FOLDER):
+        fields = flow_fields(data)
+        if fields is None:
+            continue
+        if to in fields["path"]:
+            raise RosterError(f"flow {file[:-3]} already names {to!r}; nothing was changed")
+        if name not in fields["path"]:
+            continue
+        path = _renamed(fields["path"], name, to)
+        text = fields["text"]
+        if text == structure_module.flow_text(fields["path"], hubs):
+            text = structure_module.flow_text(path, hubs)
+        after = structure_module.flow_file(path, text, fields["name"] or None, fields["command"])
+        changes.append({"folder": FLOWS_FOLDER, "name": file, "before": data, "after": after})
+        flow = loaded.get(file)
+        if flow is not None and flow["command"]:
+            commands.append((flow, {**flow, "path": path, "text": text}))
+    groups = _listing(root_fd, TEAMS_FOLDER)
+    if groups:
+        try:
+            hub = teams_module._hub(teams_module._agents(Path(root)))
+        except teams_module.TeamError:
+            hub = "orchestrator"
+    for file, data in groups:
+        team = teams_module.read_team(data)
+        if team is None:
+            continue
+        lead, members, text = team
+        if to == lead or to in members:
+            raise RosterError(f"group {file[:-3]} already names {to!r}; nothing was changed")
+        if lead != name and name not in members:
+            continue
+        new_lead, new_members = (to if lead == name else lead), _renamed(members, name, to)
+        if text == teams_module.team_text(lead, members, hub):
+            text = teams_module.team_text(new_lead, new_members, hub)
+        changes.append({"folder": TEAMS_FOLDER, "name": file, "before": data,
+                        "after": teams_module.team_file(new_lead, new_members, text)})
+    for folder in _group_folders(root_fd):
+        fd = _open_folder(root_fd, folder, False)
+        try:
+            data, taken = _read_at(fd, name + ".md"), _read_at(fd, to + ".md")
+        finally:
+            os.close(fd)
+        if taken is not None:
+            raise RosterError(f"{to!r} already has a file in the structure folder ({folder}/{to}.md)")
+        if data is not None:
+            changes += [{"folder": folder, "name": to + ".md", "before": None, "after": data},
+                        {"folder": folder, "name": name + ".md", "before": data, "after": None}]
+    return changes, commands, hubs
+
+
+def _command_changes(folder, commands, hubs):
+    """{"name", "before", "after"} for each path command a rename rewrites. A command file this toolkit did not
+    write is left alone, as a missing one is; one changed by hand refuses the rename."""
+    out = []
+    try:
+        for before, after in commands:
+            current = folder.read(before["command"])
+            if current is None or not flowcommands.is_ours(current):
+                continue
+            if current != flowcommands.render(before, hubs):
+                raise RosterError(f"the command file {before['command']}.md of flow {before['id']} was changed by hand; "
+                                  "nothing was changed. Edit or delete it, or turn the command off, first")
+            out.append({"name": before["command"], "before": current, "after": flowcommands.render(after, hubs)})
+    except flowcommands.CommandError as exc:
+        raise RosterError(str(exc)) from None
+    return out
+
+
+def _write_commands(folder, changes, done):
+    try:
+        for change in changes:
+            folder.write(change["name"], change["after"], change["before"])
+            done.append(change)
+    except flowcommands.CommandError as exc:
+        raise RosterError(str(exc)) from None
+
+
+def _revert_commands(folder, done):
+    missed = []
+    for change in reversed(done):
+        try:
+            folder.write(change["name"], change["before"], change["after"])
+        except (OSError, flowcommands.CommandError):
+            missed.append(f"commands/{change['name']}.md")
+    return missed
+
+
+def _encode_commands(changes):
+    return [{"name": c["name"], "before": agentfiles.b64(c["before"]), "after": agentfiles.b64(c["after"])}
+            for c in changes]
+
+
+def rename_agent(name, to, *, config=CONFIG, map_path=MAP, backups=BACKUPS, structure=None, agents_dir=AGENTS_DIR,
+                 commands_dir=None):
+    """Rename an added agent as one undoable step: its agent file (same bytes, new name; live at once), its file in
+    the structure folder, every flow and group that names it and the command file of each of those paths whose
+    command is on (`commands_dir`, default OpenCode's commands folder; opened only when there is one). Refused for
+    the orchestrator, the council, seats, the plugin's agents and hand-written files; `to` passes the checks of a
+    new agent's name. Returns `record`, which `restore_agent` takes to give the old name back byte for byte."""
+    config, map_path = _start(config, map_path)
+    skillset._agent_name(name)
+    obj = skillset._parse(skillset._read(config, "config")[0])
+    if ALIASES.get(name, name) in PROTECTED or name.startswith(SEAT_PREFIX) or name in skillset._seat_names(obj):
+        raise RosterError(RENAME_PROTECTED)
+    files = agentfiles.listing(agents_dir)
+    info = files.get(name)
+    if info is None:
+        if name in BUILTIN or _source_spec(obj, name) is not None:
+            raise RosterError(RENAME_DEFAULT.format(name=name))
+        raise RosterError(f"there is no added agent {name!r}")
+    if not info["added"] or not info["editable"]:
+        raise RosterError(info["why"])
+    if not isinstance(to, str):
+        raise RosterError("the new name must be text")
+    if to == name:
+        raise RosterError(f"{name!r} already has that name")
+    agentfiles.check_name(to)
+    _check_new_name(obj, to, list(obj["presets"]), agents_dir)
+    root = Path(structure) if structure is not None else STRUCTURE_DIR
+    with _structure_locked(root) as root_fd:
+        with agentfiles._folder(agents_dir) as fd:
+            data = agentfiles._read_at(fd, name + ".md")
+            held = agentfiles._taken(fd, to)
+        if held:
+            raise RosterError(f"{to!r} is already an agent file in the agents folder ({', '.join(held)})")
+        if data is None or not agentfiles.is_added(data) or agentfiles.parse(data) is None:
+            raise RosterError(f"there is no added agent {name!r}")
+        changes, commands, hubs = _rename_changes(root, root_fd, name, to)
+        with flowcommands.Folder(commands_dir, create=False) if commands else nullcontext() as folder:
+            command_changes = _command_changes(folder, commands, hubs) if commands else []
+            record = agentfiles.save_record(backups, "rename", name, {
+                "version": 1, "op": "rename", "agent": name, "to": to, "kind": "added", "file": agentfiles.b64(data),
+                "structure": _encode(changes), "commands": _encode_commands(command_changes)})
+            failed, written = [], []
+            try:
+                _apply(root_fd, changes, failed)
+                try:
+                    _write_commands(folder, command_changes, written)
+                    agentfiles.replace(to, None, data, agents_dir=agents_dir)
+                    try:
+                        agentfiles.replace(name, data, None, agents_dir=agents_dir)
+                    except BaseException:
+                        try:
+                            agentfiles.replace(to, data, None, agents_dir=agents_dir)
+                        except (OSError, SkillsetError):
+                            failed.append(f"agents/{to}.md")
+                        raise
+                except BaseException:
+                    failed += _revert_commands(folder, written)
+                    failed += _revert(root_fd, changes)
+                    raise
+            except BaseException as exc:
+                if not failed:
+                    agentfiles.drop_record(record)
+                    raise
+                raise RosterError(f"the rename of {name!r} failed ({exc}) and {', '.join(failed)} could not be put "
+                                  f"back; the undo record {record} keeps them") from exc
+    agentfiles.prune_records(record)
+    moved = _removed([c for c in changes if c["before"] is not None], name)
+    return {"agent": to, "renamed": {"from": name, "to": to, "flows": moved["flows"], "teams": moved["teams"],
+                                     "memberships": moved["memberships"], "files": moved["files"],
+                                     "commands": [c["name"] for c in command_changes]},
+            "kind": "added", "action": "renamed", "presets": [], "changed": True, "record": record,
+            "file": str(Path(os.path.abspath(agents_dir)) / f"{to}.md"), "warnings": [], "message": agentfiles.LIVE}
+
+
+def _decode_rename(data):
+    """(structure changes, command changes) of a rename record, checked to be what `rename_agent` writes."""
+    def bad(why):
+        raise RosterError(f"invalid undo record: {why}")
+
+    name, to = data["agent"], data["to"]
+
+    def raw(value, what):
+        if value is None:
+            return None
+        try:
+            out = base64.b64decode(value, validate=True)
+        except (TypeError, ValueError):
+            bad(f"{what} is not base64")
+        if len(out) > _STRUCTURE_FILE_LIMIT:
+            bad(f"{what} is too large")
+        return out
+
+    items, listed = data["structure"], data["commands"]
+    if not isinstance(items, list) or len(items) > 2 * FLOW_FILES_LIMIT + 60 or not isinstance(listed, list) \
+            or len(listed) > FLOW_FILES_LIMIT:
+        bad("malformed changes")
+    changes, own = [], {}
+    for item in items:
+        if not isinstance(item, dict) or set(item) != {"folder", "name", "before", "after"}:
+            bad("malformed structure change")
+        folder, file = item["folder"], item["name"]
+        if not isinstance(folder, str) or not _FOLDER.fullmatch(folder) or not isinstance(file, str):
+            bad("a structure change names an unusable folder")
+        before, after = raw(item["before"], "a structure change"), raw(item["after"], "a structure change")
+        if folder == FLOWS_FOLDER:
+            old, new = (flow_fields(before) if before is not None else None), (
+                flow_fields(after) if after is not None else None)
+            if not FLOW_ID.fullmatch(file[:-3]) or not file.endswith(".md") or old is None or new is None \
+                    or name not in old["path"] or new["path"] != _renamed(old["path"], name, to):
+                bad("a flow change is not this rename's")
+        elif folder == TEAMS_FOLDER:
+            old, new = (teams_module.read_team(before) if before is not None else None), (
+                teams_module.read_team(after) if after is not None else None)
+            if not FLOW_ID.fullmatch(file[:-3]) or not file.endswith(".md") or old is None or new is None \
+                    or (old[0] != name and name not in old[1]) \
+                    or new[0] != (to if old[0] == name else old[0]) or new[1] != _renamed(old[1], name, to):
+                bad("a group change is not this rename's")
+        elif (file, before is None, after is None) in ((name + ".md", False, True), (to + ".md", True, False)):
+            own.setdefault(folder, []).append(before if after is None else after)
+        else:
+            bad("a structure file is not this agent's")
+        changes.append({"folder": folder, "name": file, "before": before, "after": after})
+    if any(len(pair) != 2 or pair[0] != pair[1] for pair in own.values()) or len(own) > 1:
+        bad("the agent's structure file is not moved whole")
+    commands = []
+    for item in listed:
+        if not isinstance(item, dict) or set(item) != {"name", "before", "after"} or not isinstance(item["name"], str) \
+                or not structure_module.FLOW_NAME.fullmatch(item["name"]):
+            bad("malformed command change")
+        before, after = raw(item["before"], "a command change"), raw(item["after"], "a command change")
+        if not flowcommands.is_ours(before) or not flowcommands.is_ours(after):
+            bad("a command change is not a command this toolkit wrote")
+        commands.append({"name": item["name"], "before": before, "after": after})
+    return changes, commands
+
+
+def _restore_rename(name, data, *, root, agents_dir, commands_dir, config):
+    """Give a renamed agent its old name back from the rename's record: everything the rename changed, byte for
+    byte, refused (nothing changed) when any of it was changed since or the old name now belongs to another agent
+    (it passes a new agent's name checks again)."""
+    if set(data) != {"version", "op", "agent", "to", "kind", "file", "structure", "commands"} \
+            or data["kind"] != "added" or not isinstance(data["to"], str) or not agentfiles.NAME.fullmatch(data["to"]):
+        raise RosterError("invalid undo record: not an added agent's rename")
+    to = data["to"]
+    file = agentfiles.unb64(data["file"], "the agent file")
+    if file is None or not agentfiles.is_added(file) or agentfiles.parse(file) is None:
+        raise RosterError("invalid undo record: the file is not an added agent's")
+    renamed, commands = _decode_rename(data)
+    obj = skillset._parse(skillset._read(config, "config")[0])
+    try:
+        _check_new_name(obj, name, list(obj["presets"]), agents_dir)
+    except RosterError as exc:
+        raise RosterError(f"the old name is taken: {exc}; nothing was restored") from None
+    with _structure_locked(root) as root_fd:
+        with agentfiles._folder(agents_dir) as fd:
+            current, taken = agentfiles._read_at(fd, to + ".md"), agentfiles._taken(fd, name)
+        if current != file:
+            raise RosterError(f"the agent {to!r} was changed or removed since the rename; nothing was restored")
+        if taken:
+            raise RosterError(f"{name!r} is already an agent file in the agents folder ({', '.join(taken)}); "
+                              "nothing was restored")
+        changes = _structure_back(root_fd, root, renamed)
+        back = [{"name": c["name"], "before": c["after"], "after": c["before"]} for c in reversed(commands)]
+        with flowcommands.Folder(commands_dir, create=False) if back else nullcontext() as folder:
+            try:
+                for change in back:
+                    if folder.read(change["name"]) != change["before"]:
+                        raise RosterError(f"the command file {change['name']}.md was changed since the rename; "
+                                          "nothing was restored")
+            except flowcommands.CommandError as exc:
+                raise RosterError(str(exc)) from None
+            _apply(root_fd, changes)
+            written = []
+            try:
+                _write_commands(folder, back, written)
+                agentfiles.replace(name, None, file, agents_dir=agents_dir)
+                try:
+                    agentfiles.replace(to, file, None, agents_dir=agents_dir)
+                except BaseException:
+                    agentfiles.replace(name, file, None, agents_dir=agents_dir)
+                    raise
+            except BaseException:
+                _revert_commands(folder, written)
+                _revert(root_fd, changes)
+                raise
+    return {"agent": name, "kind": "added", "action": "restored the name", "presets": [], "changed": True,
+            "restored": {"from": to, "to": name}, "warnings": [], "message": agentfiles.LIVE}
 
 
 def read_agent(name, *, agents_dir=AGENTS_DIR):
@@ -1614,9 +1947,9 @@ def annotate(document, *, config=CONFIG, map_path=MAP, agents_dir=AGENTS_DIR):
 
 
 def agent_main(argv=None):
-    """`agentgraph agent list|show|add|text|remove|restore`: exits 0 on success, 1 when refused, 2 on a usage
+    """`agentgraph agent list|show|add|text|rename|remove|restore`: exits 0 on success, 1 when refused, 2 on a usage
     error."""
-    parser = argparse.ArgumentParser(prog="agentgraph agent", description="Add, change, remove or restore an agent.",
+    parser = argparse.ArgumentParser(prog="agentgraph agent", description="Add, change, rename, remove or restore an agent.",
                                      allow_abbrev=False)
     commands = parser.add_subparsers(dest="op", required=True)
 
@@ -1627,14 +1960,18 @@ def agent_main(argv=None):
         target.add_argument("--structure", type=Path, dest=prefix + "structure", help="the structure folder")
         target.add_argument("--agents", type=Path, dest=prefix + "agents", help="OpenCode's agents folder")
         target.add_argument("--skills-dir", type=Path, dest=prefix + "skills_dir", help="the skills folder")
+        target.add_argument("--commands", type=Path, dest=prefix + "commands", help="OpenCode's commands folder (a "
+                            "rename rewrites the commands of the paths through the agent)")
         target.add_argument("--json", action="store_true", dest=prefix + "json")
 
     options(parser, "root_")
-    for op in ("list", "show", "add", "text", "remove", "restore"):
+    for op in ("list", "show", "add", "text", "rename", "remove", "restore"):
         sub = commands.add_parser(op, allow_abbrev=False)
         options(sub, "")
-        if op in {"show", "add", "text", "remove"}:
+        if op in {"show", "add", "text", "rename", "remove"}:
             sub.add_argument("name")
+        if op == "rename":
+            sub.add_argument("to", metavar="TO", help="the new name")
         if op == "restore":
             sub.add_argument("record", help="the undo record a removal or an instruction change printed")
         if op == "text":
@@ -1670,10 +2007,12 @@ def agent_main(argv=None):
                                    prompt=_read_prompt(args.prompt_file) if args.prompt_file else None, skills=skills,
                                    read_only=args.read_only, copy_of=args.copy_of, template=args.template,
                                    skills_dir=pick("skills_dir", None), **files)
+            elif args.op == "rename":
+                result = rename_agent(args.name, args.to, commands_dir=pick("commands", None), **files)
             elif args.op == "remove":
                 result = remove_agent(args.name, **files)
             else:
-                result = restore_agent(str(args.record), **files)
+                result = restore_agent(str(args.record), commands_dir=pick("commands", None), **files)
     except (SkillsetError, OSError, UnicodeError) as exc:
         if as_json:
             print(json.dumps({"error": str(exc)}))
@@ -1689,9 +2028,9 @@ def agent_main(argv=None):
               f"skills: {', '.join(result['skills']) or 'none'}\n\n{result['text']}")
     else:
         out = [f"{result['agent']}: {result['action']}"]
-        gone = result.get("removed") or result.get("restored") or {}
+        gone = result.get("removed") or result.get("restored") or result.get("renamed") or {}
         for key, label in (("flows", "flows"), ("teams", "groups led"), ("memberships", "group memberships"),
-                           ("files", "structure files")):
+                           ("files", "structure files"), ("commands", "path commands")):
             if gone.get(key):
                 out.append(f"  {label}: {', '.join(gone[key])}")
         if result.get("file"):

@@ -56,6 +56,8 @@ HAND_CHANGED = ("{name} was changed by hand in a way this toolkit cannot keep ex
 VERIFIER_TEXT = ("You are given a goal and the work done for it. Check the work against the goal and report pass or "
                  "fail, with the evidence for each.")
 VERIFIER_DESCRIPTION = "Checks work against a goal and reports pass or fail, with the evidence for each."
+# A blank agent's description until the user writes one (its instruction starts empty; see roster.add_agent).
+BLANK_DESCRIPTION = "An agent you added. Open it to say what it does."
 TEMPLATES = ("blank", "verifier")
 
 # How OpenCode 2.3.2 resolves an agent's rules, as a scratch host answered `POST /api/session/{id}/permission`
@@ -76,8 +78,12 @@ HOST_TAIL = ({"action": "browser", "resource": "*", "effect": "deny"},
 # as an allow. The plugin keeps `write`, `apply_patch` and the like as actions of their own; a deny of one of them
 # also denies `edit`, an allow never allows `edit`.
 READ_TOOLS = ("read", "grep", "glob", "list")
+# `external_directory` is not among them: the plugin may deny it after the entry's rules (an MCP server named
+# `external` becomes `external_*` deny).
 COPYABLE = (*READ_TOOLS, "edit", "write", "apply_patch", "patch", "multiedit", "shell", "webfetch", "websearch",
-            "codesearch", "todowrite", "todoread", "lsp", "external_directory")
+            "codesearch", "todowrite", "todoread", "lsp")
+# The actions that write files: an allow on any of them makes an agent a writer (`read_only`).
+WRITE_ACTIONS = ("edit", "write", "apply_patch", "patch", "multiedit")
 EDIT_KEYS = ("write", "apply_patch", "patch", "multiedit", "ast_grep_replace")
 # The plugin's first rules after its `* * allow`, which a copy stands in for with the read tools.
 PLUGIN_READS = ({"action": "read", "resource": "*.env", "effect": "ask"},
@@ -195,6 +201,11 @@ _OWNED = re.compile(r"[\"']?(description|mode|model|permissions)[\"']?[ \t]*:")
 # agent file (the n99 proof), and a YAML merge key could bring in any key. A hand-added one is a hand change the
 # writer cannot keep: the file is read-only here, and what the view says it may do would not be the whole story.
 _RIGHTS = re.compile(r"[\"']?(permission|tools|<<)[\"']?[ \t]*:")
+# Every other top-level frontmatter line must be a plain `key: value` (or `key:`): OpenCode's YAML reader also
+# takes `? permission`, `!!str permission:` and `"permissio\u006e":` as the key `permission` (the n99 proof), so
+# any other shape is a hand change the writer cannot keep. A hand key's indented or `- ` lines, a comment and a
+# blank line are kept.
+_PLAIN = re.compile(r"[a-z_][a-z0-9_]*:( |$)")
 _RULE_LINE = (re.compile(r'  - action: ("[^"\n]*")'), re.compile(r"    resource: " + _QUOTED),
               re.compile(r"    effect: (allow|ask|deny)"))
 
@@ -230,13 +241,25 @@ def parse(data):
     head, body = lines[1:close], "\n".join(lines[close + 1:])
     fields, spans, index = {}, {}, 1
     try:
+        hand = False  # whether the last top-level line was a hand-added key (its own lines may follow)
         while index < len(head):
-            if _RIGHTS.match(head[index]):
+            line = head[index]
+            if _RIGHTS.match(line):
                 return None
-            key = _OWNED.match(head[index])
+            key = _OWNED.match(line)
             if not key:
+                if line.strip() == "" or line.startswith("#"):
+                    pass
+                elif line.startswith((" ", "- ")) or line == "-":
+                    if not hand:
+                        return None
+                elif _PLAIN.match(line):
+                    hand = True
+                else:
+                    return None
                 index += 1
                 continue
+            hand = False
             key = key.group(1)
             found = _FIELDS[key].fullmatch(head[index])
             if key in spans or not found:
@@ -295,17 +318,24 @@ def with_skills(permissions, skills):
     return narrow([*rest, *({"action": "skill", "resource": skill, "effect": "allow"} for skill in skills)])
 
 
-def read_only(permissions):
-    """Whether the agent may edit no file outright: no rule allows an `edit` that a later deny (or ask) of editing
-    everything does not override. (`effect` decides one action and resource; this is every resource at once.)"""
+def _allows_some(permissions, action):
+    """Whether some resource of `action` is allowed outright: a rule allows it that no later deny (or ask) of the
+    action on every resource overrides."""
     for rule in reversed(permissions):
-        if not matches(rule["action"], "edit"):
+        if not matches(rule["action"], action):
             continue
         if rule["effect"] == "allow":
-            return False
+            return True
         if set(rule["resource"]) == {"*"}:
-            return True  # every earlier rule is overridden for editing
-    return False  # nothing matched: the host's own first rule allows everything
+            return False  # every earlier rule is overridden for this action
+    return True  # nothing matched: the host's own first rule allows everything
+
+
+def read_only(permissions):
+    """Whether the agent may write no file outright: none of WRITE_ACTIONS (`edit`, `write`, `apply_patch`, `patch`,
+    `multiedit`) is allowed on any resource. (`host_effect` decides one action and resource; this is every resource
+    at once.)"""
+    return not any(_allows_some(permissions, action) for action in WRITE_ACTIONS)
 
 
 def _note(notes, text):
@@ -335,6 +365,8 @@ def _copied(key, pattern, effect, notes):
         out.append({"action": action, "resource": pattern, "effect": effect})
     elif effect == "ask":  # an ask may override an earlier allow in the source: the copy denies instead
         out.append({"action": action, "resource": pattern, "effect": "deny"})
+        _note(notes, f"the new agent gets no ask for {key!r}: it is denied (only OpenCode's own tools are copied "
+                     "as allowed or asked)")
     else:
         _note(notes, f"the new agent gets no {effect} for {key!r}: only OpenCode's own tools are copied as allowed")
     if key in EDIT_KEYS and effect == "deny":
@@ -662,20 +694,28 @@ def save_record(backups, kind, name, record):
 
 
 def prune_records(record):
-    """Keep the newest skillset.MAX_BACKUPS undo records of one kind and agent in a day's folder (as skill writes
-    keep theirs); `record` itself is always kept. Only folders holding nothing but a record are removed."""
+    """Keep the newest skillset.MAX_BACKUPS undo records of one kind and agent across every day's folder (the
+    total stays bounded however many days pass); `record` itself is always kept, and no record among the newest
+    MAX_BACKUPS is removed. Only folders holding nothing but a record are removed, and a day's folder left empty."""
     folder = Path(record).parent
-    found = re.fullmatch(r"((?:text|remove)-[a-z][a-z0-9_-]{0,63})-[0-9a-f]{12}", folder.name)
+    found = re.fullmatch(r"((?:text|remove|rename)-[a-z][a-z0-9_-]{0,63})-[0-9a-f]{12}", folder.name)
     if not found:
         return
     same = re.compile(re.escape(found.group(1)) + r"-[0-9a-f]{12}")
     try:
-        mine = sorted((path for path in folder.parent.iterdir() if path != folder and same.fullmatch(path.name)
-                       and stat.S_ISDIR(path.lstat().st_mode)), key=lambda path: path.lstat().st_mtime_ns)
-        for old in mine[:max(len(mine) + 1 - skillset.MAX_BACKUPS, 0)]:
+        mine = []
+        for day in folder.parent.parent.iterdir():
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}-agent-files", day.name) or not stat.S_ISDIR(day.lstat().st_mode):
+                continue
+            mine += [(day.name, path.lstat().st_mtime_ns, path) for path in day.iterdir()
+                     if path != folder and same.fullmatch(path.name) and stat.S_ISDIR(path.lstat().st_mode)]
+        mine.sort(key=lambda item: item[:2])  # oldest first: by day, then by time within the day
+        for _, _, old in mine[:max(len(mine) + 1 - skillset.MAX_BACKUPS, 0)]:
             if [child.name for child in old.iterdir()] == ["record.json"]:
                 (old / "record.json").unlink()
                 old.rmdir()
+                if old.parent != folder.parent and not any(old.parent.iterdir()):
+                    old.parent.rmdir()
     except OSError:
         pass  # pruning is tidying: a record that cannot be removed now is removed by a later change
 
@@ -691,7 +731,7 @@ def drop_record(record):
             break
 
 
-RECORD_PATH = re.compile(r"\d{4}-\d{2}-\d{2}-agent-files/(text|remove)-([a-z][a-z0-9_-]{0,63})-[0-9a-f]{12}/record\.json")
+RECORD_PATH = re.compile(r"\d{4}-\d{2}-\d{2}-agent-files/(text|remove|rename)-([a-z][a-z0-9_-]{0,63})-[0-9a-f]{12}/record\.json")
 
 
 def load_record(record, backups):

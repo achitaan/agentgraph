@@ -164,8 +164,15 @@ class Add(Base):
         self.assertEqual(agentfiles.skills_of(parsed["permissions"]), ["code-assurance"])
         self.assertTrue(agentfiles.read_only(parsed["permissions"]))
 
-    def test_blank_needs_model_description_and_prompt(self):
+    def test_blank_needs_a_model_when_the_presets_have_no_default_verifier(self):
+        # A name alone takes the default verifier's model (NameAlone); with no verifier to take it from, the model
+        # must be given.
+        obj = json.loads(self.config.read_bytes())
+        for preset in obj["presets"].values():
+            preset.pop("verifier", None)
+        self.config.write_text(json.dumps(obj, indent=2))
         self.refused("model is required", self.add, "plain")
+        self.refused("model is required", self.add, "plain", template="blank", description="Plain.", prompt="Work.")
         result = self.add("plain", model="anthropic/claude-sonnet-5-5", description="Plain.", prompt="Work.",
                           read_only=True)
         self.assertEqual(result["permission"], "read-only")
@@ -335,6 +342,23 @@ class RemoveRestore(Base):
         record = roster.remove_agent("checker", **self.paths)["record"]
         self.add(template="verifier")
         self.refused("already an agent file", roster.restore_agent, record, **self.paths)
+
+    def test_restore_is_refused_when_the_name_has_since_become_a_preset_agent_or_a_display_name(self):
+        self.add(template="verifier")
+        record = roster.remove_agent("checker", **self.paths)["record"]
+        obj = json.loads(self.config.read_bytes())
+        original = self.config.read_bytes()
+        obj["presets"][obj["preset"]]["checker"] = {"model": "a/b"}
+        self.config.write_text(json.dumps(obj, indent=2))
+        self.refused("already exists|taken", roster.restore_agent, record, **self.paths)
+        self.config.write_bytes(original)
+        obj = json.loads(original)
+        obj["presets"][obj["preset"]]["orchestrator"]["displayName"] = "@Checker"
+        self.config.write_text(json.dumps(obj, indent=2))
+        self.refused("display name|displayName|taken", roster.restore_agent, record, **self.paths)
+        self.config.write_bytes(original)
+        roster.restore_agent(record, **self.paths)
+        self.assertTrue((self.agents / "checker.md").is_file())
 
     def test_a_failure_in_the_middle_leaves_nothing_half_done(self):
         self.add(template="verifier")
@@ -638,8 +662,8 @@ class CopyNeverWider(Base):
             rules = agentfiles.from_plugin(permission)[0]
             shown = agentfiles.summary(rules)
             self.assertEqual(shown["rules"], [r for r in rules[1:-1] if r["action"] != "skill"], permission)
-            edits = any(agentfiles.host_effect(rules, "edit", resource) == "allow"
-                        for resource in ("x.py", "src/a.py", "*"))
+            edits = any(agentfiles.host_effect(rules, action, resource) == "allow"
+                        for action in agentfiles.WRITE_ACTIONS for resource in ("x.py", "src/a.py", "*"))
             self.assertEqual(shown["read_only"], not edits, permission)
             self.assertEqual(agentfiles.parse(agentfiles.render("d", "a/b", rules, "t"))["permissions"], rules)
 
@@ -664,6 +688,44 @@ class CopyNeverWider(Base):
                             self.assertEqual(now, was, (action, resource))
 
 
+    def test_an_ask_on_a_pattern_stays_ask(self):
+        rules = agentfiles.from_plugin({"edit": {"src/*": "ask"}, "bash": {"*": "allow", "git *": "ask"}})[0]
+        self.assertIn({"action": "edit", "resource": "src/*", "effect": "ask"}, rules)
+        self.assertEqual(agentfiles.host_effect(rules, "edit", "src/a.py"), "ask")
+        self.assertEqual(agentfiles.host_effect(rules, "edit", "x.py"), "deny")
+        self.assertEqual(agentfiles.host_effect(rules, "shell", "git status"), "ask")
+        self.assertEqual(agentfiles.host_effect(rules, "shell", "ls"), "allow")
+
+    def test_external_directory_is_never_copied_as_an_allow(self):
+        # The plugin may deny it after the entry's rules (an MCP server named `external` gives `external_*` deny).
+        for value in ("allow", "ask", {"/tmp/*": "allow"}):
+            rules, notes = agentfiles.from_plugin({"external_directory": value})
+            self.assertEqual(agentfiles.host_effect(rules, "external_directory", "/tmp/x"), "deny", value)
+            self.assertTrue(notes)
+        rules = agentfiles.from_plugin({"external_directory": "deny"})[0]
+        self.assertIn({"action": "external_directory", "resource": "*", "effect": "deny"}, rules)
+
+    def test_an_allow_on_any_write_action_makes_an_agent_a_writer(self):
+        for action in ("write", "apply_patch", "patch", "multiedit"):
+            with self.subTest(action=action):
+                rules = agentfiles.from_plugin({"edit": "deny", action: "allow"})[0]
+                self.assertEqual(agentfiles.host_effect(rules, action, "x.py"), "allow")
+                self.assertFalse(agentfiles.read_only(rules))
+                self.assertFalse(agentfiles.summary(rules)["read_only"])
+                rules = agentfiles.from_plugin({"edit": "deny", action: {"*": "deny", "docs/*": "allow"}})[0]
+                self.assertFalse(agentfiles.read_only(rules))
+
+    def test_read_only_kinds_deny_every_write_action(self):
+        self.add(template="verifier")
+        self.add("looker", model="a/b", description="Looks.", prompt="Look.", read_only=True)
+        for name in ("checker", "looker"):
+            rules = agentfiles.parse(self.file(name))["permissions"]
+            self.assertTrue(agentfiles.read_only(rules), name)
+            for action in agentfiles.WRITE_ACTIONS:
+                for resource in ("x.py", "src/a.py", "*"):
+                    self.assertEqual(agentfiles.host_effect(rules, action, resource), "deny", (name, action))
+
+
 class HandRights(Base):
     def test_a_hand_added_permission_or_tools_map_makes_the_file_hand_changed(self):
         # OpenCode 2.3.2 reads OpenCode 1's `permission` and `tools` maps in an agent file (the n99 proof).
@@ -679,6 +741,26 @@ class HandRights(Base):
                 self.refused("changed by hand", roster.read_agent, "checker", agents_dir=self.agents)
         (self.agents / "checker.md").write_bytes(original)
         self.assertIsNotNone(agentfiles.parse(self.file()))
+
+    def test_any_other_shape_of_a_frontmatter_key_makes_the_file_hand_changed(self):
+        # OpenCode's YAML reader takes each of these as the key `permission` (the n99 proof).
+        self.add(template="verifier")
+        original = self.file()
+
+        def edited(line):
+            data = original.replace(b"\nmode: subagent\n", b"\nmode: subagent\n" + line + b"\n", 1)
+            (self.agents / "checker.md").write_bytes(data)
+            return agentfiles.parse(data)
+
+        for line in (b"? permission\n: {edit: allow}", b"!!str permission: {edit: allow}",
+                     b'"permissio\\u006e": {edit: allow}', b"x: &r {edit: allow}\n? permission\n: *r",
+                     b"Temperature: 0.2", b"x:1", b"  permission: {edit: allow}", b"- a", b"\tx: 1"):
+            with self.subTest(line=line):
+                self.assertIsNone(edited(line))
+                self.refused("changed by hand", roster.read_agent, "checker", agents_dir=self.agents)
+        for line in (b"temperature: 0.2", b"options:\n  top_p: 0.9", b"# a note", b"tags:\n- a\n- b", b"steps:"):
+            with self.subTest(line=line):
+                self.assertIsNotNone(edited(line))
 
 
 class CraftedText(Base):
@@ -740,6 +822,37 @@ class Records(Base):
         roster.restore_agent(records[-1], **self.paths)
         self.assertTrue(self.file().endswith(b"---\nText 4.\n"))
 
+    def test_agent_file_undo_records_are_pruned_across_days(self):
+        self.add(template="verifier")
+        with patch.object(skillset, "MAX_BACKUPS", 3):
+            older = [roster.text_agent("checker", f"Old {n}.", agents_dir=self.agents,
+                                       backups=self.backups)["record"] for n in range(2)]
+            for days, record in enumerate(older):
+                day = self.backups / f"2020-01-0{days + 1}-agent-files"
+                day.mkdir()
+                Path(record).parent.rename(day / Path(record).parent.name)
+            other = roster.text_agent("checker", "Other.", agents_dir=self.agents, backups=self.backups)["record"]
+            newer = [roster.text_agent("checker", f"Text {n}.", agents_dir=self.agents,
+                                       backups=self.backups)["record"] for n in range(2)]
+        kept = sorted(p.parent for p in self.backups.rglob("text-checker-*/record.json"))
+        self.assertEqual(kept, sorted(Path(r).parent for r in [other, *newer]))
+        self.assertFalse((self.backups / "2020-01-01-agent-files").exists())
+        self.assertFalse((self.backups / "2020-01-02-agent-files").exists())
+
+    def test_a_failed_add_whose_take_back_failed_too_says_which_file_stays(self):
+        forward = roster._change_file
+
+        def change(root_fd, item, check=True):
+            if not check:
+                raise OSError("simulated take-back failure")
+            return forward(root_fd, item, check)
+
+        with patch.object(agentfiles, "replace", side_effect=OSError("simulated")), \
+                patch.object(roster, "_change_file", side_effect=change):
+            with self.assertRaisesRegex(skillset.SkillsetError, r"30-build/checker\.md could not be taken back"):
+                self.add(template="verifier")
+        self.assertFalse((self.agents / "checker.md").exists())
+
     def test_a_failed_remove_whose_put_back_failed_too_keeps_its_undo_record(self):
         self.add(template="verifier")
         structure_module.add_flow(["checker", "reviewer"], None, self.structure)
@@ -778,6 +891,115 @@ class Records(Base):
                 self.refused("invalid undo record", roster.restore_agent, record, **self.paths)
         path.write_text(json.dumps(data))
         roster.restore_agent(record, **self.paths)
+
+
+class NameAlone(Base):
+    """An add with a name alone (what the view sends for a blank agent) works by endpoint and by command; any field
+    given overrides its default; removing the agent puts every folder back exactly."""
+
+    def setUp(self):
+        super().setUp()
+        import threading
+        from agentgraph import server
+        self.httpd = server.make_server(
+            0, graph_dir=self.root / "graphs", cwd=self.root, session="root", web_dir=self.root,
+            structure_dir=self.structure, skills_config=self.config, skills_map=self.map,
+            skills_backups=self.backups, skills_dir=self.skills, skills_bundled=[], agents_dir=self.agents)
+        thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        self.addCleanup(self.httpd.server_close)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(self.httpd.shutdown)
+
+    def post(self, body):
+        import http.client
+        port = self.httpd.server_port
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        try:
+            conn.request("POST", "/api/roster", body=json.dumps(body).encode(),
+                         headers={"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}"})
+            response = conn.getresponse()
+            answer = json.loads(response.read())
+        finally:
+            conn.close()
+        self.assertEqual(response.status, 200, answer)
+        return answer
+
+    def spec(self, name):
+        obj = json.loads(self.config.read_bytes())
+        return obj["presets"][obj["preset"]][name]
+
+    def verifier_model(self):
+        spec = self.spec("verifier")
+        return f"{spec['model']}#{spec['variant']}" if spec.get("variant") else spec["model"]
+
+    def blank(self, name="agent-1"):
+        return agentfiles.render(agentfiles.BLANK_DESCRIPTION, self.verifier_model(),
+                                 agentfiles.from_plugin(roster.WRITER_PERMISSION)[0], "")
+
+    def removed_exactly(self, name):
+        self.post({"op": "remove", "name": name})
+        self.assertEqual(self.snapshot(), self.start)
+
+    def test_a_name_alone_by_endpoint_adds_a_blank_agent(self):
+        answer = self.post({"op": "add", "name": "agent-1"})
+        self.assertEqual(self.file("agent-1"), self.blank())
+        self.assertEqual((answer["model"], answer["permission"]), (self.verifier_model(), "writer"))
+        parsed = agentfiles.parse(self.file("agent-1"))
+        self.assertEqual(parsed["text"].strip(), "")
+        self.assertEqual(roster.read_agent("agent-1", agents_dir=self.agents)["description"],
+                         "An agent you added. Open it to say what it does.")
+        self.assertTrue((self.structure / "30-build" / "agent-1.md").is_file())
+        # the user then writes its instruction
+        roster.text_agent("agent-1", "Do the work.", agents_dir=self.agents, backups=self.backups)
+        self.assertEqual(agentfiles.parse(self.file("agent-1"))["text"].strip(), "Do the work.")
+        self.removed_exactly("agent-1")
+
+    def test_the_blank_template_with_a_name_alone_by_endpoint(self):
+        self.post({"op": "add", "name": "agent-1", "template": "blank"})
+        self.assertEqual(self.file("agent-1"), self.blank())
+        self.removed_exactly("agent-1")
+
+    def test_the_verifier_template_with_a_name_alone_by_endpoint(self):
+        self.post({"op": "add", "name": "agent-2", "template": "verifier"})
+        rules = agentfiles.from_plugin(self.spec("verifier").get("permission"), [])[0]
+        self.assertEqual(self.file("agent-2"), agentfiles.render(agentfiles.VERIFIER_DESCRIPTION, self.verifier_model(),
+                                                                 rules, agentfiles.VERIFIER_TEXT))
+        self.removed_exactly("agent-2")
+
+    def test_a_copy_with_a_name_alone_by_endpoint(self):
+        self.post({"op": "add", "name": "agent-3", "copy_of": "impl-claude"})
+        spec = self.spec("impl-claude")
+        rules = agentfiles.from_plugin(spec.get("permission"), list(spec.get("skills") or []))[0]
+        text = spec.get("prompt") or "You are agent-3, a copy of impl-claude."
+        model = f"{spec['model']}#{spec['variant']}" if spec.get("variant") else spec["model"]
+        self.assertEqual(self.file("agent-3"), agentfiles.render(spec["description"], model, rules, text))
+        self.removed_exactly("agent-3")
+
+    def test_any_field_given_overrides_its_blank_default(self):
+        self.post({"op": "add", "name": "agent-1", "description": "Mine.", "prompt": "Do it.",
+                   "model": "openai/gpt-6.2-sol-fast", "read_only": True})
+        self.assertEqual(self.file("agent-1"), agentfiles.render(
+            "Mine.", "openai/gpt-6.2-sol-fast", agentfiles.from_plugin(roster.READ_ONLY_PERMISSION)[0], "Do it."))
+        self.removed_exactly("agent-1")
+        self.post({"op": "add", "name": "agent-1", "template": "blank", "variant": "low"})
+        model = self.verifier_model().partition("#")[0] + "#low"
+        self.assertEqual(agentfiles.parse(self.file("agent-1"))["model"], model)
+        self.assertEqual(agentfiles.parse(self.file("agent-1"))["description"], agentfiles.BLANK_DESCRIPTION)
+        self.removed_exactly("agent-1")
+
+    def test_agent_add_with_a_name_alone_by_command(self):
+        out = io.StringIO()
+        common = ["--config", str(self.config), "--map", str(self.map), "--backups", str(self.backups),
+                  "--structure", str(self.structure), "--agents", str(self.agents), "--skills-dir", str(self.skills),
+                  "--json"]
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            code = roster.main(["agent", "add", "agent-1", *common])
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertEqual(self.file("agent-1"), self.blank())
+        with redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()):
+            self.assertEqual(roster.main(["agent", "remove", "agent-1", *common]), 0)
+        self.assertEqual(self.snapshot(), self.start)
 
 
 class Command(Base):
