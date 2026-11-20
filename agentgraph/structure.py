@@ -65,6 +65,8 @@ def _loop(agents: list[str], back_to: str, then: bool) -> list[str]:
     """`agents` carry the work forward from its first; the last sends it back to `back_to`."""
     last = agents[-1]
     repeat = f"send {last}'s findings back to {back_to} and repeat until it passes."
+    if len(agents) == 1:  # straight after a return: the agent that got the work back sends it on back
+        return [f"{'Then, if' if then else 'If'} {last} does not accept it, {repeat}"]
     if len(agents) == 2 and agents[0] == back_to:
         return [f"{'Then ' if then else ''}{last} checks {back_to}'s work.", f"If it does not pass, {repeat}"]
     start = f"{agents[0]}'s work goes to {agents[1]}" + "".join(f", then to {name}" for name in agents[2:]) + "."

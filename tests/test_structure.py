@@ -81,6 +81,15 @@ class Loader(unittest.TestCase):
         self.assertNotIn("a", shape["group_of"])
         self.assertEqual(shape["groups"], ["hub", "council", "build", "verify", "understand"])
 
+    def test_a_teams_folder_is_never_a_group_of_agents(self):
+        # Teams are kept in `teams/` (see agentgraph.teams); they are not wired in here, only kept out of the groups.
+        (self.root / "teams").mkdir()
+        (self.root / "teams" / "builders.md").write_text("lead: council\nmembers: impl-openai, designer\n\nBuild.\n")
+        shape = snapshot_json.load_structure(self.root)
+        self.assertNotIn("teams", shape["groups"])
+        self.assertNotIn("builders", shape["group_of"])
+        self.assertEqual(shape["warnings"], [])
+
     def test_unreadable_or_invalid_flows_warn_and_never_fail(self):
         write_flow(self.root, "ghost", "path: impl-openai -> ghost\n\nText.\n")
         write_flow(self.root, "middle", "path: impl-openai -> orchestrator -> verifier\n\nText.\n")
@@ -169,6 +178,13 @@ class Text(unittest.TestCase):
             with self.subTest(path=path):
                 text = structure.flow_text(path.split(), HUB)
                 self.assertLessEqual(text.count(". ") + 1, 3, text)
+
+    def test_a_return_straight_after_a_return(self):
+        # One sentence per return; the made-up text never fails (it used to raise IndexError here).
+        self.assertEqual(structure._sentences("A B C B A".split()),
+                         ["Hand A's finished work to B as its input.", "Then C checks B's work.", "If it does not pass, send C's findings back to B and repeat until it passes.",
+                          "Then, if B does not accept it, send B's findings back to A and repeat until it passes."])
+        self.assertIn("A → B → C → B → A", structure.flow_text("A B C B A".split(), HUB))
 
     def test_text_bounds_and_control_characters(self):
         self.assertEqual(structure.clean_text("x" * 2000), "x" * 2000)
@@ -302,6 +318,8 @@ class Command(unittest.TestCase):
                                (["impl-openai", "verifier", "impl-openai", "verifier"], "straight after it returned"),
                                (["orchestrator", "impl-openai", "verifier", "impl-openai", "reviewer", "impl-openai", "verifier"],
                                 "straight after it returned"),
+                               (["impl-openai", "verifier", "reviewer", "verifier", "reviewer"],
+                                "reviewer cannot get the work back from verifier"),
                                (["impl-openai", "reviewer"] * 11, "at most 20 steps")):
             with self.subTest(names=names):
                 code, out, err = self.run_cli("flow", "add", *names)
@@ -603,6 +621,109 @@ class Enforcement(unittest.TestCase):
         self.assertEqual(tree(self.root), before)
 
 
+def plain_graph(drawn, stored, hubs):
+    """The plain task graph a flow describes: one node per agent on the path, in order of first visit. A step
+    to a new agent is a node that depends on the current one; a return makes the current node a gate whose
+    feedback_to names the earlier agent's node, and the chain goes on from there. Each node is run by the
+    agent as drawn (a seat runs the council's node). None when the path leaves no working pair."""
+    working, _ = snapshot_json.flow_steps(stored, hubs)
+    if snapshot_json.is_self_loop(stored) or len(working) < 2:
+        return None
+    drawn = [name for name, kept in zip(drawn, stored) if kept in working] if len(drawn) == len(stored) else drawn
+    offset = 1 if stored[0] in hubs else 0
+    nodes, node_of, current = [], {}, None
+    for index, agent in enumerate(working):
+        if agent not in node_of:
+            node_id = f"n{len(nodes)}"
+            nodes.append(node(node_id, "implement" if not nodes else "check", drawn_name(drawn, stored, offset + index),
+                              status="running" if not nodes else "pending", depends_on=[current] if current else []))
+            node_of[agent], current = node_id, node_id
+        else:
+            gate_node = next(item for item in nodes if item["id"] == current)
+            gate_node.update(type="gate", status="pending")
+            gate_node.setdefault("feedback_to", []).append(node_of[agent])
+            current = node_of[agent]
+    return nodes
+
+
+def drawn_name(drawn, stored, index):
+    return drawn[index] if index < len(drawn) else stored[index]
+
+
+class Satisfiable(unittest.TestCase):
+    """Every flow `add_flow` accepts can be followed: the plain task graph it describes passes `validate` and
+    `flow_problems`. Every path of two to five agents over a small roster with the hub, the council and a seat."""
+
+    NAMES = ("orchestrator", "council", "councillor-a", "impl-openai", "verifier", "reviewer")
+
+    def setUp(self):
+        self.root = make_structure(Path(self.enterContext(tempfile.TemporaryDirectory())))
+        self.before = tree(self.root)
+        self.shape = snapshot_json.load_structure(self.root)
+        self.hubs = snapshot_json.hub_names(self.shape)
+
+    def test_every_accepted_path_up_to_five_agents_has_a_graph_that_follows_it(self):
+        import itertools
+        accepted = refused = followed = 0
+        for length in range(2, 6):
+            for drawn in itertools.product(self.NAMES, repeat=length):
+                drawn = list(drawn)
+                try:
+                    flow, _ = structure.add_flow(drawn, None, self.root)
+                except structure.StructureError as exc:
+                    refused += 1
+                    self.assertTrue(str(exc).strip(), drawn)
+                    continue
+                accepted += 1
+                structure.remove_flow(flow["id"], self.root)
+                nodes = plain_graph(drawn, flow["path"], self.hubs)
+                if nodes is None:
+                    continue
+                followed += 1
+                graph_ = check.graph_from_raw(graph(nodes), Path("/nonexistent/.opencode/graph/flows.json"))
+                problems = check.validate(graph_) + check.flow_problems(graph_, [flow], self.hubs, self.shape["seats"])
+                self.assertEqual(problems, [], (drawn, nodes))
+        self.assertEqual(accepted + refused, sum(len(self.NAMES) ** n for n in range(2, 6)))
+        self.assertGreater(followed, 1000)
+        self.assertEqual(tree(self.root), self.before)
+
+    def test_a_second_return_to_work_done_after_the_check_is_refused_with_a_clear_message(self):
+        for names in (["impl-openai", "verifier", "reviewer", "verifier", "reviewer"],
+                      ["orchestrator", "impl-openai", "verifier", "reviewer", "verifier", "reviewer", "orchestrator"]):
+            with self.subTest(names=names):
+                with self.assertRaises(structure.StructureError) as caught:
+                    structure.add_flow(names, None, self.root)
+                self.assertIn("reviewer cannot get the work back from verifier", str(caught.exception))
+                self.assertIn("came after", str(caught.exception))
+        self.assertEqual(tree(self.root), self.before)
+
+    def test_a_return_to_another_branch_is_accepted(self):
+        # impl-openai → verifier → reviewer → verifier → designer → reviewer → designer: the reviewer's node and
+        # the designer's both follow the verifier's, so neither is downstream of the other.
+        names = ["impl-openai", "verifier", "reviewer", "verifier", "designer", "reviewer", "designer"]
+        flow, _ = structure.add_flow(names, None, self.root)
+        nodes = plain_graph(names, flow["path"], self.hubs)
+        graph_ = check.graph_from_raw(graph(nodes), Path("/nonexistent/.opencode/graph/flows.json"))
+        self.assertEqual(check.validate(graph_) + check.flow_problems(graph_, [flow], self.hubs), [])
+
+    def test_a_node_run_by_a_seat_counts_for_its_council(self):
+        structure.add_flow(["impl-openai", "council", "impl-openai"], None, self.root)
+        shape = snapshot_json.load_structure(self.root)
+        nodes = [node("i1", "implement", "impl-openai"), gate("g1", "councillor-a", ["i1"], ["i1"])]
+        graph_ = check.graph_from_raw(graph(nodes), Path("/nonexistent/.opencode/graph/flows.json"))
+        self.assertEqual(check.flow_problems(graph_, shape["flows"], self.hubs, shape["seats"]), [])
+        # A seat starts a council flow too, and `agentgraph check` reads the seats from the structure folder.
+        structure.add_flow(["council", "reviewer"], None, self.root)
+        graphs = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (graphs / "flows.json").write_text(json.dumps(graph(nodes + [node("s1", "decision", "councillor-a")])))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = check.main(["--dir", str(graphs), "--structure", str(self.root)])
+        self.assertEqual(code, 1, out.getvalue())
+        self.assertIn("s1 (councillor-a) is not followed by reviewer", out.getvalue())
+        self.assertNotIn("g1", out.getvalue())
+
+
 ADD = {"op": "add", "path": ["impl-openai", "verifier", "impl-openai"]}
 
 
@@ -776,6 +897,8 @@ class Endpoint(unittest.TestCase):
                               ({"op": "add", "path": ["impl-openai", "verifier", "verifier"]}, "follows itself"),
                               ({"op": "add", "path": ["impl-openai", "orchestrator", "reviewer"]}, "hub"),
                               ({"op": "add", "path": ["impl-openai"]}, "at least two"),
+                              ({"op": "add", "path": ["impl-openai", "verifier", "reviewer", "verifier", "reviewer"]},
+                               "reviewer's work came after verifier's"),
                               ({"op": "add", "path": ["impl-openai", "reviewer"], "text": "x" * 2001}, "at most 2000"),
                               ({"op": "add", "path": ["impl-openai", "reviewer"], "text": "\x1b[2J"}, "control character")):
             with self.subTest(body=str(body)[:60]):

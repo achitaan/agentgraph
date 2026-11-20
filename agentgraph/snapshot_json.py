@@ -178,6 +178,7 @@ def read_settings(data: bytes) -> tuple[list[tuple[str, str]], list[str], int]:
 
 
 FLOWS_FOLDER = "flows"  # inside the structure folder: one file per flow, never a group of agents
+TEAMS_FOLDER = "teams"  # inside the structure folder: one file per team (agentgraph.teams), never a group of agents
 FLOW_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
 FLOW_TEXT_LIMIT = 2000
 FLOW_FILES_LIMIT = 200
@@ -230,12 +231,30 @@ def flow_refusal(shape: dict, path: list[str]) -> str:
             return (f"the hub {name} can only start or end a flow: it already hands out and receives every piece "
                     "of work, so it adds no step in the middle")
     working, _ = flow_steps(path, hubs)
-    # A return needs the chain's current node to be a gate (a check). Right after the work returned to the
-    # first agent, the current node is that agent's own work, which is never a gate: no task graph could follow.
-    for index in range(2, len(working)):
-        if working[index] in working[:index] and working[index - 1] == working[0]:
-            return (f"{working[index]} cannot get the work back straight after it returned to {working[0]}: "
+    # The plain task graph the path describes: one node per agent, in order of first visit. A step to a new
+    # agent is a node that depends on the current one (so the nodes form a tree); a return makes the current
+    # node a gate whose feedback_to names the earlier agent's node, and the chain goes on from that node. A
+    # return right after a step forward always works (the current node is new, nothing comes after it). Two
+    # things can fail, and only after a return: the current node is the first agent's own work, which starts
+    # the flow and so is never a gate; or the node it would send back to came after it (depends on it), and a
+    # check may only send work back to work done before it (`validate`: "sends feedback to downstream node").
+    parent: dict[str, str | None] = {working[0]: None}
+    current = working[0]
+    for index in range(1, len(working)):
+        agent = working[index]
+        if agent not in parent:
+            parent[agent], current = current, agent
+            continue
+        if current == working[0]:
+            return (f"{agent} cannot get the work back straight after it returned to {working[0]}: "
                     f"{working[0]}'s own work is not a check; send it forward to another agent first")
+        above = parent[agent]
+        while above is not None and above != current:
+            above = parent[above]
+        if above == current:
+            return (f"{agent} cannot get the work back from {current}: {agent}'s work came after {current}'s, and "
+                    f"a check can only send work back to work done before it; send it forward to another agent first")
+        current = agent
     return ""
 
 
@@ -312,12 +331,13 @@ def load_structure(directory: Path | None = None) -> dict | None:
     `escalates_to` (an agent), `seats` (a name prefix whose agents
     sit round this one). The text after the settings is the agent's
     description, kept as `about`. The `flows` folder holds the drawn flows
-    (see `load_flows`), never agents. None when the folder does not exist or
+    (see `load_flows`) and the `teams` folder the teams (agentgraph.teams), never agents. None when the folder does not exist or
     holds no group."""
     root = Path(directory) if directory is not None else STRUCTURE_DIR
     try:
         folders = sorted(path for path in root.iterdir()
-                         if path.is_dir() and not path.name.startswith(".") and path.name != FLOWS_FOLDER)[:50]
+                         if path.is_dir() and not path.name.startswith(".")
+                         and path.name not in (FLOWS_FOLDER, TEAMS_FOLDER))[:50]
     except OSError:
         return None
     shape: dict = {"groups": [], "titles": {}, "group_of": {}, "pool": {}, "escalation": [], "seats": {}, "about": {},

@@ -210,7 +210,7 @@ FLOW_START_TYPES = ("implement", "design", "research", "decision")
 _CHAIN_BUDGET = 20000  # search steps per starting node; a graph needing more is reported, never passed silently
 
 
-def flow_problems(graph: TaskGraph, flows, hubs=frozenset()) -> list[str]:
+def flow_problems(graph: TaskGraph, flows, hubs=frozenset(), seats=None) -> list[str]:
     """Drawn flows (the `flows` folder of the structure) that the graph does not
     follow. A flow applies to work that starts at its first agent (the second
     when the hub is first): every node of that agent of a FLOW_START_TYPES type
@@ -219,13 +219,18 @@ def flow_problems(graph: TaskGraph, flows, hubs=frozenset()) -> list[str]:
     (lists it in depends_on, or is a gate whose feedback_to names it); a return
     to an earlier agent needs the current node to be a gate whose feedback_to
     names that agent's node on the chain, and the chain continues from there.
-    The hub as the last step adds nothing. One problem per starting node
-    without a complete chain, naming the first missing step."""
+    The hub as the last step adds nothing. `seats` ({council lead: seat
+    prefix}, the structure's) makes a node run by a seat count as its
+    council's. One problem per starting node without a complete chain, naming
+    the first missing step."""
     # A loop of one agent on itself adds no rule: a task graph cannot show it. It is printed with the others.
     flows = [flow for flow in flows if not is_self_loop(flow["path"]) and len(flow_steps(flow["path"], hubs)[0]) >= 2]
     if not flows:
         return []
     by_id = {node.id: node for node in graph.nodes}
+    prefixes = {lead: prefix for lead, prefix in (seats or {}).items() if isinstance(prefix, str) and prefix}
+    runs = {node.id: next((lead for lead, prefix in prefixes.items() if node.agent != lead and node.agent.startswith(prefix)),
+                          node.agent) for node in graph.nodes}  # who a node stands for: a seat for its council
     followers: dict[str, list] = {}
     for node in graph.nodes:
         targets = list(node.depends_on) + (list(node.feedback_to) if node.type == "gate" else [])
@@ -236,7 +241,7 @@ def flow_problems(graph: TaskGraph, flows, hubs=frozenset()) -> list[str]:
         working, _ = flow_steps(flow["path"], hubs)
         label = " → ".join(flow["path"])
         for start in graph.nodes:
-            if start.agent != working[0] or start.type not in FLOW_START_TYPES or start.status == "passed":
+            if runs[start.id] != working[0] or start.type not in FLOW_START_TYPES or start.status == "passed":
                 continue
             budget = [_CHAIN_BUDGET]
             best: list = [0, None]  # furthest step reached, and the chain there
@@ -254,7 +259,7 @@ def flow_problems(graph: TaskGraph, flows, hubs=frozenset()) -> list[str]:
                     node = by_id[current]
                     return node.type == "gate" and chain[agent] in node.feedback_to and walk(step + 1, chain[agent], chain)
                 for follower in followers.get(current, []):
-                    if follower.agent == agent and follower.id not in chain.values():
+                    if runs[follower.id] == agent and follower.id not in chain.values():
                         if walk(step + 1, follower.id, {**chain, agent: follower.id}):
                             return True
                 return False
@@ -287,12 +292,12 @@ def print_flows(flows) -> None:
             _print(f"      {line}" if line.strip() else "")
 
 
-def _graph_and_issues(raw: dict, path: Path, flows=(), hubs=frozenset()) -> tuple[TaskGraph, list[str]]:
+def _graph_and_issues(raw: dict, path: Path, flows=(), hubs=frozenset(), seats=None) -> tuple[TaskGraph, list[str]]:
     issues = _raw_issues(raw)
     graph = graph_from_raw(raw, path)
     if issues:
         return graph, issues
-    issues = validate(graph) + flow_problems(graph, flows, hubs)
+    issues = validate(graph) + flow_problems(graph, flows, hubs, seats)
     for node in graph.nodes:
         if node.type not in NODE_TYPES:
             issues.append(f"{node.id} has unknown type {node.type!r}")
@@ -324,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     flows = shape["flows"] if shape else []
     hubs = hub_names(shape)
+    seats = shape["seats"] if shape else {}
 
     discovery_warnings: list[str] = []
     try:
@@ -354,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
         if raw is not None:
             if args.task is not None and raw.get("task") != args.task:
                 continue  # Another task's graph: never validated, so it cannot slow this check.
-            graph, issues = _graph_and_issues(raw, path, flows, hubs)
+            graph, issues = _graph_and_issues(raw, path, flows, hubs, seats)
         if graph is None:
             # A non-object is readable JSON with a schema problem; preserve
             # the CLI's distinction between it and a read or decode failure.
