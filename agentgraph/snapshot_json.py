@@ -709,6 +709,12 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
     elif source == "demo":
         from .demo import demo_setup
         document["setup"] = demo_setup()
+    from . import sidechat  # sidechat imports this module's siblings
+    if source == "live":
+        sidechat.annotate(document)  # whether the side chat is installed, its session and its spend
+    elif source == "demo":
+        from .demo import demo_sidechat
+        document["sidechat"] = demo_sidechat()
     return document
 
 

@@ -220,10 +220,41 @@ def _generic(title):
     ]
 
 
+DEMO_SIDE = "ses_demoside"
+
+
+def demo_sidechat() -> dict:
+    """The snapshot's `sidechat` object for the demo: a fixed sample, nothing is read or called."""
+    return {"installed": True, "session": DEMO_SIDE, "model": "openai/gpt-6-luna", "busy": False, "spent": 0.0042}
+
+
+def demo_side_answer() -> dict:
+    """What `agentgraph sidechat ask --demo` returns: a fixed sample answer, no call is made."""
+    return {"answer": "n6 (the middleware lane) is retrying on a higher tier after failing the same test twice; "
+                      "n4 passed. The brief does not show why n6 fails beyond its own evidence line.",
+            "session": DEMO_SIDE, "model": "openai/gpt-6-luna", "fallback": False,
+            "brief": {"chars": 6200, "full": True, "task": "add-rate-limit",
+                      "sections": {"graph": 2900, "artifacts": 410, "chat": 2600}, "files": 0},
+            "cost": 0.0021, "tokens": {"input": 3, "output": 61, "cache_write": 2200, "cache_read": 0}, "tools": 0,
+            "spent": 0.0042, "seconds": 2.4}
+
+
+def demo_side_brief() -> dict:
+    return {"chars": 6200, "limit": 24000, "full": True, "task": "add-rate-limit",
+            "sections": {"graph": 2900, "artifacts": 410, "chat": 2600}, "files": 0, "question_chars": 20,
+            "session": DEMO_SIDE}
+
+
 def demo_chat(session_id, now: float | None = None) -> dict | None:
     """The example chat of a demo session as a feed (see chatfeed.read_chat), or None for another id.
     The same `now` gives the same feed."""
     now = time.time() if now is None else now
+    if session_id == DEMO_SIDE:
+        return {"session": DEMO_SIDE, "agent": "side-chat", "busy": False, "truncated": False, "more": False,
+                "warning": None,
+                "items": [{"kind": "user", "time": round(now - 120, 3), "text": "Why is n6 stuck?", "cut": False},
+                          {"kind": "text", "time": round(now - 118, 3), "cut": False,
+                           "text": demo_side_answer()["answer"]}]}
     snap = demo_snapshot(now)
     session = next((s for s in [snap.root, *snap.sessions] if s is not None and s.id == session_id), None)
     if session is None:

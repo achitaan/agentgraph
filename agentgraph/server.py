@@ -13,9 +13,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote
 
-from . import (agentfiles, chatfeed, flowcommands, flowrun, mcpview, outputs, roster, setups, skillfiles, skillset,
-               structure, teams)
-from .demo import demo_activity, demo_setup, demo_snapshot
+from . import (agentfiles, chatfeed, flowcommands, flowrun, mcpview, outputs, roster, setups, sidechat, skillfiles,
+               skillset, structure, teams)
+from .demo import demo_activity, demo_setup, demo_sidechat, demo_snapshot
 from .snapshot_json import (ledger_home, learning_document, live_activity, load_structure, skills_document,
                             snapshot_document)
 from .sources import DB_PATH, ORCHESTRATION_GRAPH_DIR, build_snapshot, find_graph_dir
@@ -563,6 +563,7 @@ def make_server(
                                              activity=activity)
                 if use_demo:
                     document["setup"] = demo_setup()
+                    document["sidechat"] = demo_sidechat()
                 else:
                     document["learning"] = learning_document(ledger_root, config_path=paths["config"])
                     flowrun.annotate(document, structure_dir=structure_dir,
@@ -578,6 +579,8 @@ def make_server(
                                     agents_dir=agents_dir or roster.AGENTS_DIR, structure=structure_root)
                     skillfiles.annotate(document, skills=skills_dir or skillfiles.SKILLS, bundled=skills_bundled)
                     setups.annotate(document, project=cwd, **self._setup_paths())
+                    sidechat.annotate(document, project=cwd, agents_dir=agents_dir,
+                                      db_path=sessions_db if sessions_db is not None else DB_PATH)
                     outputs.annotate(document)  # each output of the shown graph: rev, size, editable, why
                 body = json.dumps(document, allow_nan=False).encode("utf-8")
             except Exception as exc:
@@ -606,9 +609,12 @@ def make_server(
                                                  structure=load_structure(structure_dir))
                     tree = {document["root"]["id"]} if document["root"] else set()
                     tree.update(item["id"] for agent in document["agents"] for item in agent["sessions"])
+                    side = sidechat.side_session(cwd or Path.cwd(), document["root"]["id"]) if document["root"] else None
                     feed = chatfeed.read_chat(wanted, limit=limit,
                                               db_path=sessions_db if sessions_db is not None else DB_PATH) \
-                        if wanted in tree else None
+                        if wanted in tree or (side is not None and wanted == side and side not in tree) else None
+                    if feed is not None and wanted == side and wanted not in tree:
+                        feed = sidechat.side_feed(feed)  # only that one session besides the tree; each question cut before its brief
             except Exception:
                 self._refuse(500, "the chat could not be read")
                 return
