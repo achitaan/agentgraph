@@ -208,6 +208,171 @@ export function createSnapshotRunner(deps) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// One session's chat: `<python> -P -m agentgraph.chatfeed --session ID --json --limit N [--demo]` (what
+// `agentgraph chat --session ID --json` runs), with the snapshot's spawn rules: no shell, the same interpreter,
+// PYTHONPATH and environment, SIGKILL after the same timeout, output capped, one process per session at a time.
+// chat() resolves { feed } (the document: session, agent, busy, items, truncated, more, warning) or { error } (one
+// line); it never rejects. The feed is data from outside: the plugin cleans every string again before drawing it.
+
+export const CHAT_TIMEOUT_MS = 20000;
+export const CHAT_MAX_BYTES = 8 * 1024 * 1024;
+export const CHAT_LIMIT = 40; // messages asked for (the back end's default)
+export const CHAT_ITEMS_MAX = 600; // items kept from one feed
+
+export function parseChat(text) {
+  if (typeof text !== "string" || !text.trim()) return { error: "The chat command printed nothing." };
+  const doc = safeParse(text);
+  if (!isPlainObject(doc)) return { error: "The chat command returned invalid JSON." };
+  if (!Array.isArray(doc.items)) return { error: "The chat command returned no items." };
+  const items = doc.items.filter(isPlainObject).slice(-CHAT_ITEMS_MAX);
+  return {
+    feed: {
+      session: typeof doc.session === "string" ? doc.session : null,
+      agent: typeof doc.agent === "string" ? doc.agent : null,
+      busy: doc.busy === true,
+      items,
+      truncated: doc.truncated === true,
+      more: doc.more === true,
+      warning: typeof doc.warning === "string" && doc.warning ? doc.warning : null,
+    },
+  };
+}
+
+// deps: { spawn, fs, path, env, home, python, timeoutMs?, maxBytes?, demo?, onSpawn? }
+export function createChatRunner(deps) {
+  const timeoutMs = deps.timeoutMs || CHAT_TIMEOUT_MS;
+  const maxBytes = deps.maxBytes || CHAT_MAX_BYTES;
+  const inflight = new Map(); // session -> Promise
+  const children = new Map();
+  let stopped = false;
+
+  function directoryFor(input) {
+    const candidate = input && input.directory;
+    if (typeof candidate === "string" && candidate && !candidate.includes("\0") && deps.path.isAbsolute(candidate)) {
+      try {
+        if (deps.fs.statSync(candidate).isDirectory()) return candidate;
+      } catch (_) {
+        /* fall through */
+      }
+    }
+    return deps.home;
+  }
+
+  function run(session, cwd) {
+    return new Promise((resolve) => {
+      const args = ["-P", "-m", "agentgraph.chatfeed", "--session", session, "--json", "--limit", String(CHAT_LIMIT)];
+      if (deps.demo) args.push("--demo");
+      const env = Object.assign({}, deps.env, { PYTHONPATH: deps.home, PYTHONIOENCODING: "utf-8" });
+      const out = [];
+      const err = [];
+      let outBytes = 0;
+      let errBytes = 0;
+      let settled = false;
+      let reason = null;
+      let child;
+      let timer = null;
+
+      const finish = (outcome, stdout, stderr) => {
+        if (reason === "stopped") return { error: "The plugin stopped." };
+        if (reason === "timeout") return { error: "The chat command did not finish within " + Math.round(timeoutMs / 1000) + " s." };
+        if (reason === "overflow") return { error: "The chat was larger than " + Math.round(maxBytes / 1048576) + " MiB." };
+        if (outcome.error) {
+          if (outcome.error.code === "ENOENT") return { error: "Python was not found at " + deps.python + ". Set options.python to a Python 3.11 or newer executable." };
+          if (outcome.error.code === "EACCES") return { error: "Python is not executable: " + deps.python + "." };
+          return { error: oneLine("Could not start Python: " + errorMessage(outcome.error)) };
+        }
+        if (outcome.code === 0) {
+          const last = lastLine(stdout);
+          const parsed = parseChat(last || "");
+          return parsed.error ? { error: oneLine(parsed.error) } : parsed;
+        }
+        const status = typeof outcome.code === "number" ? "exited with status " + outcome.code
+          : outcome.signal ? "was terminated by " + outcome.signal : "failed";
+        return { error: oneLine("The chat command " + status + (lastLine(stderr) ? ": " + lastLine(stderr) : ".")) };
+      };
+      const done = (outcome) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (child) children.delete(child);
+        let result;
+        try {
+          result = finish(outcome, Buffer.concat(out).toString("utf8"), Buffer.concat(err).toString("utf8"));
+        } catch (failure) {
+          result = { error: oneLine(errorMessage(failure)) };
+        }
+        resolve(result);
+      };
+      const kill = (why) => {
+        if (!reason) reason = why;
+        try {
+          child.kill("SIGKILL");
+        } catch (_) {
+          /* already gone */
+        }
+      };
+
+      try {
+        if (typeof deps.onSpawn === "function") deps.onSpawn([deps.python, ...args]);
+        child = deps.spawn(deps.python, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, shell: false });
+      } catch (error) {
+        done({ error });
+        return;
+      }
+      children.set(child, kill);
+      timer = setTimeout(() => kill("timeout"), timeoutMs);
+      if (child.stdout) {
+        child.stdout.on("data", (chunk) => {
+          outBytes += chunk.length;
+          if (outBytes > maxBytes) kill("overflow");
+          else out.push(chunk);
+        });
+      }
+      if (child.stderr) {
+        child.stderr.on("data", (chunk) => {
+          errBytes += chunk.length;
+          if (errBytes > maxBytes) kill("overflow");
+          else err.push(chunk);
+        });
+      }
+      child.on("error", (error) => done({ error }));
+      child.on("close", (code, signal) => done({ code, signal }));
+      if (stopped) kill("stopped");
+    });
+  }
+
+  return {
+    // input: { session, directory }. Never rejects.
+    async chat(input) {
+      try {
+        if (stopped) return { error: "The plugin stopped." };
+        if (typeof deps.python !== "string" || !deps.path.isAbsolute(deps.python)) {
+          return { error: oneLine("options.python must be an absolute path to Python 3.11 or newer: " + String(deps.python)) };
+        }
+        const session = input && typeof input.session === "string" ? input.session : "";
+        if (!SESSION_ID.test(session)) return { error: "The session id is not valid." };
+        let pending = inflight.get(session);
+        if (!pending) {
+          pending = run(session, directoryFor(input)).finally(() => {
+            if (inflight.get(session) === pending) inflight.delete(session);
+          });
+          inflight.set(session, pending);
+        }
+        return await pending;
+      } catch (error) {
+        return { error: oneLine("Could not read the chat: " + errorMessage(error)) };
+      }
+    },
+    stop() {
+      stopped = true;
+      for (const kill of [...children.values()]) kill("stopped");
+    },
+    running: () => children.size,
+    inflight: () => inflight.size,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // The run message of a path: `<python> -P -m agentgraph.structure flow prompt ID --goal-file -` (what
 // `agentgraph flow prompt ID --goal-file -` runs), the goal on standard input, no shell, the same interpreter,
 // PYTHONPATH and timeout rules as the snapshot. Resolves { text } or { error } (one line); never rejects.

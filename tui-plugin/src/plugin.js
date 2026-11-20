@@ -28,12 +28,13 @@
  * AGENTGRAPH_TUI_DEMO=1 in the TUI's environment draws a moving demo document instead of running Python;
  * AGENTGRAPH_TUI_DEMO=paths draws it at rest with sample paths (src/demo.js). The demo never sends a path.
  */
-import { render, layout, isAnimated, truncate as truncateText, flowLabel, flowName, flowStatsText } from "./render.js";
+import { render, layout, isAnimated, truncate as truncateText, flowLabel, flowName, flowStatsText, clipLine } from "./render.js";
 import {
   scene, sceneFits, frameInterval, changeAt, orbitTurned, orbitReset, TURN_STEP, ELEVATION_STEP, DRAG_TURN_PER_CELL, DRAG_ELEVATION_PER_ROW,
   finishedRuns, STREAK_MS, STREAK_GAP_MS,
 } from "./scene.js";
-import { createSnapshotRunner, errorDocument, errorMessage, oneLine, runFlowPrompt, GOAL_LIMIT } from "./runner.js";
+import { createSnapshotRunner, createChatRunner, errorDocument, errorMessage, oneLine, runFlowPrompt, GOAL_LIMIT } from "./runner.js";
+import { chatLines, chatWindow, chatHeading, cleanChat, CHAT_MIN_INLINE } from "./chat.js";
 import { createDemoRunner, DEMO_INTERVAL_MS } from "./demo.js";
 
 export const PLUGIN_ID = "agentgraph-tui";
@@ -45,6 +46,7 @@ export const PANEL_MAX_WIDTH = 100; // the panel's text never stretches wider th
 export const DEFAULT_INTERVAL_MS = 4000;
 export const MIN_INTERVAL_MS = 1000;
 export const SPINNER_MS = 200;
+export const CHAT_POLL_MS = 2000; // a busy session's chat is read this often; an idle one once
 export const DEFAULT_PYTHON = "/Users/achita.anantachina/.local/state/tec/toolchain/base_profile/bin/python3";
 const TERRACOTTA_HUE = 18;
 const BOLD = 1; // OpenTUI TextAttributes.BOLD
@@ -373,6 +375,102 @@ export function createPlugin(host) {
     let disposed = false;
     const watchers = [];
 
+    // The chat of the selected agent: `agentgraph chat` (src/runner.js), read only while the panel's list shows it for
+    // the selected row, one read at a time, once when its session is not busy and every CHAT_POLL_MS while it is.
+    // `want(session, busy)` is called from the view (it changes no signal itself); `sent` is the `m` key's success.
+    const chatRunner = createChatRunner({
+      spawn: host.spawn,
+      fs: host.fs,
+      path: host.path,
+      env: host.env,
+      home: options.home,
+      python: options.python,
+      demo: demo || options.demo,
+      onSpawn: (argv) => report("chat", argv.join(" ")), // debug log only
+    });
+    const SENT_KEEP_MS = 60000; // a sent message the feed has not shown yet is drawn as pending for this long
+    const [chatState, setChatState] = host.createSignal({ session: null, feed: null, error: null, extras: [] });
+    const chatFeed = (() => {
+      let session = null; // the session wanted now
+      let busyHint = false; // the snapshot says that session is busy
+      let generation = 0;
+      let inflight = false;
+      let again = false; // a read was asked for while one ran
+      let timer = null;
+      const busyNow = () => {
+        const s = chatState();
+        return busyHint || (s.session === session && !!s.feed && s.feed.busy === true);
+      };
+      function read() {
+        if (disposed || !session) return Promise.resolve();
+        if (inflight) {
+          again = true;
+          return Promise.resolve();
+        }
+        const asked = session;
+        const gen = generation;
+        inflight = true;
+        return chatRunner
+          .chat({ session: asked, directory: directory() })
+          .catch((error) => ({ error: errorMessage(error) }))
+          .then((res) => {
+            if (disposed || gen !== generation || asked !== session) return; // late result: drop it
+            const before = chatState();
+            const extras = before.extras.filter((e) => e.session === asked);
+            if (res && res.feed) setChatState({ session: asked, feed: res.feed, error: null, extras });
+            else setChatState({ session: asked, feed: before.session === asked ? before.feed : null, error: (res && res.error) || "The chat could not be read.", extras });
+            requestRender();
+          })
+          .finally(() => {
+            inflight = false;
+            if (again && session && !disposed) {
+              again = false;
+              read();
+            }
+          });
+      }
+      function stopTimer() {
+        if (timer) timers.clearInterval(timer);
+        timer = null;
+      }
+      return {
+        want(id, busy) {
+          busyHint = !!busy;
+          if ((id || null) === session) return;
+          session = id || null;
+          generation += 1;
+          again = false;
+          if (!session) {
+            stopTimer();
+            return;
+          }
+          if (!timer && !disposed) {
+            timer = timers.setInterval(() => {
+              if (session && !inflight && busyNow()) read();
+            }, CHAT_POLL_MS);
+          }
+          Promise.resolve().then(() => (session === id ? read() : undefined));
+        },
+        // `m` delivered `text` to `id`: it shows as pending until the feed has it, and the chat is read at once
+        sent(id, text) {
+          if (disposed || typeof id !== "string" || typeof text !== "string") return;
+          const before = chatState();
+          setChatState(Object.assign({}, before, { extras: [...before.extras, { session: id, text, at: clock() }].slice(-8) }));
+          if (id === session) read();
+          requestRender();
+        },
+        read,
+        stop() {
+          session = null;
+          generation += 1;
+          stopTimer();
+          chatRunner.stop();
+        },
+        wanted: () => session,
+      };
+    })();
+
+
     // One watcher follows one session: its latest document, the spinner frame, its timers. The sidebar and the
     // panel each own one; both go through the same runner, which runs one process per session at a time.
     function createWatcher() {
@@ -560,15 +658,25 @@ export function createPlugin(host) {
         else {
           const requests = hostRequests();
           const selected = typeof listOptions.selected === "function" ? listOptions.selected() : undefined;
-          const first = layout(snap.doc, { width, frame: watcher.frame(), now: clock(), requests, cursor: !!listOptions.cursor, selected });
+          const height = resolved.height || null;
+          const columns = resolved.columns || null;
+          const base = { width, frame: watcher.frame(), now: clock(), requests, cursor: !!listOptions.cursor, selected };
+          // the panel's rows carry what each working agent is doing; they go when the panel is too short for the rows
+          let more = listOptions.activity ? { activity: true } : {};
+          let first = layout(snap.doc, Object.assign({}, base, more));
+          if (more.activity && height && first.lines.length + 1 > height) {
+            more = {};
+            first = layout(snap.doc, base);
+          }
+          const plan = typeof listOptions.plan === "function" ? listOptions.plan(first, height, columns ? Math.min(width, columns) : width) : null;
           let result = first;
           if (typeof listOptions.keys === "function") {
             const item = first.items.find((i) => i.key === first.selected) || null;
-            result = layout(snap.doc, { width, frame: watcher.frame(), now: clock(), requests, cursor: !!listOptions.cursor, selected, keys: listOptions.keys(item, first.items, first) });
+            result = layout(snap.doc, Object.assign({}, base, more, { keys: listOptions.keys(item, first.items, first, plan) }));
           }
           result.session = session;
-          if (typeof listOptions.onLayout === "function") listOptions.onLayout(result);
-          lines = result.lines;
+          if (typeof listOptions.onLayout === "function") listOptions.onLayout(result, plan);
+          lines = plan && typeof listOptions.compose === "function" ? listOptions.compose(result, plan) : result.lines;
         }
         if (!ready && typeof listOptions.onLayout === "function") listOptions.onLayout({ items: [], selected: null });
         return lines.map((line) => lineNode(line, tones));
@@ -622,7 +730,7 @@ export function createPlugin(host) {
 
     // The list's rows in the panel: the selected row's key (remembered while the app runs) and the rows last drawn.
     const [selection, setSelection] = host.createSignal(null);
-    const rows = { items: [], selected: null, scene: false, flows: [], root: null, session: null };
+    const rows = { items: [], selected: null, scene: false, flows: [], root: null, session: null, chat: "off", chatMax: 0, chatRows: 0 };
     const has = (fn) => typeof fn === "function";
     const canOpen = () => !!(ctx.ui && ctx.ui.router && has(ctx.ui.router.navigate));
     const canStop = () => !!(ctx.client && ctx.client.session && has(ctx.client.session.interrupt) && ctx.ui && ctx.ui.dialog && has(ctx.ui.dialog.confirm));
@@ -636,28 +744,112 @@ export function createPlugin(host) {
       requestRender();
     };
     let runKeyWanted = null; // the mounted panel's setRunKey(want): `r` is there while the snapshot has a path
+    // The chat of the selected row, in the panel's list: `chatOpen` is the user's `c` (the chat in place of the lower part of
+    // the panel, for when it does not fit beside the list); `chatView` is where it is scrolled (lines up from the newest,
+    // 0 follows it) and what it last drew; `chatTick` redraws after a scroll.
+    const [chatOpen, setChatOpen] = host.createSignal(false);
+    const [chatTick, setChatTick] = host.createSignal(0);
+    const chatView = { scroll: 0, session: null, total: null, max: 0, rows: 0 };
+    const hasKeys = () => !!(ctx.keymap && has(ctx.keymap.layer));
+    const squash = (text) => cleanChat(text).replace(/\s+/g, " ").trim();
+    // messages sent from here that the feed does not show yet, as the pending items they will be
+    const pendingExtras = (state, session, feed) => {
+      const now = clock();
+      const told = new Set((feed && Array.isArray(feed.items) ? feed.items : []).filter((i) => i && (i.kind === "user" || i.user === true)).map((i) => squash(i.text)));
+      return state.extras
+        .filter((e) => e.session === session && now - e.at < SENT_KEEP_MS && !told.has(squash(e.text)))
+        .map((e) => ({ kind: "user", text: e.text, pending: true }));
+    };
+    // The chat's place: beside the list when the panel has the room, in place of its lower part after `c`, else nowhere.
+    // -> { mode: "inline" | "open" | "none" | "off", item, win, live, name, width }
+    const chatPlan = (first, height, width) => {
+      chatTick();
+      const item = first.items.find((i) => i.key === first.selected) || null;
+      if (!item || !height) return { mode: "off", item };
+      const keyRows = hasKeys() ? 1 : 0;
+      let mode = "none";
+      let rowsAvail = 0;
+      if (chatOpen()) {
+        mode = "open";
+        rowsAvail = Math.max(1, height - 2 - keyRows);
+      } else {
+        const room = height - first.lines.length - keyRows;
+        if (room >= CHAT_MIN_INLINE) {
+          mode = "inline";
+          rowsAvail = room - 1;
+        }
+      }
+      if (mode === "none") return { mode, item };
+      const cw = Math.max(1, width - 1);
+      const st = chatState();
+      let view;
+      if (!item.open) view = { state: "none" };
+      else if (st.session !== item.open || (!st.feed && !st.error)) view = { state: "loading" };
+      else if (!st.feed) view = { state: "error", error: st.error };
+      else view = { state: "feed", feed: st.error ? Object.assign({}, st.feed, { warning: st.error }) : st.feed, extra: pendingExtras(st, item.open, st.feed) };
+      const lines = chatLines(view, cw);
+      if (chatView.session !== item.open) Object.assign(chatView, { session: item.open, scroll: 0, total: null });
+      if (chatView.scroll > 0 && chatView.total !== null && lines.length !== chatView.total) chatView.scroll += lines.length - chatView.total;
+      chatView.total = lines.length;
+      const win = chatWindow(lines, rowsAvail, chatView.scroll);
+      Object.assign(chatView, { scroll: win.scroll, max: win.max, rows: win.rows });
+      return { mode, item, win, live: !!item.busy, name: item.kind === "human" ? "orchestrator" : item.name, width: cw };
+    };
+    // The lines to draw: the list's, with the chat under its rows (before the key line) or in place of them (the
+    // selected row, the chat, the key line).
+    const gutter = (line) => [{ text: " ", tone: "plain" }, ...line];
+    const chatCompose = (result, plan) => {
+      if ((plan.mode !== "inline" && plan.mode !== "open") || !plan.win) return result.lines;
+      const width = plan.width + 1;
+      const keysAt = typeof result.keysLine === "number" ? result.keysLine : null;
+      const picked = result.items.find((i) => i.key === result.selected);
+      const top = plan.mode === "open" && picked ? [result.lines[picked.line]] : result.lines.filter((_, i) => i !== keysAt);
+      const heading = gutter(chatHeading({ name: plan.name, live: plan.live, scroll: plan.win.scroll }, plan.width));
+      const body = plan.win.lines.map(gutter);
+      const keyLine = keysAt !== null ? [result.lines[keysAt]] : [];
+      return [...top, heading, ...body, ...keyLine].map((line) => clipLine(line, width));
+    };
     // The key line for the selected row: only keys that do something there.
-    const keyPieces = (item, items, result) => {
+    const keyPieces = (item, items, result, plan) => {
       const pieces = [];
-      if (Array.isArray(items) && items.length > 1) pieces.push(["↑↓", "select"]);
+      const open = !!plan && plan.mode === "open";
+      if (open) pieces.push(["↑↓", "scroll"]);
+      else if (Array.isArray(items) && items.length > 1) pieces.push(["↑↓", "select"]);
       if (item && item.open && canOpen()) pieces.push(["⏎", "open"]);
       if (item && item.busy && canStop()) pieces.push(["s", "stop"]);
       if (item && item.busy && canMessage()) pieces.push(["m", "message"]);
+      if (plan && item && item.open) {
+        if (plan.mode === "open") pieces.push(["c", "back"]);
+        else if (plan.mode === "none") pieces.push(["c", "chat"]);
+      }
+      if (plan && plan.win && plan.win.max > 0 && !open) pieces.push(["⇞⇟", "scroll"]);
       if (result && Array.isArray(result.flows) && result.flows.length && canRun() && runShown()) pieces.push(["r", "run"]);
       pieces.push(["g", "graph"], ["q", "close"]);
       return pieces;
     };
     const panelList = {
       cursor: true,
+      activity: true,
       selected: () => selection(),
-      keys: (item, items, result) => (ctx.keymap && has(ctx.keymap.layer) ? keyPieces(item, items, result) : []),
-      onLayout(result) {
+      keys: (item, items, result, plan) => (hasKeys() ? keyPieces(item, items, result, plan) : []),
+      plan: chatPlan,
+      compose: chatCompose,
+      onLayout(result, plan) {
         rows.items = Array.isArray(result.items) ? result.items : [];
         rows.selected = result.selected || null;
         rows.scene = !!result.scene;
         rows.flows = Array.isArray(result.flows) ? result.flows : [];
         rows.root = typeof result.root === "string" ? result.root : null;
         rows.session = typeof result.session === "string" ? result.session : null;
+        rows.chat = plan ? plan.mode : "off";
+        rows.chatMax = plan && plan.win ? plan.win.max : 0;
+        rows.chatRows = plan && plan.win ? plan.win.rows : 0;
+        // the chat is read for the selected row while it shows; never on the orbit, hidden or with no rows
+        if (!result.scene && rows.items.length && plan && plan.item && plan.item.open && (plan.mode === "inline" || plan.mode === "open")) {
+          chatFeed.want(plan.item.open, !!plan.item.busy);
+        } else {
+          chatFeed.want(null);
+        }
         if (Array.isArray(result.flows) && runKeyWanted) runKeyWanted(result.flows.length > 0); // a list's layout, not the orbit's
         if (Array.isArray(result.flows)) {
           // debug log only, when they change (real-host.py --live-paths waits on a path's new rev after a refresh)
@@ -758,7 +950,11 @@ export function createPlugin(host) {
       withDialog(() => ctx.ui.dialog.prompt({ title: `Message ${item.name}`, placeholder: "Sent into its running session" }))
         .then((text) => {
           if (typeof text !== "string" || !text.trim()) return undefined;
-          return Promise.resolve(ctx.client.session.prompt({ sessionID, text: text.trim(), delivery: "steer" })).then(() => toast(`Sent to ${item.name}`));
+          const sentText = text.trim();
+          return Promise.resolve(ctx.client.session.prompt({ sessionID, text: sentText, delivery: "steer" })).then(() => {
+            toast(`Sent to ${item.name}`);
+            chatFeed.sent(sessionID, sentText); // pending in the chat until it lands, and the chat is read at once
+          });
         })
         .catch((error) => {
           report("message", error);
@@ -1091,7 +1287,10 @@ export function createPlugin(host) {
           makeView(
             watcher,
             (p) => {
-              if (!isOurs(p)) return { hidden: true };
+              if (!isOurs(p)) {
+                chatFeed.want(null); // hidden: no chat read
+                return { hidden: true };
+              }
               watcher.poll(true); // stopped again when the panel closes (below) or the plugin is disposed
               if (ctx.theme !== themeRef) {
                 themeRef = ctx.theme;
@@ -1099,7 +1298,7 @@ export function createPlugin(host) {
               }
               const known = size() || measuredSize(root);
               const fits = !!known && wantScene(p) && sceneFits(known.width, known.height);
-              return { session: sessionOf(p), width: panelWidth(p), scene: fits ? known : null, painter, list: panelList };
+              return { session: sessionOf(p), width: panelWidth(p), height: known ? known.height : null, columns: known ? known.width : null, scene: fits ? known : null, painter, list: panelList };
             },
             panel,
           ),
@@ -1163,10 +1362,12 @@ export function createPlugin(host) {
               try {
                 panelWatcher.reopen();
                 setFullByF(false); // the host opens a panel as a side panel
+                setChatOpen(false);
                 keys = panelKeys(panel);
                 if (typeof host.onCleanup === "function") {
                   host.onCleanup(() => {
                     panelWatcher.stop();
+                    chatFeed.want(null);
                     keys.remove();
                   });
                 }
@@ -1216,6 +1417,22 @@ export function createPlugin(host) {
       // kept for the panel's measure callback: nothing to undo now that `g` never changes the presentation
       const sized = () => {};
       const onList = () => ours() && !rows.scene && rows.items.length > 0 && !dialogOpen();
+      const chatIsOpen = () => rows.chat === "open";
+      const chatKeyOn = () => onList() && (rows.chat === "open" || (rows.chat === "none" && !!(selectedItem() || {}).open));
+      const chatScrollable = () => onList() && (rows.chat === "inline" || rows.chat === "open") && rows.chatMax > 0;
+      const toggleChat = () => {
+        chatView.scroll = 0;
+        setChatOpen(!chatOpen());
+        setChatTick((t) => t + 1);
+        requestRender();
+      };
+      const scrollChat = (delta) => {
+        const next = Math.max(0, Math.min(rows.chatMax, chatView.scroll + delta));
+        if (next === chatView.scroll) return;
+        chatView.scroll = next;
+        setChatTick((t) => t + 1);
+        requestRender();
+      };
       // the 3D orbit shows: the arrow keys turn it (left and right in the turn layer, up and down in the layer above)
       const turning = () => ours() && rows.scene && dimension().view === "3d" && !dialogOpen();
       const act = (name) => () => {
@@ -1242,11 +1459,18 @@ export function createPlugin(host) {
           },
           { id: PANEL_NAME + ".close", bind: "q", enabled: ours, run: act("close") },
           // the list's rows; on the 3D orbit the elevation (turning(), below); nothing on the 2D orbit
-          { id: PANEL_NAME + ".up", bind: "up", enabled: () => onList() || turning(), run: () => (onList() ? moveSelection(-1) : turning() && turnBy(0, ELEVATION_STEP, "key up")) },
-          { id: PANEL_NAME + ".down", bind: "down", enabled: () => onList() || turning(), run: () => (onList() ? moveSelection(1) : turning() && turnBy(0, -ELEVATION_STEP, "key down")) },
+          // in the list the rows, or the chat's lines while it is open in place of them; on the 3D orbit the elevation
+          { id: PANEL_NAME + ".up", bind: "up", enabled: () => onList() || turning(), run: () => (onList() ? (chatIsOpen() ? scrollChat(1) : moveSelection(-1)) : turning() && turnBy(0, ELEVATION_STEP, "key up")) },
+          { id: PANEL_NAME + ".down", bind: "down", enabled: () => onList() || turning(), run: () => (onList() ? (chatIsOpen() ? scrollChat(-1) : moveSelection(1)) : turning() && turnBy(0, -ELEVATION_STEP, "key down")) },
           { id: PANEL_NAME + ".open", bind: "return", enabled: () => onList() && canOpen(), run: () => onList() && openSelected() },
           ...(canStop() ? [{ id: PANEL_NAME + ".stop", bind: "s", enabled: () => onList() && !!(selectedItem() || {}).busy, run: () => onList() && stopSelected() }] : []),
           ...(canMessage() ? [{ id: PANEL_NAME + ".message", bind: "m", enabled: () => onList() && !!(selectedItem() || {}).busy, run: () => onList() && messageSelected() }] : []),
+          // the chat: `c` opens it in place of the list's lower part when it does not fit beside it (and closes it, as Escape
+          // does); Page Up and Page Down scroll it back and forward whenever it shows
+          { id: PANEL_NAME + ".chat", bind: "c", enabled: chatKeyOn, run: () => chatKeyOn() && toggleChat() },
+          { id: PANEL_NAME + ".chat-close", bind: "escape", enabled: () => onList() && chatIsOpen(), run: () => onList() && chatIsOpen() && toggleChat() },
+          { id: PANEL_NAME + ".chat-back", bind: "pageup", enabled: chatScrollable, run: () => chatScrollable() && scrollChat(Math.max(1, chatView.rows - 1)) },
+          { id: PANEL_NAME + ".chat-forward", bind: "pagedown", enabled: chatScrollable, run: () => chatScrollable() && scrollChat(-Math.max(1, chatView.rows - 1)) },
         ],
       }));
       const unregisters = [unregister];
@@ -1375,6 +1599,7 @@ export function createPlugin(host) {
       if (disposed) return;
       disposed = true;
       for (const watcher of watchers) watcher.stop();
+      chatFeed.stop();
       runner.stop();
       for (const remove of [...panelLayers]) remove();
       for (const unregister of disposers) {

@@ -1573,22 +1573,28 @@ function drawLabels2D(doc, L, canvas, S, P, now, frame) {
   const box = L.hubBox;
   const agentRows = new Set(L.placed.map((p) => p.row));
   for (const p of L.placed) {
-    if (p.state !== "working" || p.row + 1 >= L.h || !shown.has(p) || agentRows.has(p.row + 1)) continue;
+    if (p.state !== "working" || !shown.has(p)) continue;
     const start = p.col + 2 * p.dir;
-    let room = canvas.room(start, p.row + 1, p.dir, 30);
-    if (p.row + 1 >= box.r0 && p.row + 1 <= box.r1) {
-      const edge = p.dir > 0 ? box.c0 - 1 - start : start - box.c1 - 1; // cells before the ball and a clear cell
-      if (edge >= 0) room = Math.min(room, edge);
-    }
     const n = workRounds(doc, p.agent.name);
     const tail = (n >= 2 ? `${LOOP_MARK}${n} ` : "") + formatDollars(agentCost(p.agent));
     const goal = currentGoal(isObject(doc.graph) ? doc.graph : null, p.agent.name);
-    let text = "";
-    if (goal && room - displayWidth(tail) - 1 >= 4) text = truncate(goal, room - displayWidth(tail) - 1) + " " + tail;
-    else if (displayWidth(tail) <= room) text = tail;
-    if (!text) continue;
-    const tw = displayWidth(text);
-    canvas.put(p.dir > 0 ? start : start - tw + 1, p.row + 1, text, muted);
+    // the row below the name; when that has no room (other names or glyphs on it), the row above. Where room is short
+    // the goal is cut first and the rounds and spend stay; the line goes only when even they do not fit.
+    for (const row of [p.row + 1, p.row - 1]) {
+      if (row < 0 || row >= L.h || agentRows.has(row)) continue;
+      let room = canvas.room(start, row, p.dir, 30);
+      if (row >= box.r0 && row <= box.r1) {
+        const edge = p.dir > 0 ? box.c0 - 1 - start : start - box.c1 - 1; // cells before the ball and a clear cell
+        if (edge >= 0) room = Math.min(room, edge);
+      }
+      let text = "";
+      if (goal && room - displayWidth(tail) - 1 >= 4) text = truncate(goal, room - displayWidth(tail) - 1) + " " + tail;
+      else if (displayWidth(tail) <= room) text = tail;
+      if (!text) continue;
+      const tw = displayWidth(text);
+      canvas.put(p.dir > 0 ? start : start - tw + 1, row, text, muted);
+      break;
+    }
   }
 }
 

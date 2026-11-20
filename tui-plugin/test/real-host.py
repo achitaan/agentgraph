@@ -38,6 +38,12 @@ The list (what the panel opens on):
     --open          without --demo (a real session, at rest the hub row is the only row): press Enter and require that
                     the plugin asked the host to open the hub's session (the debug log: `action: open <session>`, the
                     session this script opened) with no error, and that the session is still on screen.
+    --chat          only with --demo: the chat of the selected agent (the demo's `agentgraph chat --demo` feed). Require its
+                    heading (`chat · impl-claude ───`) and some of its lines under the list; when the panel has no
+                    room for it beside the list, press `c` to open it in place of the lower part and `Escape` to close
+                    it. Beside the list, press the down arrow: the orchestrator's read-only `transcript · orchestrator`,
+                    and once more: `chat · designer`; the up arrow twice returns. Not with --dialog, --open, --paths,
+                    --live-paths, --gcheck, --fullscreen, --view3d or --orbit.
     --paths         start the app with AGENTGRAPH_TUI_DEMO=paths (the demo team at rest with three sample paths, see
                     src/demo.js) and require the list at rest: at most 4 rows (the hub, the paths row
                     `3 paths · last impl-loop 2h ago`, spend, the key line with `r run`). Then press `r` and require the
@@ -464,14 +470,24 @@ LIST_KEYS = re.compile(r"\bg graph\b.*\bq close$")
 
 
 def list_rows(lines, found):
-    """-> the list's rows from the screen: the needs-you rows above the hub row (same column) and the view."""
+    """-> the list's rows from the screen: the needs-you rows above the hub row (same column), each with its activity
+    line (two spaces, then what the agent does), and the view. The chat under the rows (its heading down to the line
+    before the key line) is not part of the list."""
     row, col, view = found
+    cell = lambda r: re.split(r"[┃│]", lines[r][col:col + 100])[0].rstrip()
     above = []
     r = row - 1
-    while r >= 0 and re.match(r"[!?↩] \S", lines[r][col:]):
-        above.insert(0, re.split(r"[┃│]", lines[r][col:col + 100])[0].rstrip())
+    while r >= 0 and (re.match(r"[!?↩] \S", cell(r)) or re.match(r"  \S", cell(r))):
+        above.insert(0, cell(r))
         r -= 1
-    return above + [v for v in view if v.strip()]
+    while above and not re.match(r"[!?↩] \S", above[0]):
+        above.pop(0)  # an indented line with no needs row over it is not ours
+    body = [v for v in view if v.strip()]
+    heading = next((i for i, v in enumerate(body) if CHAT_HEADING.search(v)), None)
+    if heading is not None:
+        keys = len(body) - 1 if LIST_KEYS.search(body[-1]) else len(body)
+        body = body[:heading] + body[keys:]
+    return above + body
 
 
 def list_report(rows):
@@ -610,6 +626,97 @@ def drive_dialog(term, found_lines):
     facts += [l.split(" ", 1)[1] for l in log if "action:" in l][-4:]
     if opened != opened_before:
         problems.append("dialog: Enter in the confirm also opened a session")
+    return problems, facts, screens
+
+
+CHAT_HEADING = re.compile(r"(chat|transcript) · (\S+) ─")
+
+
+def chat_heading(lines):
+    """-> (row, kind, name) of the chat's heading on the screen, or None."""
+    for i, line in enumerate(lines):
+        m = CHAT_HEADING.search(line)
+        if m:
+            return i, m.group(1), m.group(2)
+    return None
+
+
+def chat_body(lines):
+    """-> the non-empty screen text under the heading, up to the key line."""
+    at = chat_heading(lines)
+    if at is None:
+        return []
+    found = find_view(lines)
+    col = found[1] if found else 0
+    out = []
+    for line in lines[at[0] + 1:]:
+        text = line[col:].rstrip()
+        if not text.strip():
+            break
+        out.append(text)
+    return out
+
+
+def drive_chat(term, lines):
+    """--chat: the chat under the list (or opened with `c`), the orchestrator's transcript, a working agent's chat.
+    -> (problems, facts, screens)"""
+    problems, facts, screens = [], [], []
+    term.pump(1.0)
+    opened_by_c = False
+    if chat_heading(term.lines()) is None:
+        term.write(b"c")
+        term.wait_for(lambda ls: chat_heading(ls) is not None, CEILING)
+        term.pump(0.5)
+        opened_by_c = True
+    shown = term.lines()
+    screens.append(("the chat" + (" after c" if opened_by_c else ""), shown))
+    at = chat_heading(shown)
+    if at is None:
+        problems.append("chat: no heading `chat · NAME ───` on screen" + (" after c" if opened_by_c else ""))
+        return problems, facts, screens
+    facts.append(f"{'opened with c' if opened_by_c else 'beside the list'}: {at[1]} · {at[2]}, {len(chat_body(shown))} lines")
+    if (at[1], at[2]) != ("chat", "impl-claude"):
+        problems.append(f"chat: expected `chat · impl-claude`, saw `{at[1]} · {at[2]}`")
+    if len(chat_body(shown)) < 3:
+        problems.append("chat: fewer than 3 lines of the chat")
+    if not opened_by_c:
+        for key, want, label in ((b"\x1b[B", ("transcript", "orchestrator"), "down once"), (b"\x1b[B", ("chat", "designer"), "down twice")):
+            term.write(key)
+            term.wait_for(lambda ls: (chat_heading(ls) or (0, 0, 0))[1:] == want, CEILING)
+            term.pump(1.0)
+            shot = term.lines()
+            screens.append((label, shot))
+            now = chat_heading(shot)
+            facts.append(f"{label}: {now[1] + ' · ' + now[2] if now else 'no heading'}, {len(chat_body(shot))} lines")
+            if now is None or (now[1], now[2]) != want:
+                problems.append(f"chat: after {label} expected `{want[0]} · {want[1]}`, saw {now}")
+            elif len(chat_body(shot)) < 2:
+                problems.append(f"chat: after {label} fewer than 2 lines of the chat")
+        for _ in range(2):
+            term.write(b"\x1b[A")
+            term.pump(0.5)
+        term.pump(1.0)
+        back = chat_heading(term.lines())
+        if back is None or back[2] != "impl-claude":
+            problems.append(f"chat: after up twice expected impl-claude, saw {back}")
+    else:
+        term.write(b"\x1b")  # Escape closes the chat opened with c
+        term.wait_for(lambda ls: chat_heading(ls) is None, CEILING)
+        term.pump(0.5)
+        shot = term.lines()
+        screens.append(("after Escape", shot))
+        if chat_heading(shot) is not None:
+            problems.append("chat: Escape did not close the chat")
+        term.write(b"c")
+        term.wait_for(lambda ls: chat_heading(ls) is not None, CEILING)
+        term.pump(0.5)
+        if chat_heading(term.lines()) is None:
+            problems.append("chat: c did not open it again")
+        term.write(b"c")
+        term.wait_for(lambda ls: chat_heading(ls) is None, CEILING)
+        term.pump(0.5)
+        if chat_heading(term.lines()) is not None:
+            problems.append("chat: c did not close it")
     return problems, facts, screens
 
 
@@ -1023,7 +1130,7 @@ def drive(term, args):
     started = app_started(term)
     if not args.no_graph:
         open_panel(term, args)
-    if (args.list_mode or args.dialog or args.open or args.paths or args.live_paths) and not args.fullscreen:
+    if (args.list_mode or args.dialog or args.open or args.paths or args.live_paths or args.chat) and not args.fullscreen:
         # /graph opens on the orbit when the panel fits it (36x14 up, so the side panel of every size run here): these
         # runs test the list, so show it with `g` first (the panel's own key, remembered while the app runs)
         if term.wait_for(orbit_on, args.wait):
@@ -1073,6 +1180,8 @@ def drive(term, args):
         extra = ("paths",) + drive_paths(term, lines)
     elif args.live_paths and find_view(lines) is not None:
         extra = ("live paths",) + drive_live_paths(term, lines, args.live_root, args.session_id)
+    elif args.chat and find_view(lines) is not None:
+        extra = ("chat",) + drive_chat(term, lines)
     elif args.open and find_view(lines) is not None:
         p, f, after = drive_open(term, lines, args.session_id)
         extra = ("open", p, f, [("after Enter", after)])
@@ -1393,6 +1502,7 @@ def main():
     parser.add_argument("--dialog", action="store_true", help="with --demo: s, then down and Enter in the confirm; nothing leaks")
     parser.add_argument("--open", action="store_true", help="without --demo: Enter on the hub row opens its session")
     parser.add_argument("--paths", action="store_true", help="the demo at rest with sample paths: r, the chooser, the goal prompt, Escape; nothing sent")
+    parser.add_argument("--chat", action="store_true", help="with --demo: the chat of the selected agent (open it with c where it does not fit), the orchestrator's transcript")
     parser.add_argument("--live-paths", action="store_true", help="a scratch orchestration folder with two named paths: the live chooser and flow prompt; nothing sent")
     parser.add_argument("--orbit", action="store_true", help="with --demo --fullscreen --view3d: the arrow keys, 0, a click and a drag on the 3D orbit")
     parser.add_argument("--plugin", default="", help="load only the terminal plugin at this folder (a scratch XDG_CONFIG_HOME)")
@@ -1406,6 +1516,8 @@ def main():
         why = "--paths and --live-paths run alone (with --size, --binary, --wait, --settle, --keep-open)"
     if not why and args.live_paths and any(a == "--session" or a.startswith("--session=") for a in sys.argv[1:]):
         why = "--live-paths types a goal: only in this script's throwaway session, not with --session"
+    if not why and args.chat and (not args.demo or args.dialog or args.open or args.paths or args.live_paths or args.gcheck or args.fullscreen or args.view3d or args.orbit):
+        why = "--chat needs --demo and runs without --dialog, --open, --paths, --live-paths, --gcheck, --fullscreen, --view3d or --orbit"
     if not why and args.orbit and not (args.demo and args.fullscreen and args.view3d):
         why = "--orbit needs --demo --fullscreen --view3d"
     if not why and args.plugin and not os.path.isfile(os.path.join(args.plugin, "src", "tui.js")):
@@ -1441,7 +1553,7 @@ def main():
         EXTRA_ENV.update({"AGENTGRAPH_TUI_HOME": args.live_root, "AGENTGRAPH_TUI_NOSEND": "1"})
 
     args.orbit_result = None
-    label = f"{cols}x{rows}{'-nograph' if args.no_graph else ''}{'-orbit' if args.orbit else ''}{'-demo' if args.demo else ''}{'-dialog' if args.dialog else ''}{'-open' if args.open else ''}{'-paths' if args.paths else ''}{'-livepaths' if args.live_paths else ''}{'-full' if args.fullscreen else ''}{'-3d' if args.view3d else ''}{'-g' + args.pre if args.gcheck else ''}"
+    label = f"{cols}x{rows}{'-nograph' if args.no_graph else ''}{'-orbit' if args.orbit else ''}{'-demo' if args.demo else ''}{'-dialog' if args.dialog else ''}{'-open' if args.open else ''}{'-paths' if args.paths else ''}{'-chat' if args.chat else ''}{'-livepaths' if args.live_paths else ''}{'-full' if args.fullscreen else ''}{'-3d' if args.view3d else ''}{'-g' + args.pre if args.gcheck else ''}"
     term = None
     try:
         term = Term([args.binary, "--standalone", "-s", session, proj], proj, cols, rows, os.path.join(SCRATCH, f"raw-{label}.bin"))
@@ -1534,9 +1646,9 @@ def main():
             print(f"===== {label}: FAIL, scene: " + "; ".join(problems))
             return 1
     extra = getattr(args, "extra", None)
-    if args.dialog or args.open or args.paths or args.live_paths:
+    if args.dialog or args.open or args.paths or args.live_paths or args.chat:
         if extra is None:
-            print(f"===== {label}: FAIL, {'dialog' if args.dialog else 'paths' if args.paths or args.live_paths else 'open'}: no view to press keys in")
+            print(f"===== {label}: FAIL, {'dialog' if args.dialog else 'paths' if args.paths or args.live_paths else 'chat' if args.chat else 'open'}: no view to press keys in")
             return 1
         kind, p_extra, f_extra, screens = extra
         for name, shot in screens:

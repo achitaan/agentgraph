@@ -830,6 +830,21 @@ function pathsRow(flows, width, now) {
   return candidates.find((c) => lineWidth(c) <= width) || count;
 }
 
+// What a working agent is doing now, one line under its row: the tool it runs, or the first words of what it thinks
+// or says (snapshot `agents[].activity`: { kind: "tool" | "reasoning" | "text", tool, text }). Null when it has none.
+function activityRow(agent, width) {
+  const a = agent && isObject(agent.activity) ? agent.activity : null;
+  if (!a) return null;
+  const kind = a.kind === "tool" || a.kind === "reasoning" || a.kind === "text" ? a.kind : null;
+  if (!kind) return null;
+  const text = clean(kind === "tool" ? a.tool : a.text);
+  if (!text) return null;
+  const mark = kind === "tool" ? "▸ " : kind === "reasoning" ? "· " : "";
+  const room = width - 2 - displayWidth(mark);
+  if (room < 1) return null;
+  return [sp("  ", "plain"), ...(mark ? [sp(mark, "muted")] : []), sp(truncate(text, room), kind === "text" ? "plain" : "muted")];
+}
+
 // The keys: [[key, label], ...] -> one muted line of the pairs that fit, in order.
 function keysRow(keys, width) {
   let text = "";
@@ -846,12 +861,13 @@ function keysRow(keys, width) {
 // ---------------------------------------------------------------------------------------------------------------
 // Entry point
 
-// layout(snapshot, { width, frame, now, requests, cursor, selected, keys }) -> { lines, items, selected }
+// layout(snapshot, { width, frame, now, requests, cursor, selected, keys, activity }) -> { lines, items, selected, keysLine }
 //   lines: the rows, each at most `width` columns. items: the rows that can be selected, in order, each
 //   { key, line, kind, agent, name, hub, open, busy }: `open` the session Enter opens, `busy` the running session stop
 //   and message act on (null for the hub and for agents that do not work). selected: the selected item's key (the
 //   first item's when `selected` names none). With `cursor` every row has a one-column gutter, `›` on the selected
-//   row; `keys` adds the dim key line ([[key, label], ...]). Also returned: `flows` (the drawn paths, most recently run
+//   row; `keys` adds the dim key line ([[key, label], ...]; `keysLine` is its index in `lines`, else null); `activity`
+//   adds one line under each working agent's row with what it is doing now. Also returned: `flows` (the drawn paths, most recently run
 //   first) and `root` (the root session's id, the orchestrator's session, or null). With paths and nothing at work
 //   (nothing needs the user, nobody works, the hub is idle) one row after the hub says how many and which ran last.
 export function layout(snapshot, options = {}) {
@@ -861,7 +877,7 @@ export function layout(snapshot, options = {}) {
     ? Math.floor(Number(options.frame))
     : now !== null ? Math.floor(now / 120) : 0;
   const finish = (lines) => lines.map((line) => clipLine(line, width));
-  const single = (line) => ({ lines: finish([line]), items: [], selected: null, flows: [], root: null });
+  const single = (line) => ({ lines: finish([line]), items: [], selected: null, flows: [], root: null, keysLine: null });
 
   if (snapshot === undefined || snapshot === null) return single([sp("Loading", "muted")]);
   if (!isObject(snapshot)) return single([sp("Bad snapshot", "danger")]);
@@ -881,7 +897,12 @@ export function layout(snapshot, options = {}) {
   // 1. what needs the user
   const needs = needsItems(snapshot, agents, hub, options.requests);
   const shownNeeds = needs.length > NEEDS_MAX + 1 ? needs.slice(0, NEEDS_MAX) : needs;
-  for (const item of shownNeeds) rows.push({ line: needsRow(item, inner, at), item });
+  for (const item of shownNeeds) {
+    rows.push({ line: needsRow(item, inner, at), item });
+    const who = options.activity === true && item.agent && !item.hub ? agents.find((a) => a.name === item.agent) : null;
+    const doing = who && busyCount(who) > 0 ? activityRow(who, inner) : null;
+    if (doing) rows.push({ line: doing });
+  }
   if (shownNeeds.length < needs.length) rows.push({ line: [sp(`+${needs.length - shownNeeds.length} more`, "muted")] });
 
   // 2. who works now: the hub, then the others (longest at it first); idle agents are a count on the hub's row
@@ -893,7 +914,7 @@ export function layout(snapshot, options = {}) {
       const sessions = agentSessions(a);
       return {
         key: `agent:${a.name}`, kind: "working", agent: a.name, name: displayName(a), hub: false, open: sessions.open, busy: sessions.busy,
-        what: whatOf(graph, a, node), since: sinceOf(node, a), rounds: roundsOf(graph, a.name), order: i,
+        what: whatOf(graph, a, node), since: sinceOf(node, a), rounds: roundsOf(graph, a.name), order: i, doing: a,
       };
     })
     .sort((x, y) => (x.since ?? Infinity) - (y.since ?? Infinity) || x.order - y.order);
@@ -906,8 +927,16 @@ export function layout(snapshot, options = {}) {
       item: { key: `agent:${hub ? hub.name : "hub"}`, kind: "hub", agent: hub ? hub.name : null, name: hub ? displayName(hub) : "hub", hub: true, open: rootId || hubSessions.open, busy: null },
     });
   }
+  if (options.activity === true && hub && !flagged.has(hub.name) && hubWorking(snapshot, hub)) {
+    const doing = activityRow(hub, inner);
+    if (doing) rows.push({ line: doing });
+  }
   const shownWorking = working.length > WORKING_MAX + 1 ? working.slice(0, WORKING_MAX) : working;
-  shownWorking.forEach((item, i) => rows.push({ line: workingRow(item, inner, frame, i, at), item }));
+  shownWorking.forEach((item, i) => {
+    rows.push({ line: workingRow(item, inner, frame, i, at), item });
+    const doing = options.activity === true ? activityRow(item.doing, inner) : null;
+    if (doing) rows.push({ line: doing });
+  });
   if (shownWorking.length < working.length) rows.push({ line: [sp(`+${working.length - shownWorking.length} more working`, "muted")] });
   // the hub needs the user, so its row is up there without the idle count: the count gets a row of its own
   if (hub && flagged.has(hub.name) && idle > 0) rows.push({ line: [sp(MARK_IDLE, "muted"), sp(` ${idle} idle`, "muted")] });
@@ -922,6 +951,7 @@ export function layout(snapshot, options = {}) {
   const cost = costRow(snapshot, inner);
   if (cost && cost.length) rows.push({ line: cost });
   const keys = options.keys ? keysRow(options.keys, inner) : null;
+  const keysAt = keys ? rows.length : null;
   if (keys) rows.push({ line: keys });
 
   const selectable = rows.filter((r) => r.item);
@@ -934,7 +964,7 @@ export function layout(snapshot, options = {}) {
     items.push({ key, line: i, kind, agent, name, hub: !!isHub, open: open || null, busy: busy || null });
   });
   const root = isObject(snapshot.root) && typeof snapshot.root.id === "string" && snapshot.root.id ? snapshot.root.id : null;
-  return { lines: finish(lines), items, selected, flows, root };
+  return { lines: finish(lines), items, selected, flows, root, keysLine: keysAt };
 }
 
 // render(snapshot, options) -> the lines of layout().

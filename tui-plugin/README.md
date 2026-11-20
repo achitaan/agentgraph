@@ -103,6 +103,9 @@ view, the list opens as a session panel:
 | `s` | stop the selected working agent: asks `ui.dialog.confirm`, then `client.session.interrupt`; the result is a toast |
 | `m` | message the selected working agent: `ui.dialog.prompt`, then `client.session.prompt` with `delivery: "steer"` into its running session; the result is a toast |
 | `r` | run a drawn path (only when the snapshot has one): the host's chooser (`ui.dialog.select`, widened with `ui.dialog.set({ size: "large" })`; skipped with one path) lists `name  a → b → a` (the id when unnamed), most recently run first, with `3 runs · $1.20 avg · 2.0 rounds` from its stats (a dash for a null field, nothing without stats); then `ui.dialog.prompt` for the goal (required, at most 4,000 characters, refused with a toast); then the run message from `agentgraph flow prompt ID --goal-file -` (below); then `client.session.prompt({ sessionID, text })`, a normal user message, to the orchestrator's session (the snapshot's root session, never a child). A toast says sent, or the back end's or the host's error. `r` is off from the press until it is sent or given up, so nothing is sent twice, and `r run` leaves the key line for that time. The `r` layer is registered while the snapshot has a path and unregistered when the paths go. The selected row does not matter: a busy child selected still sends to the root. When the snapshot gives the path a `rev`, it goes along as `--expect REV`: path ids are reused (a removed and redrawn path can get the same id), and a path that changed since the chooser showed it is refused by the back end ("changed since you opened it"); then nothing is sent, both views refresh at once, a warning toast says `<name> changed since you opened it: nothing was sent. Press r again.`, and the next goal prompt for that id starts with the goal typed (not another path's prompt: the goal waits for its own path). Without `rev` (an older back end) no `--expect` is passed |
+| `c` | the chat of the selected row, in place of the lower part of the list when it does not fit beside it (opens it where it shows already beside the list: nothing; `c` again or `Esc` closes it) |
+| `Esc` | close the chat opened with `c` |
+| `PgUp` `PgDn` | scroll the chat back and forward; while the chat is open in place, `↑` `↓` scroll it too (they move the cursor otherwise) |
 | `f` | full screen on and off (yours: `g` never does it); full screen shows the orbit, and a side panel keeps it |
 | `q` | close the panel |
 | `g` | orbit or list (remembered while the app runs) |
@@ -112,6 +115,22 @@ view, the list opens as a session panel:
   `s` and `m` act only on agents that work (never on the hub, which is your own session). A stop or message sent from
   here goes round the orchestrator: it does not know you did it, and a stopped agent's step stays as it was until
   the orchestrator looks.
+- The chat. Choose a row and the panel shows what that agent is doing, under the rows when there are 6 or more
+  lines of room (and `c` opens it in place of the lower part of the list when there is not):
+  `chat · NAME` for an agent that works (steer with `m`, stop with `s`), `transcript · NAME` for one that does not
+  and for the orchestrator (read-only: `m` and `s` do nothing there and leave the key line). Oldest first, newest at
+  the bottom, wrapped to the panel's width; it follows the newest until you scroll back (the heading says how far:
+  `↓N`). `told …` is what the agent was told (`told (pending) …` for a message you just sent, until it lands),
+  `· …` dimmer is its thinking, plain text is what it said, `▸ name state` is a tool (name and state only, never its
+  input or output), `· note`, `(cut)` and `… older chat left out` are quiet marks. Every string is cleaned again
+  before it is drawn: no control or escape sequences, tabs as spaces, wide characters measured by display width. A
+  working agent also gets one line under its row: the tool it runs, or the first words it thinks or says.
+- Reads for the chat: `<python> -P -m agentgraph.chatfeed --session <its newest session> --json --limit 40`
+  (what `agentgraph chat --session ID --json` runs; `--demo` added with `AGENTGRAPH_TUI_DEMO`), through the same
+  runner rules as the snapshot (no shell, `PYTHONPATH=<home>`, 20 s SIGKILL, capped output, every failure becomes one
+  line). Only for the selected row, one read in flight, about every 2 s while that session is busy and once when it
+  is not (and at once after a successful `m`); none while the panel is hidden, none when no row is selected or the
+  agent has no session yet.
 - Widths: the text follows the panel's width, never narrower than the sidebar's 37 columns and never wider than
   100, so lines do not stretch across a huge terminal. The host keeps narrow terminals (under about 107 columns) in full screen by itself.
 - It watches the panel's session with the same runner and `intervalMs` as the sidebar, starts when the panel opens
@@ -434,13 +453,14 @@ folder.``
   → exactly `height` lines of exactly `width` cells, spans `{ text, tone, color? }` (`color` a `#rrggbb` group
   colour). `view` is `"2d"` or `"3d"`, `change` `{ from, at }` the camera's move, `colors` `{ dark, muted }`; also
   `orbit` `{ turn, elevation, resume }`, `streaks` `[{ flow, run, at }]`, `motion: "reduced"` and `sky: false`.
+- `src/chat.js`: pure chat rendering: cleaning, wrapping, kinds, window and heading.
 - `src/demo.js`: the demo runner for `AGENTGRAPH_TUI_DEMO`.
-- `src/runner.js`: the snapshot process runner, and `runFlowPrompt` (the run message of a path).
+- `src/runner.js`: the snapshot process runner, the chat reader (`createChatRunner`), and `runFlowPrompt` (the run message of a path).
 - `test/run.mjs`: `node tui-plugin/test/run.mjs` (plain node, exits non-zero on failure). `test/fixtures/demo.json`
   is a saved `agentgraph.snapshot_json --demo` document. Its stub `setProp` refuses an `fg` that is neither a string
   nor an RGBA, as the real host does.
 - `test/real-host.py`: drives the real terminal app in a pseudo-terminal (`--size 160x45`, `--size 90x40`,
-  `--no-graph`, `--binary`, `--demo`, `--fullscreen`, `--expect-scene`, `--view3d`), types `/graph`, captures the screen with `pyte` and exits 0 only when the view is on
+  `--no-graph`, `--binary`, `--demo`, `--fullscreen`, `--expect-scene`, `--view3d`, `--chat` with `--demo`), types `/graph`, captures the screen with `pyte` and exits 0 only when the view is on
   it; see its docstring for the scratch folder, the throwaway session and `pyte`. It always runs the app with
   `--standalone`.
 - Debugging: `AGENTGRAPH_TUI_DEBUG=<file>` in the TUI's environment appends every error the plugin swallows to that

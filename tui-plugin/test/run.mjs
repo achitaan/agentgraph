@@ -1260,7 +1260,7 @@ test("panel: f toggles full screen, q closes, the list's up, down and return; on
     const f = layer.commands.find((c) => c.bind === "f");
     const q = layer.commands.find((c) => c.bind === "q");
     // f and q, and the list's keys; no s or m: this host has no client.session to stop or message with
-    assert.deepEqual(layer.commands.map((c) => c.bind), ["f", "q", "up", "down", "return"]);
+    assert.deepEqual(layer.commands.map((c) => c.bind), ["f", "q", "up", "down", "return", "c", "escape", "pageup", "pagedown"]); // c, Escape, Page Up and Down: the chat (all off here: no measured height, no chat)
     assert.equal(f.enabled(), true);
     f.run();
     assert.equal(panel.calls.full, 1);
@@ -1385,7 +1385,7 @@ test("panel keys: s confirms, then interrupts the working agent's session; m ask
     const view = host.panelClaim().render(makePanel({ sessionID: "ses_act", width: 80 }));
     await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
     const { key, calls, state } = host;
-    assert.deepEqual(state.layers.filter((l) => (l.commands || []).some((c) => c.bind === "f")).pop().commands.map((c) => c.bind), ["f", "q", "up", "down", "return", "s", "m"]);
+    assert.deepEqual(state.layers.filter((l) => (l.commands || []).some((c) => c.bind === "f")).pop().commands.map((c) => c.bind), ["f", "q", "up", "down", "return", "s", "m", "c", "escape", "pageup", "pagedown"]);
     // the stalled impl-claude: it works, so s and m act on its running session
     assert.equal(screen(view).at(-1), " ↑↓ select  ⏎ open  s stop  m message  g graph  q close");
     assert.equal(key("s").enabled(), true);
@@ -4790,6 +4790,526 @@ test("orbit ring 3D: the camera has one scale across and up, so the reference ci
 });
 
 // ---------------------------------------------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------------------------------------------
+// Chat of the selected agent (src/chat.js, runner.js createChatRunner, the panel's chat)
+
+const CH = await import(src("chat.js"));
+const { createChatRunner, CHAT_LIMIT } = await import(src("runner.js"));
+
+const chatDir = path.join(tmp, "chat");
+fs.mkdirSync(chatDir, { recursive: true });
+const chatLog = path.join(chatDir, "calls.log");
+const chatSpans = path.join(chatDir, "spans.log");
+const chatSnap = path.join(chatDir, "snap.json");
+const chatPython = fakePython("chat-python", `
+case "$*" in
+  *agentgraph.chatfeed*)
+    echo "$*" >> "${chatLog}"
+    sid=""; prev=""
+    for a in "$@"; do [ "$prev" = "--session" ] && sid="$a"; prev="$a"; done
+    echo "start $sid" >> "${chatSpans}"
+    [ -f "${chatDir}/slow" ] && sleep 0.4
+    if [ -f "${chatDir}/feed-$sid.json" ]; then cat "${chatDir}/feed-$sid.json"; else printf '{"session":"%s","agent":null,"busy":false,"items":[],"truncated":false,"more":false,"warning":null}\\n' "$sid"; fi
+    echo "end $sid" >> "${chatSpans}";;
+  *) cat "${chatSnap}";;
+esac`);
+
+const feedOf = (session, items, extra = {}) => Object.assign({ session, agent: null, busy: false, items, truncated: false, more: false, warning: null }, extra);
+const writeFeed = (session, items, extra) => fs.writeFileSync(path.join(chatDir, `feed-${session}.json`), JSON.stringify(feedOf(session, items, extra)));
+const chatDoc = (patch = (d) => d) => {
+  const doc = JSON.parse(JSON.stringify(demo));
+  const by = (n) => doc.agents.find((a) => a.name === n);
+  by("orchestrator").activity = { kind: "text", tool: null, text: "Splitting the work into three lanes", time: doc.generated - 3 };
+  by("impl-claude").activity = { kind: "tool", tool: "edit", text: "", time: doc.generated - 2 };
+  by("designer").activity = { kind: "reasoning", tool: null, text: "Weighing the contrast of the limiter badge against the dark theme", time: doc.generated - 1 };
+  return patch(doc) || doc;
+};
+const writeSnap = (doc) => fs.writeFileSync(chatSnap, JSON.stringify(doc));
+const chatCalls = () => (fs.existsSync(chatLog) ? fs.readFileSync(chatLog, "utf8").split("\n").filter(Boolean) : []);
+const chatSessions = () => chatCalls().map((l) => l.split(" ")[l.split(" ").indexOf("--session") + 1]);
+const chatSpanCounts = () => {
+  const spans = fs.existsSync(chatSpans) ? fs.readFileSync(chatSpans, "utf8").split("\n").filter(Boolean) : [];
+  return { starts: spans.filter((l) => l.startsWith("start")).length, ends: spans.filter((l) => l.startsWith("end")).length };
+};
+const resetChat = () => {
+  for (const f of fs.readdirSync(chatDir)) fs.rmSync(path.join(chatDir, f), { force: true });
+  writeSnap(chatDoc());
+};
+
+// A panel (the host's own `panel` object) on the fake interpreter, with the chat timer under the test's hand: `tick()`
+// runs the chat's poll once. `argvs` are the commands spawned.
+async function chatPanel({ width = 80, size = [80, 38], list = true, answers = {}, demoOn = false, python = chatPython, doc, feeds = {}, slow = false } = {}) {
+  resetChat();
+  if (doc) writeSnap(doc);
+  for (const [id, f] of Object.entries(feeds)) writeFeed(id, f.items || f, f.items ? f : {});
+  if (slow) fs.writeFileSync(path.join(chatDir, "slow"), "");
+  const clockRef = { t: 1795075100000 };
+  const argvs = [];
+  const fake = [];
+  const plugin = P.createPlugin({
+    createElement: OT.createElement, insert: OT.insert, setProp: OT.setProp, createSignal: solid.createSignal, onCleanup: solid.onCleanup,
+    spawn: (cmd, args, opts) => (argvs.push([cmd, ...args]), spawn(cmd, args, opts)),
+    screenSize: () => ({ width: 200, height: 60 }),
+    fs, os, path, env: demoOn ? { AGENTGRAPH_TUI_DEMO: "1" } : {}, demoFile: path.join(here, "fixtures", "demo.json"), now: () => clockRef.t,
+    timers: {
+      setInterval: (fn, ms) => {
+        if (ms !== P.CHAT_POLL_MS) return globalThis.setInterval(fn, ms);
+        const h = { fn };
+        fake.push(h);
+        return h;
+      },
+      clearInterval: (h) => {
+        const at = fake.indexOf(h);
+        if (at >= 0) fake.splice(at, 1);
+        else globalThis.clearInterval(h);
+      },
+    },
+  });
+  const host = makeActionHost();
+  host.ctx.options.python = python;
+  host.ctx.options.intervalMs = 1000;
+  host.ctx.ui.dialog.prompt = async (o) => (host.calls.push(["prompt", o.title]), answers.prompt);
+  host.ctx.ui.dialog.confirm = async (o) => (host.calls.push(["confirm", o.title]), answers.confirm);
+  const stop = plugin.setup(host.ctx);
+  const [name, setName] = solid.createSignal("agentgraph.graph");
+  const panel = makePanel({ sessionID: demoOn ? "ses_demo" : "ses_chat", width });
+  Object.defineProperty(panel, "name", { get: () => name() });
+  const view = host.panelClaim().render(panel);
+  await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
+  if (size) {
+    sizePanel(view, size[0], size[1]);
+    if (list) pressG(host.state);
+  }
+  const done = () => {
+    for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
+    stop();
+  };
+  const chatCmds = () => argvs.filter((a) => a.includes("agentgraph.chatfeed"));
+  return Object.assign(host, {
+    view, done, argvs, chatCmds, clockRef, setName, fake,
+    tick: () => fake.slice().forEach((h) => h.fn()),
+    lines: () => screen(view),
+    // `n` chat commands have run and none is still running
+    settle: async (n) => {
+      await waitFor(() => chatCmds().length >= n && chatSpanCounts().starts >= n && chatSpanCounts().starts === chatSpanCounts().ends, 5000, `${n} chat reads`);
+      await sleep(60);
+    },
+  });
+}
+
+const THOUGHT = "Thinking about how the limiter should share one bucket across workers";
+const SAID = "I will add the token bucket to the middleware";
+const KINDS = [
+  { kind: "user", text: "Please keep the headers stable", time: 1 },
+  { kind: "reasoning", text: THOUGHT, time: 2 },
+  { kind: "tool", name: "grep", status: "completed", time: 3, input: { secret: "INPUT-SECRET" }, output: "OUTPUT-SECRET" },
+  { kind: "tool", name: "edit", status: "running", time: 4 },
+  { kind: "text", text: SAID, time: 5 },
+  { kind: "note", time: 6 },
+  { kind: "text", text: "Steer this way", user: true, pending: true, delivery: "steer", time: 7 },
+];
+const joined = (line) => line.map((s) => s.text).join("");
+
+test("chat lines: each kind, thinking dimmer than what was said, a tool is its name and state only, told and pending marked, note one quiet word", () => {
+  const lines = CH.chatLines({ state: "feed", feed: feedOf("ses_x", KINDS) }, 80);
+  const flat = lines.map(joined);
+  assert.deepEqual(flat, [
+    "told Please keep the headers stable",
+    "· " + THOUGHT,
+    "▸ grep done",
+    "▸ edit running",
+    SAID,
+    "· note",
+    "told (pending) Steer this way",
+  ]);
+  const toneOf = (needle) => lines.find((l) => joined(l).includes(needle)).find((s) => s.text.includes(needle)).tone;
+  assert.equal(toneOf(THOUGHT), "muted");
+  assert.equal(toneOf(SAID), "plain");
+  assert.notEqual(toneOf(THOUGHT), toneOf(SAID));
+  assert.ok(!flat.join("\n").includes("SECRET"), "a tool's input or output is never drawn");
+  assert.equal(lines.find((l) => joined(l).startsWith("▸ edit")).at(-1).tone, "accent", "a running tool");
+  assert.equal(lines.find((l) => joined(l) === "· note")[0].tone, "muted");
+  // cut text and a truncated feed are said quietly, once
+  const cut = CH.chatLines({ state: "feed", feed: feedOf("s", [{ kind: "text", text: "long", cut: true }], { truncated: true, more: true }) }, 40).map(joined);
+  assert.deepEqual(cut, ["… older chat left out", "long", "(cut)"]);
+  assert.deepEqual(CH.chatLines({ state: "feed", feed: feedOf("s", [{ kind: "text", text: "x" }], { truncated: true }) }, 40).map(joined), ["… some text cut", "x"]);
+  assert.deepEqual(CH.chatLines({ state: "none" }, 40).map(joined), ["No session yet"]);
+  assert.deepEqual(CH.chatLines({ state: "feed", feed: feedOf("s", []) }, 40).map(joined), ["Nothing said yet"]);
+});
+
+test("chat lines: every string is cleaned again; escape sequences, controls, tabs, wide characters and very long lines stay inside 36, 42 and 160 columns", () => {
+  const nasty = [
+    { kind: "user", text: "\u001b[31mred\u001b[0m \u001b]0;title\u0007 x\ty\u0000z\u009b2J\r\nnext line" },
+    { kind: "reasoning", text: "日本語".repeat(40) + " and 😀😀😀 " + "w".repeat(300) },
+    { kind: "text", text: "a".repeat(500) + "\u001b[2J" },
+    { kind: "tool", name: "\u001b[1mbold\u001b[0m" + "n".repeat(100), status: "\u001b]52;c;AAAA\u0007running" },
+    { kind: "note" },
+    { kind: "bogus", text: "ignored" },
+  ];
+  for (const width of [36, 42, 160]) {
+    const lines = CH.chatLines({ state: "feed", feed: feedOf("s", nasty, { warning: "\u001b[31mwarn\u001b[0m" }) }, width);
+    assert.ok(lines.length > 5);
+    for (const line of lines) {
+      const t = joined(line);
+      assert.ok(R.displayWidth(t) <= width, `${width}: ${R.displayWidth(t)} wide: ${t}`);
+      assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(t), `${width}: a control character in ${JSON.stringify(t)}`);
+    }
+    assert.ok(!lines.map(joined).join("\n").includes("title"), "an OSC is dropped with its text");
+    assert.ok(lines.map(joined).join("\n").includes("x y"), "a tab is a space");
+  }
+  // the error and loading views are one line too
+  for (const state of [{ state: "error", error: "\u001b[31m" + "e".repeat(300) }, { state: "loading" }]) {
+    const lines = CH.chatLines(state, 36);
+    assert.equal(lines.length, 1);
+    assert.ok(R.displayWidth(joined(lines[0])) <= 36);
+  }
+});
+
+test("chat window: the newest at the bottom, follows the newest until scrolled back, clamped", () => {
+  const lines = Array.from({ length: 30 }, (_, i) => [{ text: `line ${i + 1}`, tone: "plain" }]);
+  const at = (scroll) => CH.chatWindow(lines, 10, scroll);
+  assert.deepEqual(at(0).lines.map(joined), lines.slice(20).map(joined));
+  assert.equal(at(0).max, 20);
+  assert.deepEqual(at(5).lines.map(joined), lines.slice(15, 25).map(joined));
+  assert.equal(at(99).scroll, 20, "clamped at the oldest");
+  assert.equal(at(-3).scroll, 0, "and at the newest");
+  assert.equal(CH.chatWindow(lines.slice(0, 4), 10, 3).scroll, 0, "nothing to scroll: all shown");
+});
+
+test("chat runner: `chatfeed --session ID --json --limit 40` without a shell, `--demo` in the demo; bad ids, failures and bad output are one line; one read per session", async () => {
+  resetChat();
+  writeFeed("ses_r", [{ kind: "text", text: "hi" }]);
+  const argvs = [];
+  const mk = (extra = {}) => createChatRunner(Object.assign({ spawn: (c, a, o) => (argvs.push([c, ...a, o]), spawn(c, a, o)), fs, path, env: process.env, home: tmp, python: chatPython }, extra));
+  const runner = mk();
+  const res = await runner.chat({ session: "ses_r" });
+  assert.equal(res.feed.items[0].text, "hi");
+  assert.deepEqual(argvs[0].slice(0, 9), [chatPython, "-P", "-m", "agentgraph.chatfeed", "--session", "ses_r", "--json", "--limit", String(CHAT_LIMIT)]);
+  assert.equal(CHAT_LIMIT, 40);
+  assert.equal(argvs[0].at(-1).shell, false);
+  assert.equal(argvs[0].at(-1).env.PYTHONPATH, tmp);
+  assert.deepEqual((await mk({ demo: true }).chat({ session: "ses_r" })).feed.items[0].text, "hi");
+  assert.equal(argvs.at(-1).at(-2), "--demo");
+  assert.match((await runner.chat({ session: "ses_x; rm -rf /" })).error, /not valid/);
+  assert.match((await runner.chat({})).error, /not valid/);
+  assert.match((await mk({ python: path.join(tmp, "nope-python") }).chat({ session: "ses_r" })).error, /Python was not found/);
+  const junk = fakePython("chat-junk", "echo not-json");
+  assert.match((await mk({ python: junk }).chat({ session: "ses_r" })).error, /invalid JSON/);
+  const bad = fakePython("chat-bad", "echo boom >&2; exit 2");
+  assert.match((await mk({ python: bad }).chat({ session: "ses_r" })).error, /exited with status 2: boom/);
+  // one process per session at a time
+  fs.writeFileSync(path.join(chatDir, "slow"), "");
+  const before = argvs.length;
+  const [a, b] = await Promise.all([runner.chat({ session: "ses_r" }), runner.chat({ session: "ses_r" })]);
+  assert.equal(argvs.length - before, 1);
+  assert.deepEqual(a, b);
+  // a hung read is killed at the timeout
+  const hang = fakePython("chat-hang", "exec sleep 30");
+  const t0 = Date.now();
+  assert.match((await mk({ python: hang, timeoutMs: 200 }).chat({ session: "ses_r" })).error, /did not finish/);
+  assert.ok(Date.now() - t0 < 3000);
+});
+
+
+const BUSY = (id, items) => ({ items, busy: true });
+const said = (n) => Array.from({ length: n }, (_, i) => ({ kind: "text", text: `message ${i + 1}`, time: i }));
+const sessionsRead = () => chatSessions();
+const maxRunning = () => {
+  let now = 0;
+  let max = 0;
+  for (const l of fs.readFileSync(chatSpans, "utf8").split("\n").filter(Boolean)) {
+    now += l.startsWith("start") ? 1 : -1;
+    max = Math.max(max, now);
+  }
+  return max;
+};
+const lastLine = (lines) => lines.at(-1);
+
+test("chat panel: `chatfeed --session <newest> --json --limit 40` for the selected agent only; 2 s while its session is busy, once when it is not; one read at a time; none when hidden", async () => {
+  const c = await chatPanel({ size: [80, 38], slow: true, feeds: { ses_g: BUSY("ses_g", said(3)), ses_root: { items: said(2), busy: false }, ses_h: BUSY("ses_h", said(1)) } });
+  try {
+    await c.settle(1);
+    assert.equal(P.CHAT_POLL_MS, 2000);
+    assert.deepEqual(c.chatCmds()[0].slice(1), ["-P", "-m", "agentgraph.chatfeed", "--session", "ses_g", "--json", "--limit", "40"]);
+    assert.equal(c.fake.length, 1, "one chat timer");
+    // six ticks while a read runs and after: never two at once
+    for (let i = 0; i < 6; i++) c.tick();
+    await c.settle(2);
+    c.tick();
+    c.tick();
+    await c.settle(3);
+    assert.equal(maxRunning(), 1, "one read in flight at a time");
+    assert.ok(sessionsRead().every((s) => s === "ses_g"), "only the selected agent: " + sessionsRead());
+    // the hub: its session is idle (the feed says so): read once, the timer reads no more
+    c.key("down").run();
+    const n = chatSessions().length;
+    await c.settle(n + 1);
+    assert.equal(chatSessions().at(-1), "ses_root");
+    c.tick();
+    c.tick();
+    await sleep(500);
+    assert.equal(chatSessions().length, n + 1, "an idle session is read once");
+    // the designer: busy again, read, never before it was selected
+    assert.ok(!chatSessions().includes("ses_h"));
+    c.key("down").run();
+    await c.settle(n + 2);
+    assert.equal(chatSessions().at(-1), "ses_h");
+    // hidden: the panel's name is not ours: no read, no timer
+    c.setName("other.panel");
+    assert.equal(c.fake.length, 0, "no chat timer while hidden");
+    const hiddenAt = c.chatCmds().length;
+    c.tick();
+    await sleep(500);
+    assert.equal(c.chatCmds().length, hiddenAt);
+    // shown again: it is read again
+    c.setName("agentgraph.graph");
+    await c.settle(hiddenAt + 1);
+    assert.equal(chatSessions().at(-1), "ses_h");
+  } finally {
+    c.done();
+  }
+});
+
+test("chat panel: the chat shows under the rows, thinking and what was said apart, a tool as name and state; activity lines under working agents", async () => {
+  const c = await chatPanel({ size: [42, 38], width: 42, feeds: { ses_g: { items: KINDS, busy: true } } });
+  try {
+    await c.settle(1);
+    const lines = c.lines();
+    assert.match(lines[0], /^›! impl-claude stalled/);
+    assert.equal(lines[1].trimEnd(), "   ▸ edit", "the tool a working agent runs, one line");
+    assert.ok(lines.some((l) => l.trimEnd() === "   Splitting the work into three lanes"), "what the hub said");
+    assert.ok(lines.some((l) => /^   · Weighing the contrast of the limiter…$/.test(l.trimEnd())), "thinking, cut to the width: " + lines.join("|"));
+    const at = lines.findIndex((l) => l.startsWith(" chat · impl-claude"));
+    assert.ok(at > 4);
+    assert.deepEqual(lines.slice(at + 1, at + 9).map((l) => l.trimEnd()), [
+      " told Please keep the headers stable",
+      " · Thinking about how the limiter should",
+      "   share one bucket across workers",
+      " ▸ grep done",
+      " ▸ edit running",
+      " I will add the token bucket to the",
+      " middleware",
+      " · note",
+    ]);
+    assert.ok(lines.some((l) => l.trimEnd() === " told (pending) Steer this way"));
+    assert.ok(!lines.join("\n").includes("SECRET"));
+    assert.match(lastLine(lines), /^ ↑↓ select  ⏎ open  s stop  m message/);
+    // thinking is dimmer than what was said: tones in the drawn nodes
+    const fgOf = (needle) => {
+      const row = c.view.children.find((r) => nodeText(r).includes(needle));
+      return row.children.find((k) => nodeText(k).includes(needle)).props.fg;
+    };
+    assert.equal(fgOf("Thinking about"), "#888888", "thinking is the muted colour");
+    assert.equal(fgOf("I will add"), "#eeeeee", "what it said is the plain one");
+    for (const l of lines) assert.ok(R.displayWidth(l) <= 42, `${R.displayWidth(l)} wide: ${l}`);
+  } finally {
+    c.done();
+  }
+});
+
+test("chat panel: follows the newest; Page Up scrolls back and holds its place while the chat grows; Page Down comes back to the newest", async () => {
+  const c = await chatPanel({ size: [60, 24], width: 60, feeds: { ses_g: { items: said(60), busy: true } } });
+  try {
+    await c.settle(1);
+    const body = () => c.lines().filter((l) => /^ message \d+$/.test(l.trimEnd())).map((l) => Number(l.trim().split(" ")[1]));
+    assert.equal(body().at(-1), 60, "the newest at the bottom");
+    assert.ok(!c.lines().some((l) => /↓\d/.test(l)), "not scrolled: no mark");
+    assert.equal(c.key("pageup").enabled(), true);
+    c.key("pageup").run();
+    const back = body();
+    assert.ok(back.at(-1) < 60 && back.at(-1) > 30, "scrolled back: " + back);
+    assert.ok(c.lines().some((l) => / ↓\d+$/.test(l.trimEnd()) && l.startsWith(" chat")), "the heading says how far back");
+    // the chat grows while scrolled back: the same lines stay
+    writeFeed("ses_g", said(63), { busy: true });
+    c.tick();
+    await c.settle(2);
+    assert.deepEqual(body(), back, "held its place");
+    c.key("pagedown").run();
+    assert.ok(body().at(-1) > back.at(-1) && body().at(-1) < 63, "a page forward: " + body());
+    c.key("pagedown").run();
+    assert.equal(body().at(-1), 63, "back at the newest");
+    assert.ok(!c.lines().some((l) => /↓\d/.test(l)), "the mark is gone");
+    // following: a new item shows without a key
+    writeFeed("ses_g", said(64), { busy: true });
+    c.tick();
+    await c.settle(3);
+    assert.equal(body().at(-1), 64);
+    // up and down still move the selection beside the chat
+    c.key("down").run();
+    assert.ok(c.lines().some((l) => l.startsWith("›◉ orchestrator")) || c.lines().some((l) => l.startsWith("›")));
+  } finally {
+    c.done();
+  }
+});
+
+test("chat panel: no session shows 'No session yet' and reads nothing; the orchestrator is selectable and read-only", async () => {
+  const noSession = chatDoc((d) => {
+    d.agents.find((a) => a.name === "impl-claude").sessions = [];
+  });
+  const c = await chatPanel({ size: [60, 30], width: 60, doc: noSession, feeds: { ses_root: { items: said(2), busy: true } } });
+  try {
+    await sleep(300);
+    assert.ok(c.lines().some((l) => l.trimEnd() === " No session yet"), c.lines().join("\n"));
+    assert.deepEqual(c.chatCmds(), [], "nothing to read");
+    assert.equal(c.fake.length, 0);
+    assert.ok(!lastLine(c.lines()).includes("⏎ open"), "no session to open either");
+    // the orchestrator
+    c.key("down").run();
+    await c.settle(1);
+    assert.equal(chatSessions()[0], "ses_root");
+    assert.ok(c.lines().some((l) => l.startsWith(" transcript · orchestrator")), "read-only: a transcript\n" + c.lines().join("\n"));
+    assert.ok(c.lines().some((l) => l.trimEnd() === " message 2"));
+    assert.equal(c.key("s").enabled(), false);
+    assert.equal(c.key("m").enabled(), false);
+    assert.ok(!/ s stop| m message/.test(lastLine(c.lines())), "only keys that do something: " + lastLine(c.lines()));
+    c.key("m").run();
+    c.key("s").run();
+    await sleep(30);
+    assert.deepEqual(c.calls.filter((x) => x[0] === "prompt" || x[0] === "confirm" || x[0] === "send" || x[0] === "interrupt"), []);
+    // a feed that says it is busy is polled even though the row cannot be steered
+    c.tick();
+    await c.settle(2);
+    // a working agent: its chat is live
+    c.key("down").run();
+    assert.ok(c.lines().some((l) => l.startsWith(" chat · designer")));
+  } finally {
+    c.done();
+  }
+});
+
+test("chat panel: after m the chat is read at once and the message is pending until it lands, once", async () => {
+  const c = await chatPanel({ size: [80, 38], answers: { prompt: "  use the token bucket  " }, feeds: { ses_g: { items: said(2), busy: true } } });
+  try {
+    await c.settle(1);
+    const before = c.chatCmds().length;
+    c.key("m").run();
+    await waitFor(() => c.calls.some((x) => x[0] === "send"), 2000, "send");
+    await waitFor(() => c.chatCmds().length === before + 1, 2000, "a read without waiting for the timer");
+    await c.settle(before + 1);
+    assert.equal(chatSessions().at(-1), "ses_g");
+    assert.ok(c.lines().some((l) => l.trimEnd() === " told (pending) use the token bucket"), "pending\n" + c.lines().join("\n"));
+    // it lands: the feed has it as a message; the pending one goes
+    writeFeed("ses_g", [...said(2), { kind: "user", text: "use the token bucket", time: 9 }], { busy: true });
+    c.tick();
+    await c.settle(before + 2);
+    assert.equal(c.lines().filter((l) => l.includes("use the token bucket")).length, 1, c.lines().join("\n"));
+    assert.ok(!c.lines().some((l) => l.includes("(pending)")));
+    // a failed send shows nothing pending
+    const calls = c.calls.length;
+    c.key("m").run(); // same prompt answer
+    await waitFor(() => c.calls.length > calls + 1, 2000, "second send");
+  } finally {
+    c.done();
+  }
+});
+
+test("chat panel: where there is no room, c opens the chat in place of the lower part of the panel; c or Escape closes it; the keys row lists only keys that do something", async () => {
+  const c = await chatPanel({ size: [60, 14], width: 60, feeds: { ses_g: { items: said(40), busy: true } } });
+  try {
+    assert.ok(!c.lines().some((l) => l.includes(" chat · ")), "no room beside the list");
+    assert.match(lastLine(c.lines()), /s stop  m message  c chat/);
+    assert.equal(c.key("c").enabled(), true);
+    assert.equal(c.key("escape").enabled(), false, "Escape closes only an open chat");
+    assert.equal(c.key("pageup").enabled(), false, "nothing shown to scroll");
+    assert.deepEqual(c.chatCmds(), [], "the chat is read only when it shows");
+    c.key("c").run();
+    await c.settle(1);
+    const lines = c.lines();
+    assert.equal(lines.length, 14);
+    assert.match(lines[0], /^›! impl-claude stalled/);
+    assert.ok(lines[1].startsWith(" chat · impl-claude"));
+    assert.equal(lines[12].trimEnd(), " message 40");
+    assert.match(lastLine(lines), /↑↓ scroll  ⏎ open  s stop  m message  c back/);
+    // up and down scroll here (they moved the selection in the list); one gesture, one meaning at a time
+    c.key("up").run();
+    assert.ok(c.lines().some((l) => / ↓1$/.test(l.trimEnd())), c.lines().join("\n"));
+    c.key("down").run();
+    assert.ok(!c.lines().some((l) => / ↓\d+$/.test(l.trimEnd())));
+    assert.equal(c.key("escape").enabled(), true);
+    c.key("escape").run();
+    assert.ok(!c.lines().some((l) => l.includes(" chat · ")));
+    c.key("c").run();
+    assert.ok(c.lines().some((l) => l.includes(" chat · ")));
+    c.key("c").run();
+    assert.ok(!c.lines().some((l) => l.includes(" chat · ")));
+    assert.equal(c.key("c").enabled(), true);
+  } finally {
+    c.done();
+  }
+});
+
+test("chat panel: escape sequences, wide characters and very long lines stay inside the panel at 36, 42 and 160 columns", async () => {
+  const nasty = [
+    { kind: "user", text: "\u001b[31mred\u001b[0m \u001b]0;title\u0007 x\ty\u0000z" },
+    { kind: "reasoning", text: "日本語".repeat(40) + " 😀😀 " + "w".repeat(300) },
+    { kind: "text", text: "a".repeat(500) + "\u001b[2J" },
+    { kind: "tool", name: "\u001b[1mbold\u001b[0m" + "n".repeat(100), status: "running" },
+  ];
+  for (const w of [36, 42, 160]) {
+    const c = await chatPanel({ size: [w, 38], width: w, feeds: { ses_g: { items: nasty, busy: true } } });
+    try {
+      await c.settle(1);
+      const lines = c.lines();
+      assert.ok(lines.some((l) => l.includes(" chat · ")));
+      const limit = Math.min(w, Math.max(P.WIDTH, Math.min(P.PANEL_MAX_WIDTH, w)));
+      const wide = Math.min(w, P.PANEL_MAX_WIDTH);
+      for (const l of lines.slice(lines.findIndex((x) => x.includes(" chat · ")))) {
+        assert.ok(R.displayWidth(l) <= wide, `${w}: ${R.displayWidth(l)} wide (limit ${wide}): ${l}`);
+        assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(l), `${w}: control character in ${JSON.stringify(l)}`);
+      }
+      assert.ok(!lines.join("\n").includes("title"));
+      assert.ok(limit > 0);
+    } finally {
+      c.done();
+    }
+  }
+});
+
+test("chat panel: with --demo the chat comes from `agentgraph chat --demo`", async () => {
+  const c = await chatPanel({ size: [80, 38], demoOn: true, feeds: { ses_g: { items: said(2), busy: true } } });
+  try {
+    await c.settle(1);
+    const cmd = c.chatCmds()[0];
+    assert.deepEqual(cmd.slice(1), ["-P", "-m", "agentgraph.chatfeed", "--session", "ses_g", "--json", "--limit", "40", "--demo"]);
+    assert.ok(c.lines().some((l) => l.trimEnd() === " message 2"), c.lines().join("\n"));
+  } finally {
+    c.done();
+  }
+});
+
+test("rows: a working agent's activity is one line under its row (the tool, or the first words it thinks or says), only where asked", () => {
+  const doc = chatDoc();
+  const flat = (o) => R.layout(doc, Object.assign({ width: 42, now: 1795075100000 }, o)).lines.map(joined);
+  assert.ok(!flat({}).some((l) => /edit|Splitting|Weighing/.test(l)), "the sidebar and every earlier caller: no activity line");
+  const withIt = R.layout(doc, { width: 42, now: 1795075100000, activity: true });
+  const lines = withIt.lines.map(joined);
+  assert.equal(lines.length, flat({}).length + 3);
+  assert.ok(lines.includes("  ▸ edit"));
+  assert.ok(lines.includes("  Splitting the work into three lanes"));
+  assert.ok(lines.includes("  · Weighing the contrast of the limiter…"));
+  assert.ok(lines.every((l) => R.displayWidth(l) <= 42));
+  assert.deepEqual(withIt.items.map((i) => i.key), R.layout(doc, { width: 42, now: 1795075100000 }).items.map((i) => i.key));
+  // an idle agent has none; escape sequences in it are cleaned
+  const dirty = chatDoc((d) => {
+    d.agents.find((a) => a.name === "designer").activity = { kind: "text", text: "\u001b[31mred\u001b[0m\tdone" };
+    d.agents.find((a) => a.name === "explorer").activity = { kind: "text", text: "idle agents show nothing" };
+  });
+  const out = R.layout(dirty, { width: 42, now: 1795075100000, activity: true }).lines.map(joined);
+  assert.ok(out.includes("  red done"));
+  assert.ok(!out.some((l) => l.includes("idle agents")));
+});
+
+test("orbit labels at 42x38 in 2D: when room is short a working agent's task title is cut first, ↻ and cost stay", () => {
+  const doc = DM.demoDocument(demo, 60000);
+  const lines = sceneText(S.sceneStrict(doc, { width: 42, height: 38, now: 1234 }));
+  const row = lines.find((l) => /↻5 \$1\.71/.test(l));
+  assert.ok(row, "impl-claude keeps its ↻ and cost\n" + lines.join("\n"));
+  assert.match(row, /…/, "the title is cut, not the tail");
+  assert.ok(lines.every((l) => R.displayWidth(l) === 42));
+  const designer = lines.find((l) => /429 error page/.test(l));
+  assert.ok(designer, "designer's line is unchanged\n" + lines.join("\n"));
+});
 
 let failed = 0;
 for (const t of tests) {

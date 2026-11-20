@@ -42,6 +42,13 @@ function shiftTimes(value, delta) {
 }
 
 // nowMs (optional): the clock; the document's times are moved so that `generated` is now.
+// What the demo's working agents are doing now (the live demo snapshot, `snapshot_json --demo`, has the same lines).
+const DEMO_ACTIVITY = {
+  orchestrator: { kind: "tool", tool: "subagent", text: null },
+  "impl-claude": { kind: "tool", tool: "shell", text: null },
+  designer: { kind: "reasoning", tool: null, text: "Check the three widths before writing the copy." },
+};
+
 export function demoDocument(base, elapsedMs, nowMs) {
   const doc = JSON.parse(JSON.stringify(isObject(base) ? base : {}));
   const t = Math.max(0, Number(elapsedMs) || 0);
@@ -53,6 +60,7 @@ export function demoDocument(base, elapsedMs, nowMs) {
     if (!isObject(agent)) continue;
     const sessions = Array.isArray(agent.sessions) ? agent.sessions : [];
     const busy = Number(agent.busy) > 0;
+    if (busy && !isObject(agent.activity) && DEMO_ACTIVITY[agent.name]) agent.activity = Object.assign({ time: typeof doc.generated === "number" ? doc.generated : 0 }, DEMO_ACTIVITY[agent.name]);
     sessions.forEach((s, i) => {
       if (!isObject(s)) return;
       if (busy && i === 0 && typeof s.cost === "number") s.cost = Math.round((s.cost + (t / 1000) * 0.006) * 10000) / 10000;
