@@ -42,12 +42,11 @@ export const SCENE_MIN_WIDTH = 36;
 export const SCENE_MIN_HEIGHT = 14;
 export const SIDE_BY_SIDE_WIDTH = 100;
 export const FRAME_MS_WORKING = 100; // ten frames a second while work moves
-export const FRAME_MS_IDLE = 250; // four when idle in 2D
+export const FRAME_MS_IDLE = 0; // none when idle in 2D: the ring stands still, so no frame is asked for
 export const FRAME_MS_IDLE_3D = 166; // six when idle in 3D (the turning)
 export const BLOCKS = Object.freeze(["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]);
 export const MARK_DONE = "●";
 export const MARK_FAILED = "✗";
-export const IDLE_LAP_MS = 20000;
 export const TURN_MS = 40000; // one turn of the 3D figure
 export const CHANGE_MS = 700; // the morph between the views (see morphCamera)
 // The 3D view is a side view: the camera ELEVATION_3D radians above the figure's plane, looking across it. The one
@@ -132,7 +131,7 @@ export function changeAt(options, now) {
   return t >= 0 && t < 1 ? { from, to, t } : null;
 }
 
-// The frame interval: 100 ms while work moves or the views morph; when idle 250 ms in 2D and 166 ms in 3D.
+// The frame interval: 100 ms while work moves or the views morph; when idle none in 2D (0: nothing moves) and 166 ms in 3D.
 export function frameInterval(doc, options = {}, now = 0) {
   if (changeAt(options, now)) return FRAME_MS_WORKING;
   if (streaking(options, now)) return FRAME_MS_WORKING;
@@ -1550,10 +1549,6 @@ function draw2D(doc, L, canvas, S, P, now, frame, options) {
       if (s === "checking") pulse(canvas, arc.points, pulsePhase(now, arc.points.length), fullOf(arc.evaluator.key));
       else if (s === "sent_back") pulse(canvas, [...arc.points].reverse(), pulsePhase(now, arc.points.length), fullOf(arc.worker.key));
     }
-  } else {
-    // nothing works: one faint dot circles the ring, a lap in about twenty seconds
-    const [x, y] = L.ring.at(((now % IDLE_LAP_MS) / IDLE_LAP_MS) * L.ring.length);
-    canvas.dot(x, y, muted);
   }
   // council seats
   for (const p of L.placed) {

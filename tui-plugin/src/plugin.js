@@ -494,7 +494,7 @@ export function createPlugin(host) {
       let spinMs = 0;
       let pollTimer = null;
       let stopped = false; // set when the panel closes; a late fetch or a re-run view must not revive the timers
-      let sceneOn = false; // the panel draws the orbit: frames at 100 ms while work moves, 250 ms (2D) or 166 ms (3D) idle
+      let sceneOn = false; // the panel draws the orbit: frames at 100 ms while work moves, no frames (2D) or 166 ms (3D) idle
       const sceneInterval = (doc) => {
         try {
           return typeof watcher.sceneInterval === "function" ? watcher.sceneInterval(doc) : frameInterval(doc);

@@ -222,7 +222,7 @@ above is round too, and tilted it is the circle's width times the sine of the el
 understand; a folder structure keeps its groups order), with names outside it. A thin spoke (every third dot) runs
 from outside the hub's ring to short of each agent that has worked in this session; while an agent works a pulse runs
 out along it. Loop arcs bow outward between worker and checker and carry a pulse toward whoever has the work. With
-nothing working one faint dot circles the ring, a lap in 20 s.
+nothing working nothing moves: the 2D view stands still and the panel asks for no frames.
 
 **3D** draws the same system as a turning solid figure: the hub at the centre, each group on its own tilted orbit
 ring (like an armillary sphere), the whole figure turning once in 40 s round its vertical axis. Characters are chosen
@@ -273,7 +273,7 @@ flies a short diagonal streak (0.9 s) to its star; none on opening or switching 
 While the orchestrator works the hub and its ring are drawn in the accent tone. Option `reducedMotion: true`: no
 streak (the star just appears) and no fade.
 
-Frames: 10 a second while work moves or the camera moves; when idle 4 a second in 2D and 6 in 3D. A frame equal to
+Frames: 10 a second while work moves or the camera moves; when idle none in 2D (nothing moves) and 6 a second in 3D. A frame equal to
 the last one drawn is not pushed to the host, and rows whose text and colours are unchanged keep their nodes. A
 160×45 frame computes in about 0.6 ms in 2D and 0.9 ms in 3D (1.3 ms with a new document each frame). The test
 reports these times but does not fail on them: it counts a frame in reference frames (a fixed piece of per-cell

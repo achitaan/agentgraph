@@ -2062,9 +2062,10 @@ test("scene 2D: a working agent's spoke is sparse and carries a pulse outward; t
   assert.ok(new Set([0, 400, 800, 1200].map(ringDots)).size > 1, "the hub breathes");
 });
 
-test("scene 2D: with nothing working only the faint dot moves, and nothing is at full strength", () => {
+test("scene 2D: with nothing working nothing moves, the panel asks for no frames, and nothing is at full strength", () => {
   const doc = D([A("orchestrator", "hub", 0, "", 1), A("a", "build", 0, "", 0.5), A("b", "verify", 0, "", 0.2), A("c", "decide")], G({ loops: [{ worker: "a", evaluator: "b", state: "closed", rounds: 2 }] }));
-  assert.equal(S.frameInterval(doc), 250);
+  assert.equal(S.frameInterval(doc), 0, "idle in 2D: no frames asked for");
+  assert.equal(S.frameInterval(doc, { view: "2d" }, 7000), 0);
   assert.equal(S.frameInterval(doc, V3), 166);
   assert.equal(S.frameInterval(D([A("orchestrator", "hub", 1)])), 100);
   assert.equal(S.frameInterval(D([A("orchestrator", "hub", 1)]), V3), 100);
@@ -2074,19 +2075,19 @@ test("scene 2D: with nothing working only the faint dot moves, and nothing is at
   const P = S.makePalette(L.keys, DARK);
   const fulls = new Set(L.keys.map((k) => P.full(k)));
   const w = 92, h = 40;
-  let moved = 0;
   for (let now = 0; now < 20000; now += 250) {
     const a = S.sceneStrict(doc, { width: w, height: h, now, colors: DARK }).flatMap(cellsOf);
-    const b = S.sceneStrict(doc, { width: w, height: h, now: now + 250, colors: DARK }).flatMap(cellsOf);
     assert.ok(!a.some((c) => c.tone === "accent" || fulls.has(c.color)), "no pulse at " + now);
-    const seen = (c) => c.ch + (c.ch === " " ? "" : c.tone + (c.color || ""));
-    const diff = a.map((c, i) => i).filter((i) => seen(a[i]) !== seen(b[i]));
-    assert.ok(diff.length <= 2, `at most the old and new cell of the dot change: ${diff.length} at ${now}`);
-    for (const i of diff) assert.ok((BRAILLE.test(a[i].ch) || a[i].ch === " ") && (BRAILLE.test(b[i].ch) || b[i].ch === " "), "only dots change");
-    if (diff.length) moved += 1;
   }
-  assert.ok(moved > 40, "the dot circles: " + moved);
-  assert.deepEqual(S.orbitLines(doc, w, 30, 0), S.orbitLines(doc, w, 30, S.IDLE_LAP_MS));
+  // at rest nothing in the ring moves, at any clock value across a former twenty-second lap
+  for (const [sw, sh] of [[36, 14], [42, 38], [160, 45]]) {
+    for (const view of [undefined, "2d"]) {
+      const at = (now) => JSON.stringify(S.sceneStrict(doc, { width: sw, height: sh, now, colors: DARK, view }));
+      const first = at(0);
+      for (const now of [1, 250, 5000, 10000, 15000, 20000, 20250]) assert.equal(at(now), first, `${sw}x${sh}: the same frame at ${now}`);
+    }
+  }
+  assert.deepEqual(S.orbitLines(doc, w, 30, 0), S.orbitLines(doc, w, 30, 10000));
 });
 
 test("scene 2D: loop arcs bow outward; the pulse runs to the checker while checking and back when sent back", () => {
@@ -3915,10 +3916,7 @@ test("small panel: the orbit draws from 36x14 in 2D and 3D with the hub, every a
   // working pulses in 2D: a working agent's frame changes with the clock, an idle one's does not
   const two = (doc, now) => sceneText(S.scene(doc, { width: 36, height: 14, now })).join("\n");
   assert.notEqual(two(demoWorn, 1000), two(demoWorn, 1300), "working: it moves");
-  // (at rest one faint dot circles the ring, a lap in twenty seconds: in 300 ms it may cross into the next cell, and that is all that changes)
-  const resting = [two(hubIdle(), 1000), two(hubIdle(), 1300)];
-  const changed = [...resting[0]].filter((ch, i) => ch !== resting[1][i]).length;
-  assert.ok(changed <= 2, `at rest: it stands still but for the one dot (${changed} cells changed)`);
+  assert.equal(two(hubIdle(), 1000), two(hubIdle(), 1300), "at rest: it stands still");
 });
 
 test("orbit sky panel: no streak on opening or switching to 3D; a run finished while 3D shows flies exactly one streak and its star stays; one finished in 2D flies none; an unchanged frame is not pushed", async () => {
@@ -5627,7 +5625,8 @@ test("side chat moon: moves only while the side chat is busy (2D and 3D); the fr
     assert.notEqual(q(calm, { view: "3d" }), 100);
     assert.notEqual(q(going, { view: "3d", motion: "reduced" }), 100);
   }
-  assert.equal(q(Object.assign({}, going, { error: "x" }), { view: "2d" }) >= 100, true);
+  const errored = q(Object.assign({}, going, { error: "x" }), { view: "2d" });
+  assert.equal(errored === 0 || errored >= 100, true, "an error never speeds the frames up (none, or at least 100 ms)");
 });
 
 test("side chat moon: not counted as working in the scene (no spoke, no arrows, no working glyph) and the ring checks stay", () => {
