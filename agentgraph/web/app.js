@@ -853,7 +853,10 @@
       agents.filter(isSeat).sort((a, b) => a.name.localeCompare(b.name)).forEach(a => { if (!seatsOf.has(a.parent)) seatsOf.set(a.parent, []); seatsOf.get(a.parent).push(a); });
       // A group's members sit round their lead as seats sit round the council (and leave the ring).
       agents.filter(a => orbit.has(a.name)).sort((a, b) => a.name.localeCompare(b.name)).forEach(a => { const lead = orbit.get(a.name); if (!seatsOf.has(lead)) seatsOf.set(lead, []); seatsOf.get(lead).push(a); });
-      const ring = agents.filter(a => a.name !== hubName && !isSeat(a) && !orbit.has(a.name));
+      // An agent the user added and dropped somewhere stays there and takes no place on the ring, so adding it moves no
+      // other agent (n103).
+      const dropped = a => a.added === true && !isSeat(a) && !orbit.has(a.name) && a.name !== hubName && Number.isFinite(movedHere()[a.name]?.x) && !seatsOf.has(a.name);
+      const ring = agents.filter(a => a.name !== hubName && !isSeat(a) && !orbit.has(a.name) && !dropped(a));
       const keys = Array.from(new Set(ring.map(a => a.group)));
       // With a structure folder the ring follows the folder order, first group at the top; otherwise the built-in order.
       const listed = snapshot?.structure?.source === 'folder' ? (snapshot.groups || []).map(group => group.id).filter(id => keys.includes(id)) : null;
@@ -917,6 +920,7 @@
       });
       const hub = byAgent.get(hubName);
       if (hub) seeds.set(hub.name, { x: 0, y: 0, r: 38, reach: 38, group: hub.group, parent: '', dx: 0, dy: 0 });
+      agents.filter(dropped).forEach(a => seeds.set(a.name, { x: 0, y: 0, r: 23, reach: 23, group: a.group, parent: '', dx: 0, dy: 0 }));
       const placedByUser = movedHere();
       const targets = Array.from(seeds, ([name, seed]) => {
         const saved = placedByUser[name], pinned = !seed.parent && !!saved && Number.isFinite(saved.x);
@@ -2455,12 +2459,17 @@
       addMenu.hidden = true; plus.setAttribute('aria-expanded', 'false');
       if (refocus) plus.focus({ preventScroll: true });
     }
-    // A spot where a new circle (and its name) sits clear of every agent: the one asked for, or the nearest free.
-    function freeSpot(x, y) {
-      const clear = (px, py) => Array.from(positions.values()).every(p => Math.hypot(p.x - px, p.y - py) >= p.r + 23 + 30);
+    // A spot where a new circle and its name sit clear of every agent's circle and name (n103): the one asked for, or
+    // the nearest free. At least as far from each agent as the layout keeps agents apart, so adding it moves no other.
+    function freeSpot(x, y, name = draft?.name || 'agent', room = 30) {
+      const others = Array.from(positions, ([key, p]) => ({ p, shape: shapeAt(key, p.x, p.y, p.r, !!p.labelUp, p.r === 29) }));
+      const clear = (px, py) => {
+        const mine = shapeAt(name, px, py, 23, false, false);
+        return others.every(({ p, shape }) => Math.hypot(p.x - px, p.y - py) >= Math.max(p.r + 23 + room, p.parent ? 0 : (p.reach || p.r) + 23 + 18) + .5 && !clashOf(mine, shape));
+      };
       if (clear(x, y)) return { x, y };
-      for (let ring = 1; ring <= 40; ring++) {
-        const distance = ring * 12, count = Math.max(8, Math.round(ring * 6));
+      for (let ring = 1; ring <= 60; ring++) {
+        const distance = ring * 6, count = Math.max(8, Math.round(distance / 4));
         for (let i = 0; i < count; i++) { const angle = i * Math.PI * 2 / count, px = x + distance * Math.cos(angle), py = y + distance * Math.sin(angle); if (clear(px, py)) return { x: px, y: py }; }
       }
       return { x, y };
@@ -2487,7 +2496,8 @@
       if (event) { const point = stagePoint(event.clientX, event.clientY); draft.x = point.x; draft.y = point.y; drawDraft(); }
       else {
         const rect = viewport.getBoundingClientRect(), middle = stagePoint(rect.left + rect.width / 2, rect.top + rect.height / 2), hub = positions.get(hubName) || middle;
-        const spot = freeSpot(hub.x + 140, hub.y - 40); Object.assign(draft, spot); placeDraft();
+        // By keyboard: with room round it for Alt+arrows (two presses any way stay clear of every agent).
+        const spot = freeSpot(hub.x + 140, hub.y - 40, name, 14 + 2 * NUDGE_PX); Object.assign(draft, spot); placeDraft();
       }
     }
     function followDraft(event) {
