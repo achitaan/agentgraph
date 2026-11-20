@@ -383,6 +383,18 @@ function windowContext(definition, overrides = {}) {
           const team = { id: input.id || input.lead, lead: input.lead || "reviewer", members: input.members ? input.members.split(" ") : ["a"], text: input.text || "Made." };
           return JSON.stringify({ team, teams: [team] });
         },
+        // n10: the default preset, the saved setups and the spend limit.
+        setup: async (input, options) => {
+          calls.push({ op: "setup", input: JSON.parse(JSON.stringify(input)), options });
+          if (input.expect === STALE_REV) return JSON.stringify({ error: "it changed since you opened it; reload and try again", rev: CURRENT_REV });
+          if (input.name === "damaged") return JSON.stringify({ error: "'damaged' is damaged: a file is missing from it" });
+          return JSON.stringify({ name: input.name, changed: true, record: "/tmp/backups/undo.json", message: "done" });
+        },
+        spend: async (input, options) => {
+          calls.push({ op: "spend", input: JSON.parse(JSON.stringify(input)), options });
+          if (input.limit === "999.00") return JSON.stringify({ error: "the limit is too high for this test" });
+          return JSON.stringify({ limit: input.op === "off" ? null : Number(input.limit), warn: null, previous: { limit: null, warn: null }, changed: true, message: "set" });
+        },
         snapshot: async (input, options) => {
           calls.push({ op: "snapshot", input: JSON.parse(JSON.stringify(input)), options });
           if (overrides.reject) throw new Error("main is not running");
@@ -478,7 +490,13 @@ await check("main registers exactly one Ipc (<id>.snapshot) with snapshot, flow,
   // Round 2: the skills method joined snapshot and flow.
   // n110: the output method (a step's output: read, write, restore) joined them.
   // n14: the chat method (one session's recent chat: its id and a number of messages) joined them.
-  assert.deepEqual(Object.keys(token.spec.methods), ["snapshot", "flow", "skills", "roster", "skillfile", "team", "output", "chat"]);
+  // n10: the setup and spend methods (the preset, the saved setups, the spend limit) joined them.
+  assert.deepEqual(Object.keys(token.spec.methods), ["snapshot", "flow", "skills", "roster", "skillfile", "team", "output", "chat", "setup", "spend"]);
+  assert.deepEqual(Object.keys(token.spec.methods.setup.input.fields), ["op", "directory", "name", "record", "replace", "expect"]);
+  assert.deepEqual(Object.keys(token.spec.methods.spend.input.fields), ["op", "directory", "limit", "warn"]);
+  assert.ok(Object.entries(token.spec.methods.setup.input.fields).every(([key, field]) => key === "expect" ? field._tag === "optionalKey" && field.schema._tag === "String" : field._tag === "String"), "setup: strings and an optional expect");
+  assert.ok(Object.values(token.spec.methods.spend.input.fields).every((field) => field._tag === "String"), "spend: strings only");
+  assert.ok(typeof impl.setup === "function" && typeof impl.spend === "function");
   assert.deepEqual(Object.keys(token.spec.methods.chat.input.fields), ["session", "limit"]);
   assert.equal(token.spec.methods.chat.input.fields.session._tag, "String");
   assert.equal(token.spec.methods.chat.input.fields.limit._tag, "Number");
@@ -2658,6 +2676,153 @@ await check("placeholder build (no app.js/style.css): builds, loads in both mode
   assert.match(text, /2 agents, 2 busy/);
   assert.equal(rendered.value.textContent, "", "destroy clears the view");
 });
+
+// ---- n10: the default preset, the saved setups and the spend limit ----
+await check("n10 main: setup and spend run `python3 -P -m agentgraph.setups|spend ... --dir SESSION_DIR --json` in home without a shell; the view's rev goes before --json; a stale answer keeps its rev; bad input and the demo spawn nothing", async () => {
+  const python = path.join(TMP, "fake-setup-python");
+  fs.writeFileSync(python, `#!/bin/sh
+cat > /dev/null
+module="$3"
+shift 3
+case "$*" in
+  *"--expect ${STALE_REV}"*) printf '{"error": "setup x changed since you saved it; reload and try again", "rev": "${CURRENT_REV}"}\\n'; exit 1;;
+esac
+case "$module" in
+  agentgraph.setups) printf 'noise\\n{"message": "done", "record": "/tmp/backups/undo.json", "args": "%s"}\\n' "$*";;
+  agentgraph.spend) printf '{"limit": 50.0, "warn": 45.0, "previous": {"limit": null, "warn": null}, "args": "%s"}\\n' "$*";;
+esac
+`, { mode: 0o700 });
+  const log = [];
+  const loaded = loadMain(CODE, log);
+  const m = mainContext({ home: ORCHESTRATION, python });
+  resolveDefault(loaded.module.exports).main(m.ctx);
+  const impl = m.provided[0].impl;
+  const dir = ORCHESTRATION, rev = "0123456789abcdef", record = "/tmp/backups/undo.json";
+  const blank = { op: "", directory: dir, name: "", record: "", replace: "" };
+  const setup = async (fields) => JSON.parse(await impl.setup({ ...blank, ...fields }));
+  const tail = `--dir ${dir} --json`;
+  const argsOf = (doc) => doc.args;
+  assert.equal(argsOf(await setup({ op: "preset-switch", name: "fast" })), `preset switch fast ${tail}`);
+  assert.equal(argsOf(await setup({ op: "preset-restore", record })), `preset restore ${record} ${tail}`);
+  assert.equal(argsOf(await setup({ op: "undo", record })), `setup undo ${record} ${tail}`);
+  assert.equal(argsOf(await setup({ op: "save", name: "cheap-week" })), `setup save cheap-week ${tail}`);
+  assert.equal(argsOf(await setup({ op: "save", name: "cheap-week", replace: "true", expect: rev })), `setup save cheap-week --replace --dir ${dir} --expect ${rev} --json`);
+  assert.equal(argsOf(await setup({ op: "restore", name: "cheap-week", expect: rev })), `setup restore cheap-week --dir ${dir} --expect ${rev} --json`);
+  assert.equal(argsOf(await setup({ op: "remove", name: "cheap-week", expect: rev })), `setup remove cheap-week --dir ${dir} --expect ${rev} --json`);
+  const stale = await setup({ op: "remove", name: "cheap-week", expect: STALE_REV });
+  assert.deepEqual([stale.error.includes("changed since"), stale.rev], [true, CURRENT_REV]);
+  const spawned = log.length;
+  assert.equal(spawned, 8, "one command each");
+  const bad = [
+    { op: "show", name: "x" }, { op: "save", name: "-x" }, { op: "save", name: "A" }, { op: "save", name: "a b" }, { op: "save", name: "a".repeat(81) }, { op: "save", name: "" },
+    { op: "restore", name: "x/y" }, { op: "preset-switch", name: "-x" }, { op: "preset-switch", name: "a b" }, { op: "preset-switch", name: "" }, { op: "preset-switch", name: "x", expect: rev },
+    { op: "undo", record: "relative.json" }, { op: "undo", record: "" }, { op: "undo", record: "/tmp/r.json", name: "x" }, { op: "preset-restore", record: "-r" },
+    { op: "restore", name: "x", expect: "nothex" }, { op: "undo", record, expect: rev }, { op: "restore", name: "x", replace: "true" }, { op: "save", name: "x", replace: "yes" },
+    { op: "save", name: "x", record }, { op: "save", name: "x", directory: "relative" }, { op: "save", name: "x", directory: "" },
+  ];
+  for (const fields of bad) assert.equal(typeof (await setup(fields)).error, "string", JSON.stringify(fields));
+  assert.equal(typeof JSON.parse(await impl.setup({ op: "save", name: "x" })).error, "string", "missing fields");
+  assert.equal(log.length, spawned, "invalid setup requests spawned something");
+  const spend = async (fields) => JSON.parse(await impl.spend({ op: "limit", directory: dir, limit: "", warn: "", ...fields }));
+  assert.equal(argsOf(await spend({ limit: "50.00" })), `limit 50.00 ${tail}`);
+  assert.equal(argsOf(await spend({ limit: "60", warn: "45.50" })), `limit 60 --warn 45.50 ${tail}`);
+  assert.equal(argsOf(await spend({ op: "off" })), `limit --off ${tail}`);
+  const spawnedSpend = log.length;
+  for (const fields of [{ limit: "" }, { limit: "-5" }, { limit: "1e3" }, { limit: "$5" }, { limit: "abc" }, { limit: "5", warn: "x" }, { limit: "5", warn: "-1" }, { limit: "12345678" }, { limit: "5.123" },
+    { op: "off", limit: "5" }, { op: "off", warn: "5" }, { op: "show", limit: "5" }, { limit: "5", directory: "relative" }, { limit: "5", directory: "" }])
+    assert.equal(typeof (await spend(fields)).error, "string", JSON.stringify(fields));
+  assert.equal(log.length, spawnedSpend, "invalid spend requests spawned something");
+  for (const entry of log) assert.ok(!JSON.stringify(entry).includes("shell\":true"), "a shell");
+  const demo = mainContext({ home: ORCHESTRATION, python, demo: true });
+  resolveDefault(loaded.module.exports).main(demo.ctx);
+  assert.match(JSON.parse(await demo.provided[0].impl.setup({ ...blank, op: "save", name: "x" })).error, /demo/);
+  assert.match(JSON.parse(await demo.provided[0].impl.spend({ op: "off", directory: dir, limit: "", warn: "" })).error, /demo/);
+  assert.equal(log.length, spawnedSpend, "the demo spawned something");
+});
+
+await check("n10 panel: the view gets actions.setup and actions.spend, which ask main with string fields and the session's folder, carry the rev, turn a refusal into a rejection (a stale one with status 409) and refuse a bad request before main", async () => {
+  const definition = windowLoad.gui.defined[0];
+  const session = { key: "srv\nses_a", id: "ses_a", directory: ORCHESTRATION };
+  const props = { get session() { return session; }, screen: {} };
+  const w = windowContext(definition, { session });
+  definition.setup(w.ctx);
+  const rendered = windowLoad.solid.runWithOwner(() => value(w.added[1].item).render(props));
+  const { setup, spend } = mountCalls[mountCalls.length - 1].options.actions;
+  assert.equal(typeof setup, "function");
+  assert.equal(typeof spend, "function");
+  const empty = { directory: ORCHESTRATION, name: "", record: "", replace: "" };
+  const rev = "0123456789abcdef";
+  const switched = await setup({ op: "preset-switch", name: "fast" });
+  assert.equal(switched.record, "/tmp/backups/undo.json");
+  await setup({ op: "preset-restore", record: switched.record });
+  await setup({ op: "save", name: "cheap-week" });
+  await setup({ op: "save", name: "cheap-week", replace: true, expect: rev });
+  await setup({ op: "restore", name: "cheap-week", expect: rev });
+  await setup({ op: "remove", name: "cheap-week", expect: rev, text: "ignored" });
+  await setup({ op: "undo", record: switched.record });
+  assert.deepEqual(w.calls.filter((c) => c.op === "setup").map((c) => c.input), [
+    { ...empty, op: "preset-switch", name: "fast" },
+    { ...empty, op: "preset-restore", record: "/tmp/backups/undo.json" },
+    { ...empty, op: "save", name: "cheap-week" },
+    { ...empty, op: "save", name: "cheap-week", replace: "true", expect: rev },
+    { ...empty, op: "restore", name: "cheap-week", expect: rev },
+    { ...empty, op: "remove", name: "cheap-week", expect: rev },
+    { ...empty, op: "undo", record: "/tmp/backups/undo.json" },
+  ]);
+  await spend({ op: "limit", limit: 50 });
+  await spend({ op: "limit", limit: 60.5, warn: 45 });
+  await spend({ op: "off" });
+  assert.deepEqual(w.calls.filter((c) => c.op === "spend").map((c) => c.input), [
+    { op: "limit", directory: ORCHESTRATION, limit: "50.00", warn: "" },
+    { op: "limit", directory: ORCHESTRATION, limit: "60.50", warn: "45.00" },
+    { op: "off", directory: ORCHESTRATION, limit: "", warn: "" },
+  ]);
+  const failure = async (action, request) => {
+    try {
+      await action(request);
+    } catch (error) {
+      return error;
+    }
+    return null;
+  };
+  assert.match((await failure(setup, { op: "restore", name: "damaged" })).message, /is damaged/);
+  const stale = await failure(setup, { op: "remove", name: "cheap-week", expect: STALE_REV });
+  assert.deepEqual([stale.status, stale.stale, stale.rev], [409, true, CURRENT_REV]);
+  assert.match((await failure(spend, { op: "limit", limit: 999 })).message, /too high/);
+  const count = w.calls.length;
+  for (const bad of [null, { op: "show" }, { op: "save" }, { op: "save", name: "-x" }, { op: "save", name: "A" }, { op: "save", name: "a b" }, { op: "preset-switch", name: "-x" }, { op: "preset-switch", name: "a b" },
+    { op: "undo" }, { op: "undo", record: "-r" }, { op: "save", name: "x", replace: "true" }, { op: "restore", name: "x", replace: true }, { op: "restore", name: "x", expect: "bad" },
+    { op: "preset-switch", name: "x", expect: rev }, { op: "undo", record: "/tmp/r.json", expect: rev }])
+    assert.equal((await failure(setup, bad))?.message, "Bad setup request.", JSON.stringify(bad));
+  for (const bad of [null, { op: "show" }, { op: "limit" }, { op: "limit", limit: "50" }, { op: "limit", limit: 0 }, { op: "limit", limit: -1 }, { op: "limit", limit: NaN },
+    { op: "limit", limit: Infinity }, { op: "limit", limit: 1000001 }, { op: "limit", limit: 5, warn: "x" }, { op: "limit", limit: 5, warn: 0 }, { op: "off", limit: 5 }, { op: "off", warn: 1 }])
+    assert.equal((await failure(spend, bad))?.message, "Bad spend request.", JSON.stringify(bad));
+  assert.equal(w.calls.length, count, "a bad request reached main");
+  rendered.dispose();
+});
+
+await check("n10 panel: a session with no folder cannot write setups or the spend limit, and the demo has neither action", async () => {
+  const definition = windowLoad.gui.defined[0];
+  const session = { key: "srv\nses_a", id: "ses_a", directory: "" };
+  const props = { get session() { return session; }, screen: {} };
+  const w = windowContext(definition, { session });
+  definition.setup(w.ctx);
+  const rendered = windowLoad.solid.runWithOwner(() => value(w.added[1].item).render(props));
+  const { setup, spend } = mountCalls[mountCalls.length - 1].options.actions;
+  const failure = async (action, request) => {
+    try {
+      await action(request);
+    } catch (error) {
+      return error.message;
+    }
+    return "";
+  };
+  assert.equal(await failure(setup, { op: "save", name: "x" }), "No session is open.");
+  assert.equal(await failure(spend, { op: "off" }), "No session is open.");
+  assert.equal(w.calls.filter((c) => c.op === "setup" || c.op === "spend").length, 0);
+  rendered.dispose();
+});
+// ---- end n10 ----
 
 await check("the harness replaces an existing temporary bundle before reading it", () => {
   // build.mjs writes atomically, so even an identical rebuild replaces the existing file.
