@@ -4893,6 +4893,213 @@
       assert(sent.length >= 8 && !sent.some(request => 'expect' in request), 'an older back end was sent expect: ' + sent.filter(request => 'expect' in request).map(request => request.op).join());
       assert(data.structure.flows.length === 0 && data.structure.teams[0].text === 'Mine.' && data.structure.teams[0].members.join() === 'oracle' && host.texts.beta === 'Beta, better.' && !data.agents.some(a => a.name === 'scout' || a.name === 'finder'), 'a write without expect did not go through: ' + host.calls.join(' | '));
     });
+    // ---- geometry lane (n103) ----
+    {
+      // The real roster's shape (the trial's: fifteen agents, the council with three seats), with drawn paths.
+      const n103Data = (flows = []) => { const data = trialRoster(); data.structure = { source: 'folder', flows: flows.map(flow => ({ ...flow, text: flow.id, source: 'drawn' })) }; return data; };
+      const ringNames = path => { const start = path.indexOf(path.at(-1)); return start < path.length - 2 ? path.slice(start, -1) : []; };
+      const ringSteps = (root, id) => [...(routeOf(root, id)?.querySelectorAll('.ag-route-step[data-step="loop"]') || [])];
+      const screenOf = root => Object.fromEntries([...root.querySelectorAll('.ag-drawing [data-agent]')].map(node => [node.dataset.agent, centre(root, node.dataset.agent)]));
+      const stageOf = root => Object.fromEntries([...root.querySelectorAll('.ag-drawing [data-agent]')].map(node => [node.dataset.agent, at(root, node.dataset.agent)]));
+      const cut = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left) > .5 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > .5;
+      const boxDistance = (b, x, y) => Math.hypot(Math.max(b.left - x, 0, x - b.right), Math.max(b.top - y, 0, y - b.bottom));
+      // Rule 1: what a loop's ring and its moved agents may not touch (screen px): every circle and name not on it, the
+      // orchestrator's always; two loops never share a centre or cover each other's names.
+      function loopProblems(root, loops, moved, label) {
+        const problems = [], shapes = agentShapes(root), centres = [];
+        loops.forEach(loop => {
+          const names = ringNames(loop.path), steps = ringSteps(root, loop.id);
+          if (!steps.length) { problems.push(label + ': ' + loop.id + ' has no ring'); return; }
+          const points = steps.flatMap(step => pointsOf(step, 120));
+          centres.push({ id: loop.id, x: points.reduce((s, p) => s + p.x, 0) / points.length, y: points.reduce((s, p) => s + p.y, 0) / points.length });
+          const { worst, into } = intrusion(points, shapes, names);
+          if (worst > 0) problems.push(label + ': ' + loop.id + ' runs ' + worst.toFixed(1) + ' px into ' + into);
+          names.filter(name => moved.includes(name)).forEach(name => {
+            const mine = shapes.find(s => s.name === name);
+            shapes.forEach(other => {
+              if (names.includes(other.name)) return;
+              const touch = Math.hypot(mine.x - other.x, mine.y - other.y) < mine.r + other.r || boxDistance(mine.label, other.x, other.y) < other.r || boxDistance(other.label, mine.x, mine.y) < mine.r || cut(mine.label, other.label);
+              if (touch) problems.push(label + ': ' + name + ' (moved onto ' + loop.id + ') touches ' + other.name);
+            });
+          });
+        });
+        centres.forEach((a, i) => centres.slice(i + 1).forEach(b => { if (Math.hypot(a.x - b.x, a.y - b.y) < 30) problems.push(label + ': ' + a.id + ' and ' + b.id + ' share a centre'); }));
+        if (nameSize(root) < 11 - .01) problems.push(label + ': names at ' + nameSize(root).toFixed(1) + ' px');
+        return problems;
+      }
+      const N103_LOOPS = [
+        { id: 'far', path: ['explorer', 'oracle-lite', 'explorer'] }, { id: 'next', path: ['researcher', 'designer', 'researcher'] },
+        { id: 'tail', path: ['reviewer', 'impl-hard', 'impl-openai', 'impl-hard'] }, { id: 'shared', path: ['oracle-lite', 'verifier', 'oracle-lite'] }];
+      await test('n103 item 1: loops drawn one after another (the trial\'s far pair, a second loop, A,B,C,B, one sharing an agent) each form a circle in free space: no ring or moved agent touches the orchestrator or any circle or name not on it, no two share a centre, agents on no loop do not move (on the stage or on screen), and removing the paths puts every agent back', async () => {
+        const problems = [];
+        for (const [width, height] of [[1300, 850], [620, 800]]) {
+          const data = n103Data(), label = width + 'x' + height;
+          await using(data, async (root, app) => {
+            await resizeTo(root, width, height); await settle();
+            const stage0 = stageOf(root), screen0 = screenOf(root), onLoops = new Set();
+            for (const loop of N103_LOOPS) {
+              data.structure.flows.push({ ...loop, text: loop.id, source: 'drawn' }); await app.refresh(); await settle();
+              ringNames(loop.path).forEach(name => onLoops.add(name));
+              Object.keys(stage0).filter(name => !onLoops.has(name)).forEach(name => {
+                if (!near(at(root, name), stage0[name])) problems.push(label + ' after ' + loop.id + ': ' + name + ' (on no loop) moved on the stage');
+                const now = centre(root, name);
+                if (Math.hypot(now.x - screen0[name].x, now.y - screen0[name].y) > .5) problems.push(label + ' after ' + loop.id + ': ' + name + ' (on no loop) moved on screen');
+              });
+            }
+            const moved = [...onLoops].filter(name => !near(at(root, name), stage0[name]));
+            problems.push(...loopProblems(root, N103_LOOPS, moved, label));
+            data.structure.flows = []; await app.refresh(); await settle();
+            Object.keys(stage0).forEach(name => {
+              if (!near(at(root, name), stage0[name])) problems.push(label + ': ' + name + ' is not back after the paths went');
+              const now = centre(root, name);
+              if (Math.hypot(now.x - screen0[name].x, now.y - screen0[name].y) > .5) problems.push(label + ': ' + name + ' is not back on screen after the paths went');
+            });
+          });
+        }
+        assert(!problems.length, problems.length + ' problems: ' + problems.slice(0, 6).join('; '));
+      });
+      // Rule 2: three loops, two crossing (they meet at the agent they share) and two side by side (the third dragged
+      // beside the first, as close as it goes). Clicks 6 px off each ring step, both sides: as the trial sampled (nine
+      // points a step), and densely; a sample on an agent's circle or name is the agent's and is not counted.
+      await test('n103 item 2: with three loops drawn (two crossing at the agent they share, two side by side), a click 6 px off a line picks that line in at least 98% of samples outside agent circles, as the trial sampled and densely', async () => {
+        const loops = [N103_LOOPS[0], N103_LOOPS[3], N103_LOOPS[1]], data = n103Data(loops), host = worldHost(data), counts = {};
+        await using(data, async root => {
+          await resizeTo(root, 1300, 850); await settle();
+          // The third loop dragged towards the first until its line runs beside it.
+          const mid = names => { const ps = names.map(name => at(root, name)); return [ps.reduce((s, p) => s + p[0], 0) / ps.length, ps.reduce((s, p) => s + p[1], 0) / ps.length]; };
+          // Beside it on the side away from the loop crossing it, so the side-by-side lines run 30 px apart.
+          const scale = root.querySelector('.ag-drawing > g').getCTM().a, a = mid(['explorer', 'oracle-lite']), c = mid(['oracle-lite', 'verifier']), z = mid(['researcher', 'designer']);
+          const d = Math.hypot(a[0] - c[0], a[1] - c[1]) || 1, goal = 82 * 2 + 30, from = centre(root, 'researcher');
+          dragTo(root, 'researcher', { x: from.x + (a[0] + (a[0] - c[0]) / d * goal - z[0]) * scale, y: from.y + (a[1] + (a[1] - c[1]) / d * goal - z[1]) * scale }, 12); await settled();
+          const gapOf = (one, two) => Math.min(...ringSteps(root, one).flatMap(step => pointsOf(step, 60)).map(p => Math.min(...ringSteps(root, two).flatMap(step => pointsOf(step, 60)).map(q => Math.hypot(p.x - q.x, p.y - q.y)))));
+          const gap = gapOf('next', 'far');
+          counts.gap = Math.round(gap);
+          assert(gap < 60, 'the third loop is not beside the first (' + Math.round(gap) + ' px apart)');
+          assert(gapOf('next', 'shared') > 24, 'the third loop runs into the second (' + Math.round(gapOf('next', 'shared')) + ' px apart)');
+          const view = viewportOf(root).getBoundingClientRect();
+          for (const [kind, fractions] of [['trial', Array.from({ length: 9 }, (_, i) => (i + 1) / 10)], ['dense', Array.from({ length: 31 }, (_, i) => (i + 1) / 32)]]) {
+            let right = 0, tried = 0; const wrong = [];
+            for (const loop of loops) ringSteps(root, loop.id).forEach((step, si) => fractions.forEach(t => {
+              const length = step.getTotalLength(), m = step.getScreenCTM(), p = step.getPointAtLength(length * t).matrixTransform(m), q = step.getPointAtLength(Math.min(length, length * t + .5)).matrixTransform(m);
+              const n = Math.hypot(q.x - p.x, q.y - p.y) || 1;
+              for (const side of [6, -6]) {
+                const spot = { x: p.x - (q.y - p.y) / n * side, y: p.y + (q.x - p.x) / n * side };
+                if (spot.x < view.left + 4 || spot.x > view.right - 4 || spot.y < view.top + 4 || spot.y > view.bottom - 4) continue;
+                const under = document.elementFromPoint(spot.x, spot.y);
+                if (!under || !viewportOf(root).contains(under) || under.closest('[data-agent]')) continue;
+                tried++; clickAt(root, spot);
+                const got = [...root.querySelectorAll('[data-route][data-selected="true"]')].map(group => group.dataset.route).join();
+                if (got === loop.id) right++; else wrong.push(loop.id + ' step ' + si + ' at ' + t.toFixed(2) + (side > 0 ? '+' : '-') + ' picked ' + (got || 'nothing'));
+                viewportOf(root).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+              }
+            }));
+            counts[kind] = right + '/' + tried;
+            if (tried < (kind === 'trial' ? 60 : 200) || right < tried * .98) throw new Error(kind + ': ' + right + ' of ' + tried + ' picked the intended line: ' + wrong.slice(0, 5).join('; '));
+          }
+        }, { actions: host.actions });
+        window.n103Picks = counts;
+      });
+      // Rule 3: details open, the trial's widths (800 px high), the real roster with loops drawn and the orchestrator's
+      // details open as the trial did. From 1100 to 620 px every circle and name is in the visible canvas (not under the
+      // sheet, the figures or the edge) with names at 11 px or more; there is no "when it fits" escape (the old check
+      // skipped exactly the case that failed). Below 620 px the agent opened and the agents its paths join are in view,
+      // and panning reaches every agent.
+      const N103_NARROW = [N103_LOOPS[0], N103_LOOPS[2]];
+      await test('n103 item 3: with the details open at 1100, 900, 760 and 620 px every circle and name of the real roster (loops drawn) is in the visible canvas at 11 px or more; at 520 and 420 px the open agent and its path neighbours are, and panning reaches the rest', async () => {
+        const problems = [], fitted = {};
+        for (const width of [1100, 900, 760, 620, 520, 420]) {
+          const data = n103Data(N103_NARROW), opened = width >= 620 ? 'orchestrator' : 'impl-hard';
+          await using(data, async root => {
+            await resizeTo(root, width, 800);
+            context(nodeOf(root, opened), centre(root, opened)); await settle(); await resizeTo(root, width, 800);
+            const label = width + ' open', size = nameSize(root), out = outsideVisible(root);
+            if (size < 11 - .01) problems.push(label + ': names at ' + size.toFixed(1) + ' px');
+            const names = renderedNames(root).map(([name]) => name), whole = names.filter(name => !out.some(line => line.startsWith(name + ' ')));
+            fitted[width] = whole.length + '/' + names.length;
+            if (width >= 620) { problems.push(...out.map(line => label + ': ' + line)); return; }
+            const wanted = ['impl-hard', 'reviewer', 'impl-openai'];
+            wanted.filter(name => !whole.includes(name)).forEach(name => problems.push(label + ': ' + name + ' (open, or on its paths) is not in view'));
+            const seen = new Set(whole), viewport = viewportOf(root); viewport.focus();
+            for (const key of ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight']) {
+              for (let i = 0; i < 16; i++) { press(viewport, key); outsideVisible(root).length; const gone = new Set(outsideVisible(root).map(line => line.split(' ')[0])); names.forEach(name => { if (!gone.has(name)) seen.add(name); }); }
+              root.querySelector('.ag-fit')?.click(); await settle();
+            }
+            names.filter(name => !seen.has(name)).forEach(name => problems.push(label + ': panning never brings ' + name + ' into view'));
+          });
+        }
+        window.n103Narrow = fitted;
+        assert(!problems.length, problems.length + ' problems: ' + problems.slice(0, 6).join('; '));
+      });
+      // Rule 4 (n8 major 6): after the user panned and zoomed, a change of layout keeps their view: a loop drawn and
+      // removed, an agent added and removed, a keyboard nudge.
+      await test('n103 item 4: a layout change (a loop drawn or removed, an agent added or removed, a keyboard nudge) never discards the user\'s pan or zoom', async () => {
+        const data = n103Data(), problems = [];
+        await using(data, async (root, app) => {
+          await resizeTo(root, 1300, 850); await settle();
+          const viewport = viewportOf(root), stage = root.querySelector('.ag-drawing > g');
+          viewport.focus(); press(viewport, '+'); press(viewport, 'ArrowLeft'); press(viewport, 'ArrowUp'); await settle();
+          const mine = stage.getCTM(), same = label => { const now = stage.getCTM(); if (Math.abs(now.a - mine.a) > .001 || Math.abs(now.e - mine.e) > .5 || Math.abs(now.f - mine.f) > .5) problems.push(label + ' moved the user\'s view: ' + [mine.a, mine.e, mine.f].map(v => v.toFixed(2)) + ' → ' + [now.a, now.e, now.f].map(v => v.toFixed(2))); };
+          data.structure.flows.push({ id: 'far', path: ['explorer', 'oracle-lite', 'explorer'], text: 'far', source: 'drawn' }); await app.refresh(); await settle(); same('a loop drawn');
+          data.structure.flows = []; await app.refresh(); await settle(); same('the loop removed');
+          data.agents.push(agent('scout', 'build', { added: true })); await app.refresh(); await settle(); same('an agent added');
+          data.agents = data.agents.filter(a => a.name !== 'designer'); await app.refresh(); await settle(); same('an agent removed');
+          const node = nodeOf(root, 'reviewer'); node.focus(); press(node, 'ArrowRight', { altKey: true }); await settle(); same('a keyboard nudge');
+        });
+        assert(!problems.length, problems.join('; '));
+      });
+      // Rule 5: the plain page passes autofocus and the graph takes the keys once drawn; a host's panel (no autofocus)
+      // leaves focus where it is.
+      await test('n103 item 5: on the plain page the graph takes keyboard focus on load (N works without a click); mounted without autofocus (the Desktop panel) it takes none', async () => {
+        let options;
+        const fakeWindow = { AgentGraph: { mount: (_, value) => { options = value; } } };
+        new Function('window', 'document', 'location', 'fetch', indexBootstrap)(fakeWindow, { getElementById: () => ({ dataset: {} }) }, { search: '' }, async () => ({ ok: true, status: 200, text: async () => '{}' }));
+        assert(options && options.autofocus === true, 'the plain page does not ask for focus on load');
+        document.activeElement?.blur?.();
+        const data = worldFixture(), host = worldHost(data);
+        await using(data, async root => {
+          assert(document.activeElement === viewportOf(root), 'with autofocus the graph did not take focus: ' + document.activeElement?.className);
+          press(document.activeElement, 'n');
+          assert(!root.querySelector('.ag-add-menu').hidden, 'N did not open the add menu without a click');
+        }, { actions: host.actions, autofocus: true });
+        const box = document.createElement('textarea'); document.body.append(box); box.focus();
+        try {
+          await using(worldFixture(), async () => { assert(document.activeElement === box, 'without autofocus the graph took focus from the chat box'); });
+        } finally { box.remove(); }
+      });
+      // Rule 6: a new agent dropped on another agent's name lands on a free spot (clear of every circle and name), and
+      // adding it moves no other agent on the stage (the camera then fits the canvas the details it opens leave).
+      await test('n103 item 6: a new agent dropped on another agent\'s name lands clear of every circle and name, and adding it moves no other agent', async () => {
+        const data = n103Data(), host = worldHost(data), problems = [];
+        data.roster = { editable: true, models: ['test/model-a'] };
+        data.agents.forEach(a => { a.removable = a.name !== 'orchestrator' && a.name !== 'council' && a.parent !== 'council'; a.added = false; a.skills = []; a.skills_editable = true; });
+        await using(data, async root => {
+          await resizeTo(root, 1300, 850); await settle();
+          const stage0 = stageOf(root);
+          for (const target of ['reviewer', 'oracle-lite']) {
+            const label = node => node.querySelector('.ag-agent-name').getBoundingClientRect(), spot = middleOf(nodeOf(root, target).querySelector('.ag-agent-name'));
+            root.querySelector('.ag-add').click(); await settle();
+            const item = menuItem(root, 'Blank agent'), from = middleOf(item);
+            pointerAt(item, 'pointerdown', from); await settle();
+            pointerAt(document, 'pointermove', { x: (from.x + spot.x) / 2, y: (from.y + spot.y) / 2 }); pointerAt(document, 'pointermove', spot);
+            pointerAt(document, 'pointerup', spot); await settled();
+            const made = [...root.querySelectorAll('.ag-drawing [data-agent]')].map(node => node.dataset.agent).filter(name => !(name in stage0) && !problems.some(line => line.startsWith(name + ':')));
+            const name = made.at(-1);
+            if (!name) { problems.push(target + ': nothing was added: ' + host.calls.join(' | ')); continue; }
+            const shapes = agentShapes(root), mine = shapes.find(s => s.name === name);
+            shapes.filter(s => s.name !== name).forEach(other => {
+              if (Math.hypot(mine.x - other.x, mine.y - other.y) < mine.r + other.r || boxDistance(mine.label, other.x, other.y) < other.r || boxDistance(other.label, mine.x, mine.y) < mine.r || cut(mine.label, other.label)) problems.push(name + ': dropped on ' + target + '\'s name, it touches ' + other.name);
+            });
+            Object.keys(stage0).forEach(other => {
+              if (!near(at(root, other), stage0[other])) problems.push(name + ': adding it moved ' + other + ' on the stage');
+            });
+            stage0[name] = at(root, name);
+            root.querySelector('.ag-close')?.click(); await settle();
+          }
+        }, { actions: host.actions });
+        assert(!problems.length, problems.length + ' problems: ' + problems.slice(0, 6).join('; '));
+      });
+    }
+    // ---- geometry lane (n103) ----
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
   })().catch(error => { document.getElementById('results').textContent = 'RESULT: FAIL ' + error.stack; });
 </script>
