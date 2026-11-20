@@ -412,8 +412,8 @@
       const inset = Math.max(EDGE, topInset());
       const outside = top < inset || bottom > height - EDGE || left < EDGE || right > width - EDGE;
       if (!outside) return;
-      if (top < inset || bottom > height - EDGE) camera.y += (height + inset - EDGE) / 2 - (top + bottom) / 2;
-      if (left < EDGE || right > width - EDGE) camera.x += width / 2 - (left + right) / 2;
+      // Only as far as it takes, so a view the user placed moves least (n103).
+      revealNames([selected.key]);
       clampPan(); clearOfCovers(point); transform();
     }
     function fitView(userAction) {
@@ -460,9 +460,12 @@
       const spans = points.map(p => { const e = extentOf(p); return { left: (p.x + e.left) * s + camera.x, right: (p.x + e.right) * s + camera.x, top: (p.y + e.top) * s + camera.y, bottom: (p.y + e.bottom) * s + camera.y }; });
       const box = { left: Math.min(...spans.map(b => b.left)), right: Math.max(...spans.map(b => b.right)), top: Math.min(...spans.map(b => b.top)), bottom: Math.max(...spans.map(b => b.bottom)) };
       // The margins the fit itself keeps (a narrow canvas is filled closer to its edges).
-      const side = arrangement === 'compact' ? 2 : EDGE, foot = arrangement === 'compact' ? 8 : EDGE;
-      const inset = Math.max(arrangement === 'compact' ? 8 : EDGE, topInset()), x0 = camera.x, y0 = camera.y;
-      if (whole && (box.right - box.left > width - 2 * side || box.bottom - box.top > height - foot - inset)) return false;
+      let side = arrangement === 'compact' ? 2 : EDGE, foot = arrangement === 'compact' ? 8 : EDGE;
+      let inset = Math.max(arrangement === 'compact' ? 8 : EDGE, topInset()), x0 = camera.x, y0 = camera.y;
+      const fits = () => box.right - box.left <= width - 2 * side && box.bottom - box.top <= height - foot - inset;
+      // A set that must come into view together may use the margins too (the extents already pad each name).
+      if (whole && !fits()) { side = 0; foot = 0; inset = Math.max(0, ...coverRects().filter(b => b.top < 24).map(b => b.bottom)); }
+      if (whole && !fits()) return false;
       const shift = (low, high, from, to) => to - from > high - low ? (low + high) / 2 - (from + to) / 2 : from < low ? low - from : to > high ? high - to : 0;
       camera.x += shift(side, width - side, box.left, box.right);
       camera.y += shift(inset, height - foot, box.top, box.bottom);
@@ -3937,7 +3940,8 @@
         const labelsChanged = renderNodes(visibleAgents); updateEdges();
         if (!camera.initialized) fitView(false);
         else if (previousLayout !== layoutSignature) settleCamera();
-        else if (labelsChanged && !camera.touched) fitView(false);
+        // Names measured again just after a loop formed or an agent came, nothing else moved: the view stays (n103).
+        else if (labelsChanged && !camera.touched) { if (layoutChange.steady) { revealNames(layoutChange.changed); clampPan(true); transform(); } else fitView(false); }
       }
       root.dataset.state = visibleAgents.length || graph ? 'ready' : 'empty';
       showEmpty();
