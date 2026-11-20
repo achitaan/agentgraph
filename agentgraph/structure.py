@@ -611,7 +611,10 @@ def flow_prompt(flow_id, goal, directory: Path | None = None, *, expect: str | N
         raise StructureError(f"there is no flow {flow_id[:80]!r}")
     if expect is not None:
         _expect_seen(expect, flow["rev"], f"flow {flow_id}")
-    return flowrun.run_message(flow, goal, hub_names(shape))
+    hubs = hub_names(shape)
+    # The other drawn paths `check` will hold a run of this one to, named in the message (flowrun.binding_flows).
+    others = flowrun.binding_flows(flow, shape["flows"], hubs, shape["seats"])
+    return flowrun.run_message(flow, goal, hubs, others=others)
 
 
 def flows_with_stats(shape: dict | None, *, ledger: Path | None, graph_paths=(), db_path: Path | None = None) -> list[dict]:

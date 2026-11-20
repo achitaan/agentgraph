@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -684,6 +685,139 @@ class RosterRemoval(agentfile_tests.Base):
         self.assertEqual((self.snapshot(), tree(commands)), before)
         structure.set_flow_command(flow["id"], False, self.structure, commands_dir=commands)
         roster.remove_agent("checker", **self.paths)
+
+
+class OtherPaths(Scratch):
+    """n101: every drawn path applies to every node of its first agent, not only the path being run. The run message
+    says so and names the other drawn paths that will hold a run of this one (flowrun.binding_flows), so a graph
+    built from its words passes `check` with all of them drawn at the first attempt."""
+
+    STRAIGHT = ["researcher", "impl-openai"]
+    SENTENCE = "Every other drawn path applies too, to each node of its first agent."
+    HEADING = "These apply here; follow each from its first agent's node, by the same rule:"
+
+    def message(self, flow_id):
+        return structure.flow_prompt(flow_id, "write hello.txt", self.root)
+
+    def test_the_message_says_every_drawn_path_applies_and_names_the_ones_that_bind(self):
+        loop = self.add_loop()
+        straight = structure.add_flow(self.STRAIGHT, None, self.root)[0]
+        text = self.message(straight["id"])
+        self.assertIn(self.SENTENCE, text.replace("\n", " "))
+        self.assertIn(self.HEADING + "\n- " + LOOP_ID + ": impl-openai → verifier → impl-openai\n", text)
+        # The loop's own run: the straight path starts at researcher, who is not on the loop; nothing extra.
+        own = self.message(loop["id"])
+        self.assertIn(self.SENTENCE, own.replace("\n", " "))
+        self.assertNotIn(self.HEADING, own)
+        self.assertNotIn(straight["id"], own)
+        structure.set_flow_name(loop["id"], "check-loop", self.root)
+        self.assertIn('\n- "check-loop": impl-openai → verifier → impl-openai\n', self.message(straight["id"]))
+
+    def test_only_the_paths_check_can_fail_on_are_named(self):
+        path = ["impl-openai", "verifier", "impl-openai", "reviewer"]
+        run = structure.add_flow(path, None, self.root)[0]
+        for other in (LOOP_PATH,  # already followed by a graph shaped on the path
+                      ["verifier", "designer"],  # verifier's node is a gate: no path applies to it
+                      ["researcher", "impl-openai"],  # researcher is not on the path
+                      ["impl-openai", "impl-openai"],  # a loop on itself: check enforces none
+                      ["orchestrator", "reviewer"]):  # the hub and one agent: check enforces none
+            structure.add_flow(other, None, self.root)
+        self.assertNotIn(self.HEADING, self.message(run["id"]))
+        binds = structure.add_flow(["reviewer", "impl-claude"], None, self.root)[0]
+        hub_first = structure.add_flow(["orchestrator", "impl-openai", "designer"], None, self.root)[0]
+        text = self.message(run["id"])
+        listed = text.split(self.HEADING + "\n", 1)[1].split("\n\n", 1)[0].splitlines()
+        # In the order they bind: impl-openai comes first on the path, reviewer last.
+        self.assertEqual(listed, [f"- {hub_first['id']}: orchestrator → impl-openai → designer",
+                                  f"- {binds['id']}: reviewer → impl-claude"])
+
+    def test_at_most_three_are_listed_then_how_many_more(self):
+        run = structure.add_flow(self.STRAIGHT, None, self.root)[0]
+        ids = [structure.add_flow(["impl-openai", agent], None, self.root)[0]["id"]
+               for agent in ("reviewer", "designer", "impl-claude", "verifier")]
+        text = self.message(run["id"])
+        listed = text.split(self.HEADING + "\n", 1)[1].split("\n\n", 1)[0].splitlines()
+        self.assertEqual(len(listed), 4)
+        self.assertEqual([line.split(":")[0][2:] for line in listed[:3]], sorted(ids)[:3])
+        self.assertEqual(listed[3], "- and 1 more: run `agentgraph structure flows`")
+
+    def bound(self, flow, others):
+        own = flowrun.TEMPLATE_FIXED + sum(len(agent) + flowrun.STEP_SHARE for agent in flow["path"]) \
+            + len(flow["name"] or flow["id"])
+        shown = others[:flowrun.OTHERS_SHOWN]
+        return own + (flowrun.OTHERS_FIXED + sum(len(other["name"] or other["id"]) + flowrun.OTHER_SHARE
+                                                 + sum(len(agent) + flowrun.ARROW_SHARE for agent in other["path"])
+                                                 for other in shown) if others else 0)
+
+    def test_the_other_paths_are_counted_like_steps_and_capped(self):
+        hubs = frozenset({"orchestrator"})
+        twelve = [chr(ord("a") + index) * 12 for index in range(13)]
+        path = Prompt.accepted_paths(structure.FLOW_STEPS_LIMIT, count=13, most=1, length=12)[0]
+        flow = {"id": "i" * 80, "path": path, "text": "", "name": None}
+        self.assertEqual(flowrun.template_size(flow, hubs, others=[]), flowrun.template_size(flow, hubs))
+        self.assertLess(flowrun.template_size(flow, hubs), 1500)  # no other paths: the old rule holds
+        long_other = {"path": [twelve[index % 13] for index in range(20)], "name": None}
+        others = [{**long_other, "id": str(index) * 80} for index in range(5)]
+        for count in (1, 2, 3, 5):
+            with self.subTest(count=count):
+                size = flowrun.template_size(flow, hubs, others=others[:count])
+                self.assertLessEqual(size, self.bound(flow, others[:count]))
+                self.assertLess(size, 2809)
+        self.assertEqual(flowrun.template_size(flow, hubs, others=others[:5]) - flowrun.template_size(
+            flow, hubs, others=others[:3]), len("\n- and 2 more: run `agentgraph structure flows`"))
+        self.assertLessEqual(len(self.HEADING) + len("\n- and 99 more: run `agentgraph structure flows`") + 2,
+                             flowrun.OTHERS_FIXED)
+
+    def from_message(self, text):
+        """The task graph the message's words describe: its numbered steps under its rule, then each listed other
+        path followed from its first agent's node under the same rule (a step to an agent new on that path is a
+        node depending on the current node; a return makes the current node a gate whose feedback_to names that
+        agent's node on that path, which becomes the current node)."""
+        import tests.test_review4 as review4  # it imports this module
+        self.assertIn(review4.RunMessageAgainstCheck.RULE, text.replace("\n", " "))
+        nodes, node_of = [], {}
+
+        def follow(agents, first=None):
+            chain, current = ({agents[0]: first}, first) if first else ({}, None)
+            for agent in agents[1:] if first else agents:
+                if agent in chain:  # a return
+                    held = next(item for item in nodes if item["id"] == current)
+                    held.update(type="gate", status="pending")
+                    held.setdefault("feedback_to", []).append(chain[agent])
+                    current = chain[agent]
+                    continue
+                node_id = f"n{len(nodes)}"
+                # A worker's node (implement, as the proof's orchestrator made impl-openai's) unless a return
+                # makes it a gate: the type every drawn path applies to.
+                nodes.append(structure_tests.node(node_id, "implement", agent,
+                                                  status="running" if not nodes else "pending",
+                                                  depends_on=[current] if current else []))
+                node_of.setdefault(agent, node_id)
+                chain[agent], current = node_id, node_id
+
+        steps = re.findall(r"^\d+\. (\S+)( \(return\)| \(the hub: you\))?$", text, re.M)
+        follow([agent for agent, mark in steps if mark != " (the hub: you)"])
+        if self.HEADING in text:
+            for line in text.split(self.HEADING + "\n", 1)[1].split("\n\n", 1)[0].splitlines():
+                agents = [agent for agent in line.split(": ", 1)[1].split(" → ") if agent != "orchestrator"]
+                follow(agents, node_of[agents[0]])
+        return check.graph_from_raw(structure_tests.graph(nodes), Path("/nonexistent/.opencode/graph/run.json"))
+
+    def test_a_graph_built_from_the_message_passes_check_with_both_paths_drawn(self):
+        # As in the proof (n101): a straight path into impl-openai, and the loop impl-openai → verifier → impl-openai.
+        self.add_loop()
+        straight = structure.add_flow(self.STRAIGHT, None, self.root)[0]
+        shape = snapshot_json.load_structure(self.root)
+        hubs = snapshot_json.hub_names(shape)
+        self.assertEqual(len(shape["flows"]), 2)
+        built = self.from_message(self.message(straight["id"]))
+        self.assertEqual(check.validate(built) + check.flow_problems(built, shape["flows"], hubs, shape["seats"]), [])
+        # The old message's words (the straight path alone, no other path named): check refuses the graph.
+        old = flowrun.run_message(next(flow for flow in shape["flows"] if flow["id"] == straight["id"]),
+                                  "write hello.txt", hubs)
+        self.assertNotIn(self.HEADING, old)
+        problems = check.flow_problems(self.from_message(old), shape["flows"], hubs, shape["seats"])
+        self.assertEqual([problem.split(": flow ")[1] for problem in problems], ["impl-openai → verifier → impl-openai"])
 
 
 if __name__ == "__main__":

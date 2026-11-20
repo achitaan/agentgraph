@@ -51,16 +51,26 @@ class WithoutTheSkill(unittest.TestCase):
     `personal-orchestrator` at all (the skill the profiles used to be read from)."""
 
     def test_profile_warnings_need_no_personal_orchestrator_skill(self):
+        # Nothing here reads the real skills folder: the scratch home's holds one made-up skill, the one a profile
+        # names for an agent of the active preset (picked from the toolkit's task-profiles.md, so a later change to
+        # the agents' skill lists does not break it). The preset file and SKILLS.md are scratch copies, as everywhere.
+        obj = json.loads(skillset.CONFIG.read_text())
+        active = obj["presets"][obj["preset"]]
+
+        class Every:
+            def __contains__(self, name):
+                return True
+
+        refs = [(agent, skill) for agent, skill in skillset._profile_refs(skillset.PROFILES, Every())
+                if agent in active and skill != "ui-ux-pro-max"]
+        self.assertTrue(refs, "task-profiles.md names no skill for an agent of the active preset")
+        agent, skill = refs[0]
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory) / "home"
             config_dir = home / ".config" / "opencode"
             skills = config_dir / "skills"
-            real = sources.CONFIG_DIR / "skills"
-            for entry in sorted(real.iterdir()):
-                if entry.name != "personal-orchestrator" and (entry / "SKILL.md").is_file():
-                    (skills / entry.name).mkdir(parents=True)
-                    shutil.copyfile(entry / "SKILL.md", skills / entry.name / "SKILL.md")
-            self.assertTrue((skills / "code-assurance" / "SKILL.md").is_file())
+            (skills / skill).mkdir(parents=True)
+            (skills / skill / "SKILL.md").write_text(f"---\nname: {skill}\ndescription: {skill} skill\n---\nBody\n")
             self.assertFalse((skills / "personal-orchestrator").exists())
             shutil.copyfile(skillset.CONFIG, config_dir / skillset.CONFIG.name)
             work = Path(directory) / "work"
@@ -70,22 +80,25 @@ class WithoutTheSkill(unittest.TestCase):
                 "import json, sys\n"
                 "from pathlib import Path\n"
                 "from agentgraph import skillset\n"
-                "work = Path(sys.argv[1])\n"
-                "result = skillset.remove('impl-openai', 'code-assurance', map_path=work / 'SKILLS.md',\n"
-                "                         backups=work / 'backups')\n"
-                "print(json.dumps({'warnings': result['warnings'], 'after': skillset.profile_mismatches()}))\n")
+                "work, agent, skill = Path(sys.argv[1]), sys.argv[2], sys.argv[3]\n"
+                "paths = dict(map_path=work / 'SKILLS.md', backups=work / 'backups')\n"
+                "skillset.add(agent, skill, **paths)\n"
+                "before = skillset.profile_mismatches()\n"
+                "result = skillset.remove(agent, skill, **paths)\n"
+                "print(json.dumps({'before': before, 'warnings': result['warnings'],\n"
+                "                  'after': skillset.profile_mismatches()}))\n")
             env = {**os.environ, "HOME": str(home), "PYTHONPATH": str(ROOT)}
-            done = subprocess.run([sys.executable, "-c", script, str(work)], cwd=work, env=env, capture_output=True,
-                                  text=True, timeout=120)
+            done = subprocess.run([sys.executable, "-c", script, str(work), agent, skill], cwd=work, env=env,
+                                  capture_output=True, text=True, timeout=120)
             self.assertEqual(done.returncode, 0, done.stderr)
             out = json.loads(done.stdout)
+            self.assertEqual(out["before"], [], out)
             self.assertEqual(len(out["warnings"]), 1, out)
-            self.assertIn("task-profiles.md: the impl-openai profile still names code-assurance", out["warnings"][0])
+            self.assertIn(f"task-profiles.md: the {agent} profile still names {skill}", out["warnings"][0])
             self.assertTrue(out["after"])
-            # The change went to the scratch home's preset file; the real one is the same as before.
+            # The change went to the scratch home's preset file.
             changed = json.loads((config_dir / skillset.CONFIG.name).read_text())
-            self.assertNotIn("code-assurance", changed["presets"][changed["preset"]]["impl-openai"].get("skills", []))
-
+            self.assertNotIn(skill, changed["presets"][changed["preset"]][agent].get("skills", []))
 
 if __name__ == "__main__":
     unittest.main()
