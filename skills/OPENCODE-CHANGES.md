@@ -1,5 +1,7 @@
 # Skills adapted for OpenCode (2026-11-19)
 
+> Update 2026-11-20: a record of the 2026-11-19 pass. Ten of the skills named below are no longer installed (seven removed, three merged into `engineering-delivery` and `grilling`); see the note at the top of [AUDIT.md](AUDIT.md).
+
 Wording-only edits to 14 installed skills. Backups of every file before change: `~/.config/opencode/backups/2026-11-19-pre-skills-opencode/<same relative path>`. Copies of each changed `SKILL.md`: `skills-opencode/<name>/SKILL.md`. Codex originals were not touched. Frontmatter `name:` is unchanged everywhere.
 
 Recurring replacement (the stance and loop wording): "Codex"-host and "spawn only when asked" wording became "delegation follows `AGENTS.md` and the orchestrator prompt; a worker never starts agents and reports the need under `Discovered` in its loop report". Verification wording became "run the item's evaluation and read its real output; a reported pass is a claim; never weaken a check to pass".

@@ -1,5 +1,7 @@
 # Skill audit
 
+> Update 2026-11-20: this is the record of the 2026-11-19 pass. Since then `context7-mcp`, `find-skills`, `internal-comms`, `personal-orchestrator`, `project-knowledge`, `research-summarizer` and `writing-clearly-and-concisely` were removed; `project-contracts` and `delivery-operations` were merged into `engineering-delivery`, and `grill-me` into `grilling`. The orchestrator now has a named list instead of all skills, `impl-claude` no longer has the Supabase skills and `designer` no longer has `clone-any-website`. The current table is in [SKILLS.md](../SKILLS.md).
+
 Every skill in the toolkit, what was done with it for OpenCode, and which agents may load it. The orchestrator may load all of them; "orchestrator only" means no other agent can.
 
 | Skill | Verdict | Agents | Why |

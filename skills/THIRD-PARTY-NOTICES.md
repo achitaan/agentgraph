@@ -27,11 +27,11 @@ and each plugin/skill's existing license files preserve upstream notices.
 | Impeccable portable guidance | [pbakaus/impeccable](https://github.com/pbakaus/impeccable), Apache-2.0 |
 | Clone Any Website | [promptwhisper/clone-any-website-skill](https://github.com/promptwhisper/clone-any-website-skill), MIT |
 | Optional Next.js template | [JCodesMore/ai-website-cloner-template](https://github.com/JCodesMore/ai-website-cloner-template), MIT |
-| Usage-accounting adaptation | [LaneOrchestrator source](https://github.com/KarthikRamesh9149/laneorchestrator/tree/9890a6b96675d1fb129bf44ea560a492ead2c780), MIT; [retained notice](skills/personal-orchestrator/references/LICENSE.lane) |
+| Usage-accounting adaptation | [LaneOrchestrator source](https://github.com/KarthikRamesh9149/laneorchestrator/tree/9890a6b96675d1fb129bf44ea560a492ead2c780), MIT; retained notice (removed with `personal-orchestrator` on 2026-11-20; in the git history) |
 
 The upstream orchestration plugin and VoltAgent catalog are no longer bundled.
 Only the locally adapted usage-accounting code is retained, with its original
-MIT notice and [provenance](skills/personal-orchestrator/references/PROVENANCE.md).
+MIT notice and provenance (both removed with the `personal-orchestrator` skill on 2026-11-20; in the git history).
 Local adaptations: Grill-me's Codex alias, explicit invocation metadata for
 interviews/AutoResearch, and a valid RSE YAML description. Full workflows
 remain upstream material. Binary CLIs and Python libraries are downloaded from
