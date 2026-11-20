@@ -579,3 +579,16 @@
 .agentgraph .ag-switch:focus-visible { outline: 2px solid var(--ag-work); outline-offset: 2px; border-radius: 4px; }
 .agentgraph .ag-detail-section .ag-command-name { margin: 6px 0 0; font-size: 12px; color: var(--ag-ink); }
 .agentgraph .ag-detail-section .ag-command-applies { margin: 2px 0 0; color: var(--ag-muted); white-space: normal; }
+/* A step's output (n111): listed in an agent's details, opened in a box that scrolls inside the sheet. */
+.agentgraph .ag-output-step { padding: 4px 0 6px; border-bottom: 1px solid var(--ag-row-divider); }
+.agentgraph .ag-detail-section .ag-output-step-name { margin: 2px 0; font-size: 11px; color: var(--ag-muted); overflow-wrap: anywhere; }
+.agentgraph .ag-output-row { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 10px; }
+.agentgraph .ag-output-row .ag-output-open, .agentgraph .ag-output-row .ag-output-name { padding: 3px 0; font-size: 12px; overflow-wrap: anywhere; }
+.agentgraph .ag-output-row .ag-output-size { font-size: 10.5px; color: var(--ag-muted); white-space: nowrap; }
+.agentgraph .ag-output-row .ag-output-why { flex-basis: 100%; margin: 0 0 2px; }
+.agentgraph .ag-output-editor { margin: 4px 0 2px; }
+.agentgraph .ag-output-text { min-height: 120px; max-height: 50vh; overflow: auto; white-space: pre; }
+.agentgraph .ag-detail-section .ag-route-state[data-output-state="unsaved"], .agentgraph .ag-detail-section .ag-route-state[data-output-state="saving"] { color: var(--ag-work); }
+.agentgraph .ag-detail-section .ag-route-state[data-output-state="error"] { color: var(--ag-danger); }
+.agentgraph .ag-output-result p, .agentgraph .ag-output-result ul { margin: 4px 0 0; white-space: normal; }
+.agentgraph .ag-output-stale li { overflow-wrap: anywhere; }

@@ -2158,9 +2158,211 @@
             return done();
           }, error => undoFailed(last, error, last.lead));
           return true;
+        case 'output': return undoOutput(last);
         default: return false;
       }
     }
+    // ---- A step's output opened, edited and saved (contract n110/n111, through actions.output) ----
+    // In an agent's details, under the task being shown, its steps that have outputs: each output's name and size (one
+    // that cannot be edited says why, and offers nothing to open). Opening one reads its text ({ op: "read" }) into a
+    // monospace box that scrolls inside the sheet. Save (or Ctrl/Cmd+Enter) writes it as the output's next revision
+    // ({ op: "write", text, expect }) by the path-text rules (saveTyped, always explicit): a stale refusal keeps the
+    // typing and sends nothing until the user saves again, no answer in 15 s is given up and a late answer dropped.
+    // The answer names the later steps that now need a rerun (the view never starts one). Undo (Ctrl/Cmd+Z) sends
+    // { op: "restore", record }: one step. What was typed and not saved outlives the details (outputViews).
+    // Hooks elsewhere: outputsSection and outputHeld (renderDetail), undoOutput (undoOther), a null step (remember).
+    const outputAction = action('output');
+    const OUTPUT_BYTES = 262144;
+    const outputViews = new Map();
+    let outputOpen = '';
+    UNDO_WHAT.output = 'the edit of the step\'s output';
+    function outputKey(task, node, artifact) { return JSON.stringify([task, node, artifact]); }
+    function outputEntry(task, node, artifact) {
+      if (snapshot?.graph?.task !== task) return null;
+      return (stepsById.get(node)?.artifacts || []).find(item => item && typeof item === 'object' && item.id === artifact) || null;
+    }
+    function outputSize(size) {
+      const n = Number(size);
+      if (size == null || !Number.isFinite(n)) return 'no file';
+      return n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
+    }
+    function outputLimit(value) { const bytes = new TextEncoder().encode(value).length; return bytes > OUTPUT_BYTES ? 'Too long: ' + bytes.toLocaleString('en-US') + ' of ' + OUTPUT_BYTES.toLocaleString('en-US') + ' bytes' : ''; }
+    // A step by name: its id and the agent that ran it.
+    function outputStepName(step) { return text(step?.id) + (step?.agent ? ' (' + text(step.agent) + ')' : ''); }
+    function outputSteps(agent) { return stepsFor(agent).filter(step => Array.isArray(step.artifacts) && step.artifacts.some(item => item && typeof item === 'object' && typeof item.id === 'string' && item.id)); }
+    function outputsSection(agent) {
+      const task = snapshot?.graph?.task;
+      if (!outputAction || typeof task !== 'string' || !task || !outputSteps(agent).length) return;
+      const holder = section(detailScroll, 'Outputs in ' + task); holder.classList.add('ag-output-section'); holder.dataset.outputSection = agent.name;
+      fillOutputs(holder, agent, task);
+    }
+    function fillOutputs(holder, agent, task) {
+      appendList(holder, outputSteps(agent), step => {
+        const group = el('div', 'ag-output-step'); group.dataset.outputStep = text(step.id);
+        const name = el('p', 'ag-output-step-name', outputStepName(step)); if (step.goal) name.title = text(step.goal);
+        group.append(name);
+        step.artifacts.filter(item => item && typeof item === 'object' && typeof item.id === 'string' && item.id).forEach(item => {
+          const key = outputKey(task, step.id, item.id), row = el('div', 'ag-output-row'), size = outputSize(item.size) + (item.revision != null ? ' · r' + text(item.revision) : '');
+          row.dataset.outputRow = key;
+          if (item.editable === true) {
+            const open = el('button', 'ag-family-link ag-output-open', text(item.id)); open.type = 'button'; open.dataset.outputOpen = key;
+            open.setAttribute('aria-expanded', String(outputOpen === key)); open.setAttribute('aria-label', 'Open ' + text(item.id) + ' from ' + text(step.id));
+            row.append(open, el('span', 'ag-output-size', size));
+          } else {
+            row.append(el('span', 'ag-output-name', text(item.id)), el('span', 'ag-output-size', size));
+            row.append(el('p', 'ag-form-reason ag-output-why', text(item.why) || 'This output cannot be opened here.'));
+          }
+          group.append(row);
+          if (item.editable === true && outputOpen === key) outputEditor(group, key, text(step.id), text(item.id));
+        });
+        holder.append(group);
+      });
+    }
+    function outputEditor(parent, key, node, artifact) {
+      const view = outputViews.get(key), item = el('div', 'ag-output-editor'); item.dataset.outputEditor = key;
+      if (!view || view.state === 'loading') item.append(el('p', 'ag-form-reason', 'Loading'));
+      else if (view.state === 'error') { const line = el('p', 'ag-form-error', view.error); line.setAttribute('role', 'alert'); item.append(line); }
+      else {
+        const box = el('textarea', 'ag-route-text ag-output-text');
+        box.value = view.draft ?? view.text; box.dataset.outputText = key; box.dataset.outputAgent = selected?.key || ''; box.dataset.saved = view.text; if (view.rev) box.dataset.rev = view.rev;
+        box.rows = 12; box.spellcheck = false; box.setAttribute('aria-label', 'Text of ' + artifact + ' from ' + node); box.setAttribute('aria-keyshortcuts', 'Control+Enter Meta+Enter');
+        const row = el('div', 'ag-route-actions'), state = el('p', 'ag-route-state', view.note || (view.draft != null ? 'Changed' : 'Saved')), save = el('button', 'ag-text-button', 'Save');
+        state.dataset.outputState = view.noteKind || (view.draft != null ? 'unsaved' : 'saved'); state.setAttribute('aria-live', 'polite');
+        save.type = 'button'; save.dataset.outputSave = key; save.setAttribute('aria-keyshortcuts', 'Control+Enter Meta+Enter');
+        row.append(state, save); item.append(box, row);
+        if (view.result) item.append(outputResult(view.result));
+      }
+      parent.append(item);
+    }
+    // What a save (or its undo) did: the revision saved, and by name the later steps that now need a rerun.
+    function outputResult(result) {
+      const item = el('div', 'ag-output-result'); item.dataset.outputResult = ''; item.setAttribute('role', 'status');
+      const revision = result.revision != null ? ' revision ' + text(result.revision) : '';
+      if (result.restored) { item.append(el('p', 'ag-output-saved', 'Put back' + revision + '.')); return item; }
+      item.append(el('p', 'ag-output-saved', result.changed === false ? 'Nothing changed: the text was the same.' : 'Saved as' + (revision || ' a new revision') + '.'));
+      if (!result.stale.length) { item.append(el('p', 'ag-output-rerun', 'No later step reads it.')); return item; }
+      item.append(el('p', 'ag-output-rerun', 'These steps read the older revision and now need a rerun (nothing was run):'));
+      const list = el('ul', 'ag-output-stale');
+      appendList(item, result.stale, step => { const line = el('li', '', outputStepName(step)); line.dataset.outputStale = text(step?.id); if (step?.goal) line.title = text(step.goal); list.append(line); });
+      item.append(list);
+      return item;
+    }
+    function showOutputResult(key) {
+      const editor = detailScroll.querySelector('[data-output-editor="' + CSS.escape(key) + '"]'), view = outputViews.get(key);
+      if (!editor || !view?.result) return;
+      editor.querySelector('[data-output-result]')?.remove();
+      editor.append(outputResult(view.result));
+    }
+    function setOutputState(key, kind, said) {
+      const view = outputViews.get(key), words = said || { saved: 'Saved', unsaved: 'Changed', saving: 'Saving' }[kind] || '';
+      if (view) Object.assign(view, { note: words, noteKind: kind });
+      const state = detailScroll.querySelector('[data-output-editor="' + CSS.escape(key) + '"] [data-output-state]');
+      if (!state) return;
+      state.dataset.outputState = kind; state.textContent = words; state.title = words;
+    }
+    // Redraw the outputs in place (the rest of the details is left alone); focus goes back to the control that had it.
+    function refillOutputs() {
+      const holder = detailScroll.querySelector('[data-output-section]'), agent = selected?.type === 'agent' ? agentsByName.get(selected.key) : null, task = snapshot?.graph?.task;
+      if (!holder || !agent || holder.dataset.outputSection !== agent.name || typeof task !== 'string') return;
+      const focused = holder.contains(document.activeElement) ? document.activeElement : null;
+      const again = focused?.dataset.outputOpen !== undefined ? '[data-output-open="' + CSS.escape(focused.dataset.outputOpen) + '"]' : focused?.dataset.outputSave !== undefined ? '[data-output-save="' + CSS.escape(focused.dataset.outputSave) + '"]' : '';
+      holder.replaceChildren(holder.querySelector('h3') || el('h3', '', 'Outputs in ' + task));
+      fillOutputs(holder, agent, task);
+      if (again) holder.querySelector(again)?.focus({ preventScroll: true });
+    }
+    // Open (read again, unless it holds typing not saved) or close an output; one is open at a time.
+    function toggleOutput(key) {
+      if (outputOpen === key) { outputOpen = ''; refillOutputs(); return; }
+      const [task, node, artifact] = JSON.parse(key), entry = outputEntry(task, node, artifact);
+      if (!outputAction || entry?.editable !== true) return;
+      outputOpen = key;
+      const old = outputViews.get(key);
+      if (!(old?.state === 'ready' && old.draft != null)) {
+        const view = { state: 'loading', text: '', rev: '', draft: null, note: '', noteKind: '', result: old?.result || null };
+        outputViews.set(key, view);
+        ask(outputAction, { op: 'read', task, node, artifact }).then(reply => {
+          if (!alive || outputViews.get(key) !== view) return;
+          Object.assign(view, { state: 'ready', text: text(reply.text ?? ''), rev: typeof reply.rev === 'string' ? reply.rev : text(outputEntry(task, node, artifact)?.rev || '') });
+          refillOutputs();
+        }, error => {
+          if (!alive || outputViews.get(key) !== view) return;
+          Object.assign(view, { state: 'error', error: message(error, 'The output could not be read') });
+          refillOutputs();
+        });
+      }
+      refillOutputs();
+    }
+    // The box being typed in (or holding typing not saved) is not rebuilt under the user's hands.
+    function outputHeld() {
+      const box = selected?.type === 'agent' ? detailScroll.querySelector('[data-output-text]') : null;
+      return !!box && box.dataset.outputAgent === selected.key && agentsByName.has(selected.key) && (document.activeElement === box || box.value !== box.dataset.saved);
+    }
+    function saveOutput(box) {
+      const key = box.dataset.outputText, view = outputViews.get(key);
+      if (!outputAction || !view || view.state !== 'ready' || !box.isConnected) return;
+      const [task, node, artifact] = JSON.parse(key), entry = outputEntry(task, node, artifact);
+      if (entry?.editable !== true) { setOutputState(key, 'error', text(entry?.why) || 'This output cannot be edited here.'); return; }
+      const wasSave = document.activeElement?.dataset?.outputSave === key;
+      let reply = null;
+      saveTyped(box, true, {
+        key: 'output:' + key, selector: '[data-output-text="' + CSS.escape(key) + '"]', state: (kind, said) => setOutputState(key, kind, said), limit: outputLimit,
+        shown: () => outputViews.get(key)?.rev || text(outputEntry(task, node, artifact)?.rev || ''),
+        send: (value, rev, answered) => ask(outputAction, withRev({ op: 'write', task, node, artifact, text: value }, rev)).then(async got => {
+          if (!alive) return got;
+          reply = got; answered(got);
+          Object.assign(view, { text: box.dataset.saved, rev: box.dataset.rev || view.rev, draft: box.value === box.dataset.saved ? null : box.value,
+            result: { revision: got.output?.revision, stale: Array.isArray(got.stale) ? got.stale.filter(item => item && typeof item === 'object') : [], changed: got.changed !== false } });
+          showOutputResult(key);
+          await afterChange();
+          if (alive && wasSave && !detailScroll.contains(document.activeElement)) detailScroll.querySelector('[data-output-save="' + CSS.escape(key) + '"]')?.focus({ preventScroll: true });
+          return got;
+        }),
+        savedOf: (got, value) => value, revOf: got => typeof got.rev === 'string' ? got.rev : '',
+        // The latest is read again (an output's text is not in the snapshot).
+        latest: () => ask(outputAction, { op: 'read', task, node, artifact }).then(got => {
+          const latest = { text: text(got.text ?? ''), rev: typeof got.rev === 'string' ? got.rev : '' };
+          if (outputViews.get(key) === view) Object.assign(view, { text: latest.text, rev: latest.rev || view.rev });
+          return latest;
+        }),
+        // An unchanged text has no record: nothing to undo.
+        step: (before, after, rev) => typeof reply?.record === 'string' && reply.record ? { op: 'output', key, task, node, artifact, owner: nodeOwners.get(node) || '', record: reply.record, before, after, rev } : null
+      });
+    }
+    function undoOutput(last) {
+      if (!outputAction || !last.record) return true;
+      ask(outputAction, { op: 'restore', record: last.record }).then(async reply => {
+        if (!alive) return;
+        const view = outputViews.get(last.key), box = detailScroll.querySelector('[data-output-text="' + CSS.escape(last.key) + '"]');
+        if (view?.state === 'ready') {
+          const restored = typeof reply.text === 'string' ? reply.text : last.before, rev = typeof reply.rev === 'string' ? reply.rev : '';
+          const typing = !!box && box.value !== box.dataset.saved;
+          if (box) { box.dataset.saved = restored; if (rev) box.dataset.rev = rev; if (!typing) box.value = restored; }
+          Object.assign(view, { text: restored, rev: rev || view.rev, draft: typing ? box.value : null, result: { restored: true, revision: reply.output?.revision, stale: [] } });
+          setOutputState(last.key, typing ? 'unsaved' : 'saved');
+          showOutputResult(last.key);
+        }
+        announceLine(sentence(text(reply.message ?? '')) || 'The output was put back.');
+        await afterChange();
+      }, error => undoFailed(last, error, agentsByName.has(last.owner) ? last.owner : hubName));
+      return true;
+    }
+    listen(detailScroll, 'click', event => {
+      const open = event.target.closest('[data-output-open]');
+      if (open) { toggleOutput(open.dataset.outputOpen); return; }
+      const save = event.target.closest('[data-output-save]');
+      if (save) { const box = detailScroll.querySelector('[data-output-text="' + CSS.escape(save.dataset.outputSave) + '"]'); if (box) saveOutput(box); }
+    });
+    listen(detailScroll, 'input', event => {
+      const box = event.target.closest?.('[data-output-text]'), view = box && outputViews.get(box.dataset.outputText);
+      if (!view) return;
+      view.draft = box.value === box.dataset.saved ? null : box.value;
+      if (box.dataset.saving !== 'true' && box.dataset.manual !== 'true') setOutputState(box.dataset.outputText, box.value === box.dataset.saved ? 'saved' : 'unsaved');
+    });
+    listen(detailScroll, 'keydown', event => {
+      const box = event.target.closest?.('[data-output-text]');
+      if (box && event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); saveOutput(box); }
+    });
+    // ---- end of a step's output ----
     function flowSection(agent, incoming, relevant) {
       const list = relevant.filter(f => (incoming ? f.to : f.from) === agent.name);
       const container = section(detailScroll, incoming ? 'Receives from' : 'Hands to');
@@ -2740,6 +2942,7 @@
       // Nor an added agent's instruction.
       const ownBox = selected.type === 'agent' ? detailScroll.querySelector('[data-agent-text]') : null;
       if (ownBox && ownBox.dataset.agentText === selected.key && agentsByName.has(selected.key) && (document.activeElement === ownBox || ownBox.value !== ownBox.dataset.saved)) return;
+      if (outputHeld()) return; // a step's output being edited
       if (!force && detailScroll.querySelector('[data-form]')?.dataset.form === selected.type + ':' + selected.key) return;
       // Nor the name of an agent being renamed.
       const renaming = selected.type === 'agent' ? detailScroll.querySelector('[data-rename]') : null;
@@ -2851,6 +3054,7 @@
         const work = section(detailScroll, 'Steps in this run' + (steps.length ? ' · ' + steps.length : ''));
         if (!steps.length) work.append(el('p', '', 'None'));
         appendList(work, steps, step => stepRow(work, step));
+        outputsSection(agent); // a step's output
         const own = new Set(steps.map(step => step.id)), happened = (graph?.events || []).filter(event => own.has(event.node)).slice(-12).reverse();
         if (happened.length) {
           const history = section(detailScroll, 'History');
@@ -3104,7 +3308,7 @@
         return reply;
       }).finally(() => { busyFlows--; });
     }
-    function remember(entry) { flowHistory.push(entry); if (flowHistory.length > UNDO_STEPS) flowHistory.shift(); }
+    function remember(entry) { if (!entry) return; flowHistory.push(entry); if (flowHistory.length > UNDO_STEPS) flowHistory.shift(); }
     function finishTrail() {
       if (trailPending) return; // the same path is never asked for twice
       const path = trail.slice();

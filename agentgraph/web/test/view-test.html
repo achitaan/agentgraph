@@ -5571,6 +5571,152 @@
       } finally { a.app.destroy(); b.app.destroy(); a.root.remove(); b.root.remove(); }
     });
     // ==== write lane: end ====
+    // ==== output lane (n111): start (a step's output opened, edited and saved through actions.output) ====
+    // Two steps of the task shown: write-report (impl-openai) has the output report, which read-report (reviewer)
+    // reads, and an output that cannot be edited. The fake back end keeps each output's text and revision; its rev is
+    // a hash of both (as agentgraph's is of the file and the graph's record of it), stamped on the snapshot's entries.
+    function outputFixture() {
+      const data = fixture();
+      data.graph.nodes = [
+        step('write-report', 'impl-openai', { status: 'passed', goal: 'Write the report', artifacts: [{ id: 'report', path: '.opencode/artifacts/view-tests/write-report/r1/report.md', revision: 1 }, { id: 'picture', path: '.opencode/artifacts/view-tests/write-report/r1/picture.png', revision: 1, rev: '00000000000000aa', size: 40, editable: false, why: 'the file is not text: it is not UTF-8' }] }),
+        step('read-report', 'reviewer', { status: 'passed', goal: 'Read the report', inputs: [{ from: 'write-report', artifact: 'report', revision: 1 }] })
+      ];
+      return data;
+    }
+    function outputHost(data, options = {}) {
+      const files = { 'write-report/report': { text: options.text ?? 'line one\n', revision: 1 } }, calls = [], records = new Map();
+      const revOf = file => hashOf([file.revision, file.text]) + hashOf([file.text, file.revision]);
+      const entryOf = (node, id) => data.graph.nodes.find(item => item.id === node)?.artifacts.find(item => item.id === id);
+      const stamp = () => Object.entries(files).forEach(([key, file]) => { const [node, id] = key.split('/'); Object.assign(entryOf(node, id), { revision: file.revision, rev: revOf(file), size: new TextEncoder().encode(file.text).length, editable: true, why: options.why ?? '' }); });
+      stamp();
+      const described = (node, id, file) => ({ id, path: '.opencode/artifacts/view-tests/' + node + '/r' + file.revision + '/' + id + '.md', revision: file.revision, rev: revOf(file), size: new TextEncoder().encode(file.text).length, editable: true, why: '' });
+      const output = async request => {
+        calls.push(JSON.parse(JSON.stringify(request)));
+        if (options.gate) await options.gate(request);
+        if (request.op === 'restore') {
+          const record = records.get(request.record);
+          if (!record) throw Object.assign(new Error('invalid undo record'), { status: 400 });
+          const file = files[record.key];
+          if (revOf(file) !== record.rev) throw Object.assign(new Error('the edit cannot be undone: a later run replaced it; nothing was restored'), { status: 400 });
+          Object.assign(file, record.before); records.delete(request.record); stamp();
+          const [node, id] = record.key.split('/');
+          return { task: 'view-tests', node, artifact: id, changed: true, restored: true, output: described(node, id, file), rev: revOf(file), text: file.text, message: options.message ?? 'Put back revision ' + file.revision };
+        }
+        const key = request.node + '/' + request.artifact, file = files[key];
+        if (!file || request.task !== 'view-tests') throw Object.assign(new Error('step ' + request.node + '\'s output ' + request.artifact + ' cannot be opened here'), { status: 400 });
+        if (request.op === 'read') return { task: request.task, node: request.node, artifact: request.artifact, path: described(request.node, request.artifact, file).path, revision: file.revision, rev: revOf(file), size: file.text.length, text: file.text, editable: true };
+        if (request.op !== 'write' || typeof request.text !== 'string') throw Object.assign(new Error('bad output request'), { status: 400 });
+        if (request.expect === undefined) throw new Error('no expect was sent (the view must always send it)');
+        if (request.expect !== revOf(file)) throw Object.assign(new Error('step ' + request.node + '\'s output ' + request.artifact + ' changed since you opened it; reload and try again'), { status: 409, rev: revOf(file) });
+        const before = { ...file }, record = 'record-' + calls.length;
+        Object.assign(file, { text: request.text, revision: file.revision + 1 }); records.set(record, { key, before, rev: revOf(file) }); stamp();
+        return { task: request.task, node: request.node, artifact: request.artifact, changed: true, output: described(request.node, request.artifact, file), rev: revOf(file),
+          stale: options.stale ?? [{ id: 'read-report', agent: 'reviewer', goal: 'Read the report', status: 'passed', read: before.revision }], record, message: 'Saved as revision ' + file.revision + '.' };
+      };
+      return { files, calls, output, stamp, revOf, writes: () => calls.filter(call => call.op === 'write'), restores: () => calls.filter(call => call.op === 'restore') };
+    }
+    const outputBox = root => root.querySelector('.ag-detail-scroll [data-output-text]');
+    const outputState = root => root.querySelector('.ag-detail [data-output-state]')?.textContent || '';
+    async function openOutput(root, name = 'report') {
+      open(root, 'impl-openai'); await settle();
+      const opener = [...root.querySelectorAll('.ag-detail [data-output-open]')].find(button => JSON.parse(button.dataset.outputOpen)[2] === name);
+      opener?.click(); await settled();
+      return opener;
+    }
+    await test('output lane: an agent\'s details list its steps\' outputs (name, size) under the task shown, an uneditable one says why and offers nothing to open, none for an agent without outputs; opened, the text is in a monospace box in the sheet; Save sends { op: "write", text, expect } with the read\'s rev and lists the saved revision and the steps that now need a rerun; Ctrl/Cmd+Z sends { op: "restore", record }, one step', async () => {
+      const data = outputFixture(), host = outputHost(data);
+      await using(data, async root => {
+        open(root, 'reviewer'); await settle();
+        assert(!root.querySelector('.ag-detail [data-output-section]'), 'an agent with no outputs has a list');
+        const opener = await openOutput(root);
+        const listed = root.querySelector('.ag-detail [data-output-section]');
+        assert(listed && listed.querySelector('h3').textContent.includes('view-tests') && listed.querySelector('[data-output-step="write-report"]')?.textContent.includes('write-report'), 'the outputs are not listed under the task and step: ' + listed?.textContent);
+        assert(opener && opener.closest('.ag-output-row').textContent.includes('9 B'), 'the output is not listed with its name and size: ' + opener?.closest('.ag-output-row')?.textContent);
+        const picture = [...listed.querySelectorAll('[data-output-row]')].find(row => JSON.parse(row.dataset.outputRow)[2] === 'picture');
+        assert(picture && picture.textContent.includes('the file is not text: it is not UTF-8') && !picture.querySelector('button, textarea, [data-output-open]'), 'an uneditable output is offered for editing or does not say why: ' + picture?.innerHTML);
+        assert(!root.querySelector('.ag-drawing').textContent.includes('report'), 'output text reached the graph area');
+        const box = outputBox(root);
+        assert(box && box.value === 'line one\n' && /monospace/.test(getComputedStyle(box).fontFamily) && host.calls.some(call => call.op === 'read' && call.node === 'write-report' && call.artifact === 'report'), 'the output is not shown from a read: ' + box?.value);
+        const rev = host.revOf(host.files['write-report/report']);
+        typeIn(box, 'line one\nline two\n'); await settle();
+        assert(!host.writes().length && outputState(root) === 'Changed', 'typing saved by itself: ' + host.writes().length);
+        root.querySelector('.ag-detail [data-output-save]').click(); await settled();
+        const sent = host.writes()[0];
+        assert(sent && sent.expect === rev && sent.text === 'line one\nline two\n' && host.files['write-report/report'].revision === 2, 'the save did not carry the read\'s rev as expect: ' + JSON.stringify(host.writes()));
+        const result = root.querySelector('.ag-detail [data-output-result]');
+        assert(result && /revision 2/.test(result.textContent) && [...result.querySelectorAll('[data-output-stale]')].map(item => item.textContent).join() === 'read-report (reviewer)' && outputState(root) === 'Saved', 'the save does not list the revision and the steps that need a rerun: ' + result?.textContent + ' / ' + outputState(root));
+        root.querySelector('.ag-close').click(); await settle();
+        undoKey(viewportOf(root)); await settled();
+        assert(host.restores().length === 1 && host.restores()[0].record === 'record-' + (host.calls.indexOf(sent) + 1), 'undo did not send restore with the record: ' + JSON.stringify(host.restores()));
+        assert(host.files['write-report/report'].text === 'line one\n' && host.files['write-report/report'].revision === 1, 'undo did not put the text back');
+        undoKey(viewportOf(root)); await settled();
+        assert(host.restores().length === 1 && host.writes().length === 1, 'one save took more than one undo step: ' + JSON.stringify(host.calls.slice(-2)));
+      }, { actions: { output: host.output } });
+    });
+    await test('output lane: a save refused as stale (409) keeps the typing, says it changed elsewhere and is never resent; the user\'s next save sends one, expecting the fresh rev', async () => {
+      const clock = fakeClock(), data = outputFixture(), host = outputHost(data);
+      await using(data, async root => {
+        await openOutput(root);
+        host.files['write-report/report'].text = 'changed elsewhere\n'; host.stamp();
+        const fresh = host.revOf(host.files['write-report/report']);
+        const box = outputBox(root); box.focus(); typeIn(box, 'mine\n'); press(box, 'Enter', { ctrlKey: true }); await settled();
+        assert(host.writes().length === 1 && outputState(root) === STALE && outputBox(root).value === 'mine\n' && host.files['write-report/report'].text === 'changed elsewhere\n', 'a stale save did not keep the typing and say so: ' + JSON.stringify([host.writes().length, outputState(root), outputBox(root)?.value]));
+        for (let step = 0; step < 3; step++) { clock.tick(60000); await settle(); }
+        assert(host.writes().length === 1, 'the refused save was sent again by itself: ' + host.writes().length);
+        press(outputBox(root), 'Enter', { ctrlKey: true }); await settled();
+        assert(host.writes().length === 2 && host.writes()[1].expect === fresh && host.files['write-report/report'].text === 'mine\n' && outputState(root) === 'Saved', 'the user\'s save was not one request with the fresh rev: ' + JSON.stringify(host.writes().map(call => call.expect)) + ' / ' + outputState(root));
+      }, { actions: { output: host.output }, clock });
+    });
+    await test('output lane: a save with no answer is given up after 15 s (not before), the typing kept and said plainly; its late answer is never applied (no saved revision, no steps listed, no undo step)', async () => {
+      const clock = fakeClock(), data = outputFixture(); let late = null;
+      const host = outputHost(data, { gate: request => request.op === 'write' ? new Promise(resolve => { late = resolve; }) : null });
+      await using(data, async root => {
+        await openOutput(root);
+        const box = outputBox(root); box.focus(); typeIn(box, 'mine\n'); press(box, 'Enter', { ctrlKey: true }); await settle();
+        assert(late, 'the save was not sent');
+        clock.tick(14999); await settle();
+        assert(outputState(root) !== NO_ANSWER, 'given up before 15 s');
+        clock.tick(1); await settle();
+        assert(outputState(root) === NO_ANSWER && outputBox(root).value === 'mine\n', 'after 15 s: ' + outputState(root) + ' / ' + outputBox(root)?.value);
+        late(); await settled();
+        assert(host.files['write-report/report'].revision === 2, 'the fake did not write');
+        assert(!root.querySelector('.ag-detail [data-output-result]') && outputState(root) === NO_ANSWER && outputBox(root).value === 'mine\n', 'the late answer was applied: ' + root.querySelector('.ag-detail [data-output-result]')?.textContent + ' / ' + outputState(root));
+        outputBox(root).blur(); root.querySelector('.ag-close').click(); await settle();
+        undoKey(viewportOf(root)); await settle();
+        assert(!host.restores().length, 'the late answer went into the undo history');
+      }, { actions: { output: host.output }, clock });
+    });
+    await test('output lane: markup in an output\'s text, its why, the steps that need a rerun and the undo message is shown as text and makes no element', async () => {
+      const TEXT = HOSTILE('output'), STEP = HOSTILE('step');
+      delete window.__agHostile;
+      const data = outputFixture(), host = outputHost(data, { text: TEXT, message: HOSTILE('message'), stale: [{ id: STEP, agent: HOSTILE('agent'), goal: HOSTILE('goal'), status: 'passed', read: 1 }] });
+      data.graph.nodes[0].artifacts[1].why = HOSTILE('why');
+      await using(data, async root => {
+        await openOutput(root);
+        assert(outputBox(root)?.value === TEXT && !outputBox(root).children.length, 'the text is not shown as the string: ' + outputBox(root)?.value);
+        typeIn(outputBox(root), TEXT + 'x'); root.querySelector('.ag-detail [data-output-save]').click(); await settled();
+        assert(root.querySelector('[data-output-stale]')?.textContent === STEP + ' (' + HOSTILE('agent') + ')', 'the step is not named as text: ' + root.querySelector('[data-output-stale]')?.textContent);
+        root.querySelector('.ag-close').click(); await settle(); undoKey(viewportOf(root)); await settled();
+        assert(host.restores().length === 1 && liveRegion(root).includes(HOSTILE('message')), 'the undo message is not said as text: ' + liveRegion(root));
+        open(root, 'impl-openai'); await settle();
+        assert(root.querySelector('.ag-detail .ag-output-why')?.textContent === HOSTILE('why'), 'the why is not shown as text');
+        assert(!markupIn(root).length, 'markup made it into the view: ' + markupIn(root).join());
+      }, { actions: { output: host.output } });
+    });
+    await test('output lane: index passes actions.output, posting each op\'s body to /api/output, and a 409 is refused with its status and rev', async () => {
+      let options; const posted = []; let answer = { ok: true, status: 200, json: async () => ({ done: true }) };
+      const fakeWindow = { AgentGraph: { mount: (_, value) => { options = value; } } };
+      new Function('window', 'document', 'location', 'fetch', indexBootstrap)(fakeWindow, { getElementById: () => ({ dataset: {} }) }, { search: '' }, async (url, init) => { posted.push({ url, method: init?.method, body: init?.body }); return answer; });
+      assert(typeof options.actions?.output === 'function', 'actions.output is not passed');
+      for (const request of [{ op: 'read', task: 't', node: 'n1', artifact: 'report' }, { op: 'write', task: 't', node: 'n1', artifact: 'report', text: 'x', expect: '0123456789abcdef' }, { op: 'restore', record: '/r.json' }]) {
+        posted.length = 0; await options.actions.output(request);
+        assert(posted.length === 1 && posted[0].url === '/api/output' && posted[0].method === 'POST' && posted[0].body === JSON.stringify(request), request.op + ' posted ' + JSON.stringify(posted));
+      }
+      answer = { ok: false, status: 409, json: async () => ({ error: 'changed since you opened it', rev: 'feed0001feed0001' }) };
+      let refused = null; try { await options.actions.output({ op: 'write' }); } catch (error) { refused = error; }
+      assert(refused?.status === 409 && refused.rev === 'feed0001feed0001', 'a 409 is not refused with its status and rev');
+    });
+    // ==== output lane (n111): end ====
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
   })().catch(error => { document.getElementById('results').textContent = 'RESULT: FAIL ' + error.stack; });
 </script>
