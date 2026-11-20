@@ -39,6 +39,8 @@
       // A step's output: read, write (its next revision; the steps that read it become stale) and restore (undo).
       const output = post('/api/output', 'The output could not be changed');
       window.AgentGraph.mount(root, {
+        // The page is the graph: it takes the keys on load (a host's panel does not pass this).
+        autofocus: true,
         actions: params.has('demo') ? undefined : { flow, skills, roster, skillfile, team, output },
         fetchSnapshot: async () => {
           const response = await fetch('/api/snapshot' + query, { cache: 'no-store' });

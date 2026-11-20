@@ -4,7 +4,7 @@
   const LIST_LIMIT = 200;
   const EDGE = 12, SLOT = 104, GROUP_GAP = 34, SEAT_DISTANCE = 68, MEMBER_DISTANCE = 96, MEMBER_REACH = 40;
   // A full loop's agents sit on a circle of their own: neighbours RING_GAP apart, the circle never under RING_MIN.
-  const RING_GAP = 124, RING_MIN = 82, RING_MS = 240, RING_CLEAR = 32; // RING_CLEAR: a loop ring's line from an agent's rim, room for its name below
+  const RING_GAP = 124, RING_MIN = 82, RING_MS = 240;
   const DETAIL_WIDTH = 340; // the details panel beside a wide graph (style.css: .ag-details-open .ag-network margin)
   const READABLE = 11 / 12; // agent names are 12 px: the automatic view never shows them under 11 px; it pans instead
   let instance = 0;
@@ -106,7 +106,7 @@
     // Presses since the last drag that moved something: a double-click counts only when its two clicks were clean.
     let cleanPresses = Infinity;
     const flowErrors = new Map(), flowHistory = [], routeViews = new Map(), freshRoutes = new Set(), timers = new Set();
-    let layoutSignature = '', layoutFrame = null, resizeFrame = null, generation = 0, renderStamp = '';
+    let layoutSignature = '', layoutFrame = null, resizeFrame = null, generation = 0, renderStamp = '', layoutChange = { changed: [], steady: false };
     let arrangement = root.clientWidth > 0 && root.clientWidth <= 650 ? 'compact' : 'wide';
     let agentsByName = new Map(), stepsByAgent = new Map(), stepsById = new Map(), nodeOwners = new Map(), shownAgents = new Map();
     let visibleAgents = [], hubName = '', activeTeam = 'main';
@@ -338,7 +338,7 @@
     // lower corner (canvas coordinates, with a 2 px margin). The graph is placed clear of them wherever panning can.
     function coverRects() {
       const view = viewport.getBoundingClientRect();
-      return [usage, status, controls].filter(item => !item.hidden && item.getClientRects().length).map(item => {
+      return [usage, status, controls, orbitDock].filter(item => !item.hidden && item.getClientRects().length).map(item => {
         const b = item.getBoundingClientRect();
         return { left: b.left - view.left - 2, right: b.right - view.left + 2, top: b.top - view.top - 2, bottom: b.bottom - view.top + 2 };
       }).filter(b => b.right - b.left > 6 && b.bottom - b.top > 6 && b.bottom > 0 && b.top < view.height);
@@ -376,16 +376,17 @@
     }
     // The sidebar keeps a readable scale: what does not fit is reached by
     // panning, and the picture stays centred on the orchestrator.
-    function clampPan() {
+    // `steady` (n103): a view already placed stays where it is while the whole graph is in it (no re-centring).
+    function clampPan(steady) {
       if (arrangement !== 'compact') return;
       const bounds = graphBounds();
       if (!bounds) return;
       const width = viewport.clientWidth, height = viewport.clientHeight;
       // Panned to the top, the topmost agent sits below the figures.
       const top = topInset() - bounds.top * camera.scale, bottom = height - 8 - bounds.bottom * camera.scale;
-      camera.y = bottom >= top ? (top + bottom) / 2 : clamp(camera.y, bottom, top);
+      camera.y = bottom >= top ? (steady ? clamp(camera.y, top, bottom) : (top + bottom) / 2) : clamp(camera.y, bottom, top);
       const left = 2 - bounds.left * camera.scale, right = width - 2 - bounds.right * camera.scale;
-      camera.x = right >= left ? clamp(width / 2, left, right) : clamp(camera.x, right, left);
+      camera.x = right >= left ? clamp(steady ? camera.x : width / 2, left, right) : clamp(camera.x, right, left);
     }
     // Zooming out (wheel, pinch, keys) stops before names go under 11 px (agent names are 12 px in the drawing), the
     // floor Fit keeps too: the user's rule is that names are never drawn smaller.
@@ -404,6 +405,11 @@
       const point = selected?.type === 'agent' || selected?.type === 'work-loop' ? positions.get(selected.key) : null;
       const width = viewport.clientWidth, height = viewport.clientHeight;
       if (!point || !width || !height) return;
+      // An open agent comes into view with the agents its paths join it to, when they fit together (n103).
+      if (selected.type === 'agent') {
+        const names = [selected.key, ...new Set(routes().flatMap(flow => (flow.path || []).flatMap((name, i, path) => name !== selected.key ? [] : [path[i - 1], path[i + 1]]).filter(name => name && name !== selected.key && positions.has(name))))];
+        if (names.length > 1 && revealNames(names, true)) { clampPan(true); clearOfCovers(point); transform(); return; }
+      }
       const e = extentOf(point), s = camera.scale;
       const top = (point.y + e.top) * s + camera.y, bottom = (point.y + e.bottom) * s + camera.y;
       const left = (point.x + e.left) * s + camera.x, right = (point.x + e.right) * s + camera.x;
@@ -444,6 +450,38 @@
       transform();
     }
 
+    // Where an agent is going (the end of a glide in progress), on the stage.
+    function finalOf(name) {
+      const item = glideState?.items.find(entry => entry.name === name), p = positions.get(name);
+      return p && (item ? { ...p, x: item.tx, y: item.ty } : p);
+    }
+    // The smallest pan that brings the given agents (circle, name and count) into the space left uncovered; when they
+    // cannot all fit, centred on them (or, `whole`, left alone: returns false). Returns whether they are now in view.
+    function revealNames(names, whole) {
+      const width = viewport.clientWidth, height = viewport.clientHeight, s = camera.scale;
+      const points = names.map(finalOf).filter(Boolean);
+      if (!points.length || !width || !height) return false;
+      const spans = points.map(p => { const e = extentOf(p); return { left: (p.x + e.left) * s + camera.x, right: (p.x + e.right) * s + camera.x, top: (p.y + e.top) * s + camera.y, bottom: (p.y + e.bottom) * s + camera.y }; });
+      const box = { left: Math.min(...spans.map(b => b.left)), right: Math.max(...spans.map(b => b.right)), top: Math.min(...spans.map(b => b.top)), bottom: Math.max(...spans.map(b => b.bottom)) };
+      // The margins the fit itself keeps (a narrow canvas is filled closer to its edges).
+      const side = arrangement === 'compact' ? 2 : EDGE, foot = arrangement === 'compact' ? 8 : EDGE;
+      const inset = Math.max(arrangement === 'compact' ? 8 : EDGE, topInset()), x0 = camera.x, y0 = camera.y;
+      if (whole && (box.right - box.left > width - 2 * side || box.bottom - box.top > height - foot - inset)) return false;
+      const shift = (low, high, from, to) => to - from > high - low ? (low + high) / 2 - (from + to) / 2 : from < low ? low - from : to > high ? high - to : 0;
+      camera.x += shift(side, width - side, box.left, box.right);
+      camera.y += shift(inset, height - foot, box.top, box.bottom);
+      return whole || Math.abs(camera.x - x0) + Math.abs(camera.y - y0) > .01;
+    }
+    // After the layout changed under a camera already placed (n8 major 6, n103): a view the user panned or zoomed stays
+    // as it is. An automatic view stays too when only a loop formed or went or an agent was added (nothing else moved,
+    // so nothing else moves on screen); it only pans what moved (and the open agent) into view. Otherwise it is fitted again.
+    function settleCamera() {
+      if (camera.own) { clampPan(true); transform(); return; }
+      if (!layoutChange.steady) { fitView(false); return; }
+      revealNames(layoutChange.changed);
+      clampPan(true); transform();
+      reveal();
+    }
     function flows() { return snapshot?.graph?.flows || []; }
     function loops() { return snapshot?.graph?.loops || []; }
     function workLoops() { return snapshot?.graph?.work_loops || []; }
@@ -512,6 +550,7 @@
       return agents;
     }
     function rememberTeam(team) {
+      orbitSuspend();
       if (!camera.initialized) return;
       teamViews.set(team + ':' + arrangement, { positions: Array.from(positions, ([key, point]) => [key, { ...point }]), camera: { ...camera }, signature: layoutSignature });
     }
@@ -599,6 +638,120 @@
       });
       return rings;
     }
+    // Where a full loop's circle goes (n103): in free space. Its line keeps RING_SPACE clear of every circle and name not
+    // on it (none of them inside it), of the orchestrator's name always, and RING_APART from every other loop's line (two
+    // loops meet only at an agent on both, and touch there rather than cross). Its moving agents, circle and name, land
+    // clear of everything else. Of the places that do, the one that moves its agents least and grows the picture least.
+    // Nothing else moves, so removing the loop puts every agent back.
+    const RING_SPACE = 12, RING_APART = 24;
+    // An agent's name box round its centre: as last drawn, else estimated from its length.
+    function labelBox(name, r, labelUp, lead) {
+      const p = positions.get(name);
+      if (p && Number.isFinite(p.labelLeft) && Math.abs((p.r || r) - r) < .01 && !!p.labelUp === !!labelUp) return { left: p.labelLeft, right: p.labelRight, top: p.labelTop, bottom: p.labelBottom };
+      const agent = shownAgents.get(name), shown = agent ? displayName(agent) : name, size = name === hubName ? 18 : lead ? 15 : 12;
+      const half = shown.length * size * .31 + 2, base = labelUp ? -r - 8 : r + 20;
+      return { left: -half, right: half, top: base - size * .8, bottom: base + size * .25 };
+    }
+    // An agent as the loops see it: its circle (the orchestrator's with its outer ring) and its name box, on the stage.
+    function shapeAt(name, x, y, r, labelUp, lead) {
+      const b = labelBox(name, r, labelUp, lead);
+      return { name, x, y, r: name === hubName ? r + 27 : r, box: { left: x + b.left, right: x + b.right, top: y + b.top, bottom: y + b.bottom } };
+    }
+    const boxNear = (b, x, y) => Math.hypot(Math.max(b.left - x, 0, x - b.right), Math.max(b.top - y, 0, y - b.bottom));
+    const boxGap = (a, b) => Math.max(a.left - b.right, b.left - a.right, a.top - b.bottom, b.top - a.bottom);
+    // How far shape `m` comes into shape `o` (0: clear), and how far a shape comes into the inside of a circle (c, R).
+    const clashOf = (m, o) => Math.max(0, m.r + o.r + 14 - Math.hypot(m.x - o.x, m.y - o.y)) + Math.max(0, o.r + 4 - boxNear(m.box, o.x, o.y)) + Math.max(0, m.r + 4 - boxNear(o.box, m.x, m.y)) + Math.max(0, 4 - boxGap(m.box, o.box));
+    const insideOf = (s, x, y, R) => Math.max(0, R + s.r + RING_SPACE - Math.hypot(s.x - x, s.y - y)) + Math.max(0, R + RING_SPACE - boxNear(s.box, x, y));
+    function placeRings(rings, placed, targets, placedByUser, canvas) {
+      const byName = new Map(targets.map(target => [target.name, target])), movers = new Set(rings.flatMap(ring => ring.movable).filter(name => !byName.get(name)?.pinned)), bands = [];
+      const at = target => { const owner = target.parent && placed.get(target.parent); return owner ? { x: owner.x + target.dx, y: owner.y + target.dy } : { x: target.x, y: target.y }; };
+      const lead = target => !target.parent && target.r === 29;
+      const shapeOf = (target, p = at(target)) => shapeAt(target.name, p.x, p.y, target.r, !!target.parent && target.dy < -1, lead(target));
+      const extent = list => ({ left: Math.min(...list.map(s => Math.min(s.x - s.r, s.box.left))), right: Math.max(...list.map(s => Math.max(s.x + s.r, s.box.right))), top: Math.min(...list.map(s => Math.min(s.y - s.r, s.box.top))), bottom: Math.max(...list.map(s => Math.max(s.y + s.r, s.box.bottom))) });
+      // The picture as it is without loops; what stays put; and the room the canvas has round the picture's middle (the
+      // figures take the top; a wide canvas as the details leave it), so a loop formed there stays in view.
+      const area = extent(targets.map(target => shapeOf(target))), shapes = targets.filter(target => !movers.has(target.name)).map(target => shapeOf(target));
+      const half = Math.max(canvas.width / 2 - EDGE, (area.right - area.left) / 2), halfY = Math.max(canvas.height / 2 - EDGE - 44, (area.bottom - area.top) / 2);
+      const centre = (area.left + area.right) / 2, middle = (area.top + area.bottom) / 2;
+      // The best place for one loop's circle, its `movable` agents moving onto it (null: it cannot be drawn).
+      const search = ring => {
+        const count = ring.names.length, radius = Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / count))), step = Math.PI * 2 / count;
+        const spots = ring.names.map(name => byName.has(name) ? at(byName.get(name)) : null);
+        if (spots.some(spot => !spot)) return;
+        const fixed = ring.names.map((name, i) => i).filter(i => !ring.movable.includes(ring.names[i]));
+        const others = shapes.filter(s => !ring.names.includes(s.name)), hub = shapes.find(s => s.name === hubName && ring.names.includes(s.name));
+        let best = null;
+        // The ring's line at (x, y): how far it comes into what stays and into the other loops.
+        const lineBad = (x, y) => {
+          let bad = hub ? Math.max(0, radius + RING_SPACE - boxNear(hub.box, x, y)) : 0;
+          for (const s of others) { bad += insideOf(s, x, y, radius); if (best && bad > best.bad) return bad; }
+          bands.forEach(band => {
+            const d = Math.hypot(x - band.x, y - band.y) || 1e-6, shared = ring.names.find(name => band.names.includes(name));
+            if (!shared) { bad += Math.max(0, radius + band.r + RING_APART - d); return; }
+            // Through a common agent: they touch there (the second meeting point inside its circle), each outside the other.
+            const s = placed.get(shared) || at(byName.get(shared)), ux = (band.x - x) / d, uy = (band.y - y) / d, along = (s.x - x) * ux + (s.y - y) * uy;
+            const sx = 2 * (x + ux * along) - s.x, sy = 2 * (y + uy * along) - s.y;
+            bad += Math.max(0, Math.hypot(sx - s.x, sy - s.y) - (byName.get(shared).r + 10)) + Math.max(0, .9 * (radius + band.r) - d);
+          });
+          return bad;
+        };
+        const consider = (x, y, start, dir, line) => {
+          let bad = line, moved = 0;
+          const made = [], list = [];
+          for (let i = 0; i < count; i++) {
+            const name = ring.names[i];
+            if (!ring.movable.includes(name)) continue;
+            const a = start + dir * i * step, px = x + radius * Math.cos(a), py = y + radius * Math.sin(a), m = shapeOf(byName.get(name), { x: px, y: py });
+            for (const s of others) bad += clashOf(m, s);
+            bands.forEach(band => { if (!band.names.includes(name)) bad += insideOf(m, band.x, band.y, band.r); });
+            if (best && bad > best.bad + 1e-6) return;
+            moved += Math.hypot(px - spots[i].x, py - spots[i].y); made.push([name, px, py]); list.push(m);
+          }
+          list.push({ x, y, r: radius, box: { left: x, right: x, top: y, bottom: y } });
+          const e = extent(list), grown = Math.max(0, area.left - e.left) + Math.max(0, e.right - area.right) + Math.max(0, area.top - e.top) + Math.max(0, e.bottom - area.bottom);
+          const cost = moved + 3 * grown + 1000 * (Math.max(0, centre - half - e.left) + Math.max(0, e.right - centre - half) + Math.max(0, middle - halfY - e.top) + Math.max(0, e.bottom - middle - halfY));
+          if (!best || bad < best.bad - 1e-6 || cost < best.cost) best = { bad, cost, x, y, start, dir, made };
+        };
+        if (fixed.length === 1) {
+          // One agent stays (the orchestrator, a seat, one on an earlier loop): the circle passes through it.
+          const i = fixed[0], f = spots[i];
+          for (let k = 0; k < 120; k++) for (const dir of [1, -1]) {
+            const angle = k * Math.PI / 60, x = f.x + radius * Math.cos(angle), y = f.y + radius * Math.sin(angle);
+            consider(x, y, Math.atan2(f.y - y, f.x - x) - dir * i * step, dir, lineBad(x, y));
+          }
+        } else if (!fixed.length) {
+          const turns = Array.from({ length: 12 }, (_, k) => k * step / 12);
+          const tryAt = (x, y) => { const line = lineBad(x, y); if (best && line > best.bad + 1e-6) return; turns.forEach(turn => { consider(x, y, turn, 1, line); consider(x, y, turn, -1, line); }); };
+          const reach = radius + 140;
+          for (let x = area.left - reach; x <= area.right + reach; x += 24) for (let y = area.top - reach; y <= area.bottom + reach; y += 24) tryAt(x, y);
+          if (best) { const cx = best.x, cy = best.y; for (let dx = -24; dx <= 24; dx += 6) for (let dy = -24; dy <= 24; dy += 6) tryAt(cx + dx, cy + dy); }
+        } else {
+          // Two or more stay where they are (the council's seats): the circle round their middle, turned so the others move least.
+          const x = spots.reduce((sum, spot) => sum + spot.x, 0) / count, y = spots.reduce((sum, spot) => sum + spot.y, 0) / count;
+          const line = lineBad(x, y);
+          for (let k = 0; k < 72; k++) consider(x, y, k * Math.PI / 36, 1, line);
+        }
+        return best;
+      };
+      rings.forEach(full => {
+        // An agent the user put somewhere stays there and the circle goes through it, unless the circle would then run
+        // into something; then it moves onto a circle in free space like the rest.
+        let ring = { ...full, movable: full.movable.filter(name => !byName.get(name)?.pinned) }, best = search(ring);
+        if (ring.movable.length < full.movable.length && (!best || best.bad > .5)) { const other = search(full); if (other && (!best || other.bad < best.bad)) { ring = full; best = other; } }
+        if (!best) return;
+        const count = ring.names.length, radius = Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / count)));
+        const shift = placedByUser[ring.key], sx = shift && Number.isFinite(shift.dx) ? shift.dx : 0, sy = shift && Number.isFinite(shift.dy) ? shift.dy : 0;
+        best.made.forEach(([name, x, y]) => {
+          const body = placed.get(name);
+          if (!body) return;
+          Object.assign(body, { x: x + sx, y: y + sy, still: true, ring: ring.key });
+          const stayed = shapes.findIndex(shape => shape.name === name);
+          if (stayed >= 0) shapes.splice(stayed, 1);
+          shapes.push(shapeOf(byName.get(name), body));
+        });
+        bands.push({ x: best.x + sx, y: best.y + sy, r: radius, names: ring.names });
+      });
+    }
     function positionStore() { try { return typeof localStorage === 'undefined' ? null : localStorage; } catch (_) { return null; } }
     function loadMoves() {
       const kept = {};
@@ -673,6 +826,7 @@
       return Array.from({ length: count }, (_, i) => ({ dx: Math.cos(start + i * Math.PI * 2 / count) * distance, dy: Math.sin(start + i * Math.PI * 2 / count) * distance, distance }));
     }
     function reseat() {
+      if (orbitHold(reseat)) return;
       positions.forEach(point => {
         const lead = point.parent && positions.get(point.parent);
         if (lead) { point.x = lead.x + point.dx; point.y = lead.y + point.dy; point.fixed = false; }
@@ -681,18 +835,20 @@
     // Everything surrounds the orchestrator: one ring (a tall oval in a narrow
     // panel) with each group side by side on it. Manual pins still win.
     function addPositions(agents) {
+      if (orbitHold(addPositions, agents)) return;
       const rect = { width: root.clientWidth, height: Math.max(1, root.clientHeight - (notice.hidden ? 0 : notice.offsetHeight)) };
       if (rect.width <= 0 || viewport.clientWidth <= 0 || viewport.clientHeight <= 0) return;
       const compact = arrangement === 'compact';
-      // The canvas as it is with the details closed: a narrow oval grows into it, and opening the sheet does not re-lay
-      // out the agents (the camera fits them into what is left).
-      const sheet = compact && root.classList.contains('ag-details-open') ? parseFloat(getComputedStyle(root).getPropertyValue('--ag-sheet-height')) || 0 : 0;
-      const canvasHeight = Math.max(1, Math.round(viewport.clientHeight + sheet));
+      // The canvas as it is: a narrow oval grows into spare height. With the sheet open (n103) it is shaped for what the
+      // sheet leaves, so every circle and name fits above it at a readable size; closing the sheet puts it back.
+      const canvasHeight = Math.max(1, Math.round(viewport.clientHeight));
       // Wide: the oval is shaped for the canvas the details panel (DETAIL_WIDTH) leaves, open or not, so opening it
       // never re-lays out the agents and they still fit at a readable size beside it.
-      const aspect = Math.round(clamp((rect.width - DETAIL_WIDTH) / rect.height, 1, 1.3) * 20) / 20;
+      // A canvas the details leave taller than wide (n103: 760 px) gets a taller oval, chosen below once its size is known.
+      const open = (rect.width - DETAIL_WIDTH) / rect.height, tall = open < 1;
+      const aspect = Math.round(clamp(open, 1, 1.3) * 20) / 20;
       const byAgent = new Map(agents.map(a => [a.name, a])), orbit = satellites(byAgent), rings = loopRings(byAgent, orbit);
-      const base = JSON.stringify([arrangement, compact ? [Math.round(rect.width), canvasHeight] : aspect, hubName, snapshot?.structure?.source === 'folder' ? (snapshot.groups || []).map(group => group.id) : null, agents.map(a => [a.name, a.group, a.parent]).sort(), [...orbit].sort()]);
+      const base = JSON.stringify([arrangement, compact ? [Math.round(rect.width), canvasHeight] : tall ? ['tall', Math.round(rect.width), Math.round(rect.height)] : aspect, hubName, snapshot?.structure?.source === 'folder' ? (snapshot.groups || []).map(group => group.id) : null, agents.map(a => [a.name, a.group, a.parent]).sort(), [...orbit].sort()]);
       const signature = JSON.stringify([base, rings.map(ring => [ring.key, ring.names, ring.movable])]);
       if (signature === layoutSignature) return;
       // Only the loops changed: the agents that move glide to their places (once, briefly).
@@ -704,7 +860,10 @@
       agents.filter(isSeat).sort((a, b) => a.name.localeCompare(b.name)).forEach(a => { if (!seatsOf.has(a.parent)) seatsOf.set(a.parent, []); seatsOf.get(a.parent).push(a); });
       // A group's members sit round their lead as seats sit round the council (and leave the ring).
       agents.filter(a => orbit.has(a.name)).sort((a, b) => a.name.localeCompare(b.name)).forEach(a => { const lead = orbit.get(a.name); if (!seatsOf.has(lead)) seatsOf.set(lead, []); seatsOf.get(lead).push(a); });
-      const ring = agents.filter(a => a.name !== hubName && !isSeat(a) && !orbit.has(a.name));
+      // An agent the user added and dropped somewhere stays there and takes no place on the ring, so adding it moves no
+      // other agent (n103).
+      const dropped = a => a.added === true && !isSeat(a) && !orbit.has(a.name) && a.name !== hubName && Number.isFinite(movedHere()[a.name]?.x) && !seatsOf.has(a.name);
+      const ring = agents.filter(a => a.name !== hubName && !isSeat(a) && !orbit.has(a.name) && !dropped(a));
       const keys = Array.from(new Set(ring.map(a => a.group)));
       // With a structure folder the ring follows the folder order, first group at the top; otherwise the built-in order.
       const listed = snapshot?.structure?.source === 'folder' ? (snapshot.groups || []).map(group => group.id).filter(id => keys.includes(id)) : null;
@@ -729,13 +888,28 @@
       let rx, ry;
       if (compact) {
         rx = Math.max(60, rect.width / 2 - 23 - EDGE);
-        ry = Math.max(least, rx / 1.3);
+        // Flatter with the sheet open: it leaves a canvas wider than tall.
+        ry = Math.max(least, rx / (root.classList.contains('ag-details-open') ? 1.45 : 1.3));
         if (perimeter(rx, ry) < needed) ry = grow(value => perimeter(rx, value) >= needed);
         // A tall panel is used, not left empty: the oval grows into spare height.
         ry = Math.max(ry, Math.min(rx * 2.2, canvasHeight / 2 - Math.max(depth + 34, 96)));
       } else {
-        ry = perimeter(aspect * least, least) < needed ? grow(value => perimeter(aspect * value, value) >= needed) : least;
-        rx = aspect * ry;
+        const oval = a => perimeter(a * least, least) < needed ? grow(value => perimeter(a * value, value) >= needed) : least;
+        let shape = aspect;
+        if (tall) {
+          // Of the ovals from tall to round, the one the open canvas shows largest (names either side, the seats above
+          // and the names below, the figures on top), while the closed canvas, as high and wider, still fits it at a
+          // readable size.
+          const across = rect.width - DETAIL_WIDTH - 2 * EDGE, high = rect.height - 2 * EDGE;
+          let best = -Infinity;
+          for (let step = 0; step <= 12; step++) {
+            const a = .4 + step * .05, value = oval(a), w = 2 * a * value + 110, h = 2 * value + depth + 60;
+            const score = Math.min(across / w, high / h) + (high / h >= READABLE ? 10 : 0);
+            if (score > best + 1e-9) { best = score; shape = a; }
+          }
+        }
+        ry = oval(shape);
+        rx = shape * ry;
       }
       const path = ellipse(rx, ry), spread = clamp((path.length - groups.length * GROUP_GAP) / (filled || 1), 1, 1.25);
       groups.forEach(group => { group.units.forEach(unit => { unit.width *= spread; }); group.width *= spread; });
@@ -753,6 +927,7 @@
       });
       const hub = byAgent.get(hubName);
       if (hub) seeds.set(hub.name, { x: 0, y: 0, r: 38, reach: 38, group: hub.group, parent: '', dx: 0, dy: 0 });
+      agents.filter(dropped).forEach(a => seeds.set(a.name, { x: 0, y: 0, r: 23, reach: 23, group: a.group, parent: '', dx: 0, dy: 0 }));
       const placedByUser = movedHere();
       const targets = Array.from(seeds, ([name, seed]) => {
         const saved = placedByUser[name], pinned = !seed.parent && !!saved && Number.isFinite(saved.x);
@@ -760,21 +935,9 @@
         return { name, ...seed, ...seat, ...(pinned ? { x: saved.x, y: saved.y } : {}), pinned, still: pinned || name === hubName };
       });
       const bodies = targets.filter(target => !target.parent), limit = body => Math.max(0, rect.width / 2 - body.reach - EDGE);
-      // Placed loop rings: an agent not on one keeps its circle and name (RING_CLEAR beyond its reach) off the ring's line.
-      const bands = [];
       const settle = () => {
         for (let iteration = 0; iteration < 80; iteration++) {
           let moved = false;
-          bands.forEach(band => bodies.forEach(body => {
-            if (body.still || band.names.includes(body.name)) return;
-            let dx = body.x - band.x, dy = body.y - band.y, distance = Math.hypot(dx, dy);
-            const room = body.reach + RING_CLEAR, off = distance - band.r;
-            if (Math.abs(off) >= room) return;
-            if (distance < .001) { dx = 0; dy = 1; distance = 1; }
-            // Out of the ring unless it sits deep inside, then into the middle.
-            const outward = off >= 0 || distance > band.r - room / 2 || band.r < room * 2, by = outward ? room - off + .1 : -(room + off + .1);
-            body.x += dx / distance * by; body.y += dy / distance * by; moved = true;
-          }));
           for (let i = 0; i < bodies.length; i++) for (let j = i + 1; j < bodies.length; j++) {
             const a = bodies[i], b = bodies[j], room = a.reach + b.reach + 18;
             if (a.still && b.still) continue;
@@ -792,67 +955,20 @@
       };
       settle();
       const placed = new Map(bodies.map(body => [body.name, body]));
-      // Full loops: their moving agents go onto an even circle, in path order; the rest make room round them.
-      if (rings.length) {
-        const where = name => { const body = placed.get(name); if (body) return body; const seat = targets.find(target => target.name === name), owner = seat && placed.get(seat.parent); return owner ? { x: owner.x + seat.dx, y: owner.y + seat.dy } : null; };
-        rings.forEach(ring => {
-          const count = ring.names.length, radius = Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / count))), step = Math.PI * 2 / count;
-          const spots = ring.names.map(where);
-          if (spots.some(spot => !spot)) return;
-          const fixed = ring.names.map((name, i) => [name, i]).filter(([name]) => !ring.movable.includes(name));
-          let cx = spots.reduce((sum, spot) => sum + spot.x, 0) / count, cy = spots.reduce((sum, spot) => sum + spot.y, 0) / count, start = 0;
-          if (fixed.length === 1) {
-            // One agent stays (the hub, say): the circle passes through it.
-            const [, i] = fixed[0], f = spots[i], others = spots.filter((_, j) => j !== i);
-            const gx = others.reduce((sum, spot) => sum + spot.x, 0) / others.length, gy = others.reduce((sum, spot) => sum + spot.y, 0) / others.length;
-            let dx = gx - f.x, dy = gy - f.y, d = Math.hypot(dx, dy);
-            if (d < 1) { dx = f.x || 1; dy = f.y; d = Math.hypot(dx, dy) || 1; }
-            cx = f.x + dx / d * radius; cy = f.y + dy / d * radius;
-            start = Math.atan2(f.y - cy, f.x - cx) - i * step;
-          } else {
-            // Turned so the agents move as little as they can.
-            let least = Infinity;
-            for (let k = 0; k < 72; k++) {
-              const angle = k * Math.PI / 36;
-              const cost = ring.names.reduce((sum, name, i) => ring.movable.includes(name) ? sum + (cx + radius * Math.cos(angle + i * step) - spots[i].x) ** 2 + (cy + radius * Math.sin(angle + i * step) - spots[i].y) ** 2 : sum, 0);
-              if (cost < least) { least = cost; start = angle; }
-            }
-          }
-          const shift = placedByUser[ring.key];
-          if (shift && Number.isFinite(shift.dx)) { cx += shift.dx; cy += shift.dy; }
-          ring.names.forEach((name, i) => {
-            const body = placed.get(name);
-            if (!body || !ring.movable.includes(name)) return;
-            Object.assign(body, { x: cx + radius * Math.cos(start + i * step), y: cy + radius * Math.sin(start + i * step), still: true, ring: ring.key });
-          });
-          bands.push({ x: cx, y: cy, r: radius, names: ring.names, free: !fixed.length });
-        });
-        // A ring whose agents all move never sits on an agent that stays put and is on no ring (the hub, one the user
-        // placed): the ring goes, as a whole, off that agent's line, whichever side the agent is on.
-        for (let round = 0; round < 30; round++) {
-          let moved = false;
-          bands.forEach(band => {
-            if (!band.free) return;
-            placed.forEach(body => {
-              if (!body.still || body.ring || band.names.includes(body.name)) return;
-              const dx = band.x - body.x, dy = band.y - body.y, distance = Math.hypot(dx, dy) || 1, overlap = body.reach + RING_CLEAR - Math.abs(distance - band.r);
-              if (overlap <= 0) return;
-              const by = Math.min(overlap + 1, 24) * (distance >= band.r ? 1 : -1), ox = dx / distance * by, oy = dy / distance * by;
-              band.x += ox; band.y += oy;
-              band.names.forEach(name => { const member = placed.get(name); if (member) { member.x += ox; member.y += oy; } });
-              moved = true;
-            });
-          });
-          if (!moved) break;
-        }
-        settle();
-      }
+      // Full loops: their moving agents go onto an even circle, in path order, in free space (placeRings); nothing else moves.
+      if (rings.length) placeRings(rings, placed, targets, placedByUser, compact ? { width: rect.width, height: canvasHeight } : { width: rect.width - DETAIL_WIDTH, height: rect.height });
       const before = new Map(Array.from(positions, ([name, point]) => [name, { x: point.x, y: point.y }]));
+      // What this layout moved: agents new to the picture, and those going onto, off or along a loop's circle (`steady`
+      // when nothing else moved: then the camera stays where it is, see settleCamera).
+      const changed = [];
+      let steady = true;
       targets.forEach(target => {
         if (target.parent) { const owner = placed.get(target.parent); target.x = owner.x + target.dx; target.y = owner.y + target.dy; }
-        const point = positions.get(target.name) || {};
-        positions.set(target.name, Object.assign(point, { x: target.x, y: target.y, r: target.r, group: target.group, parent: target.parent, dx: target.dx, dy: target.dy, fixed: target.pinned, ring: target.ring || '' }));
+        const point = positions.get(target.name) || {}, was = before.get(target.name);
+        if (!was || Math.hypot(was.x - target.x, was.y - target.y) > .5) { changed.push(target.name); if (was && !target.ring && !point.ring && !(target.parent && placed.get(target.parent)?.ring)) steady = false; }
+        positions.set(target.name, Object.assign(point, { x: target.x, y: target.y, r: target.r, reach: target.reach, group: target.group, parent: target.parent, dx: target.dx, dy: target.dy, fixed: target.pinned, ring: target.ring || '' }));
       });
+      layoutChange = { changed, steady: steady && before.size > 0 };
       if (glide) glideFrom(before);
     }
     function reducedMotion() { return root.dataset.agMotion === 'none' || !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches; }
@@ -914,11 +1030,12 @@
     function notes(parent, list) { list.forEach(note => { const row = el('p', 'ag-note', text(note.text)); row.title = text(note.text); parent.append(row); }); }
     function positionNode(name) {
       const node = nodes.get(name), p = positions.get(name);
-      if (node && p) node.setAttribute('transform', 'translate(' + p.x + ' ' + p.y + ')');
+      if (node && p) node.setAttribute('transform', 'translate(' + p.x + ' ' + p.y + ')' + orbitNode(node, name));
     }
     // Move one agent to (x, y) on the stage, as far as it goes without landing on another. A lead carries its
     // seats; a seat moves on its own and keeps its new place beside its lead. The place is remembered.
     function moveNode(name, x, y) {
+      if (orbitRefuseMove()) return;
       const point = positions.get(name);
       if (!point) return;
       const lead = point.parent && positions.get(point.parent);
@@ -1176,6 +1293,7 @@
     const CLEAR = 2, NAME_CLEAR = 1, BEND_STEP = 3;
     let bendQueue = [];
     function obstaclesFor(ends, box) {
+      if (orbit.shown) return [];
       const list = [];
       positions.forEach((p, name) => {
         if (ends.includes(name) || !nodes.has(name) || !shownAgents.has(name)) return;
@@ -2725,12 +2843,17 @@
       addMenu.hidden = true; plus.setAttribute('aria-expanded', 'false');
       if (refocus) plus.focus({ preventScroll: true });
     }
-    // A spot where a new circle (and its name) sits clear of every agent: the one asked for, or the nearest free.
-    function freeSpot(x, y) {
-      const clear = (px, py) => Array.from(positions.values()).every(p => Math.hypot(p.x - px, p.y - py) >= p.r + 23 + 30);
+    // A spot where a new circle and its name sit clear of every agent's circle and name (n103): the one asked for, or
+    // the nearest free. At least as far from each agent as the layout keeps agents apart, so adding it moves no other.
+    function freeSpot(x, y, name = draft?.name || 'agent', room = 30) {
+      const others = Array.from(positions, ([key, p]) => ({ p, shape: shapeAt(key, p.x, p.y, p.r, !!p.labelUp, p.r === 29) }));
+      const clear = (px, py) => {
+        const mine = shapeAt(name, px, py, 23, false, false);
+        return others.every(({ p, shape }) => Math.hypot(p.x - px, p.y - py) >= Math.max(p.r + 23 + room, p.parent ? 0 : (p.reach || p.r) + 23 + 18) + .5 && !clashOf(mine, shape));
+      };
       if (clear(x, y)) return { x, y };
-      for (let ring = 1; ring <= 40; ring++) {
-        const distance = ring * 12, count = Math.max(8, Math.round(ring * 6));
+      for (let ring = 1; ring <= 60; ring++) {
+        const distance = ring * 6, count = Math.max(8, Math.round(distance / 4));
         for (let i = 0; i < count; i++) { const angle = i * Math.PI * 2 / count, px = x + distance * Math.cos(angle), py = y + distance * Math.sin(angle); if (clear(px, py)) return { x: px, y: py }; }
       }
       return { x, y };
@@ -2757,7 +2880,8 @@
       if (event) { const point = stagePoint(event.clientX, event.clientY); draft.x = point.x; draft.y = point.y; drawDraft(); }
       else {
         const rect = viewport.getBoundingClientRect(), middle = stagePoint(rect.left + rect.width / 2, rect.top + rect.height / 2), hub = positions.get(hubName) || middle;
-        const spot = freeSpot(hub.x + 140, hub.y - 40); Object.assign(draft, spot); placeDraft();
+        // By keyboard: with room round it for Alt+arrows (two presses any way stay clear of every agent).
+        const spot = freeSpot(hub.x + 140, hub.y - 40, name, 14 + 2 * NUDGE_PX); Object.assign(draft, spot); placeDraft();
       }
     }
     function followDraft(event) {
@@ -3755,6 +3879,596 @@
       if (list.length) list[(index + step + list.length) % list.length].focus({ preventScroll: true });
     }
 
+    // ---- orbit lane (n105): the 3D view, a planetary system that turns ----
+    // The terminal's model (tui-plugin/src/scene.js): the orchestrator is the sun at the centre, each group has its own
+    // ring round it, each ring tilted differently (INCLINATIONS), its agents on it near where the flat view has them;
+    // the system turns once in ORBIT_TURN_MS, seen from ORBIT_ELEVATION above its plane, and the camera moves between
+    // the views in ORBIT_CHANGE_MS. Council seats and a group's members stay round their lead as in 2D.
+    // How it is drawn: while 3D is shown `positions` holds where each agent is on screen (the 2D place blended with
+    // its projection, so every line, loop, pick and badge follows); the 2D places are kept in `orbit.base`, and any 2D
+    // layout code (addPositions, reseat) runs on them through orbitHold. Depth is size and a mix toward the muted colour (orbitNode,
+    // from positionNode) and order (nearer agents drawn last). Going back puts the 2D places and camera back exactly.
+    // In 3D lines do not bend round agents (obstaclesFor gives none): a line may pass in front of or behind an agent,
+    // and every line and loop ring turns smoothly with the system. A frame is drawn only when the angle or the data
+    // changed. The switch is one morph (the terminal's morphCamera): the camera at the side view (ORBIT_ELEVATION)
+    // while the rings rise and every agent travels from its 2D place to its 3D place, and back the same way; D or the
+    // button during it turns it round from where it is (orbitEnter and orbitLeave start from orbit.k).
+    // The flat view is where the work is done; 3D is for looking. In 3D a click picks (an agent or a line), a
+    // right-click, Enter or i opens the details to read, Escape lets go and undo works; everything that would change
+    // something (drawing a path, a double-click's loop, N and the +, Delete and Backspace, G's run, moving an agent,
+    // typing or pressing a control in the details) is refused with one sentence in the status line (ORBIT_LOOK_SAID).
+    // The sky (n104 sky.md), 3D only, fading in and out with the morph: a sparse star field from a fixed seed (the same
+    // sky every time) in the layer behind the graph (the drawing's first child, no pointer, no text), shifting as the
+    // view turns and tilts at ORBIT_SKY_RATE of the agents' movement; a warmer, brighter star for each finished run
+    // (each path's stats.passed, placed by the path's id and the run's number, at most SKY_RUNS_MAX: those of the
+    // lowest run numbers); a shooting star when a run finishes while 3D is shown (one per run, spaced out, none on
+    // load or on entering 3D), its star appearing where it ends. The orchestrator glows as the sun (swelling while
+    // it works) and every other agent is shaded as a sphere lit from it. Nothing of it moves by itself or exists in
+    // 2D; with reduced motion there is no streak, swell or fade. The sky is redrawn only with the frames above.
+    // One model with the terminal (tui-plugin/src/scene.js): TURN_MS, CHANGE_MS, ELEVATION_3D, PERSPECTIVE, RESUME_MS,
+    // PARALLAX, INCLINATIONS, TURN_STEP and ELEVATION_STEP, ELEVATION_MIN/MAX, DEPTH_MIX, SKY_SEED, RUN_STARS_MAX,
+    // STREAK_MS, STREAK_GAP_MS and its hashes are its numbers. In pixels, not cells: the drag's rate (per pixel), the
+    // screen scale (one radius for both axes, the rings fitted to the free canvas), the field's density (one star per
+    // 9,000 px², a cell taken as 8 x 16 px, over a sky a quarter taller than the view above and below instead of
+    // wrapping rows), the depth mix (continuous in depth, not six steps) and the streak (a line, not characters).
+    const ORBIT_TURN_MS = 40000, ORBIT_CHANGE_MS = 700, ORBIT_ELEVATION = .5, ORBIT_PERSPECTIVE = 4, ORBIT_RESUME_MS = 3000, ORBIT_SKY_RATE = 1 / 3;
+    const SKY_SEED = 0x5ca1ab1e, SKY_DENSITY = 9000, SKY_FIELD_MAX = 400, SKY_RUNS_MAX = 200, SKY_MARGIN = .25, SKY_STREAK_MS = 900, SKY_STREAK_GAP = 700, SKY_STREAKS_MAX = 8;
+    const ORBIT_INCLINATIONS = [.9, -1.05, .7, -.8, 1.15, -.6, 1, -.9], ORBIT_DEPTH_MIX = [.72, .6, .45, .3, .15, 0];
+    const ORBIT_LOW = 0, ORBIT_HIGH = Math.PI / 2, ORBIT_TURN_PX = .008, ORBIT_TILT_PX = .006, ORBIT_KEY_TURN = Math.PI / 12, ORBIT_KEY_TILT = Math.PI / 24;
+    const ORBIT_KEY = POSITIONS_KEY + ':view';
+    const ORBIT_LOOK_SAID = '3D is for looking: press D to change things in 2D.';
+    const orbit = { want: '2d', shown: false, k: 0, change: null, turn: 0, elevation: ORBIT_ELEVATION, base: null, saved: null, from3d: null, figure: null, depth: new Map(), order: '', raf: 0, last: 0, pausedUntil: 0, resume: null, waiting: false, holding: false, grab: null, frames: 0, frameMs: [] };
+    const orbitLayer = svg('g', { class: 'ag-orbits', 'aria-hidden': 'true' });
+    stage.insertBefore(orbitLayer, edgeLayer);
+    // An <svg> of its own (not a <g>, which would read as the camera's stage), turned by the one layer inside it.
+    const orbitSkyBox = svg('svg', { class: 'ag-sky', 'aria-hidden': 'true', focusable: 'false' }), orbitSky = svg('g', { class: 'ag-sky-turn' });
+    orbitSkyBox.append(orbitSky);
+    drawing.insertBefore(orbitSkyBox, drawing.firstChild);
+    const sky = { size: '', V: 0, W: 0, H: 0, tx: 0, tile: null, streaks: null, defs: null, runs: null, next: 0, timers: new Set() };
+    // The terminal's hashes: hash32 and unit (a number in [0, 1) from two integers) and nameSeed (FNV-1a of a string).
+    function skyHash32(a, b) {
+      let x = Math.imul((a | 0) ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul((b | 0) + 0x632be5ab, 0xc2b2ae35);
+      x = Math.imul(x ^ (x >>> 16), 0x7feb352d); x = Math.imul(x ^ (x >>> 15), 0x846ca68b);
+      return (x ^ (x >>> 16)) >>> 0;
+    }
+    const skyUnit = (a, b) => skyHash32(a, b) / 4294967296;
+    function skySeed(text) { let h = 2166136261; for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 16777619); return h >>> 0; }
+    // Field star i, as the terminal has it: its place (u across the sky, v down it; here the sky is SKY_MARGIN taller
+    // than the view above and below, for the tilt's shift) and its size, most of them faint.
+    const SKY_FIELD = Array.from({ length: SKY_FIELD_MAX }, (_, i) => { const k = skyHash32(SKY_SEED + i, 3) % 10; return { u: skyUnit(SKY_SEED + i, 1), v: -SKY_MARGIN + skyUnit(SKY_SEED + i, 2) * (1 + 2 * SKY_MARGIN), size: k < 6 ? 'faint' : k < 9 ? 'dim' : 'bright' }; });
+    const SKY_RADIUS = { faint: .7, dim: 1, bright: 1.35 };
+    // The finished runs' stars (the terminal's runStars): every path's first run, then every path's second, and so on,
+    // in the snapshot's order, at most SKY_RUNS_MAX; past that a new run adds no star and no streak.
+    function skyRunKeys() {
+      const runs = [...(sky.runs?.counts || [])], keys = [];
+      for (let n = 1; keys.length < SKY_RUNS_MAX && runs.some(([, passed]) => passed >= n); n++) runs.forEach(([id, passed]) => { if (passed >= n && keys.length < SKY_RUNS_MAX) keys.push(id + '#' + n); });
+      return keys;
+    }
+    function skyRunPlace(key) { const seed = skySeed(key); return { x: skyUnit(seed, 1) * sky.V, y: skyUnit(seed, 2) * sky.H, down: (seed & 1) === 1 }; }
+    // The tile (stars at their places in the view) and its copy one view to the left, so the shift wraps round.
+    function skyCopy() {
+      const copy = sky.tile.cloneNode(true);
+      copy.setAttribute('class', 'ag-sky-copy'); copy.setAttribute('transform', 'translate(' + (-sky.V).toFixed(1) + ' 0)');
+      orbitSky.querySelector(':scope > .ag-sky-copy')?.remove();
+      orbitSky.insertBefore(copy, sky.streaks);
+    }
+    // The sky is V wide (the view at least: a full turn moves it exactly V, so it is the same at 0 and 2 PI) and wraps.
+    function skyBuild(V, W, H) {
+      const size = V.toFixed(1) + 'x' + W + 'x' + H;
+      if (sky.tile && sky.size === size) return;
+      Object.assign(sky, { size, V, W, H });
+      if (!sky.defs) {
+        // The sun's glow and a sphere's light (highlight towards the upper left, turned towards the sun by each agent).
+        sky.defs = svg('defs');
+        const sun = svg('radialGradient', { id: uid + '-sun' }), sphere = svg('radialGradient', { id: uid + '-sphere', fx: .3, fy: .3 });
+        [[0, .34], [.45, .14], [1, 0]].forEach(([at, alpha]) => sun.append(svg('stop', { class: 'ag-sky-stop-sun', offset: at, 'stop-opacity': alpha })));
+        [['light', 0, .5], ['light', .45, 0], ['dark', .78, .06], ['dark', 1, .26]].forEach(([tone, at, alpha]) => sphere.append(svg('stop', { class: 'ag-sky-stop-' + tone, offset: at, 'stop-opacity': alpha })));
+        sky.defs.append(sun, sphere); orbitSkyBox.insertBefore(sky.defs, orbitSky);
+      }
+      sky.tile = svg('g', { class: 'ag-sky-tile' });
+      const count = clamp(Math.round(V * H * (1 + 2 * SKY_MARGIN) / SKY_DENSITY), 1, SKY_FIELD_MAX);
+      SKY_FIELD.slice(0, count).forEach(star => sky.tile.append(svg('circle', { class: 'ag-sky-star', 'data-size': star.size, cx: (star.u * V).toFixed(1), cy: (star.v * H).toFixed(1), r: SKY_RADIUS[star.size] })));
+      sky.streaks = svg('g', { class: 'ag-sky-streaks' });
+      orbitSky.replaceChildren(sky.tile, sky.streaks);
+      skyRunStars([]);
+    }
+    // The run stars now; `fresh` (runs just finished, 3D shown) each get a shooting star, their stars shown at its end.
+    function skyRunStars(fresh) {
+      sky.tile.querySelectorAll('.ag-sky-run').forEach(star => star.remove());
+      const flying = !reducedMotion() ? new Set(fresh) : new Set();
+      skyRunKeys().forEach(key => {
+        const at = skyRunPlace(key), star = svg('circle', { class: 'ag-sky-star ag-sky-run', 'data-run': key, cx: at.x.toFixed(1), cy: at.y.toFixed(1), r: 1.7 });
+        if (flying.has(key) || orbitSky.querySelector('.ag-sky-run[data-pending="true"][data-run="' + CSS.escape(key) + '"]')) star.dataset.pending = 'true';
+        sky.tile.append(star);
+      });
+      skyCopy();
+      flying.forEach(key => { if (sky.tile.querySelector('.ag-sky-run[data-run="' + CSS.escape(key) + '"]')) skyStreak(key); });
+    }
+    function skyReveal(key) { orbitSky.querySelectorAll('.ag-sky-run[data-run="' + CSS.escape(key) + '"]').forEach(star => star.removeAttribute('data-pending')); }
+    // Several at once are spaced SKY_STREAK_GAP apart.
+    function skyStreak(key) {
+      const now = performance.now(), start = Math.max(now, sky.next);
+      sky.next = start + SKY_STREAK_GAP;
+      const id = later(() => { sky.timers.delete(id); skyFly(key); }, start - now);
+      sky.timers.add(id);
+    }
+    function skyFly(key) {
+      if (!sky.tile || !orbitLooking() || reducedMotion()) { skyReveal(key); return; }
+      // To the star's place in whichever copy is in view, a short bright stretch travelling down a diagonal (the
+      // terminal's: one column and one row a step, here 8 by 16 px): down from the left or the right by the run's seed,
+      // up from below when the star is too near the top, from the other side when it would start off the view.
+      const at = skyRunPlace(key), x = at.x + sky.tx < sky.V ? at.x : at.x - sky.V, length = clamp(sky.W * .22, 90, 200);
+      const step = [8 / Math.hypot(8, 16), 16 / Math.hypot(8, 16)], lift = Number(/translate\([-\d.]+ ([-\d.]+)/.exec(orbitSky.getAttribute('transform') || '')?.[1]) || 0;
+      const dy = at.y + lift - length * step[1] >= 0 ? 1 : -1;
+      let dx = at.down ? 1 : -1;
+      const startX = x + sky.tx - dx * length * step[0];
+      if (startX < 0 || startX > sky.W) dx = -dx;
+      const line = svg('line', { class: 'ag-sky-streak', x1: (x - dx * length * step[0]).toFixed(1), y1: (at.y - dy * length * step[1]).toFixed(1), x2: x.toFixed(1), y2: at.y.toFixed(1) });
+      const stretch = Math.min(70, length * .45);
+      line.style.strokeDasharray = stretch + ' ' + (length + stretch);
+      sky.streaks.append(line);
+      let over = false;
+      const done = () => { if (over) return; over = true; line.remove(); skyReveal(key); };
+      const flight = line.animate([{ strokeDashoffset: stretch + 'px', opacity: 0 }, { opacity: .55, offset: .25 }, { opacity: .55, offset: .7 }, { strokeDashoffset: -(length - stretch) + 'px', opacity: 0 }], { duration: SKY_STREAK_MS, easing: 'ease-in' });
+      flight.finished.then(done, done);
+      const id = later(() => { sky.timers.delete(id); done(); }, SKY_STREAK_MS + 400);
+      sky.timers.add(id);
+    }
+    // The sky for this frame: built for the view's size, shifted with the turn and the tilt, faded with the morph.
+    function skyDraw() {
+      const W = viewport.clientWidth, H = viewport.clientHeight;
+      if (W <= 0 || H <= 0) return;
+      // The terminal's skyPlace: V = max(view, 2 PI x the near side's movement per radian x PARALLAX); shifted toward
+      // the far side by V a full turn, and up as the camera rises by PARALLAX of the figure's movement.
+      const front = orbitFigure().radius * (camera.scale || 1), V = Math.max(W, 2 * Math.PI * front * ORBIT_SKY_RATE);
+      skyBuild(V, W, H);
+      const full = 2 * Math.PI, turn = ((orbit.view.turn % full) + full) % full;
+      const lift = clamp(-(orbit.view.elevation - ORBIT_ELEVATION) * front * ORBIT_SKY_RATE, -SKY_MARGIN * H, SKY_MARGIN * H);
+      sky.tx = (turn / full * sky.V) % sky.V;
+      orbitSky.setAttribute('transform', 'translate(' + sky.tx.toFixed(2) + ' ' + lift.toFixed(2) + ')');
+      orbitSkyBox.style.opacity = orbit.k < .999 ? orbit.k.toFixed(3) : '';
+    }
+    // Back in 2D nothing of the sky is left: the stars, the streaks under way, the glow and the shading.
+    function skyClear() {
+      sky.timers.forEach(id => { clearTimeout(id); timers.delete(id); }); sky.timers.clear();
+      orbitSky.replaceChildren(); orbitSky.removeAttribute('transform'); orbitSkyBox.style.opacity = '';
+      sky.defs?.remove(); Object.assign(sky, { size: '', tile: null, streaks: null, defs: null, next: 0, tx: 0 });
+      nodeLayer.querySelectorAll('.ag-sun-glow, .ag-sphere, .ag-depth-mix').forEach(item => item.remove());
+    }
+    // Each snapshot (render's hook): the finished runs per path; the ones new since the last snapshot of this source
+    // fly in if 3D is shown, else their stars are simply there when it is (history does not replay).
+    function orbitRuns() {
+      const counts = new Map();
+      (snapshot?.structure?.flows || []).forEach(flow => { const n = Math.floor(Number(flow?.stats?.passed)); if (typeof flow?.id === 'string' && n > 0) counts.set(flow.id, n); });
+      const was = sky.runs, fresh = [];
+      if (was && was.generation === generation) counts.forEach((n, id) => { for (let k = (was.counts.has(id) ? was.counts.get(id) : (snapshot.structure.flows.some(flow => flow.id === id && was.ids.has(id)) ? 0 : n)) + 1; k <= n && fresh.length < SKY_STREAKS_MAX; k++) fresh.push(id + '#' + k); });
+      sky.runs = { generation, counts, ids: new Set((snapshot?.structure?.flows || []).map(flow => flow?.id)) };
+      if (sky.tile) skyRunStars(orbitLooking() ? fresh : []);
+    }
+    // The sun's glow and the planets' light (orbitNode's part, 3D only).
+    function orbitLight(node, name) {
+      const core = node.querySelector(':scope > .ag-core');
+      if (!core) return;
+      const fade = orbit.k < .999 ? orbit.k.toFixed(3) : '', r = Number(core.getAttribute('r')) || 0;
+      if (name === hubName) {
+        let glow = node.querySelector(':scope > .ag-sun-glow');
+        if (!glow) { glow = svg('circle', { class: 'ag-sun-glow', fill: 'url(#' + uid + '-sun)' }); node.insertBefore(glow, node.firstChild); }
+        glow.setAttribute('r', (r * 2.4).toFixed(1)); glow.style.opacity = fade;
+        return;
+      }
+      let shade = node.querySelector(':scope > .ag-sphere');
+      if (!shade) { shade = svg('circle', { class: 'ag-sphere', fill: 'url(#' + uid + '-sphere)' }); core.after(shade); }
+      const p = positions.get(name), sun = positions.get(hubName);
+      const toward = p && sun && (Math.abs(sun.x - p.x) > .01 || Math.abs(sun.y - p.y) > .01) ? Math.atan2(sun.y - p.y, sun.x - p.x) * 180 / Math.PI + 135 : 0;
+      shade.setAttribute('r', r); shade.setAttribute('transform', 'rotate(' + toward.toFixed(1) + ')'); shade.style.opacity = fade;
+    }
+    const orbitButton = el('button', 'ag-control ag-orbit-toggle');
+    orbitButton.type = 'button'; orbitButton.setAttribute('aria-label', '3D view'); orbitButton.title = '3D view (D)';
+    orbitButton.setAttribute('aria-pressed', 'false'); orbitButton.setAttribute('aria-keyshortcuts', 'D');
+    const orbitIcon = svg('svg', { viewBox: '0 0 16 16', 'aria-hidden': 'true', focusable: 'false' });
+    orbitIcon.append(svg('circle', { r: 7, transform: 'translate(8 8) rotate(-20) scale(1 .42)', 'vector-effect': 'non-scaling-stroke' }), svg('circle', { cx: 8, cy: 8, r: 2.6 }));
+    orbitButton.append(orbitIcon);
+    // Beside the other controls, in their row (kept just left of them as they change width), and a cover the camera
+    // keeps the graph clear of, as theirs is.
+    const orbitDock = el('div', 'ag-orbit-dock');
+    orbitDock.append(orbitButton); controls.after(orbitDock);
+    const orbitDockPlace = () => { orbitDock.style.right = (8 + controls.offsetWidth + (controls.offsetWidth ? 2 : 0)) + 'px'; };
+    const orbitDockWatch = new ResizeObserver(orbitDockPlace);
+    orbitDockWatch.observe(controls); orbitDockPlace();
+    cleanups.push(() => orbitDockWatch.disconnect());
+    const orbitNote = el('span', 'ag-orbit-note');
+    orbitNote.hidden = true; orbitNote.setAttribute('role', 'status'); orbitNote.setAttribute('aria-live', 'polite');
+    status.append(orbitNote);
+    viewport.setAttribute('aria-keyshortcuts', viewport.getAttribute('aria-keyshortcuts') + ' D');
+    let orbitNoteTimer = null;
+    function orbitSay(said) {
+      orbitNote.textContent = said; orbitNote.hidden = false;
+      if (orbitNoteTimer) { clearTimeout(orbitNoteTimer); timers.delete(orbitNoteTimer); }
+      orbitNoteTimer = later(() => { orbitNoteTimer = null; orbitNote.hidden = true; orbitNote.textContent = ''; }, 3500);
+    }
+    function orbitStore(value) { try { const store = positionStore(); if (store) { if (value === undefined) return store.getItem(ORBIT_KEY); store.setItem(ORBIT_KEY, value); } } catch (_) { /* no storage (the Desktop panel may have none) */ } return null; }
+    function orbitMark() {
+      root.dataset.agView = orbit.want;
+      orbitButton.setAttribute('aria-pressed', String(orbit.want === '3d'));
+      // What the camera is doing, for tests and hosts (no text in the graph area): the blend (0 flat, 1 3D), the angle,
+      // the frames drawn and the mean time of the last ones, in ms.
+      root.dataset.agBlend = orbit.k === 0 || orbit.k === 1 ? String(orbit.k) : orbit.k.toFixed(3); root.dataset.agTurn = orbit.turn.toFixed(4); root.dataset.agElevation = orbit.elevation.toFixed(4);
+      root.dataset.agFrames = String(orbit.frames);
+      root.dataset.agFrameMs = orbit.frameMs.length ? (orbit.frameMs.reduce((t, v) => t + v, 0) / orbit.frameMs.length).toFixed(2) : '';
+    }
+    const orbitSmooth = t => t * t * (3 - 2 * t);
+    // The figure, from the 2D places: one ring per group (its node line through the middle of its agents, as the
+    // terminal draws it) and each ring agent's point on it, in ring radii round the hub (z up).
+    function orbitFigure() {
+      if (orbit.figure) return orbit.figure;
+      const base = orbit.base, hub = base.get(hubName) || { x: 0, y: 0 }, byKey = new Map(), points = new Map();
+      let total = 0, count = 0;
+      positions.forEach((p, name) => {
+        const b = base.get(name);
+        if (!b || name === hubName || (p.parent && base.has(p.parent))) return;
+        const dx = b.x - hub.x, dy = b.y - hub.y, key = p.group || 'build';
+        if (!byKey.has(key)) byKey.set(key, []);
+        byKey.get(key).push({ name, azimuth: Math.atan2(dx, -dy) });
+        total += Math.hypot(dx, dy); count++;
+      });
+      const groups = [...byKey].map(([key, members]) => {
+        const node = Math.atan2(members.reduce((t, m) => t + Math.sin(m.azimuth), 0), members.reduce((t, m) => t + Math.cos(m.azimuth), 0));
+        const along = (node + 2 * Math.PI) % (2 * Math.PI);
+        return { key, members, node, along: along > 2 * Math.PI - .6 ? along - 2 * Math.PI : along };
+      }).sort((a, b) => a.along - b.along);
+      // figure3D(L, k): the rings' tilt scaled by k (the morph's rise); at 1 the full tilt (the points kept here).
+      const rings = groups.map((group, gi) => {
+        const tilt = ORBIT_INCLINATIONS[gi % ORBIT_INCLINATIONS.length], node = group.node;
+        const ring = k => {
+          const inc = tilt * k, n = [Math.sin(node), Math.cos(node), 0], m = [Math.cos(node) * Math.cos(inc), -Math.sin(node) * Math.cos(inc), Math.sin(inc)];
+          const at = u => [Math.cos(u) * n[0] + Math.sin(u) * m[0], Math.cos(u) * n[1] + Math.sin(u) * m[1], Math.sin(u) * m[2]];
+          const place = new Map(group.members.map(member => { const beta = member.azimuth - node; return [member.name, at(Math.atan2(Math.sin(beta), Math.cos(beta) * Math.cos(inc)))]; }));
+          return { at, place };
+        };
+        ring(1).place.forEach((point, name) => points.set(name, point));
+        return { key: group.key, ring };
+      });
+      // The sun at the middle of the canvas the details leave (the space the camera had when 3D began), the rings as
+      // wide as the 2D view's agents are from it, narrower where that would not fit there at the nearest (4/3 size).
+      const frame = orbit.frame || { x: hub.x, y: hub.y, fit: Infinity }, wide = count ? total / count * 1.08 : 180;
+      points.set(hubName, [0, 0, 0]);
+      const radius = Math.max(wide * .45, Math.min(wide, frame.fit));
+      orbit.figure = { rings, points, hub: { x: frame.x, y: frame.y }, radius, shrink: Math.max(.6, radius / wide) };
+      return orbit.figure;
+    }
+    // The figure k of the way up (figure3D(L, k)): each ring's line and its agents' points, the hub at the middle.
+    function orbitRise(figure, k) {
+      if (k >= 1) return { rings: figure.rings.map(ring => ({ key: ring.key, at: ring.ring(1).at })), points: figure.points };
+      const points = new Map([[hubName, [0, 0, 0]]]), rings = figure.rings.map(item => { const ring = item.ring(k); ring.place.forEach((point, name) => points.set(name, point)); return { key: item.key, at: ring.at }; });
+      return { rings, points };
+    }
+    // The camera: the figure turned by `turn` round its upright axis, seen from `elevation` above its plane (PI/2:
+    // straight above, as the 2D view). -> stage point and depth (+1 nearest, -1 farthest).
+    function orbitCamera(figure, turn, elevation) {
+      const ct = Math.cos(turn), st = Math.sin(turn), ce = Math.cos(elevation), se = Math.sin(elevation), R = figure.radius;
+      return p => {
+        const x = p[0] * ct + p[1] * st, y = -p[0] * st + p[1] * ct, up = y * se + p[2] * ce, depth = -y * ce + p[2] * se;
+        const s = ORBIT_PERSPECTIVE / (ORBIT_PERSPECTIVE - depth);
+        return { x: figure.hub.x + x * s * R, y: figure.hub.y - up * s * R, depth };
+      };
+    }
+    // Where everything is now (no drawing): `positions` gets each agent's place on screen, `orbit.depth` its depth.
+    // The morph (the terminal's morphCamera): the camera stays at the 3D angle; the figure rises k of the way
+    // (orbitRise) and each point goes in a straight line on screen from its 2D place (here the agent's own 2D place,
+    // and for a ring its circle seen from straight above) to where the camera shows it, k of the way.
+    function orbitProject() {
+      const e = orbit.k, figure = orbitFigure(), risen = orbitRise(figure, e), full = new Map();
+      orbit.view = { turn: orbit.turn, elevation: orbit.elevation, risen };
+      const camera3d = orbitCamera(figure, orbit.view.turn, orbit.view.elevation);
+      const project = p => { const q = camera3d(p), fx = figure.hub.x + p[0] * figure.radius, fy = figure.hub.y - p[1] * figure.radius; return { x: fx + (q.x - fx) * e, y: fy + (q.y - fy) * e, depth: q.depth }; };
+      orbit.depth.clear();
+      positions.forEach((p, name) => {
+        if (!orbit.base.has(name)) orbit.base.set(name, { x: p.x, y: p.y });
+        const point = risen.points.get(name);
+        if (point) { full.set(name, camera3d(point)); return; }
+        if (!(p.parent && orbit.base.has(p.parent))) full.set(name, { ...orbit.base.get(name), depth: 0 });
+      });
+      positions.forEach((p, name) => {
+        if (full.has(name)) return;
+        // A seat or a member: round its lead as in 2D, at its lead's depth and size.
+        const lead = full.get(p.parent) || { ...orbit.base.get(p.parent), depth: 0 }, b = orbit.base.get(name), l = orbit.base.get(p.parent), size = (1 + .3 * (lead.depth + 1) / 2) * figure.shrink;
+        full.set(name, { x: lead.x + (b.x - l.x) * size, y: lead.y + (b.y - l.y) * size, depth: lead.depth + 1e-4 });
+      });
+      positions.forEach((p, name) => {
+        const b = orbit.base.get(name), q = full.get(name);
+        p.x = b.x + (q.x - b.x) * e; p.y = b.y + (q.y - b.y) * e;
+        orbit.depth.set(name, { z: q.depth, s: 1 + e * .3 * (q.depth + 1) / 2, mix: e * orbitMix(q.depth) });
+      });
+      return project;
+    }
+    // The terminal's DEPTH_MIX (its six levels, far to near, toward the muted colour), here continuous in depth.
+    function orbitMix(depth) {
+      const x = clamp((depth + 1) / 2 * 6 - .5, 0, 5), i = Math.min(4, Math.floor(x));
+      return ORBIT_DEPTH_MIX[i] + (ORBIT_DEPTH_MIX[i + 1] - ORBIT_DEPTH_MIX[i]) * (x - i);
+    }
+    // positionNode's part: an agent's size for its depth ('' in 2D), its colour mixed toward the muted one (not while
+    // it works, as in the terminal), its light.
+    function orbitNode(node, name) {
+      const d = orbit.shown && orbit.depth.get(name);
+      if (!d) { if (node.style.opacity) node.style.opacity = ''; return ''; }
+      const core = node.querySelector(':scope > .ag-core');
+      if (core && name !== hubName) {
+        let mixer = node.querySelector(':scope > .ag-depth-mix');
+        if (!mixer) { mixer = svg('circle', { class: 'ag-depth-mix' }); core.after(mixer); }
+        const mix = node.dataset.busy && node.dataset.busy !== '0' ? 0 : d.mix;
+        mixer.setAttribute('r', core.getAttribute('r')); mixer.style.opacity = mix.toFixed(3);
+      }
+      orbitLight(node, name);
+      return d.s > 1.0005 ? ' scale(' + d.s.toFixed(4) + ')' : '';
+    }
+    // Nearer agents over farther ones (and their names): the node order follows depth, moved without losing focus.
+    // Without depth (back in 2D) the order is the one 2D had (orbit.dom), any agent added meanwhile after it.
+    function orbitOrder(byDepth) {
+      const list = [...nodes].filter(([, node]) => node.parentNode === nodeLayer), was = new Map((orbit.dom || []).map((node, i) => [node, i]));
+      if (byDepth) list.sort((a, b) => (orbit.depth.get(a[0])?.z ?? 0) - (orbit.depth.get(b[0])?.z ?? 0));
+      else list.sort((a, b) => (was.get(a[1]) ?? Infinity) - (was.get(b[1]) ?? Infinity));
+      const order = list.map(([name]) => name).join('\n');
+      if (order === orbit.order) return;
+      orbit.order = order;
+      const focused = document.activeElement;
+      list.forEach(([, node]) => { if (nodeLayer.moveBefore) nodeLayer.moveBefore(node, null); else nodeLayer.append(node); });
+      if (focused && focused !== document.activeElement && focused.isConnected) focused.focus({ preventScroll: true });
+    }
+    // The rings: each a thin line, its far half fainter; they rise with the morph and fade in and out with it.
+    function orbitRings(project) {
+      const figure = orbit.view.risen, shown = new Set();
+      orbitLayer.style.opacity = orbit.k < .999 ? orbit.k.toFixed(3) : '';
+      figure.rings.forEach(ring => {
+        shown.add(ring.key);
+        let view = [...orbitLayer.children].filter(item => item.dataset.group === ring.key);
+        if (view.length !== 2) { view.forEach(item => item.remove()); view = ['near', 'far'].map(side => svg('path', { class: 'ag-orbit-ring', 'data-group': ring.key, 'data-side': side })); orbitLayer.append(...view); }
+        const parts = { near: '', far: '' }, steps = 96;
+        let last = null;
+        for (let i = 0; i <= steps; i++) {
+          const q = project(ring.at(i / steps * 2 * Math.PI)), side = q.depth >= 0 ? 'near' : 'far', xy = q.x.toFixed(1) + ' ' + q.y.toFixed(1);
+          if (last && last.side === side) parts[side] += ' L ' + xy;
+          else { if (last) parts[last.side] += ' L ' + xy; parts[side] += ' M ' + (last ? last.xy : xy) + (last ? ' L ' + xy : ''); }
+          last = { side, xy };
+        }
+        view[0].setAttribute('d', parts.near.trim()); view[1].setAttribute('d', parts.far.trim());
+      });
+      [...orbitLayer.children].forEach(item => { if (!shown.has(item.dataset.group)) item.remove(); });
+    }
+    function orbitDraw() {
+      const started = performance.now();
+      const project = orbitProject();
+      skyDraw();
+      nodes.forEach((_, name) => positionNode(name));
+      orbitOrder(true);
+      orbitRings(project);
+      updateEdges();
+      const wireFrom = flowAction && trail.length && !trailPending && positions.get(trail.at(-1));
+      if (wireFrom && wire.style.display !== 'none') { wire.setAttribute('x1', wireFrom.x); wire.setAttribute('y1', wireFrom.y); }
+      root.dataset.agCameraElevation = orbit.view.elevation.toFixed(4);
+      orbit.frames++;
+      orbit.frameMs.push(performance.now() - started); if (orbit.frameMs.length > 240) orbit.frameMs.shift();
+      orbitMark();
+    }
+    function orbitSpins() {
+      return orbit.want === '3d' && !reducedMotion() && !document.hidden && root.clientWidth > 0 && !pointers.size && !draft?.held && performance.now() >= orbit.pausedUntil;
+    }
+    function orbitRequest() { if (alive && orbit.shown && !orbit.raf) orbit.raf = requestAnimationFrame(orbitTick); }
+    function orbitTick(now) {
+      orbit.raf = 0;
+      if (!alive || !orbit.shown) return;
+      const dt = orbit.last ? clamp(now - orbit.last, 0, 100) : 16;
+      orbit.last = now;
+      let again = false;
+      if (orbit.change) {
+        const c = orbit.change, t = clamp((now - c.at) / ORBIT_CHANGE_MS, 0, 1);
+        orbit.k = c.from + (c.to - c.from) * orbitSmooth(t);
+        if (c.to === 0 && orbit.from3d && c.from > 0) {
+          // Going back, the camera returns to where the 2D view had it.
+          const f = orbit.k / c.from, s = orbit.saved, b = orbit.from3d;
+          camera.x = s.x + (b.x - s.x) * f; camera.y = s.y + (b.y - s.y) * f; camera.scale = s.scale + (b.scale - s.scale) * f; transform();
+        }
+        if (t >= 1) { orbit.change = null; if (c.to === 0) { orbitRestore(true); return; } } else again = true;
+      }
+      if (orbitSpins()) { orbit.turn += dt * 2 * Math.PI / ORBIT_TURN_MS; again = true; }
+      // A frame only when the camera or the data changed (orbit.dirty: new places from 2D layout code, or entering).
+      const angle = orbit.k + ' ' + orbit.turn + ' ' + orbit.elevation;
+      if (orbit.dirty || angle !== orbit.drawn) { orbit.dirty = false; orbit.drawn = angle; orbitDraw(); }
+      if (again) orbitRequest(); else orbit.last = 0;
+    }
+    // The 2D places and camera back exactly; `draw` false when 2D code is about to draw (a team or arrangement change).
+    function orbitRestore(draw) {
+      if (!orbit.shown) return;
+      if (orbit.raf) { cancelAnimationFrame(orbit.raf); orbit.raf = 0; }
+      positions.forEach((p, name) => { const b = orbit.base.get(name); if (b) { p.x = b.x; p.y = b.y; } });
+      orbit.shown = false; orbit.k = 0; orbit.change = null; orbit.grab = null; orbit.depth.clear(); orbit.last = 0;
+      const saved = orbit.saved, view = viewport.getBoundingClientRect();
+      const resized = !!saved && (Math.abs(view.width - saved.width) > .5 || Math.abs(view.height - saved.height) > .5);
+      if (saved && camera.initialized) Object.assign(camera, { x: saved.x, y: saved.y, scale: saved.scale, own: saved.own, touched: saved.touched });
+      orbit.base = null; orbit.saved = null; orbit.from3d = null; orbit.figure = null; orbit.frame = null;
+      orbitLayer.replaceChildren(); orbitLayer.style.opacity = ''; skyClear(); delete root.dataset.agCameraElevation;
+      orbitOrder(false); orbit.dom = null;
+      nodes.forEach(node => { node.style.opacity = ''; });
+      if (draw && snapshot) {
+        renderNodes(visibleAgents); updateEdges();
+        // The space changed while 3D was shown (the details opened, the pane resized): the 2D rules place the camera.
+        if (resized && camera.initialized) { if (saved.own) clampPan(true); else fitView(false); reveal(); }
+        transform();
+      }
+      orbitMark();
+    }
+    // 2D layout code while 3D is shown: it runs on the 2D places, which are then kept, and the projection follows.
+    function orbitHold(fn, ...args) {
+      if (!orbit.shown || orbit.holding) return false;
+      if (!camera.initialized) { orbitSuspend(); return false; }
+      orbit.holding = true;
+      let changed = false;
+      try {
+        positions.forEach((p, name) => { const b = orbit.base.get(name); if (b) { p.x = b.x; p.y = b.y; } });
+        fn(...args);
+        stopLayout();
+        const next = new Map();
+        positions.forEach((p, name) => next.set(name, { x: p.x, y: p.y }));
+        changed = next.size !== orbit.base.size || [...next].some(([name, b]) => { const was = orbit.base.get(name); return !was || Math.abs(was.x - b.x) > .01 || Math.abs(was.y - b.y) > .01; });
+        orbit.base = next;
+      } finally { orbit.holding = false; }
+      if (changed) orbit.figure = null;
+      orbitProject();
+      if (changed) { orbit.dirty = true; orbitRequest(); }
+      return true;
+    }
+    // A team or arrangement change (or a reset) while 3D is shown: 2D for that moment, then 3D again once laid out.
+    function orbitSuspend() { if (!orbit.shown) return; orbitRestore(false); orbitWait(); }
+    function orbitWait() {
+      if (orbit.waiting) return;
+      orbit.waiting = true;
+      later(function check() {
+        if (orbit.want !== '3d' || orbit.shown) { orbit.waiting = false; return; }
+        if (snapshot && camera.initialized && positions.size && !orbit.holding && root.clientWidth > 0) { orbit.waiting = false; orbitEnter(false); return; }
+        later(check, 200);
+      }, 0);
+    }
+    function orbitEnter(animate) {
+      orbit.want = '3d'; orbitStore('3d'); orbitMark();
+      if (!snapshot || !camera.initialized || !positions.size) { orbitWait(); return; }
+      if (!orbit.shown) {
+        stopLayout();
+        orbit.base = new Map(); positions.forEach((p, name) => orbit.base.set(name, { x: p.x, y: p.y }));
+        orbit.saved = { x: camera.x, y: camera.y, scale: camera.scale, own: camera.own, touched: camera.touched, width: camera.width, height: camera.height };
+        orbit.figure = null; orbit.shown = true; orbit.k = 0; orbit.order = ''; orbit.dom = [...nodeLayer.children];
+        const view = viewport.getBoundingClientRect(), s = camera.scale || 1;
+        orbit.frame = { x: (view.width / 2 - camera.x) / s, y: (view.height / 2 - camera.y) / s, fit: (Math.min(view.width, view.height) / 2 / s - 46) / 1.34 };
+      }
+      orbit.from3d = null; orbit.dirty = true;
+      if (animate && !reducedMotion()) orbit.change = { from: orbit.k, to: 1, at: performance.now() };
+      else { orbit.change = null; orbit.k = 1; }
+      orbitRequest();
+    }
+    function orbitLeave(animate) {
+      orbit.want = '2d'; orbitStore('2d'); orbitMark();
+      if (!orbit.shown) return;
+      orbit.grab = null;
+      if (animate && !reducedMotion() && orbit.k > 0) {
+        orbit.from3d = { x: camera.x, y: camera.y, scale: camera.scale };
+        orbit.change = { from: orbit.k, to: 0, at: performance.now() };
+        orbitRequest();
+      } else orbitRestore(true);
+    }
+    function orbitToggle() {
+      if (press?.moved || (drag?.moved && !orbit.grab)) return;
+      if (orbit.want === '3d') orbitLeave(true); else orbitEnter(true);
+    }
+    // Turning by hand pauses the self-turn; it starts again ORBIT_RESUME_MS after the last input.
+    function orbitTurned() {
+      orbit.pausedUntil = performance.now() + ORBIT_RESUME_MS;
+      if (orbit.resume) { clearTimeout(orbit.resume); timers.delete(orbit.resume); }
+      orbit.resume = later(() => { orbit.resume = null; orbitRequest(); }, ORBIT_RESUME_MS + 20);
+      orbitRequest();
+    }
+    function orbitReset() { orbit.turn = 0; orbit.elevation = ORBIT_ELEVATION; orbitTurned(); }
+    // moveNode's guard: an agent is moved in 2D only.
+    function orbitRefuseMove() { if (!orbit.shown) return false; orbitSay(ORBIT_LOOK_SAID); return true; }
+    // 3D is for looking (not while the morph goes back to 2D).
+    function orbitLooking() { return orbit.shown && orbit.want === '3d'; }
+    function orbitRefuse(event) { event.preventDefault(); event.stopImmediatePropagation(); orbitSay(ORBIT_LOOK_SAID); }
+    function orbitPlainKey(event) { return !event.ctrlKey && !event.metaKey && !event.altKey; }
+    listen(orbitButton, 'click', orbitToggle);
+    // `d` switches the views wherever the view has the keys (not while typing).
+    listen(root, 'keydown', event => {
+      if (event.defaultPrevented || event.target.closest('textarea, input, select')) return;
+      if (event.key === 'Escape' && orbit.grab && drag?.moved) { orbit.turn = orbit.grab.turn; orbit.elevation = orbit.grab.elevation; orbit.grab = null; orbitRequest(); return; }
+      if ((event.key === 'd' || event.key === 'D') && !event.shiftKey && orbitPlainKey(event) && !event.repeat) { event.preventDefault(); orbitToggle(); }
+    }, true);
+    listen(viewport, 'keydown', event => {
+      if (!orbit.shown || event.defaultPrevented) return;
+      const node = event.target.closest('[data-agent]'), arrow = { ArrowLeft: [1, 0], ArrowRight: [-1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[event.key];
+      // Moving an agent from the keyboard is 2D only: the status line says so.
+      if (node && arrow && (event.altKey || event.shiftKey) && !event.ctrlKey && !event.metaKey) { orbitRefuse(event); return; }
+      if (event.target !== viewport && !node) return;
+      if (orbitLooking() && orbitPlainKey(event)) {
+        const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+        // Enter and Space on an agent open its details (in 2D, with a path pending, they would draw).
+        if (node && (key === 'Enter' || key === ' ')) { event.preventDefault(); event.stopImmediatePropagation(); activateAgent(node.dataset.agent, node); return; }
+        // Drawing (Enter finishing, l's loop), adding (n), deleting (Delete, Backspace) and running (g): refused.
+        if (['Delete', 'Backspace', 'n', 'g'].includes(key) || (key === 'l' && node) || (key === 'Enter' && trail.length)) { orbitRefuse(event); return; }
+      }
+      if ((event.key === 'r' || event.key === 'R') && !event.shiftKey && orbitPlainKey(event)) { event.preventDefault(); event.stopImmediatePropagation(); orbitReset(); return; }
+      if (event.target === viewport && arrow && !event.shiftKey && orbitPlainKey(event)) {
+        event.preventDefault(); event.stopImmediatePropagation();
+        orbit.turn += arrow[0] * ORBIT_KEY_TURN; orbit.elevation = clamp(orbit.elevation + arrow[1] * ORBIT_KEY_TILT, ORBIT_LOW, ORBIT_HIGH);
+        orbitTurned();
+      }
+    }, true);
+    listen(viewport, 'wheel', event => {
+      if (!orbit.shown) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      const rect = viewport.getBoundingClientRect();
+      zoomAt(camera.scale * Math.exp(-clamp(event.deltaY, -160, 160) * .007), event.clientX - rect.left, event.clientY - rect.top);
+    }, { passive: false, capture: true });
+    // A drag in 3D, on empty space or starting on an agent, turns the system (past the same MOVE_PX as every drag);
+    // it never moves an agent or pans. Two pointers still pinch to zoom.
+    listen(viewport, 'pointermove', event => {
+      if (!orbit.shown || pinch || pointers.size > 1 || !pointers.has(event.pointerId)) return;
+      const id = event.pointerId, held = press && press.id === id ? press : drag && drag.id === id ? drag : null;
+      if (!held) return;
+      if (!orbit.grab || orbit.grab.id !== id) {
+        if (Math.hypot(event.clientX - held.startX, event.clientY - held.startY) <= MOVE_PX) return;
+        orbit.grab = { id, x: held.startX, y: held.startY, turn: orbit.turn, elevation: orbit.elevation };
+        if (held === press) { cancelPress(); drag = { id, route: '', member: '', startX: held.startX, startY: held.startY, x: camera.x, y: camera.y, moved: true }; }
+        else drag.moved = true;
+        clearHold(); suppressClick = true; lastClick = null; viewport.dataset.dragging = 'true';
+      }
+      event.stopImmediatePropagation();
+      pointers.set(id, { x: event.clientX, y: event.clientY });
+      orbit.turn = orbit.grab.turn - (event.clientX - orbit.grab.x) * ORBIT_TURN_PX;
+      orbit.elevation = clamp(orbit.grab.elevation + (event.clientY - orbit.grab.y) * ORBIT_TILT_PX, ORBIT_LOW, ORBIT_HIGH);
+      orbitTurned();
+    }, true);
+    // A click in 3D picks: on an agent it picks that one (a lone armed agent, as a first click in 2D; again lets it go),
+    // never drawing a path or making a loop; on a line it picks the line, letting go of a picked agent first.
+    listen(viewport, 'pointerup', event => {
+      if (!orbitLooking() || pinch || (hold?.id === event.pointerId && hold.fired)) return;
+      if (press && press.id === event.pointerId && !press.moved) {
+        const name = press.key, step = standIn(name);
+        cancelPress(); suppressClick = true; lastClick = null; pickFlow('');
+        if (flowAction && step && !trailPending) { if (trail.length === 1 && trail[0] === step) dropTrail(); else startTrail(name); }
+      } else if (drag && drag.id === event.pointerId && !drag.moved && trail.length && !trailPending && (drag.route || drag.member)) dropTrail();
+    }, true);
+    // Everything in the details, the + and its menu that would change something is refused in 3D: typing in a field,
+    // pressing a control (a button, a choice, a box to tick). Reading stays: closing, the links between agents, opening
+    // a session or a skill's text, the notices, the folds.
+    const ORBIT_READING = '.ag-close, .ag-family-link, .ag-open-session, .ag-skill-open, .ag-spend-row, .ag-run-notices, summary';
+    const orbitControl = target => {
+      const control = target?.closest?.('button, select, input, label, textarea');
+      if (!control || !control.closest('.ag-detail, .ag-add-menu, .ag-add') || control.closest(ORBIT_READING)) return null;
+      return control;
+    };
+    ['click', 'pointerdown', 'mousedown'].forEach(name => listen(root, name, event => {
+      if (!orbitLooking()) return;
+      const control = orbitControl(event.target);
+      if (!control || (control.matches('textarea, input') && !/^(checkbox|radio|button|submit)$/.test(control.type))) return;
+      if (name === 'click') orbitRefuse(event); else { event.preventDefault(); event.stopImmediatePropagation(); }
+    }, true));
+    listen(root, 'beforeinput', event => { if (orbitLooking() && orbitControl(event.target)) orbitRefuse(event); }, true);
+    listen(root, 'keydown', event => {
+      if (!orbitLooking() || !orbitControl(event.target) || !event.target.matches('textarea, input, select')) return;
+      // In a field: Enter saves or runs, a choice's keys change it, Alt+arrows move the agent being named.
+      if (event.key === 'Enter' || (event.target.matches('select') && /^(Arrow|Home|End|Page| )/.test(event.key)) || (event.altKey && event.key.startsWith('Arrow'))) orbitRefuse(event);
+    }, true);
+    // After any press (a click as well as a turn) the self-turn goes on: it stopped while the pointer was down.
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(name => listen(viewport, name, event => { if (orbit.grab?.id === event.pointerId) { orbit.grab = null; orbitTurned(); } else orbitRequest(); }, true));
+    // A double-click on empty space resets the angle in 3D (in 2D it puts the agents back in their places).
+    listen(viewport, 'dblclick', event => {
+      // On an agent a double-click would make its loop on itself: refused in 3D.
+      if (orbitLooking() && (event.target.closest?.('[data-agent]') || agentAt(event.clientX, event.clientY))) { orbitRefuse(event); return; }
+      if (!orbit.shown || event.target.closest?.('[data-agent], [data-route], [data-team-line], [data-loop-id], [data-work-loop-id], [data-learning], button') || agentAt(event.clientX, event.clientY)) return;
+      event.preventDefault(); event.stopImmediatePropagation(); orbitReset();
+    }, true);
+    listen(document, 'visibilitychange', () => { if (!document.hidden) { orbit.last = 0; orbitRequest(); } });
+    cleanups.push(() => { if (orbit.raf) cancelAnimationFrame(orbit.raf); orbit.raf = 0; });
+    if (orbitStore() === '3d') { orbit.want = '3d'; orbitWait(); }
+    orbitMark();
+    // ---- orbit lane (n105) ----
+
     listen(plus, 'click', event => { if (addMenu.hidden) openAddMenu(event.detail === 0); else closeAddMenu(false); });
     // A press on a starting point takes the new circle at once: drag it out and release to drop it, or click and
     // then click where it goes.
@@ -4076,6 +4790,7 @@
         else return;
         event.preventDefault(); camera.touched = true;
         const before = copyMoves(); moveNode(key, x, y); finishMove(before, { agent: key, by: 'key' });
+        // The user's own pan and zoom stay (n8 major 6): only an automatic view is fitted again.
         if (arrangement === 'compact' || camera.own) { clampPan(); transform(); } else fitView(false);
         return;
       }
@@ -4226,14 +4941,14 @@
       const graph = data.graph;
       runDetails.dataset.notices = String(data.warnings.length + (graph ? graph.problems.length : 0) > 0 || !!data.learning?.due);
       renderActivity(); updatePlus();
+      orbitRuns();
       const previousLayout = layoutSignature;
       if (root.clientWidth > 0 && viewport.clientWidth > 0) {
         addPositions(visibleAgents);
         const labelsChanged = renderNodes(visibleAgents); updateEdges();
-        // A new layout refits, unless the user has panned or zoomed since the last fit: their view stays, and the
-        // selected agent is brought into it.
-        if (!camera.initialized || (!camera.own && (previousLayout !== layoutSignature || (labelsChanged && !camera.touched)))) fitView(false);
-        else if (previousLayout !== layoutSignature) { clampPan(); transform(); reveal(); }
+        if (!camera.initialized) fitView(false);
+        else if (previousLayout !== layoutSignature) settleCamera();
+        else if (labelsChanged && !camera.touched) fitView(false);
       }
       root.dataset.state = visibleAgents.length || graph ? 'ready' : 'empty';
       showEmpty();
@@ -4249,7 +4964,15 @@
       else renderDetail();
       highlight();
       keepFocus();
+      // On a page of its own (options.autofocus) the graph takes the keys once it is drawn, so N works without a click;
+      // never from something the user is already in, and never in a host's panel (no autofocus there).
+      if (options.autofocus === true && !autofocused && visibleAgents.length) {
+        autofocused = true;
+        const current = document.activeElement;
+        if (!current || current === document.body || current === document.documentElement) viewport.focus({ preventScroll: true });
+      }
     }
+    let autofocused = false;
     const paneSize = { width: 0, height: 0 };
     function scheduleResize() {
       if (!alive || resizeFrame !== null) return;

@@ -354,7 +354,9 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   opens a menu: Blank agent (the view sends template "blank" and no model, so the back end's default, the
 //   default verifier's model, applies as on the command line), Verifier, or a copy of any agent. The new circle
 //   follows the pointer and is dropped by a click or a release (Escape cancels); it settles at the
-//   nearest free spot beside what it would cover. From the keyboard it is placed at once at a free spot.
+//   nearest free spot beside what it would cover, clear of every circle and name; adding it moves no other
+//   agent (it keeps its place and takes none on the ring). From the keyboard it is placed at once at a free spot
+//   with room round it for Alt+arrows.
 //   On the drop the view asks { op: "add" } under the first free name (verifier-2, impl-claude-2,
 //   agent-1), keeps the dropped place, opens the details with the name selected (Alt+arrows move it,
 //   Enter renames it) and shows the reply's message as the success line (the view never says when it
@@ -460,8 +462,12 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 // Refit: opening or closing the details refits the graph into the space left (every circle and name clear of the
 //   sheet, the figures and the controls; names at 11 px or more, past that it pans), unless the user has panned or
 //   zoomed since the last fit: then their view stays. A change of the pane's own size or of arrangement refits.
-//   A new layout (an agent added or removed, a loop drawn) and a keyboard nudge refit only while the view is not
-//   the user's: after a pan or zoom their view stays (the selected agent is brought into it); Fit hands it back.
+//   A change of layout (a loop drawn or removed, an agent added or removed, a keyboard nudge) never discards the
+//   user's pan or zoom; an automatic view stays put too when nothing but a loop's agents or a new agent moved (it
+//   pans only to bring them into view), else it is fitted again. A wide canvas the details leave taller than wide
+//   gets a taller oval, and with the compact sheet open the agents are laid out for the canvas above it (closing
+//   it puts them back), so everything fits there at 11 px or more where it can; where it cannot, the opened agent
+//   comes into view with the agents its paths join it to.
 // Zoom floor: wheel, Ctrl+wheel, pinch, the - key and Fit all stop where names are 11 px on screen (12 px names
 //   at scale 11/12). The background pans, like an agent drags, only once the pointer has moved more than 5 px.
 // A refused path keeps the reason as the tooltip of its first agent and of the newest agent (which shakes and
@@ -525,8 +531,55 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   stale refusal whose refresh hangs: "…and the latest did not load within 15 seconds. Try again."). A snapshot
 //   that does not come within 15 s leaves the drawing as it is. options.clock ({ setTimeout, clearTimeout })
 //   replaces the timer, for tests.
+// 3D view (orbit lane n105; the terminal's model in tui-plugin/src/scene.js): a button beside the controls (named
+//   "3D view", aria-pressed) and the key D (wherever the view has the keys, not while typing) switch 2D and 3D; the
+//   switch is one morph over 700 ms (eased t*t*(3-2t); at once with reduced motion), the terminal's morphCamera: the
+//   camera stays at the side view (0.5 rad above the system's plane) while the rings rise out of the plane (each
+//   ring's tilt times the morph's progress, figure3D(L, k)) and every point moves in a straight line on screen from
+//   its 2D place to where that camera shows it (no cut, no fade), and back the same way. A press of D or the button
+//   during the morph is never lost: it turns the move round from where it is; a click during it picks as in 3D. In 3D the orchestrator is the sun (at the
+//   middle of the canvas the details leave, the rings narrowed to fit there), each group its own ring tilted differently, its agents on it near their 2D places, council seats and a group's
+//   members round their lead; nearer agents are larger and drawn over farther ones, whose colour is mixed toward the
+//   muted one (the terminal's DEPTH_MIX .72 farthest to 0 nearest, continuous here; not while an agent works); names
+//   stay upright and at 11 px or more. Every line, loop (a closed dotted ring), group line, badge and pick follows
+//   the agents. Going back puts the 2D view back exactly (pan, zoom, every position). The choice is kept in the
+//   page and across a reload (key "<positions key>:view"; no storage: the page only). The system turns by itself
+//   once in 40 s, only in 3D, never with reduced motion, while the page is hidden or during a press. A drag (over
+//   5 px, on empty space or starting on an agent) turns it: across turns, up and down tilt it between along its
+//   plane (0) and straight down (PI/2, never past); arrow keys on the canvas turn it 15 degrees and tilt it 7.5
+//   degrees a press; R or a double-click on
+//   empty canvas resets the angle; Escape during a drag puts the angle back. Turning by hand pauses the self-turn
+//   for 3 s. Wheel and pinch zoom; there is no pan in 3D. The flat view is where the work is done; 3D is for
+//   looking: a click picks an agent or a line (a second agent is picked instead, never joined by a path; lines do
+//   not bend round agents), a right-click, i, or Enter on an agent opens the details to read, Escape lets go, and
+//   undo works. Everything that would change something is refused, nothing is asked of the host and the status line
+//   says "3D is for looking: press D to change things in 2D.": drawing a path (Enter, l, a double-click's loop), N
+//   and the +, Delete and Backspace, G, moving an agent (a drag on one turns the system; Alt/Shift+arrow), typing in
+//   the details and pressing their controls. The sky (3D only; nothing of it is drawn in 2D) is the drawing's
+//   first child (svg.ag-sky: aria-hidden, no pointer events, no focus, no text) and fades in and out with the morph:
+//   a sparse field of specks from a fixed seed (the same sky every time; three sizes, at most .3 opaque; warm white
+//   on dark, an ink star chart on light; the terminal's seed 0x5ca1ab1e and hash32) that shifts, wrapping round,
+//   as the terminal's skyPlace: it is V = max(view width, 2 PI x a third of the near side's movement per radian)
+//   wide and a full turn moves it exactly V; tilting lifts it by a third of the figure's movement; a warmer star (.4 opaque) for each finished run, i.e. run 1..stats.passed of each path (failed
+//   runs add none), placed by the FNV-1a seed of "<path id>#<run number>"; at most 200: every path's first run, then every
+//   path's second, and so on, in the snapshot's order; past 200 a new run adds no star and no streak. When a snapshot shows a run finished while 3D is
+//   shown, one shooting star (0.9 s) crosses to where that run's star then appears; several are spaced 0.7 s apart
+//   (at most 8 a snapshot, none for a path new in it); none on load, on entering 3D or for a failed run. The orchestrator glows as the sun, swelling while it works
+//   (still when idle); every other agent is shaded as a sphere lit from it. Nothing else moves by itself. Reduced
+//   motion: no streak (the star simply appears), no swell, no fade. A name over a speck keeps 4.5:1 or better even
+//   without its halo. The sky draws no frame of its own: it moves only with the frames below. A frame is drawn only when the angle or the data changed. root carries
+//   data-ag-view ("2d"/"3d"), data-ag-blend (0 to 1), data-ag-turn, data-ag-elevation (the 3D angle), data-ag-camera-elevation (the
+//   camera's, through the morph; 3D only), data-ag-frames and
+//   data-ag-frame-ms (mean of the last frames) for hosts and tests. Where the web differs from the terminal (pixels,
+//   not cells): the drag's rate per pixel; one screen scale for both axes, the rings fitted to the free canvas; the
+//   field's density (a star per 9,000 px^2, a cell taken as 8 x 16 px) over a sky a quarter taller than the view
+//   above and below instead of wrapped rows; the depth mix continuous rather than six steps; the streak a line on
+//   the terminal's diagonal (one column, one row a step), not characters; the sun's glow and sphere shading.
 // options.motion: "full" (default) or "none" for a still picture (tests, screenshots). The system's
 //   reduced-motion setting is always honoured.
+// options.autofocus: true to give the canvas keyboard focus once the graph is first drawn (N, F and the arrows
+//   work without a click), unless something other than the page already has focus. index.html passes it; a host
+//   panel (the desktop plugin) does not, so the view never takes focus there.
 // options.scheme: "auto" (default; follows a data-color-scheme on an ancestor or the document element,
 //   else the system setting, live), "light" or "dark".
 // Returns { refresh(): Promise<void>, reset(): Promise<void>, destroy(): void }.
@@ -541,7 +594,7 @@ window.AgentGraph.mount(root, options)
 - It keeps everything inside `root`: no writes to `document.body`, no global listeners that outlive `destroy()`, no globals other than `window.AgentGraph`.
 - All of its CSS is in `agentgraph/web/style.css`, and every selector is scoped under the class `agentgraph` (which `mount` puts on `root`), so it cannot restyle a host application. No external fonts, images or scripts.
 - It never uses `innerHTML` (or anything else that parses markup) with text from the document.
-- Loops, defined once (`loopStart(path)` in `app.js`): a path whose last agent appears earlier in it, at index `i` with at least two steps after it, closes a loop from `i` to the end; a path that ends at its first agent (`i = 0`) is a full loop. `A, A` (a loop on one agent) is not this kind of loop and is drawn as before. The loop part is drawn as one closed, fully curved ring in the dotted dash `.5 5.5` (`data-step="loop"`; the flow carries `data-loop` `full`, `part`, `self` or `none`); the lead-in (`A → B` of `A, B, C, B`) stays solid and straight. Dotted means loop: no other drawn flow step is dashed. A full loop's agents (other than the hub, a seat, a group member or an agent already on another loop's circle, which stay where they are) move onto an even circle in path order, in one transition under 300 ms (none with reduced motion); dragging one moves the circle; removing the loop or undoing it puts every agent back exactly.
+- Loops, defined once (`loopStart(path)` in `app.js`): a path whose last agent appears earlier in it, at index `i` with at least two steps after it, closes a loop from `i` to the end; a path that ends at its first agent (`i = 0`) is a full loop. `A, A` (a loop on one agent) is not this kind of loop and is drawn as before. The loop part is drawn as one closed, fully curved ring in the dotted dash `.5 5.5` (`data-step="loop"`; the flow carries `data-loop` `full`, `part`, `self` or `none`); the lead-in (`A → B` of `A, B, C, B`) stays solid and straight. Dotted means loop: no other drawn flow step is dashed. A full loop's agents (other than the hub, a seat, a group member or an agent already on another loop's circle, which stay where they are) move onto an even circle in path order, in one transition under 300 ms (none with reduced motion); dragging one moves the circle; removing the loop or undoing it puts every agent back exactly. The circle goes in free space: its line and its moved agents keep clear of every circle and name not on it (the hub's name always), and of other loops (two loops meet only at an agent on both); an agent the user placed stays and the circle goes through it, unless that would run into something. No agent on no loop moves.
 - Picking lines: every flow, loop and group line has an invisible band 16 screen px wide at any zoom (`vector-effect: non-scaling-stroke`); where bands overlap the line nearest the pointer takes the press, the right-click and the hover. A click picks the whole flow or loop; hover marks all of it and fades the other lines. The cursor is a hand on anything that can be picked and a grab hand on anything that can be moved. Lines bend round a third agent's circle or name only when the straight line would cross it. Nothing in the graph can be selected as text; the camera keeps the graph clear of the usage figures, the status line and the compact sheet; wheel zoom stops before names go under 8 px.
 - Drawn flows (`structure.flows`): a forward step is a straight line with an arrowhead, a step back to an agent already on the path a curved arc; steps of different flows on one pair are offset, and a pair that already has something drawn on it (a hub spoke, a task-graph work line, escalation or review loop) gets its flow steps beside that, never on top of it or hidden by it. Every step has a wide invisible hit area above the graph's own lines and loops. A flow is still at rest. A new flow draws in once (about 300 ms); a refused one disappears and the first agent shakes once. No text is added to the graph.
 - `index.html` loads `style.css` and `app.js` and calls `AgentGraph.mount(document.getElementById("root"), { fetchSnapshot: () => fetch("/api/snapshot" + location.search).then(r => r.json()), actions: { flow, skills, roster, skillfile, team, output } })`, where each posts its request to its endpoint (`/api/structure/flow`, `/api/skills`, `/api/roster`, `/api/skillfile`, `/api/structure/team`, `/api/output`) and rejects with the reply's `error` (and its `rev` on a 409); with `?demo` it passes no `actions`. The page passes no `run`: a path's details show "Copy run message" (it asks `flow` `{op: "prompt"}` and puts the text on the clipboard) instead of Run.
