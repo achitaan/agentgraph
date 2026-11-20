@@ -460,6 +460,24 @@ class Digest(Case):
         both = subprocess.run([*base, "--json", "--text"], capture_output=True, text=True, env=env, cwd=self.dir)
         self.assertNotEqual(both.returncode, 0)
 
+    def test_side_cuts_each_question_before_its_brief(self):
+        from agentgraph import sidechat
+        self.db.session("ses_a", agent="explorer")
+        self.db.user("ses_a", "what now?" + sidechat.SEPARATOR + "\nBRIEF-MARKER the graph")
+        self.db.assistant("ses_a", [reasoning("private thought"), said("this")])
+        base = [sys.executable, "-P", "-m", "agentgraph.chatfeed", "--session", "ses_a", "--json", "--db", str(self.db.path)]
+        env = {"PYTHONPATH": str(ROOT), "PATH": "/usr/bin:/bin"}
+        plain = subprocess.run(base, capture_output=True, text=True, env=env, cwd=self.dir)
+        self.assertIn("BRIEF-MARKER", plain.stdout)  # without --side the feed is the raw one
+        side = subprocess.run([*base, "--side"], capture_output=True, text=True, env=env, cwd=self.dir)
+        self.assertEqual(side.returncode, 0, side.stderr)
+        self.assertNotIn("BRIEF-MARKER", side.stdout)
+        self.assertNotIn("private thought", side.stdout)
+        items = json.loads(side.stdout)["items"]
+        self.assertEqual([i["kind"] for i in items], ["user", "text"])
+        self.assertEqual(items[0]["text"], "what now?")
+        self.assertEqual(json.loads(side.stdout), sidechat.side_feed(json.loads(plain.stdout)))
+
 
 class Demo(unittest.TestCase):
     def test_the_demo_feed_is_stable_and_has_the_shapes(self):

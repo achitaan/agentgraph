@@ -88,6 +88,45 @@ class Amounts(unittest.TestCase):
                     spend.amount(value)
 
 
+class Huge(Scratch):
+    """An integer too big for a float is an ordinary refusal, not an OverflowError."""
+    BIG = 10 ** 400
+
+    def test_amount_refuses_it(self):
+        for value in (self.BIG, -self.BIG):
+            with self.subTest(value=value > 0):
+                with self.assertRaises(spend.SpendError):
+                    spend.amount(value)
+                with self.assertRaises(spend.SpendError):
+                    spend.set_limit(50, value, project=self.project)
+        with self.assertRaises(spend.SpendError):
+            spend.set_limit(self.BIG, None, project=self.project)
+        self.assertFalse((self.project / ".opencode" / "spend.json").exists())
+
+    def test_a_stored_file_holding_one_reads_as_not_ours(self):
+        (self.project / ".opencode").mkdir()
+        target = self.project / ".opencode" / "spend.json"
+        for text in ('{"version": 1, "limit": 1%s, "warn": 5}' % ("0" * 399), '{"version": 1, "limit": 50, "warn": 1%s}' % ("0" * 399)):
+            target.write_text(text)
+            with self.assertRaises(spend.SpendError):
+                spend._read(self.project)
+            code, out, err = run("show", "--dir", str(self.project), "--db", str(self.db), "--json")
+            self.assertIn(code, (0, 1))
+            self.assertNotIn("Traceback", err)
+            self.assertEqual(spend.annotate({}, project=self.project, db_path=self.db, root=None, sessions=[])["spend"]["limit"], None)
+            code, out, err = run("limit", "50", "--dir", str(self.project))
+            self.assertEqual((code, err), (0, ""), out)
+            self.assertEqual(self.kept()["limit"], 50.0)
+
+    def test_the_command_refuses_it(self):
+        big = str(self.BIG)
+        for args in (["limit", big], ["limit", "50", "--warn", big]):
+            code, out, err = run(*args, "--dir", str(self.project))
+            self.assertEqual((code, out), (1, ""), args)
+            self.assertEqual(len(err.strip().splitlines()), 1)
+            self.assertNotIn("Traceback", err)
+
+
 class Commands(Scratch):
     def test_set_default_warn_show_remove(self):
         code, out, err = run("limit", "50", "--dir", str(self.project))
@@ -335,6 +374,22 @@ class Endpoint(Served):
                 self.assertEqual(status, 400, answer)
                 self.assertIn("error", answer)
         self.assertEqual((self.project / ".opencode" / "spend.json").read_bytes(), before)
+
+    def test_a_huge_integer_is_a_bad_amount(self):
+        raw = b'{"op": "limit", "limit": 1%s}' % (b"0" * 399)
+        warn = b'{"op": "limit", "limit": 50, "warn": 1%s}' % (b"0" * 399)
+        for body in (raw, warn):
+            status, answer, _ = self.call(body)
+            self.assertEqual(status, 400, answer)
+            self.assertIn("error", answer)
+        self.assertFalse((self.project / ".opencode" / "spend.json").exists())
+        self.assertEqual(self.call({"op": "limit", "limit": 5})[0], 200)  # the handler is still alive
+
+    def test_a_stored_huge_integer_keeps_the_snapshot_well_behaved(self):
+        (self.project / ".opencode").mkdir(exist_ok=True)
+        (self.project / ".opencode" / "spend.json").write_text('{"version": 1, "limit": 1%s, "warn": 5}' % ("0" * 399))
+        body = self.snapshot()
+        self.assertIsNone(body["spend"]["limit"])
 
     def test_guards(self):
         good = {"op": "limit", "limit": 5}

@@ -1,6 +1,6 @@
 """One session's recent chat as capped plain text, for the "chat on every agent" panel.
 
-    python3 -m agentgraph.chatfeed --session ID [--limit N] [--json | --text] [--chars N] [--demo]
+    python3 -m agentgraph.chatfeed --session ID [--limit N] [--json | --text] [--chars N] [--demo] [--side]
     (bin/agentgraph chat ...)
 
 What is read, and what never is. OpenCode 2.3.2 keeps a session's transcript in `session_message`
@@ -390,6 +390,8 @@ def main(argv: list[str] | None = None) -> int:
     form.add_argument("--text", action="store_true", help="plain text (the default)")
     parser.add_argument("--chars", type=_count, default=TOTAL_CAP, help=f"longest text output (default {TOTAL_CAP})")
     parser.add_argument("--demo", action="store_true", help="the built-in example chat (ses_root, ses_g, ses_a ...)")
+    parser.add_argument("--side", action="store_true", help="the side chat's own session: each question cut before its "
+                        "brief, no reasoning (as GET /api/chat shows it)")
     parser.add_argument("--db", type=Path, default=DB_PATH, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if not valid_session(args.session):
@@ -402,6 +404,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     else:
         feed = read_chat(args.session, limit=args.limit, db_path=args.db)
+    if args.side:
+        from .sidechat import side_feed  # sidechat imports this module
+        feed = side_feed(feed)
     if args.json:
         print(json.dumps(feed, allow_nan=False))
     else:

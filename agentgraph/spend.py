@@ -62,6 +62,8 @@ def amount(value, what: str = "the limit") -> float:
     if isinstance(value, str):
         text = value.strip().lstrip("$").strip()
         value = float(text) if _NUMBER.fullmatch(text) else math.nan
+    if isinstance(value, int):  # a huge integer does not fit a float: compare it as it is
+        value = max(-1, min(int(LIMIT_MAX) + 1, value))
     value = float(value)
     if not math.isfinite(value):
         raise SpendError(f"{what} must be a number of dollars")

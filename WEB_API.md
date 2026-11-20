@@ -4,7 +4,7 @@ Two hosts show the same interface: a local web page (`agentgraph serve`) and an 
 
 ## 1. The snapshot document
 
-Produced by `agentgraph.snapshot_json.snapshot_document(snapshot, source, task=None, *, session=None)` and printed by `agentgraph snapshot`. Served at `GET /api/snapshot`. Times are Unix seconds. Every key is always present; a missing value is `null`, an empty list is `[]`.
+Produced by `agentgraph.snapshot_json.snapshot_document(snapshot, source, task=None, *, session=None)` and printed by `agentgraph snapshot`. Served at `GET /api/snapshot`. Times are Unix seconds. The keys of the example below are always present (a missing value there is `null`, an empty list `[]`). These are not, and a reader must allow for their absence: `agents[].activity` (only on an agent that is busy now); `sidechat.spent` (only when known); and the keys a live source adds after `snapshot_document`: `learning`, `skills`, `skill_warnings`, `mcp`, `roster`, `setup`, `spend`, `sidechat`, on each agent `added`, `mcps`, `removable`, `removable_reason`, `rev`, `skills_editable`, `skills_reason` and `use_when`, and on each `graph.nodes[].artifacts[]` entry `rev`, `size`, `editable` and `why`. The demo has `setup`, `spend` and `sidechat` (sample ones) but none of the rest. The plain `agentgraph snapshot` command with a live source adds all of them, as `GET /api/snapshot` does, and `agentgraph snapshot --demo` adds only the demo's three; the bare `snapshot_document` function adds none, and `spend` can be missing from an older back end.
 
 ```json
 {

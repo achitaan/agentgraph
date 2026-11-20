@@ -43,7 +43,7 @@ It is a GUI-only plugin (no server or TUI part), loaded as a local directory. It
 - **The chat on every agent** (the view's details; `options.actions.chat`, `send`, `stop`):
   - `chat(sessionID, { limit })` reads one session's recent chat through a second Ipc method,
     `chat({ session, limit }) -> JSON text`, which runs `python3 -P -m agentgraph.chatfeed --session=ID --json --limit=N`
-    (the `agentgraph chat` command; `--demo` added in demo mode) with the same `execFile` rules, environment, 20 s timeout
+    (the `agentgraph chat` command; `--demo` added in demo mode). It is read only for a session of the last snapshot's tree, or the snapshot's `sidechat.session`, which is read with `--side` (each question cut before its brief, no reasoning, as `GET /api/chat` shows it); any other id is refused without running Python (the demo reads its example chats) with the same `execFile` rules, environment, 20 s timeout
     and 8 MiB cap as the snapshot. The session id (the snapshot's id pattern) and the limit (a whole number, 1 to 200;
     40 when not given) are checked in the window and again in main; a bad one never reaches Python. The feed crosses as
     the command printed it (it holds no tool input or output); an error document or a failed command rejects the

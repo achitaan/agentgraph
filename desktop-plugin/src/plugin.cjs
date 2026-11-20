@@ -295,8 +295,10 @@ function snapshotIpc(pluginId) {
         // Read one session's recent chat (`agentgraph chat --session ID --json --limit N`). Input: the session id and the
         // number of latest messages (a whole number, 1 to 200). Output: the feed as JSON text (WEB_API.md, GET /api/chat)
         // as the command printed it, or {"error": "..."}.
+        // `side` (optional) reads the side chat's own session, as `agentgraph chat --side`: each question cut before its
+        // brief, no reasoning (what GET /api/chat does for it).
         chat: {
-          input: Schema.Struct({ session: Schema.String, limit: Schema.Number }),
+          input: Schema.Struct({ session: Schema.String, limit: Schema.Number, side: (Schema.optionalKey || Schema.optional)(Schema.Boolean) }),
           output: Schema.String,
         },
         // Ask the side chat one question (`agentgraph sidechat ask --main ID --text-file - --json`). Input: the main
@@ -922,18 +924,20 @@ function createSpendRunner(deps) {
 }
 // ---- end n10 ----
 
-// Main process: `python3 -P -m agentgraph.chatfeed --session=ID --json --limit=N [--demo]` without a shell, read-only. The
+// Main process: `python3 -P -m agentgraph.chatfeed --session=ID --json --limit=N [--demo] [--side]` without a shell, read-only. The
 // session id and the limit are checked here as the window checks them; the feed is passed on as the command printed it
 // (it holds no tool input or output), and an error document or a failed command is { error: one line }.
 function createChatRunner(deps) {
   const fail = (message) => ({ error: oneLine(message) });
   function command(input) {
     if (!isPlainObject(input)) return fail("Bad chat request.");
-    const { session, limit } = input;
+    const { session, limit, side } = input;
     if (typeof session !== "string" || !SESSION_ID.test(session)) return fail("The session id is not valid.");
     if (!Number.isInteger(limit) || limit < 1 || limit > CHAT_LIMIT_MAX) return fail("The number of messages is not valid.");
+    if (side !== undefined && typeof side !== "boolean") return fail("Bad chat request.");
     const args = ["-P", "-m", "agentgraph.chatfeed", "--session=" + session, "--json", "--limit=" + limit];
     if (deps.demo) args.push("--demo");
+    if (side === true) args.push("--side");
     return { args, stdin: "" };
   }
   const accept = (doc) => (typeof doc.session === "string" && Array.isArray(doc.items) ? doc : null);
@@ -1117,7 +1121,7 @@ function renderPanel(ctx, solid, props) {
 
   // The sessions of the last snapshot this panel read (the root and each agent's), for the session it was read for:
   // a message or a stop is accepted for one of these only.
-  let known = { key: undefined, ids: new Set(), root: "" };
+  let known = { key: undefined, ids: new Set(), root: "", side: "" };
   const rememberSessions = (doc) => {
     const ids = new Set();
     const add = (id) => {
@@ -1127,9 +1131,12 @@ function renderPanel(ctx, solid, props) {
     for (const agent of Array.isArray(doc.agents) ? doc.agents : []) {
       if (isPlainObject(agent) && Array.isArray(agent.sessions)) for (const item of agent.sessions) add(isPlainObject(item) ? item.id : undefined);
     }
-    known = { key: sessionKey(), ids, root: isPlainObject(doc.root) && typeof doc.root.id === "string" && SESSION_ID.test(doc.root.id) ? doc.root.id : "" };
+    // The side chat's own session (the snapshot's sidechat.session) is readable too, and nothing else besides the tree.
+    const side = isPlainObject(doc.sidechat) && typeof doc.sidechat.session === "string" && SESSION_ID.test(doc.sidechat.session) && !ids.has(doc.sidechat.session) ? doc.sidechat.session : "";
+    known = { key: sessionKey(), ids, root: isPlainObject(doc.root) && typeof doc.root.id === "string" && SESSION_ID.test(doc.root.id) ? doc.root.id : "", side };
   };
   const isKnownSession = (id) => known.key !== undefined && known.key === sessionKey() && known.ids.has(id);
+  const isSideSession = (id) => known.key !== undefined && known.key === sessionKey() && known.side !== "" && known.side === id;
 
   const fetchSnapshot = async () => {
     if (!alive) return errorDocument("The panel is closed.");
@@ -1442,7 +1449,13 @@ function renderPanel(ctx, solid, props) {
     const asked = isPlainObject(request) ? request.limit : undefined;
     const limit = asked === undefined || asked === null ? CHAT_LIMIT_DEFAULT : asked;
     if (!Number.isInteger(limit) || limit < 1 || limit > CHAT_LIMIT_MAX) throw new Error("Bad chat request.");
-    const text = await ctx.main(snapshotIpc(ctx.id)).chat({ session: sessionID, limit }, { signal: ctx.signal });
+    // As GET /api/chat: a session of the last snapshot's tree, or the side chat's own session (read without its briefs);
+    // any other id is refused here and never reaches the command. The demo reads its example chats only.
+    const demo = ctx.options && ctx.options.demo === true;
+    const side = !demo && !isKnownSession(sessionID) && isSideSession(sessionID);
+    if (!demo && !side && !isKnownSession(sessionID)) throw new Error("That session is not in the agent graph.");
+    const input = side ? { session: sessionID, limit, side: true } : { session: sessionID, limit };
+    const text = await ctx.main(snapshotIpc(ctx.id)).chat(input, { signal: ctx.signal });
     let doc;
     try {
       doc = JSON.parse(text);

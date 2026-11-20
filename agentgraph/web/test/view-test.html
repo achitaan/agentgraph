@@ -8665,7 +8665,7 @@
 
     await test('chat: nothing is asked of the host but reads, sends and stops, only through the chat code, and the session id goes exactly as the snapshot gives it', async () => {
       const source = [...document.scripts].find(script => script.textContent.includes('function call(fn, request)')).textContent;
-      const names = ['chatAction', 'sendAction', 'stopAction'];
+      const names = ['chatAction', 'sendAction', 'stopAction', 'sideAction'];
       names.forEach(name => { const uses = [...source.matchAll(new RegExp('\\b' + name + '\\(', 'g'))].length; assert(uses === 1, name + ' is called in ' + uses + ' places, not the one chat function'); });
       assert(!/innerHTML|insertAdjacentHTML|outerHTML/.test(source.slice(source.indexOf('A chat on every agent (loop n5)'), source.indexOf('function renderDetail('))), 'the chat code builds markup');
       const data = chatFixture(), id = 'ses_ÿ 1/%20&?', host = chatHost({}), clock = chatClock();

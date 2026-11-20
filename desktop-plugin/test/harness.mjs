@@ -498,7 +498,7 @@ await check("main registers exactly one Ipc (<id>.snapshot) with snapshot, flow,
   assert.ok(Object.entries(token.spec.methods.setup.input.fields).every(([key, field]) => key === "expect" ? field._tag === "optionalKey" && field.schema._tag === "String" : field._tag === "String"), "setup: strings and an optional expect");
   assert.ok(Object.values(token.spec.methods.spend.input.fields).every((field) => field._tag === "String"), "spend: strings only");
   assert.ok(typeof impl.setup === "function" && typeof impl.spend === "function");
-  assert.deepEqual(Object.keys(token.spec.methods.chat.input.fields), ["session", "limit"]);
+  assert.deepEqual(Object.keys(token.spec.methods.chat.input.fields), ["session", "limit", "side"]);
   assert.equal(token.spec.methods.chat.input.fields.session._tag, "String");
   assert.equal(token.spec.methods.chat.input.fields.limit._tag, "Number");
   assert.equal(token.spec.methods.chat.output._tag, "String");
@@ -1591,6 +1591,11 @@ function hostDecode(schema, input) {
       out[key] = input[key];
       continue;
     }
+    if (type._tag === "Boolean") {
+      if (typeof input[key] !== "boolean") throw new Error(`input: ${key} is not a boolean`);
+      out[key] = input[key];
+      continue;
+    }
     assert.equal(type._tag, "String", key);
     if (typeof input[key] !== "string") throw new Error(`input: ${key} is not a string`);
     out[key] = input[key];
@@ -2348,9 +2353,10 @@ const CHAT_SNAPSHOT = { version: 1, root: { id: "ses_a" }, agents: [
 
 await check("chat: main runs `python3 -P -m agentgraph.chatfeed --session=ID --json --limit=N` in home and the feed crosses as it is; the window's action adds nothing", async () => {
   const python = chatPython("fake-chat-python", `printf '%s\\n' '${JSON.stringify(FEED)}'`);
-  const t = chatWindow({ python });
+  const t = chatWindow({ python, snapshot: CHAT_SNAPSHOT });
   try {
     assert.equal(typeof t.actions.chat, "function");
+    await t.options.fetchSnapshot(); // the chat is read for a session of the last snapshot
     const feed = await t.actions.chat("ses_child", { limit: 25 });
     assert.deepEqual(JSON.parse(JSON.stringify(feed)), FEED);
     assert.equal(t.log.length, 1);
@@ -2374,8 +2380,10 @@ await check("chat: main runs `python3 -P -m agentgraph.chatfeed --session=ID --j
 
 await check("chat: a bad session id or limit never reaches Python, on either side of the bridge", async () => {
   const python = chatPython("never-chat-python", `printf '%s\\n' '${JSON.stringify(FEED)}'`);
-  const t = chatWindow({ python });
+  const t = chatWindow({ python, snapshot: CHAT_SNAPSHOT });
   try {
+    await t.options.fetchSnapshot();
+    const asked0 = t.asked.length;
     const rejected = async (promise) => {
       try {
         await promise;
@@ -2388,7 +2396,7 @@ await check("chat: a bad session id or limit never reaches Python, on either sid
       assert.equal(await rejected(t.actions.chat(id, { limit: 10 })), "Bad chat request.", JSON.stringify(id));
     for (const limit of [0, 201, -1, 1.5, "40", NaN, Infinity, [], {}, true])
       assert.equal(await rejected(t.actions.chat("ses_a", { limit })), "Bad chat request.", JSON.stringify(limit));
-    assert.equal(t.asked.length, 0, "the window sent a bad request over the bridge");
+    assert.equal(t.asked.length, asked0, "the window sent a bad request over the bridge");
     assert.equal(t.log.length, 0);
   } finally {
     t.rendered.dispose();
@@ -2409,8 +2417,9 @@ await check("chat: a bad session id or limit never reaches Python, on either sid
 
 await check("chat: an error document or a failing command rejects with one short line; a feed with a warning is a feed", async () => {
   const rejection = async (python) => {
-    const t = chatWindow({ python });
+    const t = chatWindow({ python, snapshot: CHAT_SNAPSHOT });
     try {
+      await t.options.fetchSnapshot();
       await t.actions.chat("ses_a", { limit: 40 });
     } catch (error) {
       return error.message;
@@ -2427,8 +2436,9 @@ await check("chat: an error document or a failing command rejects with one short
   const long = await rejection(chatPython("err-long-python", `printf '%s\\n' '{"error":"${"x".repeat(2000)}"}'`));
   assert.ok(long.length <= 300, "the message is short");
   const warned = { ...FEED, items: [], warning: "the OpenCode database is locked" };
-  const t = chatWindow({ python: chatPython("warn-python", `printf '%s\\n' '${JSON.stringify(warned)}'`) });
+  const t = chatWindow({ python: chatPython("warn-python", `printf '%s\\n' '${JSON.stringify(warned)}'`), snapshot: CHAT_SNAPSHOT });
   try {
+    await t.options.fetchSnapshot();
     assert.deepEqual(JSON.parse(JSON.stringify(await t.actions.chat("ses_a", { limit: 40 }))), warned);
   } finally {
     t.rendered.dispose();
@@ -2457,11 +2467,61 @@ await check("chat: the demo is given the chat alone, which reads `agentgraph.cha
 });
 
 await check("chat: the real command through the real main reads a real (empty) database without a traceback", async () => {
-  const t = chatWindow({ python: "python3" });
+  const t = chatWindow({ python: "python3", snapshot: { version: 1, root: { id: "ses_harnessnothing" }, agents: [] } });
   try {
+    await t.options.fetchSnapshot();
     const feed = await t.actions.chat("ses_harnessnothing", { limit: 3 });
     assert.equal(feed.session, "ses_harnessnothing");
     assert.ok(Array.isArray(feed.items));
+  } finally {
+    t.rendered.dispose();
+  }
+});
+
+await check("chat: only a session of the last snapshot, or the snapshot's side session, is read; anything else is refused without reaching Python", async () => {
+  const python = chatPython("scope-chat-python", `printf '%s\\n' '${JSON.stringify(FEED)}'`);
+  let current = { ...CHAT_SNAPSHOT, sidechat: { installed: true, session: "ses_side" } };
+  const t = chatWindow({ python, snapshot: () => current });
+  const refusal = async (id) => {
+    try {
+      await t.actions.chat(id, { limit: 10 });
+    } catch (error) {
+      return error.message;
+    }
+    return "";
+  };
+  try {
+    // Before any snapshot was read nothing is known.
+    assert.equal(await refusal("ses_a"), "That session is not in the agent graph.");
+    assert.equal(t.log.length, 0);
+    await t.options.fetchSnapshot();
+    for (const id of ["ses_other", "ses_sid", "ses_side2", "ses_Side"]) assert.equal(await refusal(id), "That session is not in the agent graph.", id);
+    assert.equal(t.log.length, 0, "a session outside the tree reached Python");
+    assert.equal(t.asked.length, 0, "a session outside the tree crossed the bridge");
+    // The tree is read plain; the side session is read with --side (no briefs), and only that one.
+    await t.actions.chat("ses_child", { limit: 10 });
+    assert.deepEqual(t.log[0].args, ["-P", "-m", "agentgraph.chatfeed", "--session=ses_child", "--json", "--limit=10"]);
+    await t.actions.chat("ses_side", { limit: 10 });
+    assert.deepEqual(t.log[1].args, ["-P", "-m", "agentgraph.chatfeed", "--session=ses_side", "--json", "--limit=10", "--side"]);
+    // A snapshot that no longer names it, an error document, another panel session: refused again.
+    current = CHAT_SNAPSHOT;
+    await t.options.fetchSnapshot();
+    assert.equal(await refusal("ses_side"), "That session is not in the agent graph.");
+    current = { ...CHAT_SNAPSHOT, sidechat: { installed: true, session: "ses_child" } }; // a side id that is in the tree is read plain
+    await t.options.fetchSnapshot();
+    await t.actions.chat("ses_child", { limit: 10 });
+    assert.equal(t.log[t.log.length - 1].args.includes("--side"), false);
+    current = { ...CHAT_SNAPSHOT, sidechat: { installed: true, session: "ses_side" } };
+    await t.options.fetchSnapshot();
+    t.setSession({ key: "srv\nses_z", id: "ses_z", directory: ORCHESTRATION, server: {} });
+    assert.equal(await refusal("ses_side"), "That session is not in the agent graph.");
+    assert.equal(await refusal("ses_a"), "That session is not in the agent graph.");
+    // main refuses a malformed `side` too.
+    const m = mainContext({ home: ORCHESTRATION, python });
+    const log = [];
+    resolveDefault(loadMain(CODE, log).module.exports).main(m.ctx);
+    for (const side of ["true", 1, null, {}]) assert.deepEqual(Object.keys(JSON.parse(await m.provided[0].impl.chat({ session: "ses_a", limit: 5, side }))), ["error"]);
+    assert.equal(log.length, 0);
   } finally {
     t.rendered.dispose();
   }

@@ -495,6 +495,9 @@ def command(*, model: str, side: str | None, title: str, tree: set[str], executa
         raise SidechatError("the model must be provider/model")
     cmd = [executable or binary(), "run", "--standalone", "--agent", AGENT, "--model", model, "--format", "json"]
     cmd += ["--session", side] if side is not None else ["--archived", "--title", title]
+    stray = [arg for arg in cmd[1:] if (arg.startswith("-") or arg == "run") and arg not in ALLOWED_FLAGS]
+    if stray:  # a model or title that looks like a flag would be read by the host as one
+        raise SidechatError(f"the command line would carry a flag the side chat does not use: {_cut(stray[0], 40)}")
     return cmd
 
 
@@ -564,16 +567,19 @@ def _events(output: str) -> dict:
 
 
 def _run(cmd: list[str], message: str, cwd, timeout: float) -> tuple[int | None, dict, str]:
-    """(exit code or None when stopped on the timeout, the parsed events, the first line of stderr)."""
+    """(exit code or None when stopped on the timeout, the parsed events, the first line of stderr). The message (the
+    question and the brief, up to some 28,000 characters) goes to the host on stdin: `opencode run` reads it there when
+    it is given no message argument (probed, `.opencode/artifacts/agentgraph-chat/n11/r2/stdin-probe.txt`), so it is
+    not in the process list and does not count against the argument limit."""
     cwd = os.path.abspath(cwd)
     try:
-        proc = subprocess.Popen([*cmd, message], cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True,
                                 env={**os.environ, "PWD": str(cwd)})  # the host reads $PWD, not the process's cwd
     except OSError as exc:
         raise SidechatError(f"cannot start {cmd[0]}: {exc.strerror}") from exc
     try:
-        out, err = proc.communicate(timeout=timeout)
+        out, err = proc.communicate(input=message, timeout=timeout)
         code = proc.returncode
     except subprocess.TimeoutExpired:
         _stop(proc)

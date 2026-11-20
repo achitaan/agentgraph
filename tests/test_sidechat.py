@@ -44,8 +44,9 @@ log = os.path.join(here, "calls.jsonl")
 n = sum(1 for _ in open(log)) if os.path.exists(log) else 0
 step = plan[min(n, len(plan) - 1)]
 args = sys.argv[1:]
+message = sys.stdin.read()  # like `opencode run` with no message argument: the message is on stdin
 with open(log, "a") as f:
-    f.write(json.dumps({"args": args[:-1], "message": args[-1], "cwd": os.getcwd(), "pwd": os.environ.get("PWD"), "pid": os.getpid()}) + "\n")
+    f.write(json.dumps({"args": args, "message": message, "cwd": os.getcwd(), "pwd": os.environ.get("PWD"), "pid": os.getpid()}) + "\n")
 if step.get("sleep"):
     open(os.path.join(here, "slept.pid"), "w").write(str(os.getpid()))
     time.sleep(step["sleep"])
@@ -273,6 +274,25 @@ class RunTests(Case):
         self.assertNotIn("--archived", call["args"])
         self.assertEqual(result["session"], SIDE)
         self.assertEqual(sidechat.load_state(self.project, MAIN)["asks"], 2)
+
+    def test_the_message_goes_on_stdin_never_in_the_arguments(self):
+        self.ask("where are we?")
+        self.ask("and then?")
+        calls = self.calls()
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertTrue(call["message"].startswith("Question from the user:"), call["message"][:40])
+            self.assertGreater(len(call["message"]), 100)
+            self.assertFalse([arg for arg in call["args"] if call["message"] in arg or "Question from the user" in arg or "where are we" in arg],
+                             "the message is in the arguments")
+            self.assertLess(max(len(arg) for arg in call["args"]), 120, call["args"])
+        self.assertIn("ses_side", calls[1]["args"])
+
+    def test_a_model_or_title_that_looks_like_a_flag_is_refused(self):
+        with self.assertRaisesRegex(sidechat.SidechatError, "flag"):
+            sidechat.command(model="-x/y", side=None, title="t", tree=set())
+        with self.assertRaisesRegex(sidechat.SidechatError, "flag"):
+            sidechat.command(model="a/b", side=None, title="--continue", tree=set())
 
     def test_only_allowed_flags_are_ever_built(self):
         self.ask()
