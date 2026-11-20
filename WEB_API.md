@@ -563,13 +563,17 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   empty canvas resets the angle; Escape during a drag puts the angle back. Turning by hand pauses the self-turn
 //   for 3 s. Wheel and pinch zoom; there is no pan in 3D. The flat view is where the work is done; 3D is for
 //   looking: a click picks an agent or a line (a second agent is picked instead, never joined by a path; lines do
-//   not bend round agents), a right-click, i, or Enter on an agent opens the details to read, Escape lets go, and
-//   undo works. Everything that would change something is refused, nothing is asked of the host and the status line
-//   says "3D is for looking: press D to change things in 2D.": drawing a path (Enter, l, a double-click's loop), N
-//   and the +, Delete and Backspace, G, moving an agent (a drag on one turns the system; Alt/Shift+arrow), typing in
-//   the details and pressing their controls. A step's output (Outputs in TASK) opens to read; typing in it, its Save,
-//   Ctrl/Cmd+Enter and a save queued in 2D that would go out after the switch are refused (the typing stays); undo
-//   of an output edit works. The sky (3D only; nothing of it is drawn in 2D) is the drawing's
+//   not bend round agents; the screen-reader line says what is picked and never offers drawing a path), a
+//   right-click, i, or Enter on an agent opens the details to read, and Escape lets go.
+//   While anything but the flat view shows (3D or either morph) no write is asked of the host, whatever starts it;
+//   reads are. Refused in the one place every request goes through, with the status line "3D is for looking: press D
+//   to change things in 2D.": drawing a path (Enter, l, a double-click's loop; a path or a new circle begun in 2D is
+//   not finished), N and the +, Delete and Backspace, G, Ctrl/Cmd+Z (wherever the focus is; no undo step is used),
+//   moving an agent (a drag on one turns the system; Alt/Shift+arrow; a drag moving one in 2D holds the switch),
+//   typing in the details and pressing their controls, a save queued behind one out, the pause after typing, leaving
+//   a box and the page hidden. The typing stays, marked not saved. At the switch to 3D what is typed is saved at
+//   once, in 2D; a save already out finishes and its answer is shown. Back in 2D the usual rules go on (the typing
+//   is saved, undo takes the steps made before). A step's output (Outputs in TASK) opens to read. The sky (3D only; nothing of it is drawn in 2D) is the drawing's
 //   first child (svg.ag-sky: aria-hidden, no pointer events, no focus, no text) and fades in and out with the morph:
 //   a sparse field of specks from a fixed seed (the same sky every time; three sizes, at most .3 opaque; warm white
 //   on dark, an ink star chart on light; the terminal's seed 0x5ca1ab1e and hash32) that shifts, wrapping round,
