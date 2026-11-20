@@ -169,3 +169,78 @@ def demo_snapshot(now: float | None = None) -> Snapshot:
         Objective("o4", "No regression in the existing suite", ["n11"]),
     ]
     return Snapshot(now, roster, root, sessions, [graph], [])
+
+
+# --- the example chat of each demo session ---------------------------------------------
+
+# Each script lists (seconds before now, kind, text or tool name, tool status). A busy session's script ends on
+# what it is doing now; a finished session gets the generic one.
+_WORKING = {
+    "ses_root": [
+        (700, "user", "Add per-user rate limiting to the public API", None),
+        (690, "reasoning", "Two lanes are done. The middleware lane failed twice, so it moves up a tier.\nThe error page lane is still running.", None),
+        (680, "text", "Escalating the middleware work to impl-claude and waiting for the error page.", None),
+        (676, "tool", "subagent", "completed"),
+        (20, "reasoning", "Both lanes are working. Nothing to decide until one of them returns.", None),
+        (5, "tool", "subagent", "running"),
+    ],
+    "ses_g": [
+        (200, "user", "Apply the limiter in the middleware chain. Same failure twice: headers are missing on a 429.", None),
+        (190, "reasoning", "The 429 path returns before the header middleware runs.\nMove the Retry-After header into the limiter's own reply.", None),
+        (150, "text", "Found it: the limiter answers before the header step. I am setting Retry-After there and rerunning the middleware tests.", None),
+        (140, "tool", "read", "completed"),
+        (120, "tool", "edit", "completed"),
+        (6, "tool", "shell", "running"),
+    ],
+    "ses_h": [
+        (300, "user", "429 error page and retry-after message", None),
+        (280, "tool", "read", "completed"),
+        (240, "text", "The page shows a generic message. It needs the retry time from the header.", None),
+        (3, "reasoning", "Check the three widths before writing the copy.\nThe retry time can be read from the Retry-After header.", None),
+    ],
+}
+
+
+def _generic(title):
+    return [
+        (200, "user", title, None),
+        (190, "reasoning", "Read the relevant files first, then answer.", None),
+        (180, "tool", "read", "completed"),
+        (170, "tool", "grep", "completed"),
+        (150, "text", "Done. The result is written to the task's output.", None),
+    ]
+
+
+def demo_chat(session_id, now: float | None = None) -> dict | None:
+    """The example chat of a demo session as a feed (see chatfeed.read_chat), or None for another id.
+    The same `now` gives the same feed."""
+    now = time.time() if now is None else now
+    snap = demo_snapshot(now)
+    session = next((s for s in [snap.root, *snap.sessions] if s is not None and s.id == session_id), None)
+    if session is None:
+        return None
+    script = _WORKING.get(session.id) if session.busy else None
+    script = script or _generic(session.title)
+    items = []
+    for ago, kind, value, status in script:
+        item = {"kind": kind, "time": round(now - ago, 3)}
+        if kind == "tool":
+            item.update(name=value, status=status)
+        else:
+            item.update(text=value, cut=False)
+        items.append(item)
+    return {"session": session.id, "agent": session.agent, "busy": session.busy, "items": items,
+            "truncated": False, "more": False, "warning": None}
+
+
+def demo_activity(now: float | None = None) -> dict[str, dict]:
+    """`activity` of each busy demo session, from the last item of its chat."""
+    from .chatfeed import activity_of
+    snap = demo_snapshot(now)
+    found = {}
+    for session in [snap.root, *snap.sessions]:
+        feed = demo_chat(session.id, now) if session is not None and session.busy else None
+        activity = activity_of(feed["items"][-1]) if feed and feed["items"] else None
+        if activity is not None:
+            found[session.id] = activity
+    return found

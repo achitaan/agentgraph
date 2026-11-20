@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import contract, names
 from .contract import Agent, Session, Snapshot, TaskGraph
-from .demo import demo_snapshot
+from .demo import demo_activity, demo_snapshot
 from .sources import CONFIG_DIR, ORCHESTRATION_GRAPH_DIR, build_snapshot, top_level_session
 
 
@@ -487,12 +487,25 @@ class _Shape:
         return self.structure["escalation"] if self.structure else contract.ESCALATION
 
 
+def live_activity(snapshot: Snapshot, db_path=None) -> dict[str, dict]:
+    """What each busy session of the snapshot is doing now (chatfeed.activities), for `snapshot_document`'s
+    `activity`. One short query per busy session; {} when the database cannot be read."""
+    from . import chatfeed
+    from .sources import DB_PATH
+    busy = [item.id for item in ([snapshot.root] if snapshot.root is not None else []) + snapshot.sessions
+            if item.busy and item.id]
+    return chatfeed.activities(busy, db_path=db_path if db_path is not None else DB_PATH) if busy else {}
+
+
 def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, *,
-                      session: str | None = None, structure: dict | None = None) -> dict:
+                      session: str | None = None, structure: dict | None = None,
+                      activity: dict[str, dict] | None = None) -> dict:
     """Project a snapshot onto the web contract without modifying the input.
 
     `session` is the session id the caller asked to watch (it may be a
     sub-agent's); it picks that session's graph when no `task` is given.
+    `activity` maps a session id to what it is doing now (`live_activity`); a busy agent whose newest busy
+    session has one carries it as `activity`. An idle agent has no `activity` key.
     """
     shape = _Shape(structure)
     graphs = sorted(snapshot.graphs, key=lambda graph: _time_key(graph.updated), reverse=True)
@@ -549,6 +562,10 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
             "busy": sum(bool(session.busy) for session in related),
             "sessions": [_session_document(session) for session in related],
         })
+        if activity:
+            current = next((item.id for item in related if item.busy), None)  # `related` is newest first
+            if current in activity:
+                grouped[group][-1]["activity"] = activity[current]
 
     grouped["hub"].sort(key=lambda entry: entry["name"] != root_name)  # stable: the root first
     handoffs: set[tuple[str, str]] = set()
@@ -668,7 +685,9 @@ def skills_document(config_dir: Path | None = None, *, skills_dir: Path | None =
 def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, session: str | None = None) -> dict:
     """The snapshot document plus `learning` for a live source."""
     document = snapshot_document(snapshot, source, task, session=session,
-                                 structure=load_structure() if source == "live" else None)
+                                 structure=load_structure() if source == "live" else None,
+                                 activity=live_activity(snapshot) if source == "live"
+                                 else demo_activity(snapshot.now) if source == "demo" else None)
     if source == "live":
         from . import mcpview, roster, skillfiles, skillset  # each imports this module
         document["learning"] = _json_safe(learning_document())

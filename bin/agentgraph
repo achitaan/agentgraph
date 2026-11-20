@@ -23,6 +23,7 @@
 #   agentgraph cost [--session ID]  where one chat's money went, and what would have made it cheaper
 #   agentgraph cost --trend         cost per turn over time, split at each change to the cost settings
 #   agentgraph bloat [--json]       the fixed text each agent's turn costs, dead weight, what piles up (--set-baseline)
+#   agentgraph chat --session ID    one session's recent chat as plain text: reasoning, messages, tool names (--limit N, --json, --chars N, --demo)
 #   agentgraph route [--json]       who gets which work, from the structure folder (route use-when NAME --text T,
 #                                   route restore RECORD; flow scaffold P --task T writes a path's task graph)
 # -P: do not put the current directory on the import path, so a project that
@@ -50,6 +51,9 @@ case "$1" in
   cost)
     shift
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.cost "$@" ;;
+  chat)
+    shift
+    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.chatfeed "$@" ;;
   snapshot)
     shift
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.snapshot_json "$@" ;;
