@@ -265,6 +265,10 @@
     usage.type = 'button'; usage.hidden = true; usage.setAttribute('aria-label', 'Usage');
     const usageCost = el('span', 'ag-usage-cost'), usageTokens = el('span', 'ag-usage-tokens'), usageContext = el('span', 'ag-usage-context');
     usage.append(usageCost, usageTokens, usageContext);
+    // n10: the total against the project's spend limit ("$7.65 / $50") and a thin line under it (see renderUsageLimit).
+    const usageLimit = el('span', 'ag-usage-limit'), usageLine = el('span', 'ag-usage-line'); usageLine.append(el('i'));
+    usageLimit.hidden = usageLine.hidden = true; usageLine.setAttribute('aria-hidden', 'true');
+    usageCost.after(usageLimit); usage.append(usageLine);
     // The context bar: the track is the distance to the next summary, the fill is the context now.
     function renderWear(info) {
       const fill = el('i'), track = el('span', 'ag-wear-bar'), parts = [track, el('span', 'ag-wear-number', amount(info.context))];
@@ -307,6 +311,7 @@
       usage.hidden = !snapshot;
       if (!snapshot) return;
       usageCost.textContent = cost(snapshot.totals?.cost);
+      renderUsageLimit();
       usageTokens.textContent = amount(snapshot.totals?.tokens_in) + '↑ ' + amount(snapshot.totals?.tokens_out) + '↓';
       const info = wearOf(snapshot.root);
       usageContext.hidden = !info && !snapshot.root?.context;
@@ -3007,6 +3012,214 @@
       mcpButton.hidden = !has;
       if (!has) closeMcpPanel(false); else if (!mcpPanel.hidden) drawMcpPanel();
     }
+    // ---- n10: the spend limit, the active preset and the saved setups (actions.spend, actions.setup) ----
+    // All of it is in the run details, which the top total opens: nothing is added to the graph. Writes go through
+    // call() (refused in 3D with the look-only sentence, a stale refusal brings the view up to date); a row asks once
+    // before it changes anything; every change keeps one Undo; a refusal is shown as the back end said it, and
+    // nothing changes. Names and dates are text, never markup.
+    const setupAction = action('setup'), spendAction = action('spend');
+    const SETUP_NAME = /^[a-z0-9][a-z0-9-]{0,79}$/, LIMIT_TEXT = /^\$?\s*(\d{1,7}(?:\.\d{1,2})?)$/;
+    const PRESET_APPLIES = 'It applies at the next start of OpenCode; a session already open keeps its models.';
+    let setupAsking = '', setupWhere = '', setupLine = null, setupUndo = null, setupBusy = new Set(), setupDraft = '', limitDraft = '';
+    const spendOf = () => { const figures = snapshot?.spend; return figures && typeof figures === 'object' ? figures : null; };
+    const setupOf = () => { const value = snapshot?.setup; return value && typeof value === 'object' ? value : null; };
+    const dollars = value => Number.isInteger(value) ? '$' + value : cost(value);
+    // none (no limit), under, warn (from the warning amount), at or over the limit.
+    function limitState() {
+      const figures = spendOf(), limit = Number(figures?.limit), spent = Number(snapshot?.totals?.cost) || 0;
+      if (!figures || !(limit > 0)) return { state: 'none', limit: 0, spent };
+      const warn = Number(figures.warn);
+      const state = spent > limit + 0.005 ? 'over' : spent >= limit - 0.005 ? 'at' : figures.warn != null && warn > 0 && spent >= warn ? 'warn' : 'under';
+      return { state, limit, spent, share: Math.min(1, spent / limit) };
+    }
+    // The top total against the limit: "$7.65 / $50" and a thin line under it filling toward the limit.
+    function renderUsageLimit() {
+      const found = limitState();
+      usage.dataset.limit = found.state;
+      usageLimit.hidden = usageLine.hidden = found.state === 'none';
+      if (found.state === 'none') { usageLimit.textContent = ''; usage.setAttribute('aria-label', 'Usage'); return; }
+      usageLimit.textContent = '/ ' + dollars(found.limit) + (found.state === 'over' ? ' · over' : found.state === 'at' ? ' · at limit' : '');
+      usageLine.firstChild.style.width = (found.share * 100).toFixed(1) + '%';
+      usage.setAttribute('aria-label', 'Usage: ' + cost(found.spent) + ' of the ' + dollars(found.limit) + ' limit' + (found.state === 'over' ? ', over the limit' : found.state === 'at' ? ', at the limit' : ''));
+    }
+    // Is a box of this place being typed in (or holding what was typed)? Then the details are not rebuilt under it.
+    function setupFieldHeld() {
+      return selected?.type === 'run' && [...detailScroll.querySelectorAll('[data-setup-field]')].some(box => document.activeElement === box || box.value !== box.dataset.saved);
+    }
+    // One write: ask, say the answer, refresh, draw again. `done(reply)` says what happened and what undoes it.
+    function setupWrite(fn, request, where, done) {
+      const lane = fn === spendAction ? 'spend' : 'setup';
+      if (!fn || setupBusy.has(lane)) return;
+      setupBusy.add(lane); setupLine = null; setupWhere = where;
+      const finish = () => { setupAsking = ''; setupBusy.delete(lane); if (alive) forceDetail(); };
+      ask(fn, request).then(async reply => {
+        if (!alive) return;
+        done(reply);
+        try { await afterChange(); } catch (_) { /* the refusal of a refresh is said by the next one */ }
+      }, error => {
+        if (!alive) return;
+        setupLine = { kind: 'error', text: sentence(message(error, 'Not changed')) };
+      }).then(finish, finish);
+    }
+    function setupOpenAsk(key) { setupAsking = key; setupLine = null; forceDetail(); detailScroll.querySelector('[data-setup-confirm]')?.focus({ preventScroll: true }); }
+    function setupCancel() { setupAsking = ''; forceDetail(); }
+    function setupButton(label, attrs, onPress, className = 'ag-text-button') {
+      const button = el('button', className, label); button.type = 'button';
+      Object.entries(attrs || {}).forEach(([key, value]) => { button.dataset[key] = value; });
+      button.addEventListener('click', onPress); return button;
+    }
+    // The line said after a change or a refusal, and the one Undo.
+    function setupSaid(parent, where) {
+      if (setupWhere !== where) return;
+      if (setupLine) { const line = el('p', setupLine.kind === 'error' ? 'ag-form-error ag-setup-line' : 'ag-form-reason ag-setup-line', setupLine.text); line.dataset.setupLine = setupLine.kind; line.setAttribute('role', setupLine.kind === 'error' ? 'alert' : 'status'); parent.append(line); }
+      if (setupUndo) {
+        const row = el('p', 'ag-setup-undo'); row.append(el('span', '', setupUndo.what + ' '), setupButton('Undo', { setupUndo: setupUndo.kind }, () => {
+          const last = setupUndo; if (!last || setupBusy.size) return;
+          setupWrite(last.fn(), last.request, setupWhere, reply => { setupUndo = null; setupLine = { kind: 'ok', text: last.undone(reply) }; });
+        }));
+        parent.append(row);
+      }
+    }
+    // A box refused before anything is asked (a bad amount or name): the sentence is put in its place; nothing is drawn again.
+    function setupInvalid(box, where, said) {
+      setupWhere = where; setupLine = { kind: 'error', text: said }; setupUndo = null;
+      const parent = box.closest('.ag-field')?.parentNode; if (!parent) { forceDetail(); return; }
+      parent.querySelectorAll(':scope > [data-setup-line], :scope > .ag-setup-undo').forEach(item => item.remove());
+      setupSaid(parent, where);
+    }
+    function renderLimitBlock() {
+      const figures = spendOf(); if (!figures) return;
+      const found = limitState(), block = runSection('Spend limit', 'limit');
+      const line = el('p', 'ag-limit-line'); line.dataset.limit = found.state;
+      line.textContent = found.state === 'none' ? 'No limit set' : cost(found.spent) + ' of ' + dollars(found.limit) + (found.state === 'over' ? ' · over the limit' : found.state === 'at' ? ' · the limit is reached' : '');
+      block.append(line);
+      if (found.state !== 'none') {
+        const bar = el('span', 'ag-limit-bar'), fill = el('i'); bar.dataset.limit = found.state; fill.style.width = (found.share * 100).toFixed(1) + '%'; bar.append(fill); block.append(bar);
+        if (found.state === 'warn') block.append(el('p', 'ag-wear-fact', 'past the warning at ' + dollars(Number(figures.warn))));
+        block.append(el('p', 'ag-wear-fact', 'nothing is stopped at the limit; it only marks the total'));
+      }
+      if (figures.rate != null && Number.isFinite(Number(figures.rate))) { const fact = el('p', 'ag-wear-fact', 'rate ' + cost(figures.rate) + ' an hour over the last 30 minutes'); fact.dataset.spendRate = ''; block.append(fact); }
+      const split = el('p', 'ag-wear-fact', 'chat ' + cost(figures.chat) + ' · workers ' + cost(figures.workers)); split.dataset.spendSplit = ''; block.append(split);
+      if (!spendAction) return;
+      const field = el('label', 'ag-field ag-limit-field'), box = el('input', 'ag-input'); box.type = 'text'; box.inputMode = 'decimal'; box.autocomplete = 'off'; box.maxLength = 12;
+      box.dataset.setupField = 'limit'; box.dataset.saved = ''; box.value = limitDraft; box.placeholder = found.state === 'none' ? '50' : dollars(found.limit).slice(1);
+      box.addEventListener('input', () => { limitDraft = box.value; });
+      field.append(el('span', 'ag-form-label', found.state === 'none' ? 'Limit in dollars' : 'Change the limit (dollars)'), box);
+      const set = () => {
+        const match = LIMIT_TEXT.exec(box.value.trim()), amountNow = match ? Number(match[1]) : NaN;
+        if (!(amountNow > 0)) { setupInvalid(box, 'limit', 'Give the limit as dollars, such as 50 or 7.50.'); return; }
+        setupWrite(spendAction, { op: 'limit', limit: amountNow }, 'limit', reply => {
+          limitDraft = ''; const before = reply?.previous || {};
+          setupLine = { kind: 'ok', text: reply?.changed === false ? 'The limit is already ' + dollars(amountNow) + '.' : 'The limit is ' + dollars(amountNow) + '.' };
+          setupUndo = reply?.changed === false ? setupUndo : { kind: 'limit', what: 'The limit changed.', fn: () => spendAction, request: before.limit != null ? { op: 'limit', limit: before.limit, warn: before.warn } : { op: 'off' }, undone: () => before.limit != null ? 'The limit is back to ' + dollars(before.limit) + '.' : 'The limit is removed.' };
+        });
+      };
+      box.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); set(); } });
+      const actions = el('div', 'ag-form-actions'), buttons = el('div', 'ag-form-buttons');
+      buttons.append(setupButton(found.state === 'none' ? 'Set limit' : 'Change', { setupLimit: 'set' }, set, 'ag-form-submit'));
+      if (found.state !== 'none') buttons.append(setupButton('Remove limit', { setupLimit: 'off' }, () => setupWrite(spendAction, { op: 'off' }, 'limit', reply => {
+        const before = reply?.previous || {};
+        setupLine = { kind: 'ok', text: 'The limit is removed.' };
+        setupUndo = before.limit != null ? { kind: 'limit', what: 'The limit was removed.', fn: () => spendAction, request: { op: 'limit', limit: before.limit, warn: before.warn }, undone: () => 'The limit is back at ' + dollars(before.limit) + '.' } : null;
+      })));
+      actions.append(buttons); field.append(actions); block.append(field);
+      setupSaid(block, 'limit');
+    }
+    function renderPresetBlock() {
+      const setup = setupOf(); if (!setup) return;
+      const block = runSection('Preset', 'preset'), active = typeof setup.preset === 'string' ? setup.preset : '';
+      const names = (Array.isArray(setup.presets) ? setup.presets : []).filter(name => typeof name === 'string' && name).slice(0, LIST_LIMIT);
+      const head = el('p', 'ag-setup-active', active ? 'Active: ' + active : 'No preset is set'); head.dataset.setupActive = active; block.append(head);
+      const override = setup.override === 'env' ? 'the environment variable OH_MY_OPENCODE_SLIM_PRESET' : setup.override === 'project' ? 'a project config (.opencode/oh-my-opencode-slim)' : '';
+      if (override) { const said = el('p', 'ag-wear-fact ag-setup-override', 'Set by ' + override + '; it overrides the preset, so switching here would change nothing.'); said.dataset.setupOverride = setup.override; block.append(said); }
+      const list = el('ul', 'ag-setup-list'); block.append(list);
+      names.forEach(name => {
+        const row = el('li', 'ag-setup-row'); row.dataset.preset = name; row.dataset.active = String(name === active);
+        row.append(el('span', 'ag-setup-name', name));
+        if (name === active) { const tag = el('span', 'ag-setup-tag', 'active'); row.append(tag); row.setAttribute('aria-current', 'true'); }
+        else if (setupAction && !override) {
+          if (setupAsking === 'preset:' + name) {
+            row.dataset.asking = 'true';
+            row.append(el('span', 'ag-setup-ask', 'Use ' + name + '? ' + PRESET_APPLIES));
+            const buttons = el('span', 'ag-form-buttons');
+            buttons.append(setupButton('Use', { setupConfirm: 'preset', setupName: name }, () => setupWrite(setupAction, { op: 'preset-switch', name }, 'preset', reply => {
+              setupLine = { kind: 'ok', text: 'Switched to ' + name + '. ' + PRESET_APPLIES };
+              setupUndo = typeof reply?.record === 'string' && reply.record ? { kind: 'preset', what: 'The preset changed.', fn: () => setupAction, request: { op: 'preset-restore', record: reply.record }, undone: () => 'The preset is back to ' + (active || 'what it was') + '. ' + PRESET_APPLIES } : null;
+            }), 'ag-form-submit'), setupButton('Cancel', { setupCancel: '' }, setupCancel));
+            row.append(buttons);
+          } else row.append(setupButton('Use', { setupUse: name }, () => { if (!setupBusy.size) setupOpenAsk('preset:' + name); }));
+        }
+        list.append(row);
+      });
+      if (!names.length) block.append(el('p', 'ag-run-empty', 'No presets'));
+      setupSaid(block, 'preset');
+    }
+    function renderSavedBlock() {
+      const setup = setupOf(); if (!setup) return;
+      const block = runSection('Saved setups', 'setups');
+      const saved = (Array.isArray(setup.saved) ? setup.saved : []).filter(item => item && typeof item.name === 'string' && item.name).slice(0, LIST_LIMIT);
+      const list = el('ul', 'ag-setup-list'); block.append(list);
+      saved.forEach(item => {
+        const row = el('li', 'ag-setup-row ag-saved-row'); row.dataset.savedSetup = item.name; row.dataset.damaged = String(item.damaged === true);
+        const when = typeof item.saved === 'string' ? item.saved.slice(0, 10) : '';
+        row.append(el('span', 'ag-setup-name', item.name), el('span', 'ag-setup-meta', [when, item.preset ? 'preset ' + item.preset : ''].filter(Boolean).join(' · ')));
+        if (item.damaged === true) row.append(el('span', 'ag-setup-tag ag-setup-damaged', 'damaged: cannot be restored'));
+        if (setupAction) {
+          const ownAsk = setupAsking.endsWith(':' + item.name) ? setupAsking.split(':')[0] : '';
+          if (ownAsk === 'restore' || ownAsk === 'remove') {
+            row.dataset.asking = 'true';
+            row.append(el('span', 'ag-setup-ask', ownAsk === 'restore' ? 'Restore ' + item.name + '? It replaces the preset file, the agents, groups and paths in use now with the saved ones; Undo puts them back.' : 'Remove ' + item.name + '? It is moved to the backups; Undo brings it back.'));
+            const buttons = el('span', 'ag-form-buttons');
+            const request = { op: ownAsk, name: item.name, ...(typeof item.rev === 'string' && item.rev ? { expect: item.rev } : {}) };
+            buttons.append(setupButton(ownAsk === 'restore' ? 'Restore' : 'Remove', { setupConfirm: ownAsk, setupName: item.name }, () => setupWrite(setupAction, request, 'saved', reply => {
+              setupLine = { kind: 'ok', text: ownAsk === 'restore' ? (reply?.changed === false ? 'Nothing to change: the files are already as saved.' : 'Restored ' + item.name + '. ' + PRESET_APPLIES) : 'Removed ' + item.name + '.' };
+              setupUndo = reply?.changed !== false && typeof reply?.record === 'string' && reply.record ? { kind: ownAsk, what: ownAsk === 'restore' ? 'The setup was restored.' : item.name + ' was removed.', fn: () => setupAction, request: { op: 'undo', record: reply.record }, undone: () => ownAsk === 'restore' ? 'The files are back as they were before the restore.' : item.name + ' is back.' } : null;
+            }), 'ag-form-submit'), setupButton('Cancel', { setupCancel: '' }, setupCancel));
+            row.append(buttons);
+          } else {
+            const buttons = el('span', 'ag-form-buttons');
+            if (item.damaged !== true) buttons.append(setupButton('Restore', { setupRestore: item.name }, () => { if (!setupBusy.size) setupOpenAsk('restore:' + item.name); }));
+            buttons.append(setupButton('Remove', { setupRemove: item.name }, () => { if (!setupBusy.size) setupOpenAsk('remove:' + item.name); }));
+            row.append(buttons);
+          }
+        }
+        list.append(row);
+      });
+      if (!saved.length) block.append(el('p', 'ag-run-empty', 'None saved'));
+      if (setupAction) {
+        const names = new Set(saved.map(item => item.name)), field = el('label', 'ag-field ag-setup-save'), box = el('input', 'ag-input');
+        box.type = 'text'; box.autocomplete = 'off'; box.spellcheck = false; box.maxLength = 80; box.placeholder = 'cheap-week';
+        box.dataset.setupField = 'save'; box.dataset.saved = ''; box.value = setupDraft;
+        box.addEventListener('input', () => { setupDraft = box.value; });
+        field.append(el('span', 'ag-form-label', 'Save current as…'), box);
+        const replacing = setupAsking.startsWith('replace:') ? setupAsking.slice(8) : '';
+        const send = (name, replace) => {
+          const found = saved.find(item => item.name === name);
+          setupWrite(setupAction, { op: 'save', name, ...(replace ? { replace: true } : {}), ...(replace && typeof found?.rev === 'string' && found.rev ? { expect: found.rev } : {}) }, 'saved', reply => {
+            setupDraft = ''; setupLine = { kind: 'ok', text: (replace ? 'Replaced ' : 'Saved ') + name + (Number.isInteger(reply?.files) ? ' (' + reply.files + ' files).' : '.') };
+            setupUndo = typeof reply?.record === 'string' && reply.record ? { kind: 'save', what: name + ' was saved.', fn: () => setupAction, request: { op: 'undo', record: reply.record }, undone: () => replace ? name + ' is back as it was.' : name + ' is removed again.' } : null;
+          });
+        };
+        const save = () => {
+          const name = box.value.trim();
+          if (!SETUP_NAME.test(name)) { setupInvalid(box, 'saved', 'A setup name uses lowercase letters, digits and "-", starting with a letter or digit (80 characters at most).'); return; }
+          if (names.has(name)) { setupAsking = 'replace:' + name; setupLine = null; forceDetail(); detailScroll.querySelector('[data-setup-confirm]')?.focus({ preventScroll: true }); return; }
+          send(name, false);
+        };
+        box.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); save(); } });
+        const actions = el('div', 'ag-form-actions'), buttons = el('div', 'ag-form-buttons');
+        if (replacing) {
+          actions.dataset.asking = 'true';
+          actions.append(el('span', 'ag-setup-ask', 'A setup named ' + replacing + ' exists. Replace it? The old one is kept in the backups; Undo puts it back.'));
+          buttons.append(setupButton('Replace', { setupConfirm: 'replace', setupName: replacing }, () => send(replacing, true), 'ag-form-submit'), setupButton('Cancel', { setupCancel: '' }, setupCancel));
+        } else buttons.append(setupButton('Save', { setupSave: '' }, save, 'ag-form-submit'));
+        actions.append(buttons); field.append(actions); block.append(field);
+      }
+      setupSaid(block, 'saved');
+    }
+    // The three blocks, below the totals of the run details. Not drawn without the snapshot's field.
+    function renderSetupPlace() { renderLimitBlock(); renderPresetBlock(); renderSavedBlock(); }
+    // ---- end n10 ----
     function renderRunDetail(graph) {
       eyebrow.textContent = '';
       detailScroll.append(el('h2', 'ag-detail-title ag-run-title', 'Run'));
@@ -3017,6 +3230,7 @@
         choice.value = activeTeam; field.append(el('span', '', 'Team'), choice); detailScroll.append(field);
       }
       stats(detailScroll, { cost: snapshot.totals?.cost, sent: snapshot.totals?.tokens_in, received: snapshot.totals?.tokens_out, context: snapshot.root?.context || 0 });
+      renderSetupPlace(); // n10: the spend limit, the preset and the saved setups
       const wearInfo = wearOf(snapshot.root);
       if (wearInfo) renderWearDetail(wearInfo);
       const learning = snapshot.learning;
@@ -3746,6 +3960,7 @@
       const ownBox = selected.type === 'agent' ? detailScroll.querySelector('[data-agent-text]') : null;
       if (ownBox && ownBox.dataset.agentText === selected.key && agentsByName.has(selected.key) && (document.activeElement === ownBox || ownBox.value !== ownBox.dataset.saved)) return;
       if (outputHeld()) return; // a step's output being edited
+      if (!force && setupFieldHeld()) return; // n10: a limit or a setup name being typed
       if (!force && detailScroll.querySelector('[data-form]')?.dataset.form === selected.type + ':' + selected.key) return;
       // Nor the name of an agent being renamed.
       const renaming = selected.type === 'agent' ? detailScroll.querySelector('[data-rename]') : null;
@@ -5940,7 +6155,7 @@
     function render(data) {
       const previousTeam = activeTeam;
       snapshot = { ...data, agents: prepareRoster(data) };
-      const stamp = JSON.stringify([data.agents, data.graph, data.warnings, data.totals, data.escalation, data.root?.wear, data.structure, data.skill_warnings, data.skills, data.roster, data.mcp]);
+      const stamp = JSON.stringify([data.agents, data.graph, data.warnings, data.totals, data.escalation, data.root?.wear, data.structure, data.skill_warnings, data.skills, data.roster, data.mcp, data.spend, data.setup]);
       if (stamp !== renderStamp) { renderStamp = stamp; renderRevision++; }
       // The host's answer stands for an agent's skills only until a snapshot shows the same list.
       skillOverride.forEach((list, name) => { const agent = (data.agents || []).find(item => item?.name === name); if (!agent || JSON.stringify(agent.skills) === JSON.stringify(list)) skillOverride.delete(name); });
@@ -6085,7 +6300,7 @@
       // Writes sent before this are not heard (call()); what waited on them starts clean.
       busyFlows = 0; skillPending.clear(); flowsOut.clear(); replyRevs.clear(); writing.clear(); ownMoves.clear(); teamOverride.clear(); textSessions.clear(); agentTexts.clear(); skillDrafts.clear(); outputViews.clear(); outputOpen = '';
       if (draft || failedDraft) { draft = null; failedDraft = null; drawDraft(); }
-      freshRoutes.clear(); flowErrors.clear(); flowHistory.length = 0; routeViews.clear(); teamLines.clear(); agentNotes.clear(); skillView = null; teamDraft = null; pickedMember = ''; pickedFlow = ''; formBusy = false; trailStatus.textContent = ''; delete root.dataset.agTrail;
+      freshRoutes.clear(); flowErrors.clear(); flowHistory.length = 0; routeViews.clear(); teamLines.clear(); agentNotes.clear(); skillView = null; teamDraft = null; pickedMember = ''; pickedFlow = ''; formBusy = false; setupAsking = ''; setupWhere = ''; setupLine = null; setupUndo = null; setupBusy.clear(); setupDraft = ''; limitDraft = ''; trailStatus.textContent = ''; delete root.dataset.agTrail;
       selected = null; selectedOrigin = null; initialSelection = ''; highlightedStep = ''; detailSignature = '';
       teamChoice = null; activeTeam = 'main'; teamChoices = []; layoutSignature = ''; renderStamp = '';
       arrangement = root.clientWidth > 0 && root.clientWidth <= 650 ? 'compact' : 'wide';

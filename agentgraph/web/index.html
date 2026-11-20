@@ -38,12 +38,15 @@
       const team = post('/api/structure/team', 'The group could not be changed');
       // A step's output: read, write (its next revision; the steps that read it become stale) and restore (undo).
       const output = post('/api/output', 'The output could not be changed');
+      // The default preset and the saved setups, and the project's spend limit (the run details).
+      const setup = post('/api/setup', 'The setup could not be changed');
+      const spend = post('/api/spend', 'The spend limit could not be changed');
       window.AgentGraph.mount(root, {
         // The page is the graph: it takes the keys on load (a host's panel does not pass this).
         autofocus: true,
         // An agent's chat is read from /api/chat (the demo's example chats with demo=1). The page has no way to steer or stop.
         chatUrl: '/api/chat', chatDemo: params.has('demo'),
-        actions: params.has('demo') ? undefined : { flow, skills, roster, skillfile, team, output },
+        actions: params.has('demo') ? undefined : { flow, skills, roster, skillfile, team, output, setup, spend },
         fetchSnapshot: async () => {
           const response = await fetch('/api/snapshot' + query, { cache: 'no-store' });
           const body = await response.text();

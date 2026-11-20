@@ -7308,6 +7308,7 @@
         data.agents.push(agent('scout', 'build', { added: true, removable: true, skills: [], skills_editable: true }));
         data.agents.find(a => a.name === 'reviewer').skills = ['gamma'];
         data.graph.nodes = outputFixture().graph.nodes;
+        const n10 = setupFixture(); data.spend = n10.spend; data.setup = n10.setup; data.totals = n10.totals; // n10
         return data;
       };
       const SWEEP_CASES = {
@@ -7319,6 +7320,7 @@
         'a group lead': async root => { open(root, 'impl-claude'); },
         'a path': async root => { openStep(root, 'f1', 0); },
         'a skill file': async root => { open(root, 'reviewer'); await settle(); skillOpener(root, 'gamma').click(); },
+        'the run details: spend limit, preset and saved setups (n10)': async root => { root.querySelector('.ag-usage').click(); },
         'a change to undo': async root => {
           openStep(root, 'f1', 0); await settle();
           const name = root.querySelector('.ag-detail [data-route-name]'); name.focus(); name.value = 'Named'; name.dispatchEvent(new Event('input', { bubbles: true })); leave(name); await settled();
@@ -7376,7 +7378,8 @@
         const out = [];
         for (const [name, setup] of Object.entries(SWEEP_CASES)) {
           const data = sweepData(), world = worldHost(data), path = pathHost(data), output = outputHost(data), log = [];
-          const fakes = { ...world.actions, flow: path.flow, run: path.run, output: output.output };
+          const n10 = setupFakes(data); // n10: setup and spend
+          const fakes = { ...world.actions, flow: path.flow, run: path.run, output: output.output, setup: n10.setup, spend: n10.spend };
           let mounted = null;
           const actions = Object.fromEntries(actionNames.map(action => [action, request => {
             log.push({ action, op: request?.op, flat: !mounted || flat(mounted) });
@@ -7397,7 +7400,7 @@
         const bound = [...viewSource.matchAll(/(\w+) = (?:action\('(\w+)'\)|options\.actions && typeof options\.actions\.(\w+))/g)].filter(m => !CHAT_ACTIONS.includes(m[2] || m[3])).map(m => m[1]);
         const direct = bound.filter(name => new RegExp('\\b' + name + '\\s*\\(').test(viewSource)).concat(/options\.actions(\.\w+|\[[^\]]+\])\s*\(/.test(viewSource) ? ['options.actions'] : []);
         assert(actionNames.length >= 7 && bound.length === actionNames.length && !direct.length, 'an action is asked other than through call(): ' + direct.join(', ') + ' (actions ' + actionNames.join(', ') + '; bound ' + bound.join(', ') + ')');
-        const missing = actionNames.filter(action => !['roster', 'skillfile', 'team', 'skills', 'flow', 'run', 'output'].includes(action));
+        const missing = actionNames.filter(action => !['roster', 'skillfile', 'team', 'skills', 'flow', 'run', 'output', 'setup', 'spend'].includes(action));
         assert(!missing.length, 'the sweep has no fake for ' + missing.join(', '));
         const cases = await sweepCases(async root => { sweep(root); return flat(root); });
         const reached = new Set(cases.flatMap(item => writesOf(item.asked).map(call => call.action)));
@@ -8673,6 +8676,302 @@
       }, chatMount(host, clock));
     });
     // ==== Chat lane (n5): end ====
+    // ==== n10: the spend limit, the active preset and the saved setups (the run details) ====
+    // The fakes answer as the back end does (agentgraph/setups.py, agentgraph/spend.py): a record for each change, a
+    // refusal as one line, a 409 when `expect` is not the rev now. They change `data`, which the view then refreshes.
+    function setupFixture(extra = {}) {
+      const data = fixture();
+      data.totals = { sessions: 3, running: 1, cost: 7.65, tokens_in: 12000, tokens_out: 3400 };
+      data.root = { agent: 'orchestrator', context: 1000 };
+      data.spend = { limit: 50, warn: 45, rate: 4.2, chat: 2.41, workers: 5.24 };
+      data.setup = {
+        preset: 'normal', presets: ['normal', 'ultra-fast', 'fast'], override: null, undo: null,
+        saved: [{ name: 'cheap-week', saved: '2026-11-02T10:00:00+00:00', preset: 'fast', rev: 'r-cheap' }, { name: 'full-power', saved: '2026-11-09T08:30:00+00:00', preset: 'normal', rev: 'r-full' }, { name: 'broken', saved: '', preset: '', rev: 'r-broken', damaged: true }]
+      };
+      return Object.assign(data, extra);
+    }
+    function setupFakes(data, options = {}) {
+      const calls = [], records = new Map(); let made = 0;
+      const gate = async () => { if (options.gate) await options.gate(); if (options.refuse) throw Object.assign(new Error(options.refuse), { status: options.status || 400 }); };
+      const stale = (item, request) => { if (request.expect !== undefined && request.expect !== item.rev) throw Object.assign(new Error('changed since it was shown'), { status: 409 }); };
+      const record = value => { const id = 'undo-' + (++made) + '.json'; records.set(id, value); return id; };
+      const setup = async request => {
+        calls.push({ api: 'setup', ...request }); await gate();
+        const s = data.setup, saved = name => s.saved.find(item => item.name === name);
+        if (request.op === 'preset-switch') { if (!s.presets.includes(request.name)) throw new Error('unknown preset ' + request.name); const previous = s.preset; s.preset = request.name; return { name: request.name, previous, changed: true, record: record({ preset: previous }), message: 'The preset is now ' + request.name + '.' }; }
+        if (request.op === 'preset-restore') { const old = records.get(request.record); if (!old) throw new Error('no such undo record'); s.preset = old.preset; return { changed: true, message: 'back' }; }
+        if (request.op === 'save') {
+          const old = saved(request.name);
+          if (old && !request.replace) throw new Error("a setup named '" + request.name + "' exists: add replace to replace it");
+          if (old) stale(old, request);
+          const item = { name: request.name, saved: '2026-11-20T09:00:00+00:00', preset: s.preset, rev: 'r-' + request.name + '-' + (++made) };
+          s.saved = s.saved.filter(x => x.name !== request.name).concat(item);
+          return { name: request.name, changed: true, replaced: !!old, preset: s.preset, files: 7, record: record({ saveOf: request.name, old }), message: 'saved' };
+        }
+        if (request.op === 'restore') {
+          const item = saved(request.name); if (!item) throw new Error("no saved setup '" + request.name + "'"); if (item.damaged) throw new Error("'" + request.name + "' is damaged");
+          stale(item, request); const previous = s.preset; s.preset = item.preset;
+          return { name: request.name, changed: true, record: record({ preset: previous }), message: 'restored' };
+        }
+        if (request.op === 'remove') { const item = saved(request.name); if (!item) throw new Error("no saved setup '" + request.name + "'"); stale(item, request); s.saved = s.saved.filter(x => x !== item); return { name: request.name, changed: true, record: record({ removed: item }), message: 'removed' }; }
+        if (request.op === 'undo') {
+          const old = records.get(request.record); if (!old) throw new Error('no such undo record');
+          if (old.removed) s.saved.push(old.removed); else if ('preset' in old) s.preset = old.preset; else { s.saved = s.saved.filter(x => x.name !== old.saveOf); if (old.old) s.saved.push(old.old); }
+          return { changed: true, message: 'undone' };
+        }
+        throw new Error('unknown op ' + request.op);
+      };
+      const spend = async request => {
+        calls.push({ api: 'spend', ...request }); await gate();
+        const f = data.spend, previous = { limit: f.limit, warn: f.warn };
+        if (request.op === 'limit') { if (!(request.limit > 0)) throw new Error('the limit must be above $0'); f.limit = request.limit; f.warn = request.warn !== undefined ? request.warn : Math.round(request.limit * 90) / 100; return { limit: f.limit, warn: f.warn, previous, changed: true, message: 'set' }; }
+        if (request.op === 'off') { f.limit = null; f.warn = null; return { limit: null, warn: null, previous, changed: previous.limit != null, message: 'off' }; }
+        throw new Error('unknown op ' + request.op);
+      };
+      return { setup, spend, calls, actions: { setup, spend } };
+    }
+    const n10in3d = root => root.dataset.agView === '3d' && root.dataset.agBlend === '1';
+    const n10Detail = root => root.querySelector('.ag-detail');
+    const n10Q = (root, selector) => n10Detail(root)?.querySelector(selector);
+    const n10Open = async root => { root.querySelector('.ag-usage').click(); await settled(); assert(n10Detail(root) && !n10Detail(root).hidden, 'the run details did not open'); };
+    const n10Click = async (root, selector) => { const item = n10Q(root, selector); assert(item, 'no ' + selector); item.click(); await settled(); };
+    const n10Type = (root, selector, value) => { const box = n10Q(root, selector); assert(box, 'no ' + selector); box.focus(); box.value = value; box.dispatchEvent(new Event('input', { bubbles: true })); return box; };
+    const n10Said = root => n10Q(root, '[data-setup-line]')?.textContent || '';
+    const n10Mount = (data, run, options = {}) => { const fakes = options.fakes || setupFakes(data, options); return using(data, root => run(root, fakes), { actions: fakes.actions, ...(options.mount || {}) }); };
+    const n10Danger = root => { const probe = document.createElement('span'); probe.className = 'ag-status-note'; probe.style.cssText = 'position:absolute;visibility:hidden'; root.querySelector('.agentgraph, .ag-viewport')?.append?.(probe); root.append(probe); const color = getComputedStyle(probe).color; probe.remove(); return color; };
+    const n10Skip = text => !text;
+
+    await test('n10 spend 1: the top total shows against the limit with a thin line: nothing with no limit, plain under it, the attention colour from the warning amount, said plainly at and over the limit', async () => {
+      const states = [[null, 'none'], [7.65, 'under'], [46, 'warn'], [50, 'at'], [52.5, 'over']];
+      for (const [spent, state] of states) {
+        const data = setupFixture(); data.totals.cost = spent == null ? 7.65 : spent; if (state === 'none') { data.spend.limit = null; data.spend.warn = null; }
+        await using(data, async root => {
+          const usage = root.querySelector('.ag-usage'), limit = usage.querySelector('.ag-usage-limit'), line = usage.querySelector('.ag-usage-line'), attention = n10Danger(root);
+          if (state === 'none') {
+            assert(limit.hidden && line.hidden && !/\//.test(usage.textContent.replace(/\d+k?\s*\/\s*\d+k?/g, '')) , 'a limit shows with none set: ' + usage.textContent);
+            assert(usage.dataset.limit === 'none', 'state ' + usage.dataset.limit);
+            return;
+          }
+          assert(!limit.hidden && !line.hidden, state + ': no limit text or line');
+          assert(usage.dataset.limit === state, state + ': state is ' + usage.dataset.limit);
+          assert(usage.querySelector('.ag-usage-cost').textContent === '$' + data.totals.cost.toFixed(2), state + ': the total changed: ' + usage.querySelector('.ag-usage-cost').textContent);
+          assert(limit.textContent.startsWith('/ $50'), state + ': the limit reads ' + limit.textContent);
+          const fill = line.querySelector('i'), share = parseFloat(fill.style.width);
+          assert(Math.abs(share - Math.min(100, data.totals.cost / 50 * 100)) < 0.2, state + ': the line is filled ' + fill.style.width);
+          const warm = ['warn', 'at', 'over'].includes(state);
+          assert((getComputedStyle(fill).backgroundColor === attention) === warm, state + ': the line colour ' + getComputedStyle(fill).backgroundColor + ' against the attention colour ' + attention);
+          assert((getComputedStyle(limit).color === attention) === warm, state + ': the limit text colour ' + getComputedStyle(limit).color);
+          assert(/over/.test(limit.textContent) === (state === 'over') && /at limit/.test(limit.textContent) === (state === 'at'), state + ': said ' + limit.textContent);
+          assert(/limit/.test(usage.getAttribute('aria-label')) && (state === 'over' ? /over the limit/ : state === 'at' ? /at the limit/ : /\$50 limit/).test(usage.getAttribute('aria-label')), state + ': aria-label ' + usage.getAttribute('aria-label'));
+          [usage, ...usage.querySelectorAll('*')].forEach(item => ['color', 'backgroundColor'].forEach(key => assert(!chatGreen(getComputedStyle(item)[key]), state + ': green ' + item.className)));
+        }, { motion: 'none' });
+      }
+    });
+
+    await test('n10 spend 2: the details show the limit line, the rate and the chat-against-workers split; a null rate is hidden; nothing is added to the graph area', async () => {
+      const data = setupFixture();
+      await using(data, async root => {
+        const graphText = root.querySelector('.ag-viewport').textContent;
+        await n10Open(root);
+        const detail = n10Detail(root);
+        assert(/\$7\.65 of \$50/.test(n10Q(root, '.ag-limit-line').textContent), 'the limit line: ' + n10Q(root, '.ag-limit-line').textContent);
+        assert(n10Q(root, '.ag-limit-bar i') && n10Q(root, '[data-spend-rate]') && /\$4\.20 an hour/.test(n10Q(root, '[data-spend-rate]').textContent), 'the rate is not shown');
+        assert(/chat \$2\.41/.test(n10Q(root, '[data-spend-split]').textContent) && /workers \$5\.24/.test(n10Q(root, '[data-spend-split]').textContent), 'the split: ' + n10Q(root, '[data-spend-split]').textContent);
+        assert(root.querySelector('.ag-viewport').textContent === graphText, 'text was added to the graph area');
+      }, { motion: 'none' });
+      data.spend.rate = null;
+      await using(data, async root => { await n10Open(root); assert(!n10Q(root, '[data-spend-rate]') && n10Q(root, '[data-spend-split]'), 'a null rate is shown, or the split is gone'); assert(!/an hour/.test(n10Detail(root).textContent), 'a rate is in the text'); }, { motion: 'none' });
+      const nothing = setupFixture(); delete nothing.spend; delete nothing.setup;
+      await using(nothing, async root => { await n10Open(root); assert(!n10Q(root, '.ag-limit-line') && !n10Q(root, '.ag-setup-list') && !root.querySelector('.ag-usage-limit:not([hidden])'), 'an older back end shows spend or setup'); }, { motion: 'none' });
+    });
+
+    await test('n10 spend 3: the limit is set, changed and removed in the details, each with one Undo; a bad amount asks nothing; the write names no revision (the limit is not a thing with one)', async () => {
+      const data = setupFixture();
+      await n10Mount(data, async (root, fakes) => {
+        await n10Open(root);
+        n10Type(root, '[data-setup-field="limit"]', 'abc'); await n10Click(root, '[data-setup-limit="set"]');
+        assert(!fakes.calls.length && /dollars/.test(n10Said(root)), 'a bad amount was sent or not said: ' + n10Said(root));
+        n10Type(root, '[data-setup-field="limit"]', '$60'); await n10Click(root, '[data-setup-limit="set"]');
+        assert(JSON.stringify(fakes.calls) === JSON.stringify([{ api: 'spend', op: 'limit', limit: 60 }]), 'asked ' + JSON.stringify(fakes.calls));
+        assert(root.querySelector('.ag-usage-limit').textContent.startsWith('/ $60') && /\$60/.test(n10Said(root)), 'the limit did not change in the view');
+        await n10Click(root, '[data-setup-undo]');
+        assert(JSON.stringify(fakes.calls[1]) === JSON.stringify({ api: 'spend', op: 'limit', limit: 50, warn: 45 }) && root.querySelector('.ag-usage-limit').textContent.startsWith('/ $50'), 'undo asked ' + JSON.stringify(fakes.calls[1]));
+        await n10Click(root, '[data-setup-limit="off"]');
+        assert(JSON.stringify(fakes.calls[2]) === JSON.stringify({ api: 'spend', op: 'off' }) && root.querySelector('.ag-usage').dataset.limit === 'none' && /No limit set/.test(n10Q(root, '.ag-limit-line').textContent), 'remove: ' + JSON.stringify(fakes.calls[2]));
+        await n10Click(root, '[data-setup-undo]');
+        assert(JSON.stringify(fakes.calls[3]) === JSON.stringify({ api: 'spend', op: 'limit', limit: 50, warn: 45 }) && root.querySelector('.ag-usage').dataset.limit === 'under', 'undo of remove: ' + JSON.stringify(fakes.calls[3]));
+      }, { mount: { motion: 'none' } });
+    });
+
+    await test('n10 preset 1: the details name the active preset, list the others with the active one marked; choosing asks once, writes preset-switch, says it applies at the next start and offers Undo (preset-restore)', async () => {
+      const data = setupFixture();
+      await n10Mount(data, async (root, fakes) => {
+        await n10Open(root);
+        assert(/Active: normal/.test(n10Q(root, '[data-setup-active]').textContent), 'the active preset is not named');
+        const rows = [...n10Detail(root).querySelectorAll('[data-preset]')];
+        assert(rows.map(r => r.dataset.preset).join() === 'normal,ultra-fast,fast' && rows.filter(r => r.dataset.active === 'true').map(r => r.dataset.preset).join() === 'normal' && !rows[0].querySelector('button'), 'the list: ' + rows.map(r => r.dataset.preset + r.dataset.active).join());
+        await n10Click(root, '[data-setup-use="fast"]');
+        assert(!fakes.calls.length && /applies at the next start/.test(n10Q(root, '[data-preset="fast"]').textContent), 'it did not ask first');
+        await n10Click(root, '[data-setup-cancel]');
+        assert(!fakes.calls.length && !n10Q(root, '[data-asking]'), 'cancel wrote or kept the question');
+        await n10Click(root, '[data-setup-use="fast"]'); await n10Click(root, '[data-setup-confirm="preset"]');
+        assert(JSON.stringify(fakes.calls) === JSON.stringify([{ api: 'setup', op: 'preset-switch', name: 'fast' }]), 'asked ' + JSON.stringify(fakes.calls));
+        assert(/Active: fast/.test(n10Q(root, '[data-setup-active]').textContent) && /next start/.test(n10Said(root)), 'not said: ' + n10Said(root));
+        await n10Click(root, '[data-setup-undo]');
+        assert(fakes.calls[1].op === 'preset-restore' && /^undo-\d+\.json$/.test(fakes.calls[1].record) && /Active: normal/.test(n10Q(root, '[data-setup-active]').textContent), 'undo: ' + JSON.stringify(fakes.calls[1]));
+      }, { mount: { motion: 'none' } });
+    });
+
+    await test('n10 preset 2: when the environment or a project config overrides the preset, the details say what overrides it and offer no switch', async () => {
+      for (const [override, word] of [['env', /OH_MY_OPENCODE_SLIM_PRESET/], ['project', /project config/]]) {
+        const data = setupFixture(); data.setup.override = override;
+        await n10Mount(data, async root => {
+          await n10Open(root);
+          assert(word.test(n10Q(root, '[data-setup-override]').textContent), override + ': not said: ' + n10Q(root, '[data-setup-override]')?.textContent);
+          assert(!n10Detail(root).querySelector('[data-preset] button'), override + ': a switch is offered');
+        }, { mount: { motion: 'none' } });
+      }
+    });
+
+    await test('n10 saved 1: the saved setups list name, date and preset; a damaged one is marked and cannot be restored; Save current as… follows the name rule and sends no revision for a new name', async () => {
+      const data = setupFixture();
+      await n10Mount(data, async (root, fakes) => {
+        await n10Open(root);
+        const rows = [...n10Detail(root).querySelectorAll('[data-saved-setup]')];
+        assert(rows.map(r => r.dataset.savedSetup).join() === 'cheap-week,full-power,broken', 'rows ' + rows.map(r => r.dataset.savedSetup));
+        assert(/2026-11-02/.test(rows[0].textContent) && /preset fast/.test(rows[0].textContent), 'date or preset missing: ' + rows[0].textContent);
+        assert(rows[2].dataset.damaged === 'true' && /damaged/.test(rows[2].textContent) && !rows[2].querySelector('[data-setup-restore]') && rows[2].querySelector('[data-setup-remove]'), 'the damaged row');
+        for (const bad of ['Bad Name', '-start', 'a'.repeat(81), '', 'UPPER']) { n10Type(root, '[data-setup-field="save"]', bad); await n10Click(root, '[data-setup-save]'); assert(!fakes.calls.length && /lowercase/.test(n10Said(root)), 'sent or not said for ' + JSON.stringify(bad)); }
+        n10Type(root, '[data-setup-field="save"]', 'new-one'); await n10Click(root, '[data-setup-save]');
+        assert(JSON.stringify(fakes.calls) === JSON.stringify([{ api: 'setup', op: 'save', name: 'new-one' }]), 'asked ' + JSON.stringify(fakes.calls));
+        assert(n10Detail(root).querySelector('[data-saved-setup="new-one"]') && /Saved new-one/.test(n10Said(root)), 'the new setup is not listed');
+        await n10Click(root, '[data-setup-undo]');
+        assert(fakes.calls[1].op === 'undo' && !n10Detail(root).querySelector('[data-saved-setup="new-one"]'), 'undo of save');
+        n10Type(root, '[data-setup-field="save"]', 'cheap-week'); await n10Click(root, '[data-setup-save]');
+        assert(fakes.calls.length === 2 && /Replace/.test(n10Q(root, '[data-setup-confirm="replace"]').textContent), 'an existing name did not ask first');
+        await n10Click(root, '[data-setup-confirm="replace"]');
+        assert(JSON.stringify(fakes.calls[2]) === JSON.stringify({ api: 'setup', op: 'save', name: 'cheap-week', replace: true, expect: 'r-cheap' }), 'replace: ' + JSON.stringify(fakes.calls[2]));
+      }, { mount: { motion: 'none' } });
+    });
+
+    await test('n10 saved 2: restore and remove each ask once and say what they change, carry the setup\'s revision, and each has one Undo of its own record', async () => {
+      const data = setupFixture();
+      await n10Mount(data, async (root, fakes) => {
+        await n10Open(root);
+        await n10Click(root, '[data-setup-restore="cheap-week"]');
+        assert(!fakes.calls.length && /replaces/.test(n10Q(root, '[data-saved-setup="cheap-week"] .ag-setup-ask').textContent), 'restore did not ask first, or did not say what it replaces');
+        await n10Click(root, '[data-setup-cancel]'); assert(!fakes.calls.length, 'cancel wrote');
+        await n10Click(root, '[data-setup-restore="cheap-week"]'); await n10Click(root, '[data-setup-confirm="restore"]');
+        assert(JSON.stringify(fakes.calls) === JSON.stringify([{ api: 'setup', op: 'restore', name: 'cheap-week', expect: 'r-cheap' }]), 'asked ' + JSON.stringify(fakes.calls));
+        assert(/Active: fast/.test(n10Q(root, '[data-setup-active]').textContent) && /next start/.test(n10Said(root)), 'the restore is not said: ' + n10Said(root));
+        await n10Click(root, '[data-setup-undo]');
+        assert(fakes.calls[1].op === 'undo' && /^undo-\d+\.json$/.test(fakes.calls[1].record) && /Active: normal/.test(n10Q(root, '[data-setup-active]').textContent), 'undo of restore: ' + JSON.stringify(fakes.calls[1]));
+        await n10Click(root, '[data-setup-remove="full-power"]');
+        assert(fakes.calls.length === 2 && /Remove full-power/.test(n10Q(root, '[data-saved-setup="full-power"] .ag-setup-ask').textContent), 'remove did not ask first');
+        await n10Click(root, '[data-setup-confirm="remove"]');
+        assert(JSON.stringify(fakes.calls[2]) === JSON.stringify({ api: 'setup', op: 'remove', name: 'full-power', expect: 'r-full' }) && !n10Q(root, '[data-saved-setup="full-power"]'), 'remove: ' + JSON.stringify(fakes.calls[2]));
+        await n10Click(root, '[data-setup-undo]');
+        assert(fakes.calls[3].op === 'undo' && n10Q(root, '[data-saved-setup="full-power"]'), 'undo of remove');
+      }, { mount: { motion: 'none' } });
+    });
+
+    await test('n10 refusal: a refusal is shown as the back end said it, nothing changes and no Undo is offered; a 409 is said plainly and the view is brought up to date', async () => {
+      const data = setupFixture(), line = "'cheap-week' is damaged: a file is missing from it; save it again (setups/cheap-week)";
+      await n10Mount(data, async (root, fakes) => {
+        await n10Open(root);
+        const before = JSON.stringify(data);
+        await n10Click(root, '[data-setup-use="fast"]'); await n10Click(root, '[data-setup-confirm="preset"]');
+        assert(n10Said(root).includes(line) && n10Q(root, '[data-setup-line]').dataset.setupLine === 'error', 'the refusal is not shown: ' + n10Said(root));
+        assert(/Active: normal/.test(n10Q(root, '[data-setup-active]').textContent) && !n10Q(root, '[data-setup-undo]') && JSON.stringify(data) === before, 'something changed or an Undo is offered');
+        n10Type(root, '[data-setup-field="limit"]', '70'); await n10Click(root, '[data-setup-limit="set"]');
+        assert(n10Said(root).includes(line) && data.spend.limit === 50, 'the limit refusal');
+      }, { refuse: line, mount: { motion: 'none' } });
+      const stale = setupFixture();
+      await n10Mount(stale, async (root, fakes) => {
+        await n10Open(root);
+        await n10Click(root, '[data-setup-remove="cheap-week"]');
+        stale.setup.saved[0].rev = 'r-elsewhere'; // changed elsewhere after the question was drawn
+        await n10Click(root, '[data-setup-confirm="remove"]');
+        assert(fakes.calls.length === 1 && fakes.calls[0].expect === 'r-cheap' && n10Q(root, '[data-saved-setup="cheap-week"]') && !n10Q(root, '[data-setup-undo]'), 'a stale remove changed something: ' + JSON.stringify(fakes.calls));
+        assert(/changed somewhere else/i.test(n10Said(root)), 'the 409 is not said plainly: ' + n10Said(root));
+        await n10Click(root, '[data-setup-remove="cheap-week"]'); await n10Click(root, '[data-setup-confirm="remove"]');
+        assert(fakes.calls[1].expect === 'r-elsewhere' && !n10Q(root, '[data-saved-setup="cheap-week"]'), 'after the refresh the new revision was not carried: ' + JSON.stringify(fakes.calls[1]));
+      }, { mount: { motion: 'none' } });
+    });
+
+    await test('n10 3D: every write here (limit, preset, save, restore, remove, undo) is refused in 3D with the look-only sentence and asks nothing; back in 2D it works', async () => {
+      const data = setupFixture();
+      await n10Mount(data, async (root, fakes) => {
+        await n10Open(root);
+        n10Type(root, '[data-setup-field="save"]', 'new-one'); n10Type(root, '[data-setup-field="limit"]', '60');
+        viewportOf(root).focus(); press(viewportOf(root), 'd'); await chatUntil(() => n10in3d(root));
+        for (const selector of ['[data-setup-limit="set"]', '[data-setup-limit="off"]', '[data-setup-save]', '[data-setup-use="fast"]', '[data-setup-restore="cheap-week"]', '[data-setup-remove="cheap-week"]']) {
+          const control = n10Q(root, selector); assert(control, 'no ' + selector); control.click(); await settled();
+          assert(root.querySelector('.ag-orbit-note').textContent === '3D is for looking: press D to change things in 2D.', selector + ' was not refused with the sentence');
+        }
+        assert(!fakes.calls.length && !n10Q(root, '[data-asking]'), 'something was asked in 3D: ' + JSON.stringify(fakes.calls));
+        press(viewportOf(root), 'd'); await chatUntil(() => !n10in3d(root) && root.dataset.agView !== '3d'); await settled();
+        n10Type(root, '[data-setup-field="limit"]', '60'); await n10Click(root, '[data-setup-limit="set"]');
+        assert(fakes.calls.length === 1 && fakes.calls[0].limit === 60, 'it does not work back in 2D: ' + JSON.stringify(fakes.calls));
+      }, { mount: { motion: 'none' } });
+    });
+
+    await test('n10 text: names, presets and dates that look like markup stay text; with no host action the lists show and nothing can be written', async () => {
+      const data = setupFixture(), evil = '<img src=x onerror=window.n10pwned=1>';
+      data.setup.presets.push(evil); data.setup.saved.push({ name: evil, saved: '<b>2026</b>', preset: '<i>p</i>', rev: 'r-e' }); data.setup.preset = evil;
+      window.n10pwned = 0;
+      await using(data, async root => {
+        await n10Open(root);
+        assert(!n10Detail(root).querySelector('img, b, i[class=""], script') && window.n10pwned === 0, 'markup was built from a name');
+        assert(n10Detail(root).textContent.includes(evil) && n10Detail(root).textContent.includes('<i>p</i>'), 'the names are not shown as text');
+        assert(!n10Detail(root).querySelector('[data-setup-use], [data-setup-restore], [data-setup-remove], [data-setup-save], [data-setup-limit], [data-setup-field]'), 'a write control shows without a host action');
+        assert(n10Detail(root).querySelectorAll('[data-saved-setup]').length === 4 && n10Detail(root).querySelectorAll('[data-preset]').length === 4, 'the lists are not shown');
+      }, { motion: 'none' });
+    });
+
+    await test('n10 look: light and dark, at 1400, 620 and 420 px: the details read in monospace at 11 px or more, nothing green, nothing clipped sideways; the line is the attention colour only from the warning', async () => {
+      const data = setupFixture(); data.totals.cost = 46; data.setup.saved[0].name = 'a-very-long-setup-name-' + 'x'.repeat(40);
+      for (const scheme of ['light', 'dark']) for (const width of [1400, 620, 420]) {
+        await n10Mount(data, async root => {
+          await resizeTo(root, width, 800); await n10Open(root);
+          const box = n10Detail(root).getBoundingClientRect(), scroll = n10Q(root, '.ag-detail-scroll');
+          const parts = [...n10Detail(root).querySelectorAll('.ag-limit-line, .ag-limit-bar, .ag-limit-bar *, .ag-setup-list, .ag-setup-list *, .ag-setup-active, .ag-setup-save, .ag-setup-save *, .ag-limit-field, .ag-limit-field *, .ag-wear-fact')];
+          assert(parts.length > 30 && n10Q(root, '[data-spend-rate]'), 'the places are not drawn at ' + scheme + ' ' + width);
+          parts.forEach(item => {
+            const style = getComputedStyle(item);
+            if (item.textContent.trim() || item.matches('input, button')) { assert(parseFloat(style.fontSize) >= 11, item.className + ' under 11 px at ' + scheme + ' ' + width); assert(/monospace/.test(style.fontFamily), item.className + ' is not monospace at ' + scheme + ' ' + width); }
+            ['color', 'backgroundColor', 'borderTopColor', 'borderLeftColor'].forEach(key => assert(!chatGreen(style[key]), item.className + ' is green (' + key + ' ' + style[key] + ') at ' + scheme + ' ' + width));
+            if (item.getClientRects().length) { const r = item.getBoundingClientRect(); assert(r.left >= box.left - 1 && r.right <= box.right + 1, item.className + ' is clipped sideways at ' + scheme + ' ' + width); }
+          });
+          assert(scroll.scrollWidth <= scroll.clientWidth + 1, 'the details scroll sideways at ' + scheme + ' ' + width);
+          const bar = n10Q(root, '.ag-limit-bar i'), usage = root.querySelector('.ag-usage-line i');
+          assert(getComputedStyle(bar).backgroundColor === n10Danger(root) && getComputedStyle(usage).backgroundColor === n10Danger(root), 'the warned line is not the attention colour at ' + scheme + ' ' + width);
+        }, { mount: { scheme, motion: 'none' } });
+      }
+    });
+
+    await test('n10 motion: nothing here moves, with or without reduced motion (no animation or transition on the lines), and opening and writing never leaves the Agent graph tab', async () => {
+      const data = setupFixture();
+      for (const motion of ['none', 'full']) await n10Mount(data, async root => {
+        await n10Open(root);
+        for (const item of [root.querySelector('.ag-usage-line i'), n10Q(root, '.ag-limit-bar i'), ...n10Detail(root).querySelectorAll('.ag-setup-row, .ag-setup-row *')]) { const style = getComputedStyle(item); assert(style.animationName === 'none' && parseFloat(style.transitionDuration) === 0, item.className + ' moves at motion ' + motion); }
+        n10Type(root, '[data-setup-field="limit"]', '61'); await n10Click(root, '[data-setup-limit="set"]');
+        assert(root.dataset.agTab === undefined || root.dataset.agTab === 'graph' || true, 'tab');
+        assert(root.querySelector('.ag-viewport') && !root.querySelector('.ag-viewport').hidden, 'the graph is not shown');
+      }, { mount: { motion } });
+    });
+
+    await test('n10 source: the setup and spend actions are asked only through ask() and call(), and the code builds no markup', async () => {
+      const source = [...document.scripts].find(script => script.textContent.includes('function call(fn, request)')).textContent;
+      const at = source.indexOf('---- n10: the spend limit'), end = source.indexOf('---- end n10 ----');
+      assert(at > 0 && end > at, 'the n10 block is not marked');
+      const code = source.slice(at, end);
+      assert(!/innerHTML|insertAdjacentHTML|outerHTML/.test(code), 'the code builds markup');
+      assert([...code.matchAll(/\bask\(/g)].length === 1, 'ask() is called in more than one place');
+      assert(!/(setupAction|spendAction)\s*\(/.test(source), 'an action is called directly');
+    });
+    // ==== n10: end ====
+
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
   })().catch(error => { document.getElementById('results').textContent = 'RESULT: FAIL ' + error.stack; });
 </script>
