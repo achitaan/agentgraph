@@ -4967,10 +4967,17 @@
           await resizeTo(root, 1300, 850); await settle();
           // The third loop dragged towards the first until its line runs beside it.
           const mid = names => { const ps = names.map(name => at(root, name)); return [ps.reduce((s, p) => s + p[0], 0) / ps.length, ps.reduce((s, p) => s + p[1], 0) / ps.length]; };
-          // Beside it on the side away from the loop crossing it, so the side-by-side lines run 30 px apart.
+          // Beside it, so the side-by-side lines run 30 px apart, on the side with the most free room (as a user drags into
+          // free space): away from the loop crossing it and from every other agent, inside the canvas.
           const scale = root.querySelector('.ag-drawing > g').getCTM().a, a = mid(['explorer', 'oracle-lite']), c = mid(['oracle-lite', 'verifier']), z = mid(['researcher', 'designer']);
-          const d = Math.hypot(a[0] - c[0], a[1] - c[1]) || 1, goal = 82 * 2 + 30, from = centre(root, 'researcher');
-          dragTo(root, 'researcher', { x: from.x + (a[0] + (a[0] - c[0]) / d * goal - z[0]) * scale, y: from.y + (a[1] + (a[1] - c[1]) / d * goal - z[1]) * scale }, 12); await settled();
+          const goal = 82 * 2 + 30, from = centre(root, 'researcher'), rest = renderedNames(root).map(([name]) => name).filter(name => !['researcher', 'designer'].includes(name));
+          const box = viewportOf(root).getBoundingClientRect(), side = Array.from({ length: 24 }, (_, k) => {
+            const angle = k * Math.PI / 12, t = [a[0] + Math.cos(angle) * goal, a[1] + Math.sin(angle) * goal], to = { x: from.x + (t[0] - z[0]) * scale, y: from.y + (t[1] - z[1]) * scale };
+            const ox = to.x + (z[0] - at(root, 'researcher')[0]) * scale, oy = to.y + (z[1] - at(root, 'researcher')[1]) * scale;
+            const room = Math.min(Math.hypot(t[0] - c[0], t[1] - c[1]) - 82, ...rest.map(name => Math.hypot(t[0] - at(root, name)[0], t[1] - at(root, name)[1])), (ox - box.left) / scale, (box.right - ox) / scale, (oy - box.top - 44) / scale, (box.bottom - oy) / scale);
+            return { to, room };
+          }).sort((one, two) => two.room - one.room)[0];
+          dragTo(root, 'researcher', side.to, 12); await settled();
           const gapOf = (one, two) => Math.min(...ringSteps(root, one).flatMap(step => pointsOf(step, 60)).map(p => Math.min(...ringSteps(root, two).flatMap(step => pointsOf(step, 60)).map(q => Math.hypot(p.x - q.x, p.y - q.y)))));
           const gap = gapOf('next', 'far');
           counts.gap = Math.round(gap);

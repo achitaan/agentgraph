@@ -656,6 +656,9 @@
     const boxGap = (a, b) => Math.max(a.left - b.right, b.left - a.right, a.top - b.bottom, b.top - a.bottom);
     // How far shape `m` comes into shape `o` (0: clear), and how far a shape comes into the inside of a circle (c, R).
     const clashOf = (m, o) => Math.max(0, m.r + o.r + 14 - Math.hypot(m.x - o.x, m.y - o.y)) + Math.max(0, o.r + 4 - boxNear(m.box, o.x, o.y)) + Math.max(0, m.r + 4 - boxNear(o.box, m.x, m.y)) + Math.max(0, 4 - boxGap(m.box, o.box));
+    // How far a circle (c, R) actually runs through or round a shape, and how far two shapes actually overlap.
+    const realOf = (s, x, y, R) => Math.max(0, R + s.r - Math.hypot(s.x - x, s.y - y)) + Math.max(0, R - boxNear(s.box, x, y));
+    const hitOf = (m, o) => Math.max(0, m.r + o.r - Math.hypot(m.x - o.x, m.y - o.y)) + Math.max(0, o.r - boxNear(m.box, o.x, o.y)) + Math.max(0, m.r - boxNear(o.box, m.x, m.y)) + Math.max(0, -boxGap(m.box, o.box));
     const insideOf = (s, x, y, R) => Math.max(0, R + s.r + RING_SPACE - Math.hypot(s.x - x, s.y - y)) + Math.max(0, R + RING_SPACE - boxNear(s.box, x, y));
     function placeRings(rings, placed, targets, placedByUser, canvas) {
       const byName = new Map(targets.map(target => [target.name, target])), movers = new Set(rings.flatMap(ring => ring.movable).filter(name => !byName.get(name)?.pinned)), bands = [];
@@ -669,7 +672,9 @@
       const half = Math.max(canvas.width / 2 - EDGE, (area.right - area.left) / 2), halfY = Math.max(canvas.height / 2 - EDGE - 44, (area.bottom - area.top) / 2);
       const centre = (area.left + area.right) / 2, middle = (area.top + area.bottom) / 2;
       // The best place for one loop's circle, its `movable` agents moving onto it (null: it cannot be drawn).
-      const search = ring => {
+      // `ahead`: later loops through one of this loop's moving agents (and otherwise free): each needs room on the far side
+      // of that agent, touching this circle there, so this circle leaves it.
+      const search = (ring, ahead = []) => {
         const count = ring.names.length, radius = Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / count))), step = Math.PI * 2 / count;
         const spots = ring.names.map(name => byName.has(name) ? at(byName.get(name)) : null);
         if (spots.some(spot => !spot)) return;
@@ -702,6 +707,15 @@
             if (best && bad > best.bad + 1e-6) return;
             moved += Math.hypot(px - spots[i].x, py - spots[i].y); made.push([name, px, py]); list.push(m);
           }
+          for (const next of ahead) {
+            const spot = made.find(([name]) => name === next.name);
+            if (!spot) continue;
+            const nx = spot[1] + (spot[1] - x) / radius * next.radius, ny = spot[2] + (spot[2] - y) / radius * next.radius, skip = new Set([...ring.names, ...next.names]);
+            for (const s of shapes) if (!skip.has(s.name)) bad += insideOf(s, nx, ny, next.radius);
+            for (const s of list) if (!next.names.includes(s.name)) bad += insideOf(s, nx, ny, next.radius);
+            bands.forEach(band => { if (!band.names.some(name => next.names.includes(name))) bad += Math.max(0, next.radius + band.r + RING_APART - Math.hypot(nx - band.x, ny - band.y)); });
+            if (best && bad > best.bad + 1e-6) return;
+          }
           list.push({ x, y, r: radius, box: { left: x, right: x, top: y, bottom: y } });
           const e = extent(list), grown = Math.max(0, area.left - e.left) + Math.max(0, e.right - area.right) + Math.max(0, area.top - e.top) + Math.max(0, e.bottom - area.bottom);
           const cost = moved + 3 * grown + 1000 * (Math.max(0, centre - half - e.left) + Math.max(0, e.right - centre - half) + Math.max(0, middle - halfY - e.top) + Math.max(0, e.bottom - middle - halfY));
@@ -728,24 +742,55 @@
         }
         return best;
       };
-      rings.forEach(full => {
-        // An agent the user put somewhere stays there and the circle goes through it, unless the circle would then run
-        // into something; then it moves onto a circle in free space like the rest.
-        let ring = { ...full, movable: full.movable.filter(name => !byName.get(name)?.pinned) }, best = search(ring);
-        if (ring.movable.length < full.movable.length && (!best || best.bad > .5)) { const other = search(full); if (other && (!best || other.bad < best.bad)) { ring = full; best = other; } }
-        if (!best) return;
-        const count = ring.names.length, radius = Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / count)));
-        const shift = placedByUser[ring.key], sx = shift && Number.isFinite(shift.dx) ? shift.dx : 0, sy = shift && Number.isFinite(shift.dy) ? shift.dy : 0;
-        best.made.forEach(([name, x, y]) => {
-          const body = placed.get(name);
-          if (!body) return;
-          Object.assign(body, { x: x + sx, y: y + sy, still: true, ring: ring.key });
-          const stayed = shapes.findIndex(shape => shape.name === name);
-          if (stayed >= 0) shapes.splice(stayed, 1);
-          shapes.push(shapeOf(byName.get(name), body));
+      // One pass over the loops in order. `looking`: the loops that leave room for a later loop through one of their agents.
+      const pass = looking => {
+        const results = [];
+        rings.forEach((full, index) => {
+          const ahead = !looking.has(index) ? [] : rings.slice(index + 1).flatMap(next => {
+            const common = next.names.filter(name => full.movable.includes(name));
+            if (common.length !== 1 || next.names.some(name => name !== common[0] && (!next.movable.includes(name) || byName.get(name)?.pinned))) return [];
+            return [{ name: common[0], names: next.names, radius: Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / next.names.length))) }];
+          });
+          // An agent the user put somewhere stays there and the circle goes through it, unless the circle would then run
+          // into something; then it moves onto a circle in free space like the rest.
+          let ring = { ...full, movable: full.movable.filter(name => !byName.get(name)?.pinned) }, best = search(ring, ahead);
+          if (ring.movable.length < full.movable.length && (!best || best.bad > .5)) { const other = search(full, ahead); if (other && (!best || other.bad < best.bad)) { ring = full; best = other; } }
+          const count = ring.names.length, radius = Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / count)));
+          results.push(best ? { bad: best.bad, x: best.x, y: best.y, radius, names: ring.names, made: best.made.map(([name]) => name) } : null);
+          if (!best) return;
+          const shift = placedByUser[ring.key], sx = shift && Number.isFinite(shift.dx) ? shift.dx : 0, sy = shift && Number.isFinite(shift.dy) ? shift.dy : 0;
+          best.made.forEach(([name, x, y]) => {
+            const body = placed.get(name);
+            if (!body) return;
+            Object.assign(body, { x: x + sx, y: y + sy, still: true, ring: ring.key });
+            const stayed = shapes.findIndex(shape => shape.name === name);
+            if (stayed >= 0) shapes.splice(stayed, 1);
+            shapes.push(shapeOf(byName.get(name), body));
+          });
+          bands.push({ x: best.x + sx, y: best.y + sy, r: radius, names: ring.names });
         });
-        bands.push({ x: best.x + sx, y: best.y + sy, r: radius, names: ring.names });
+        return results;
+      };
+      // Earlier loops stay where they are when a loop is added. Only when a later loop through an agent of an earlier one
+      // then has no clear place does that earlier loop go where it leaves room for it (still a function of the loops
+      // drawn, so removing one puts every agent back).
+      const bodies = [...new Set(rings.flatMap(ring => ring.movable))].map(name => placed.get(name)).filter(Boolean), saved = bodies.map(body => ({ body, x: body.x, y: body.y, still: body.still, ring: body.ring })), shapes0 = shapes.slice();
+      // No clear place: its line or a moved agent actually runs into an agent or a name (not only into the margins).
+      const blocked = result => !result || shapes.some(s => !result.names.includes(s.name) && (realOf(s, result.x, result.y, result.radius) > 1 || result.made.some(name => { const m = shapes.find(t => t.name === name); return m && hitOf(m, s) > 1; })));
+      const first = pass(new Set()), looking = new Set();
+      first.forEach((result, k) => {
+        if (!blocked(result)) return;
+        const fixedOn = rings[k].names.filter(name => !rings[k].movable.includes(name));
+        rings.forEach((earlier, j) => { if (j < k && fixedOn.length === 1 && earlier.movable.includes(fixedOn[0]) && !blocked(first[j])) looking.add(j); });
       });
+      if (!looking.size) return;
+      const keep = { bodies: bodies.map(body => ({ body, x: body.x, y: body.y, still: body.still, ring: body.ring })), shapes: shapes.slice(), bands: bands.slice() };
+      saved.forEach(({ body, x, y, still, ring }) => Object.assign(body, { x, y, still, ring }));
+      shapes.splice(0, shapes.length, ...shapes0); bands.length = 0;
+      const second = pass(looking), worse = list => list.filter(blocked).length;
+      if (worse(second) < worse(first)) return;
+      keep.bodies.forEach(({ body, x, y, still, ring }) => Object.assign(body, { x, y, still, ring }));
+      shapes.splice(0, shapes.length, ...keep.shapes); bands.splice(0, bands.length, ...keep.bands);
     }
     function positionStore() { try { return typeof localStorage === 'undefined' ? null : localStorage; } catch (_) { return null; } }
     function loadMoves() {
