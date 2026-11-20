@@ -18,6 +18,7 @@ from .contract import (
 )
 from .sources import find_graph_dir, graph_files, graph_from_raw, read_graph_text
 from .snapshot_json import flow_steps, hub_names, is_self_loop, load_structure
+from .teams import problems as team_problems
 
 
 _NODE_STRINGS = ("id", "type", "agent", "goal", "done_when", "status")
@@ -292,12 +293,13 @@ def print_flows(flows) -> None:
             _print(f"      {line}" if line.strip() else "")
 
 
-def _graph_and_issues(raw: dict, path: Path, flows=(), hubs=frozenset(), seats=None) -> tuple[TaskGraph, list[str]]:
+def _graph_and_issues(raw: dict, path: Path, flows=(), hubs=frozenset(), seats=None,
+                      teams=()) -> tuple[TaskGraph, list[str]]:
     issues = _raw_issues(raw)
     graph = graph_from_raw(raw, path)
     if issues:
         return graph, issues
-    issues = validate(graph) + flow_problems(graph, flows, hubs, seats)
+    issues = validate(graph) + flow_problems(graph, flows, hubs, seats) + team_problems(teams, graph, seats or {})
     for node in graph.nodes:
         if node.type not in NODE_TYPES:
             issues.append(f"{node.id} has unknown type {node.type!r}")
@@ -330,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
     flows = shape["flows"] if shape else []
     hubs = hub_names(shape)
     seats = shape["seats"] if shape else {}
+    teams = shape.get("teams", []) if shape else []  # the groups: agents that report to one lead
 
     discovery_warnings: list[str] = []
     try:
@@ -360,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
         if raw is not None:
             if args.task is not None and raw.get("task") != args.task:
                 continue  # Another task's graph: never validated, so it cannot slow this check.
-            graph, issues = _graph_and_issues(raw, path, flows, hubs, seats)
+            graph, issues = _graph_and_issues(raw, path, flows, hubs, seats, teams)
         if graph is None:
             # A non-object is readable JSON with a schema problem; preserve
             # the CLI's distinction between it and a read or decode failure.

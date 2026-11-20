@@ -322,9 +322,26 @@ def _files(teams_fd: int | None) -> set[str]:
     return {name[:-3] for name in os.listdir(teams_fd) if name.endswith(".md") and FLOW_ID.fullmatch(name[:-3])}
 
 
-def _regular(teams_fd: int, team_id: str) -> None:
+def _regular(teams_fd: int, team_id: str) -> bytes:
+    """The bytes of a team's file, refused unless it is a regular file (never through a symlink)."""
     if not stat.S_ISREG(os.lstat(team_id + ".md", dir_fd=teams_fd).st_mode):
         raise TeamError(f"team {team_id} is not a regular file; it was left unchanged")
+    return _bytes(teams_fd, team_id)
+
+
+def _bytes(teams_fd: int, team_id: str) -> bytes | None:
+    try:
+        handle = os.open(team_id + ".md", os.O_RDONLY | _NOFOLLOW, dir_fd=teams_fd)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(handle, "rb") as stream:
+        return stream.read(4 * FLOW_TEXT_LIMIT + 8192)
+
+
+def _unchanged(teams_fd: int, team_id: str, before: bytes) -> None:
+    """Refuse when the file is no longer what this write read (another program wrote it meanwhile)."""
+    if _bytes(teams_fd, team_id) != before:
+        raise TeamError(f"team {team_id} changed while this edit was being made; nothing was written. Try again.")
 
 
 def _write(teams_fd: int, name: str, data: bytes, *, new: bool) -> None:
@@ -413,11 +430,12 @@ def set_text(team_id, text, structure_dir: Path | None = None) -> dict:
         teams_fd = _open_teams(root_fd, False)
         try:
             found = _find(teams_fd, team_id)
-            _regular(teams_fd, found)
+            before = _regular(teams_fd, found)
             team = _team(_load(root, shape)[0], found)
             if not text.strip():
                 text = team_text(team["lead"], team["members"], _hub(shape))
             if text != team["text"]:
+                _unchanged(teams_fd, found, before)
                 _write(teams_fd, found + ".md", team_file(team["lead"], team["members"], text), new=False)
         finally:
             if teams_fd is not None:
@@ -434,13 +452,14 @@ def set_members(team_id, members, structure_dir: Path | None = None) -> tuple[di
         teams_fd = _open_teams(root_fd, False)
         try:
             found = _find(teams_fd, team_id)
-            _regular(teams_fd, found)
+            before = _regular(teams_fd, found)
             loaded, _ = _load(root, shape)
             team = _team(loaded, found)
             others = [other for other in loaded if other["id"] != found]
             lead, members, notes = _refusal(shape, team["lead"], members, others)
             text = team_text(lead, members, _hub(shape)) if team["generated"] else team["text"]
             if members != team["members"] or text != team["text"]:
+                _unchanged(teams_fd, found, before)
                 _write(teams_fd, found + ".md", team_file(lead, members, text), new=False)
         finally:
             if teams_fd is not None:
@@ -458,8 +477,9 @@ def remove(team_id, structure_dir: Path | None = None) -> dict:
         teams_fd = _open_teams(root_fd, False)
         try:
             found = _find(teams_fd, team_id)
-            _regular(teams_fd, found)
+            before = _regular(teams_fd, found)
             gone = next((team for team in _load(root, shape)[0] if team["id"] == found), {"id": found})
+            _unchanged(teams_fd, found, before)
             os.unlink(found + ".md", dir_fd=teams_fd)
             empty = not os.listdir(teams_fd)
         finally:

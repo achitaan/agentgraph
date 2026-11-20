@@ -137,7 +137,7 @@ class Loader(unittest.TestCase):
         # `checks: all` is no longer a setting: it connects nothing and is read as the start of the description.
         (self.root / "30-verify/reviewer.md").write_text("checks: all\n\nReviews.\n")
         doc = snapshot_json.snapshot_document(demo_snapshot(1000), "demo", structure=snapshot_json.load_structure(self.root))
-        self.assertEqual(sorted(doc["structure"]), ["flows", "source"])
+        self.assertEqual(sorted(doc["structure"]), ["flows", "source", "teams"])
         self.assertEqual(doc["structure"]["flows"], [{"id": "impl-openai-verifier-impl-openai", "path": ["impl-openai", "verifier", "impl-openai"],
                                                       "text": LOOP, "source": "drawn"}])
         self.assertTrue(all("checks" not in agent for agent in doc["agents"]))
@@ -145,7 +145,7 @@ class Loader(unittest.TestCase):
 
     def test_builtin_snapshot_has_no_flows(self):
         doc = snapshot_json.snapshot_document(demo_snapshot(1000), "demo")
-        self.assertEqual(doc["structure"], {"source": "builtin", "flows": []})
+        self.assertEqual(doc["structure"], {"source": "builtin", "flows": [], "teams": []})
 
 
 class Text(unittest.TestCase):
@@ -804,7 +804,7 @@ class EveryPair(unittest.TestCase):
             if path.name != "README.md":
                 self.assertFalse(any(line.strip().lower().startswith("checks:") for line in path.read_text().splitlines()), path)
         doc = snapshot_json.snapshot_document(demo_snapshot(1000), "demo", structure=self.shape)
-        self.assertEqual(doc["structure"], {"source": "folder", "flows": []})
+        self.assertEqual(doc["structure"], {"source": "folder", "flows": [], "teams": []})
         self.assertEqual(self.shape["warnings"], [])
 
     def test_the_flows_folder_is_ignored_by_git(self):

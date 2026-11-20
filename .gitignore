@@ -11,3 +11,5 @@ cost-settings.jsonl
 
 # Flows drawn in the agent graph: each user's own standing instructions.
 structure/flows/
+# Groups (teams) drawn in the agent graph: also each user's own.
+structure/teams/

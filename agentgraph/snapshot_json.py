@@ -341,7 +341,7 @@ def load_structure(directory: Path | None = None) -> dict | None:
     except OSError:
         return None
     shape: dict = {"groups": [], "titles": {}, "group_of": {}, "pool": {}, "escalation": [], "seats": {}, "about": {},
-                   "files": {}, "flows": [], "warnings": []}
+                   "files": {}, "flows": [], "teams": [], "warnings": []}
     for folder in folders:
         group = re.sub(r"^\d+[-_]", "", folder.name)
         if not group or group in shape["titles"]:
@@ -376,7 +376,18 @@ def load_structure(directory: Path | None = None) -> dict | None:
     if not shape["groups"]:
         return None
     load_flows(root, shape)
+    load_teams(root, shape)
     return shape
+
+
+def load_teams(root: Path, shape: dict) -> None:
+    """Read `teams/` into shape["teams"] ({"id", "lead", "members", "text"}, in id order) with the rules of
+    agentgraph.teams; a file it cannot use is skipped with a warning. None without a `teams/` folder."""
+    from . import teams  # teams imports this module
+    agents = {"group_of": shape["group_of"], "seats": shape["seats"], "hubs": sorted(hub_names(shape))}
+    found, warnings = teams._load(root, agents)
+    shape["teams"] = [{key: team[key] for key in ("id", "lead", "members", "text")} for team in found]
+    shape["warnings"].extend(warnings)
 
 
 class _Shape:
@@ -417,6 +428,10 @@ class _Shape:
     @property
     def warnings(self) -> list[str]:
         return list(self.structure.get("warnings", [])) if self.structure else []
+
+    def teams(self) -> list[dict]:
+        """The groups (teams): {"id", "lead", "members", "text"}; none without a structure folder."""
+        return [dict(team, members=list(team["members"])) for team in (self.structure.get("teams", []) if self.structure else [])]
 
     def flows(self) -> list[dict]:
         """The drawn flows: {"id", "path", "text", "source": "drawn"}."""
@@ -505,7 +520,7 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
         "root": {**_session_document(root), "agent": root.agent, "directory": root.directory,
                  "wear": root.wear}
         if root is not None else None,
-        "structure": {"source": "folder" if structure else "builtin", "flows": shape.flows()},
+        "structure": {"source": "folder" if structure else "builtin", "flows": shape.flows(), "teams": shape.teams()},
         "groups": [{"id": group, "title": shape.title(group),
                     "agents": [agent["name"] for agent in agents]}
                    for group, agents in grouped.items()],
@@ -522,7 +537,8 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
 _LEDGER_HOMES = {"ultra-fast": "memory-o2"}
 
 
-def learning_document(home_root: Path | None = None, config_dir: Path | None = None) -> dict | None:
+def learning_document(home_root: Path | None = None, config_dir: Path | None = None,
+                      config_path: Path | None = None) -> dict | None:
     """What the ledger has stored for the active preset: the user's notes in
     their own words, whether a prompt change is due, and each agent's record
     over recorded runs. None when there is no ledger to read."""
@@ -531,7 +547,8 @@ def learning_document(home_root: Path | None = None, config_dir: Path | None = N
         root = Path(home_root) if home_root is not None else ORCHESTRATION_GRAPH_DIR.parent.parent
         preset = ""
         try:
-            config = json.loads((Path(config_dir or CONFIG_DIR) / "oh-my-opencode-slim.json").read_text())
+            path = Path(config_path) if config_path is not None else Path(config_dir or CONFIG_DIR) / "oh-my-opencode-slim.json"
+            config = json.loads(path.read_text())
             preset = str(config.get("preset") or "")
         except Exception:  # noqa: BLE001
             pass
@@ -565,11 +582,13 @@ def learning_document(home_root: Path | None = None, config_dir: Path | None = N
         return None
 
 
-def skills_document(config_dir: Path | None = None) -> list[dict]:
-    """The installed skills: name and one-line description, read from the head of each SKILL.md."""
+def skills_document(config_dir: Path | None = None, *, skills_dir: Path | None = None) -> list[dict]:
+    """The installed skills: name and one-line description, read from the head of each SKILL.md
+    (in `skills_dir`, default the `skills` folder of `config_dir`)."""
     found: list[dict] = []
+    folder_of_skills = Path(skills_dir) if skills_dir is not None else Path(config_dir or CONFIG_DIR) / "skills"
     try:
-        folders = sorted(path for path in (Path(config_dir or CONFIG_DIR) / "skills").iterdir() if path.is_dir())[:200]
+        folders = sorted(path for path in folder_of_skills.iterdir() if path.is_dir())[:200]
     except OSError:
         return found
     for folder in folders:
@@ -598,10 +617,12 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
     document = snapshot_document(snapshot, source, task, session=session,
                                  structure=load_structure() if source == "live" else None)
     if source == "live":
-        from . import skillset  # skillset imports this module
+        from . import roster, skillfiles, skillset  # each imports this module
         document["learning"] = _json_safe(learning_document())
         document["skills"] = skills_document()
         skillset.annotate(document)
+        roster.annotate(document)
+        skillfiles.annotate(document)
     return document
 
 

@@ -140,7 +140,7 @@ class SnapshotDocumentTests(unittest.TestCase):
             doc = document()
             agents = {agent["name"]: agent for agent in doc["agents"]}
             # The structure carries its drawn flows only (no default loops); tests/test_structure.py covers them.
-            self.assertEqual((doc["structure"]["source"], sorted(doc["structure"])), ("folder", ["flows", "source"]))
+            self.assertEqual((doc["structure"]["source"], sorted(doc["structure"])), ("folder", ["flows", "source", "teams"]))
             self.assertEqual([group["id"] for group in doc["groups"]], ["hub", "council", "build", "check"])
             self.assertEqual(agents["reviewer"]["group"], "check")
             self.assertNotIn("checks", agents["reviewer"])
@@ -162,7 +162,7 @@ class SnapshotDocumentTests(unittest.TestCase):
             self.assertEqual(doc["groups"][-1], {"id": "scouts", "title": "Scouts", "agents": ["explorer"]})
         # Without a structure the built-in table is used, unchanged.
         plain = snapshot_json.snapshot_document(demo_snapshot(1000), "demo")
-        self.assertEqual((plain["structure"]["source"], sorted(plain["structure"])), ("builtin", ["flows", "source"]))
+        self.assertEqual((plain["structure"]["source"], sorted(plain["structure"])), ("builtin", ["flows", "source", "teams"]))
         self.assertEqual([group["id"] for group in plain["groups"]], ["hub", "understand", "decide", "council", "build", "verify"])
 
     def test_an_agent_carries_the_description_from_its_structure_file(self):

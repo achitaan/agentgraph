@@ -378,6 +378,43 @@ class Problems(unittest.TestCase):
         self.assertIn("b (impl-claude)", message)
 
 
+class ChangedUnderneath(Base):
+    """A team file another program rewrites between this write's read and its replace is refused, never overwritten."""
+
+    def setUp(self):
+        super().setUp()
+        teams.add("reviewer", ["impl-openai", "impl-claude"], structure_dir=self.root)
+        self.path = self.root / "teams" / "reviewer.md"
+
+    def meanwhile(self, data=b"lead: reviewer\nmembers: designer\n\nEdited by hand.\n"):
+        real = teams._load
+        calls = []
+
+        def load(*args, **kwargs):
+            answer = real(*args, **kwargs)
+            if not calls:
+                self.path.write_bytes(data)
+            calls.append(1)
+            return answer
+        return unittest.mock.patch.object(teams, "_load", side_effect=load), data
+
+    def check(self, call, *args):
+        patcher, data = self.meanwhile()
+        with patcher, self.assertRaises(teams.TeamError) as caught:
+            call(*args, structure_dir=self.root)
+        self.assertIn("changed while this edit was being made", str(caught.exception))
+        self.assertEqual(self.path.read_bytes(), data, "the other program's edit was overwritten")
+
+    def test_set_text_refuses(self):
+        self.check(teams.set_text, "reviewer", "Mine.")
+
+    def test_set_members_refuses(self):
+        self.check(teams.set_members, "reviewer", ["designer", "researcher"])
+
+    def test_remove_refuses(self):
+        self.check(teams.remove, "reviewer")
+
+
 class Command(Base):
     def run_main(self, *argv, stdin=None):
         out, err = io.StringIO(), io.StringIO()

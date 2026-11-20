@@ -372,12 +372,34 @@ def _show(flow: dict) -> str:
     return f"{flow['id']}: {arrow(flow['path'])}\n" + "".join(f"    {line}\n" for line in flow["text"].split("\n"))
 
 
+def _list_teams(directory: Path | None, as_json: bool) -> int:
+    """`structure teams`: the groups as `agentgraph team list` prints them."""
+    from . import teams  # teams imports this module
+    try:
+        found, warnings = teams.read_teams(directory)
+    except (StructureError, OSError) as exc:
+        if as_json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"agentgraph structure: {exc}", file=sys.stderr)
+        return 1
+    if as_json:
+        print(json.dumps({"teams": found, **({"warnings": warnings} if warnings else {})}))
+        return 0
+    for warning in warnings:
+        print(warning, file=sys.stderr)
+    print("".join(teams._show(item) for item in found) if found else "no groups", end="" if found else "\n")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentgraph structure", description=__doc__.splitlines()[0])
     parser.add_argument("--structure", type=Path, metavar="DIR", help="structure folder (default: the orchestration's own)")
     commands = parser.add_subparsers(dest="command", required=True)
     listed = commands.add_parser("flows", help="list the drawn flows: what a new task graph must follow")
     listed.add_argument("--json", action="store_true", help='print {"flows": [...]}')
+    grouped = commands.add_parser("teams", help="list the groups: agents that report to one lead (agentgraph team ...)")
+    grouped.add_argument("--json", action="store_true", help='print {"teams": [...]}')
     flow = commands.add_parser("flow", help="add a flow, change its instruction or remove it")
     actions = flow.add_subparsers(dest="action", required=True)
     add = actions.add_parser("add", help="add a flow along AGENT AGENT [AGENT ...]")
@@ -389,7 +411,7 @@ def main(argv: list[str] | None = None) -> int:
     text.add_argument("--text-file", metavar="F", required=True, help="the instruction from file F, or - for standard input")
     remove = actions.add_parser("remove", help="remove flow ID")
     remove.add_argument("id", metavar="ID")
-    subparsers = [listed, flow, add, text, remove]
+    subparsers = [listed, grouped, flow, add, text, remove]
     for command in subparsers:
         command.add_argument("--structure", type=Path, metavar="DIR", default=argparse.SUPPRESS,
                              help="structure folder (default: the orchestration's own)")
@@ -399,6 +421,8 @@ def main(argv: list[str] | None = None) -> int:
     action = getattr(args, "action", None)
     notes: list[str] = []
     result: dict = {}
+    if args.command == "teams":
+        return _list_teams(args.structure, args.json)
     try:
         if args.command == "flows":
             flows = flows_of(_shape(args.structure))
