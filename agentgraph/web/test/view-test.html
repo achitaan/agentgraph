@@ -5100,6 +5100,318 @@
       });
     }
     // ---- geometry lane (n103) ----
+    // ---- orbit lane (n105) ----
+    {
+      // The real roster (fifteen agents, the council with three seats) with six paths, three of them loops.
+      const N105_PATHS = [{ id: 'p1', path: ['explorer', 'oracle-lite', 'explorer'] }, { id: 'p2', path: ['researcher', 'designer', 'researcher'] }, { id: 'p3', path: ['reviewer', 'impl-hard', 'impl-openai', 'impl-hard'] },
+        { id: 'p4', path: ['impl-claude', 'verifier'] }, { id: 'p5', path: ['oracle', 'impl-claude'] }, { id: 'p6', path: ['council', 'oracle'] }];
+      const n105Data = () => { const data = trialRoster(); data.structure = { source: 'folder', flows: N105_PATHS.map(flow => ({ ...flow, path: [...flow.path], text: flow.id, source: 'drawn' })), teams: [] }; return data; };
+      const frame = () => new Promise(resolve => requestAnimationFrame(() => resolve()));
+      const until = async (condition, ms = 1500) => { const end = performance.now() + ms; while (!condition() && performance.now() < end) await sleep(15); return condition(); };
+      const in3d = root => root.dataset.agView === '3d' && root.dataset.agBlend === '1';
+      const in2d = root => root.dataset.agView === '2d' && root.dataset.agBlend === '0';
+      const turnOf = root => Number(root.dataset.agTurn), tiltOf = root => Number(root.dataset.agElevation), framesOf = root => Number(root.dataset.agFrames);
+      // The whole 2D picture as numbers: the camera, every agent and every drawn line.
+      const pictureOf = root => JSON.stringify([root.querySelector('.ag-drawing > g').getAttribute('transform'), [...root.querySelectorAll('.ag-drawing [data-agent]')].map(node => node.dataset.agent + ' ' + node.getAttribute('transform') + ' ' + (node.style.opacity || '1')),
+        [...root.querySelectorAll('.ag-route-step, .ag-team-edge, line[data-edge]')].map(line => ['d', 'x1', 'y1', 'x2', 'y2'].map(key => line.getAttribute(key)).join(' ')), [...root.querySelectorAll('.ag-nodes > [data-agent]')].map(node => node.dataset.agent).join()]);
+      const emptySpot = root => {
+        const view = viewportOf(root).getBoundingClientRect();
+        for (let y = view.top + 70; y < view.bottom - 40; y += 23) for (let x = view.left + 30; x < view.right - 60; x += 29) {
+          const under = document.elementFromPoint(x, y);
+          if (under && viewportOf(root).contains(under) && !under.closest('[data-agent], [data-route], [data-team-line], [data-loop-id], [data-work-loop-id]') && !lineAtSpot(root, { x, y })) return { x, y };
+        }
+        throw new Error('no empty spot');
+      };
+      const lineAtSpot = (root, p) => document.elementsFromPoint(p.x, p.y).some(item => item.matches?.('.ag-route-hit, .ag-team-hit, .ag-line-hit'));
+      // A drag of the pointer (id 1) from p by (dx, dy) in steps; `hold` leaves it pressed.
+      function dragBy(root, p, dx, dy, { steps = 6, hold = false } = {}) {
+        pointerAt(document.elementFromPoint(p.x, p.y), 'pointerdown', p);
+        for (let i = 1; i <= steps; i++) pointerAt(viewportOf(root), 'pointermove', { x: p.x + dx * i / steps, y: p.y + dy * i / steps });
+        if (!hold) pointerAt(viewportOf(root), 'pointerup', { x: p.x + dx, y: p.y + dy });
+      }
+      const topmost = (root, name) => { const c = centre(root, name); return document.elementFromPoint(c.x, c.y)?.closest('[data-agent]')?.dataset.agent === name; };
+      // Turn (by keys) until the named agents are each in front at their centres.
+      async function clearOf(root, names) {
+        for (let i = 0; i < 32 && !names.every(name => topmost(root, name)); i++) { press(viewportOf(root), 'ArrowLeft'); await frame(); await frame(); }
+        assert(names.every(name => topmost(root, name)), 'no angle shows ' + names.join(' and ') + ' in front');
+      }
+      const stored = () => localStorage.getItem('agentgraph.positions.v1');
+      // (item 4 first: the cheapest check, where the shards' split puts the busiest page)
+      await test('n105 item 4: everything drawn in 2D is drawn in 3D (agents, council seats, paths, loops as closed dotted rings, group lines, badges, spokes) with no new text; depth by size, dimming and order (nearer over farther); names upright and never under 11 px', async () => {
+        const data = n105Data();
+        data.structure.teams = [{ id: 't1', lead: 'reviewer', members: ['verifier'], text: '' }];
+        Object.assign(data.agents.find(a => a.name === 'impl-openai'), { busy: 2, sessions: [{ id: 's1', title: 'A', busy: true, model: 'm', cost: 0 }, { id: 's2', title: 'B', busy: true, model: 'm', cost: 0 }] });
+        await using(data, async root => {
+          await settled();
+          const inventory = () => JSON.stringify({
+            agents: [...root.querySelectorAll('.ag-drawing [data-agent]')].filter(node => node.getClientRects().length).map(node => node.dataset.agent).sort(),
+            routes: [...root.querySelectorAll('[data-route]')].map(group => group.dataset.route + ':' + group.dataset.loop + ':' + [...group.querySelectorAll('.ag-route-step')].map(step => step.dataset.step).join()).sort(),
+            teams: [...root.querySelectorAll('[data-team-line]')].map(line => line.dataset.teamLine).sort(),
+            badges: [...root.querySelectorAll('.ag-busy-count[data-shown="true"]')].map(badge => badge.dataset.busyCount + badge.textContent).sort(),
+            edges: [...root.querySelectorAll('line[data-edge], path[data-edge]')].map(line => line.dataset.edge).sort(),
+            text: [...root.querySelectorAll('.ag-drawing text')].map(item => item.textContent).filter(Boolean).sort()
+          });
+          const flat = inventory();
+          press(viewportOf(root), 'd'); await until(() => in3d(root)); assert(in3d(root), 'd did not switch to 3D');
+          press(viewportOf(root), 'ArrowLeft'); press(viewportOf(root), 'ArrowLeft'); await frame(); await frame();
+          assert(inventory() === flat, '3D does not draw what 2D draws: ' + flat.slice(0, 200) + ' / ' + inventory().slice(0, 200));
+          const dotted = [...root.querySelectorAll('.ag-route-step[data-step="loop"]')];
+          assert(dotted.length >= 6 && dotted.every(step => getComputedStyle(step).strokeDasharray.replace(/px/g, '').replace(/\s+/g, ' ').trim() === '0.5, 5.5'.replace(/\s+/g, ' ')), 'the loops are not dotted rings in 3D');
+          // Each loop's ring closes: step i runs from agent i to agent i + 1 and the last back to the first.
+          for (const flow of N105_PATHS) {
+            const start = flow.path.indexOf(flow.path.at(-1)); if (start >= flow.path.length - 2) continue;
+            const names = flow.path.slice(start, -1), steps = [...routeOf(root, flow.id).querySelectorAll('.ag-route-step[data-step="loop"]')];
+            steps.forEach((step, i) => {
+              const ends = pointsOf(step, 2), a = agentShapes(root).find(s => s.name === names[i]), b = agentShapes(root).find(s => s.name === names[(i + 1) % names.length]);
+              assert(Math.hypot(ends[0].x - a.x, ends[0].y - a.y) < a.r + 16 && Math.hypot(ends[2].x - b.x, ends[2].y - b.y) < b.r + 16, flow.id + ' ring step ' + i + ' does not join ' + names[i] + ' to ' + names[(i + 1) % names.length]);
+            });
+          }
+          assert(root.querySelectorAll('.ag-orbit-ring').length === 10, 'not one ring (near and far halves) per group: ' + root.querySelectorAll('.ag-orbit-ring').length);
+          const nodes = [...root.querySelectorAll('.ag-nodes > [data-agent]')], scaleOf = node => node.querySelector('.ag-core').getCTM().a / root.querySelector('.ag-drawing > g').getCTM().a;
+          const scales = nodes.map(scaleOf), opacities = nodes.map(node => Number(getComputedStyle(node).opacity));
+          assert(Math.max(...scales) / Math.min(...scales) > 1.12, 'no depth by size: ' + scales.map(s => s.toFixed(2)).join());
+          assert(Math.max(...opacities) - Math.min(...opacities) > .2 && opacities.every((o, i) => i === 0 || o >= opacities[i - 1] - 1e-3), 'no depth by dimming (farther fainter): ' + opacities.map(o => o.toFixed(2)).join());
+          assert(scales.every((s, i) => i === 0 || s >= scales[i - 1] - 1e-3), 'a farther agent is drawn over a nearer one: ' + nodes.map((node, i) => node.dataset.agent + ' ' + scales[i].toFixed(3)).join(', '));
+          const labels = [...root.querySelectorAll('.ag-drawing .ag-agent-name')];
+          assert(labels.every(label => { const m = label.getScreenCTM(); return Math.abs(m.b) < 1e-6 && Math.abs(m.c) < 1e-6 && m.a > 0 && m.d > 0; }), 'a name is not upright');
+          for (let i = 0; i < 12; i++) press(viewportOf(root), '-');
+          await frame();
+          assert(nameSize(root) >= 11 - .01, 'names at ' + nameSize(root).toFixed(2) + ' px in 3D zoomed out');
+        }, { motion: 'none' });
+      });
+      await test('n105 item 1: one named control beside the others and the key d switch 2D and 3D; the camera moves over about 700 ms; going back restores the 2D view exactly (camera, every position, every line); the choice is kept across a reload and a host without storage does not fail', async () => {
+        const data = n105Data();
+        await using(data, async root => {
+          await settled();
+          const button = root.querySelector('.ag-orbit-toggle');
+          assert(button && button.tagName === 'BUTTON' && /3D/.test(button.getAttribute('aria-label') || '') && button.getAttribute('aria-pressed') === 'false' && /D/.test(button.getAttribute('aria-keyshortcuts') || ''), 'no named 3D control');
+          assert(!viewportOf(root).contains(button) && button.getClientRects().length, 'the control is in the graph area or not shown');
+          const controls = root.querySelector('.ag-controls').getBoundingClientRect(), own = button.getBoundingClientRect();
+          assert(Math.abs(own.bottom - controls.bottom) < 2 && own.right <= controls.left + 1 && controls.left - own.right < 8, 'the control is not in the row of the other controls');
+          assert(in2d(root), '2D is not where it opens');
+          // The 2D view at rest (the first layout's glide over) is the one to come back to.
+          let flat = pictureOf(root);
+          for (let i = 0; i < 40; i++) { await sleep(50); const now = pictureOf(root); if (now === flat) break; flat = now; }
+          viewportOf(root).focus(); press(viewportOf(root), 'd');
+          const started = performance.now();
+          await until(() => Number(root.dataset.agBlend) > 0, 300);
+          await sleep(Math.max(0, started + 330 - performance.now()));
+          const blend = Number(root.dataset.agBlend), mid = pictureOf(root);
+          assert(blend > .1 && blend < .9 && root.dataset.agView === '3d' && button.getAttribute('aria-pressed') === 'true', 'no move under way a third of the way through (blend ' + blend + ')');
+          assert(mid !== flat, 'nothing moved during the switch');
+          await until(() => in3d(root), 1500);
+          const took = performance.now() - started;
+          assert(in3d(root) && took > 560 && took < 1100, 'the camera move took ' + Math.round(took) + ' ms, not about 700');
+          viewportOf(root).dispatchEvent(new WheelEvent('wheel', { deltaY: -240, bubbles: true, cancelable: true, clientX: 500, clientY: 400 }));
+          await frame();
+          assert(pictureOf(root) !== flat, '3D draws the 2D picture');
+          button.click();
+          await until(() => in2d(root), 1500);
+          assert(in2d(root) && button.getAttribute('aria-pressed') === 'false', 'the control did not go back to 2D');
+          const back = pictureOf(root);
+          assert(back === flat, 'the 2D view is not restored exactly: ' + (() => { const a = JSON.parse(flat), b = JSON.parse(back); return a.flatMap((part, i) => JSON.stringify(part) === JSON.stringify(b[i]) ? [] : [JSON.stringify(part).slice(0, 160) + ' / ' + JSON.stringify(b[i]).slice(0, 160)]).join(' ; '); })());
+          // Remembered: a reload (a second view on the same storage) opens in 3D, without the move.
+          press(viewportOf(root), 'd');
+          const again = document.createElement('div'); again.style.cssText = 'position:relative;width:900px;height:600px'; document.getElementById('fixtures').append(again);
+          const second = AgentGraph.mount(again, { fetchSnapshot: async () => n105Data(), intervalMs: 60000, motion: 'none' });
+          try {
+            await second.refresh(); await until(() => in3d(again), 1500);
+            assert(in3d(again) && again.querySelector('.ag-orbit-toggle').getAttribute('aria-pressed') === 'true', 'a reload does not open in 3D: ' + again.dataset.agView + ' ' + again.dataset.agBlend);
+          } finally { second.destroy(); again.remove(); }
+          // A host without storage (the Desktop panel may have none): the switch works and nothing throws.
+          const get = Storage.prototype.getItem, set = Storage.prototype.setItem, errors = [];
+          const onError = event => errors.push(event.message);
+          window.addEventListener('error', onError);
+          Storage.prototype.getItem = () => { throw new Error('no storage'); }; Storage.prototype.setItem = () => { throw new Error('no storage'); };
+          try {
+            const bare = document.createElement('div'); bare.style.cssText = 'position:relative;width:700px;height:500px'; document.getElementById('fixtures').append(bare);
+            const third = AgentGraph.mount(bare, { fetchSnapshot: async () => n105Data(), intervalMs: 60000, motion: 'none' });
+            try {
+              await third.refresh(); await settle(); press(bare.querySelector('.ag-viewport'), 'd'); await until(() => in3d(bare), 800); assert(in3d(bare), 'a view mounted without storage does not switch');
+              press(bare.querySelector('.ag-viewport'), 'd'); await frame(); assert(in2d(bare), 'without storage the switch back fails');
+            }
+            finally { third.destroy(); bare.remove(); }
+          } finally { Storage.prototype.getItem = get; Storage.prototype.setItem = set; window.removeEventListener('error', onError); }
+          assert(!errors.length, 'errors without storage: ' + errors.join('; '));
+        }, { motion: 'full' });
+      });
+      await test('n105 item 2: in 3D a drag on empty space or starting on an agent turns the system (no agent moves, no pan), up and down tilt it within the plane and straight down (never flips), the wheel zooms, arrow keys with nothing picked turn it, R and a double-click on empty space reset it; turning by hand pauses the self-turn, which comes back a few seconds after', async () => {
+        const data = n105Data();
+        await using(data, async root => {
+          await settled();
+          press(viewportOf(root), 'd'); await until(() => in3d(root)); assert(in3d(root), 'd did not switch to 3D');
+          const camera = () => root.querySelector('.ag-drawing > g').getAttribute('transform');
+          const cam0 = camera(), turn0 = turnOf(root), spot = emptySpot(root);
+          dragBy(root, spot, 80, 0); await frame(); await frame();
+          assert(Math.abs(turnOf(root) - (turn0 - .64)) < .02, 'a drag on empty space did not turn: ' + turn0 + ' -> ' + turnOf(root));
+          assert(camera() === cam0, 'a drag in 3D panned');
+          await clearOf(root, ['impl-claude']);
+          const turn1 = turnOf(root), from = centre(root, 'impl-claude');
+          dragBy(root, from, -60, 0); await frame(); await frame();
+          assert(Math.abs(turnOf(root) - (turn1 + .48)) < .02, 'a drag starting on an agent did not turn: ' + turn1 + ' -> ' + turnOf(root));
+          assert(stored() === null && camera() === cam0 && !root.dataset.agTrail && !detailOpen(root), 'a drag starting on an agent moved it, panned, picked or opened it');
+          dragBy(root, emptySpot(root), 0, -2000); await frame();
+          assert(Math.abs(tiltOf(root) - .06) < .001, 'tilting up does not stop at the plane: ' + tiltOf(root));
+          dragBy(root, emptySpot(root), 0, 3000); await frame();
+          assert(Math.abs(tiltOf(root) - Math.PI / 2) < .001, 'tilting down does not stop straight down: ' + tiltOf(root));
+          const scale = () => root.querySelector('.ag-drawing > g').getCTM().a, s0 = scale();
+          viewportOf(root).dispatchEvent(new WheelEvent('wheel', { deltaY: -200, bubbles: true, cancelable: true, clientX: spot.x, clientY: spot.y })); await frame();
+          assert(scale() > s0 * 1.2, 'the wheel does not zoom in 3D');
+          viewportOf(root).focus();
+          const turn2 = turnOf(root), tilt2 = tiltOf(root);
+          press(viewportOf(root), 'ArrowLeft'); press(viewportOf(root), 'ArrowDown'); await frame();
+          assert(Math.abs(turnOf(root) - turn2 - .2) < .001 && tiltOf(root) < tilt2 - .1, 'arrow keys do not turn the system: ' + turnOf(root) + ' ' + tiltOf(root));
+          press(viewportOf(root), 'r'); await frame();
+          assert(turnOf(root) === 0 && tiltOf(root) === .5, 'R does not reset the angle');
+          press(viewportOf(root), 'ArrowRight'); await frame();
+          const empty = emptySpot(root);
+          document.elementFromPoint(empty.x, empty.y).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, clientX: empty.x, clientY: empty.y }));
+          await frame();
+          assert(turnOf(root) === 0 && tiltOf(root) === .5 && stored() === null, 'a double-click on empty space does not reset the angle (or moved agents)');
+        }, { motion: 'none' });
+        await using(n105Data(), async root => {
+          await settle();
+          press(viewportOf(root), 'd'); await until(() => in3d(root)); assert(in3d(root), 'd did not switch to 3D');
+          const a = turnOf(root); await sleep(150);
+          assert(turnOf(root) > a, 'the system does not turn by itself in 3D');
+          press(viewportOf(root), 'ArrowLeft'); await frame();
+          const held = turnOf(root); await sleep(250);
+          assert(turnOf(root) === held, 'turning by hand does not pause the self-turn');
+          // A few seconds later (the clock moved on 3.1 s rather than waited for; the page shown again asks for a frame).
+          const now = performance.now;
+          performance.now = () => now.call(performance) + 3100;
+          try { document.dispatchEvent(new Event('visibilitychange')); await until(() => turnOf(root) > held, 400); }
+          finally { performance.now = now; }
+          assert(turnOf(root) > held, 'the self-turn does not come back a few seconds after turning by hand');
+        }, { motion: 'full' });
+      });
+      await test('n105 item 3: the system turns by itself only in 3D, never with reduced motion, while the page is hidden or during a drag; 2D draws no frame of its own', async () => {
+        await using(n105Data(), async root => {
+          await settle();
+          await sleep(100);
+          assert(framesOf(root) === 0 && turnOf(root) === 0, '2D drew frames or turned');
+          press(viewportOf(root), 'd'); await until(() => in3d(root)); assert(in3d(root), 'd did not switch to 3D');
+          let a = turnOf(root); await until(() => turnOf(root) > a, 300);
+          assert(turnOf(root) > a, 'no self-turn in 3D');
+          const spot = emptySpot(root);
+          pointerAt(document.elementFromPoint(spot.x, spot.y), 'pointerdown', spot); await frame();
+          a = turnOf(root); await sleep(100);
+          assert(turnOf(root) === a, 'the system turns by itself during a press');
+          pointerAt(viewportOf(root), 'pointerup', spot); await until(() => turnOf(root) > a, 300);
+          assert(turnOf(root) > a, 'the self-turn does not go on after a press without a drag');
+          const hidden = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
+          Object.defineProperty(document, 'hidden', { configurable: true, get: () => true }); document.dispatchEvent(new Event('visibilitychange'));
+          try { await frame(); a = turnOf(root); const f = framesOf(root); await sleep(100); assert(turnOf(root) === a && framesOf(root) === f, 'the system turns while the page is hidden'); }
+          finally { delete document.hidden; Object.defineProperty(Document.prototype, 'hidden', hidden); document.dispatchEvent(new Event('visibilitychange')); }
+          a = turnOf(root); await until(() => turnOf(root) > a, 300);
+          assert(turnOf(root) > a, 'the self-turn does not come back when the page shows');
+        }, { motion: 'full' });
+        await using(n105Data(), async root => {
+          await settle();
+          press(viewportOf(root), 'd'); await frame(); await frame();
+          assert(in3d(root), 'with reduced motion the switch is not at once');
+          const a = turnOf(root), f = framesOf(root); await sleep(120);
+          assert(turnOf(root) === a && framesOf(root) === f, 'the system turns by itself with reduced motion');
+        }, { motion: 'none' });
+      });
+      await test('n105 item 5: in 3D clicks and keys work as in 2D: a click picks a path, Delete removes it and undo brings it back, a right-click opens details only, N opens the add menu, G a path\'s goal, Escape lets go, a path is drawn by clicks; a drag or Alt+arrow on an agent moves nothing and the status line says agents move in 2D; Escape during a turn puts the angle back', async () => {
+        const data = n105Data(), host = worldHost(data);
+        data.roster = { editable: true, models: ['test/model-a'] };
+        data.agents.forEach(a => { a.removable = a.name !== 'orchestrator' && a.name !== 'council' && a.parent !== 'council'; a.added = false; a.skills = []; a.skills_editable = true; });
+        await using(data, async (root, app) => {
+          await settled();
+          press(viewportOf(root), 'd'); await until(() => in3d(root)); assert(in3d(root), 'd did not switch to 3D');
+          await clearOf(root, ['impl-claude', 'verifier']);
+          // Pick p4 (impl-claude -> verifier) by a click on its line, between the two circles.
+          const step = routeOf(root, 'p4').querySelector('.ag-route-step'), points = pointsOf(step, 20);
+          const spot = points.slice(4, 17).find(p => !document.elementFromPoint(p.x, p.y)?.closest('[data-agent]') && document.elementFromPoint(p.x, p.y)?.closest('[data-route]')?.dataset.route === 'p4');
+          assert(spot, 'p4 has no clear point to click');
+          clickAt(root, spot); await settle();
+          assert(picked(root, 'p4') && !detailOpen(root), 'a click does not pick a path in 3D');
+          press(document.activeElement, 'Delete'); await settled();
+          assert(host.calls.some(call => call.startsWith('flow') && call.includes('"remove"') && call.includes('p4')) && !routeOf(root, 'p4'), 'Delete does not remove the picked path in 3D: ' + host.calls.join(' | '));
+          undoKey(viewportOf(root)); await settled();
+          assert(root.querySelectorAll('[data-route]').length === 6, 'undo does not bring the path back in 3D');
+          const turnBefore = turnOf(root);
+          assert(context(nodeOf(root, 'verifier'), centre(root, 'verifier')) && detailOpen(root) && !root.dataset.agTrail, 'a right-click does not open details (only) in 3D');
+          press(viewportOf(root), 'Escape'); await settle();
+          assert(!detailOpen(root) && turnOf(root) === turnBefore, 'Escape does not close the details in 3D');
+          viewportOf(root).focus(); press(viewportOf(root), 'n'); await settle();
+          assert(!root.querySelector('.ag-add-menu').hidden, 'N does not open the add menu in 3D');
+          press(document.activeElement, 'Escape'); await settle();
+          clickAt(root, spot); await settle();
+          press(document.activeElement, 'g'); await settled();
+          assert(detailOpen(root) && goalBox(root), 'G does not open the picked path\'s goal in 3D');
+          root.querySelector('.ag-close').click(); await settle();
+          press(viewportOf(root), 'Escape'); await settle();
+          // A path drawn by clicks: impl-claude, then verifier, then verifier again to finish.
+          const calls = host.calls.length;
+          tap(root, 'impl-claude'); dbl(root, 'verifier'); await settled();
+          assert(host.calls.slice(calls).some(call => call.startsWith('flow') && call.includes('"add"') && call.includes('["impl-claude","verifier"]')), 'a path is not drawn by clicks in 3D: ' + host.calls.slice(calls).join(' | '));
+          press(viewportOf(root), 'Escape'); await settle();
+          const note = root.querySelector('.ag-orbit-note');
+          dragBy(root, centre(root, 'impl-claude'), 40, 0); await frame();
+          assert(stored() === null && !note.hidden && /2D/.test(note.textContent) && root.querySelector('.ag-status').contains(note), 'a drag on an agent moved it or the status line did not say why');
+          note.hidden = true;
+          press(nodeOf(root, 'verifier'), 'ArrowRight', { altKey: true }); press(nodeOf(root, 'verifier'), 'ArrowDown', { shiftKey: true }); await settle();
+          assert(stored() === null && !note.hidden && /2D/.test(note.textContent), 'Alt+arrow moved an agent in 3D or the status line did not say why');
+          const turn = turnOf(root), tilt = tiltOf(root), empty = emptySpot(root);
+          dragBy(root, empty, 70, 30, { hold: true }); await frame();
+          assert(turnOf(root) !== turn, 'the turn did not start');
+          press(viewportOf(root), 'Escape'); pointerAt(viewportOf(root), 'pointerup', { x: empty.x + 70, y: empty.y + 30 }); await frame();
+          assert(turnOf(root) === turn && tiltOf(root) === tilt, 'Escape during a turn does not put the angle back');
+        }, { actions: host.actions, motion: 'none' });
+      });
+      await test('n105 item 6: at rest in 3D a click 6 px off a line picks that line in at least 98% of samples (every path, two angles); a frame is drawn only when the angle or the data changed; the frame time with fifteen agents and six paths is measured', async () => {
+        const data = n105Data(), host = worldHost(data), counts = {};
+        await using(data, async (root, app) => {
+          await settled();
+          press(viewportOf(root), 'd'); await until(() => in3d(root)); assert(in3d(root), 'd did not switch to 3D');
+          const view = viewportOf(root).getBoundingClientRect();
+          for (const angle of ['start', 'turned']) {
+            if (angle === 'turned') { press(viewportOf(root), 'ArrowLeft'); press(viewportOf(root), 'ArrowLeft'); press(viewportOf(root), 'ArrowUp'); await frame(); await frame(); }
+            // Lines cross in 3D as the system turns: a spot as near another line (any path, group line or spoke) as
+            // the one sampled is a click on that line, so it is not counted (the count of those is reported).
+            let right = 0, tried = 0, shared = 0; const wrong = [];
+            const clouds = [...root.querySelectorAll('.ag-route-hit, .ag-team-hit, .ag-line-hit')].filter(item => viewportOf(root).contains(item) && item.getClientRects().length && item.getScreenCTM()).map(item => ({ owner: item.closest('[data-route]')?.dataset.route || '', points: item.tagName.toLowerCase() === 'line' ? pointsOf(item, 80) : (() => { const length = item.getTotalLength(), m = item.getScreenCTM(); return Array.from({ length: 121 }, (_, i) => item.getPointAtLength(length * i / 120).matrixTransform(m)); })() }));
+            const nearOther = (id, spot) => clouds.some(cloud => cloud.owner !== id && cloud.points.some(q => Math.hypot(q.x - spot.x, q.y - spot.y) <= 6.5));
+            N105_PATHS.forEach(flow => [...routeOf(root, flow.id).querySelectorAll('.ag-route-step')].forEach((step, si) => Array.from({ length: 15 }, (_, i) => (i + 1) / 16).forEach(t => {
+              const length = step.getTotalLength(), m = step.getScreenCTM(), p = step.getPointAtLength(length * t).matrixTransform(m), q = step.getPointAtLength(Math.min(length, length * t + .5)).matrixTransform(m);
+              const n = Math.hypot(q.x - p.x, q.y - p.y) || 1;
+              for (const side of [6, -6]) {
+                const spot = { x: p.x - (q.y - p.y) / n * side, y: p.y + (q.x - p.x) / n * side };
+                if (spot.x < view.left + 4 || spot.x > view.right - 4 || spot.y < view.top + 4 || spot.y > view.bottom - 4) continue;
+                const under = document.elementFromPoint(spot.x, spot.y);
+                if (!under || !viewportOf(root).contains(under) || under.closest('[data-agent]')) continue;
+                if (nearOther(flow.id, spot)) { shared++; continue; }
+                tried++; clickAt(root, spot);
+                const got = [...root.querySelectorAll('[data-route][data-selected="true"]')].map(group => group.dataset.route).join();
+                if (got === flow.id) right++; else wrong.push(flow.id + ' step ' + si + ' at ' + t.toFixed(2) + (side > 0 ? '+' : '-') + ' picked ' + (got || 'nothing'));
+                viewportOf(root).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+              }
+            })));
+            counts[angle] = right + '/' + tried + ' (' + shared + ' as near another line)';
+            assert(tried >= 120 && right >= tried * .98, angle + ': ' + right + ' of ' + tried + ' picked the intended line: ' + wrong.slice(0, 5).join('; '));
+          }
+          // Frames: none at rest, one per change of angle, none for a refresh that changes nothing, one for new data.
+          await frame(); const f0 = framesOf(root); await sleep(100);
+          assert(framesOf(root) === f0, 'frames are drawn at rest');
+          press(viewportOf(root), 'ArrowLeft'); await frame(); await frame();
+          assert(framesOf(root) === f0 + 1, 'a turn by a key drew ' + (framesOf(root) - f0) + ' frames, not one');
+          await app.refresh(); await frame(); await frame();
+          assert(framesOf(root) === f0 + 1, 'a refresh that changed nothing drew a frame');
+          data.structure.flows.push({ id: 'p7', path: ['explorer', 'verifier'], text: 'p7', source: 'drawn' }); await app.refresh(); await frame(); await frame();
+          assert(framesOf(root) >= f0 + 1 && routeOf(root, 'p7'), 'new data is not drawn');
+          data.structure.flows.pop(); await app.refresh(); await frame();
+          // The frame time: twenty turned frames, as the self-turn draws them.
+          for (let i = 0; i < 20; i++) { press(viewportOf(root), i % 2 ? 'ArrowLeft' : 'ArrowRight'); await frame(); }
+          counts.frameMs = root.dataset.agFrameMs;
+          assert(Number(root.dataset.agFrameMs) > 0 && Number(root.dataset.agFrameMs) < 16, 'a 3D frame takes ' + root.dataset.agFrameMs + ' ms');
+        }, { actions: host.actions, motion: 'none' });
+        window.n105Picks = counts;
+      });
+    }
+    // ---- orbit lane (n105) ----
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
   })().catch(error => { document.getElementById('results').textContent = 'RESULT: FAIL ' + error.stack; });
 </script>
