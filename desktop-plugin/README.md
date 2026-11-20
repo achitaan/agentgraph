@@ -32,6 +32,23 @@ It is a GUI-only plugin (no server or TUI part), loaded as a local directory. It
   `python3 -P -m agentgraph.snapshot_json [--session=ID]` with `execFile` (no shell), `cwd` = the session's directory,
   `PYTHONPATH` = the orchestration directory, a 20 s timeout and an 8 MiB output cap. Overlapping requests for the same
   (directory, session) share one process. Any failure returns `{"version": 1, "error": "<one line>"}`.
+- **The chat on every agent** (the view's details; `options.actions.chat`, `send`, `stop`):
+  - `chat(sessionID, { limit })` reads one session's recent chat through a second Ipc method,
+    `chat({ session, limit }) -> JSON text`, which runs `python3 -P -m agentgraph.chatfeed --session=ID --json --limit=N`
+    (the `agentgraph chat` command; `--demo` added in demo mode) with the same `execFile` rules, environment, 20 s timeout
+    and 8 MiB cap as the snapshot. The session id (the snapshot's id pattern) and the limit (a whole number, 1 to 200;
+    40 when not given) are checked in the window and again in main; a bad one never reaches Python. The feed crosses as
+    the command printed it (it holds no tool input or output); an error document or a failed command rejects the
+    promise with one short line. The page keeps one read in flight per session; the plugin queues nothing.
+  - `send(sessionID, text, { steer })` calls the host's own `props.session.server.client.session.prompt`: `{ sessionID,
+    text, delivery: "steer" }` when `steer` is true, else the plain `{ sessionID, text }` the run message already uses.
+    The text is 1 to 4,000 characters. `stop(sessionID)` calls `client.session.interrupt({ sessionID })`. Both answer
+    `{ ok: true }` or `{ ok: false, error: "<one line>" }` and never throw; a host call that throws, rejects or answers
+    `{ error }` is `{ ok: false }`. Both accept only a session of the last snapshot this panel read (the root, or one
+    of the agents' sessions) and refuse any other without calling the host. The panel gives `send` only when
+    `client.session.prompt` is a function and `stop` only when `client.session.interrupt` is, so the page shows no
+    dead control. The demo is given `chat` alone (it reads the demo's example chats); the page code is the same.
+  - Nothing here logs: no message text, nor the feed, is written to a log or put on a command line.
 
 ## Load it
 
@@ -133,3 +150,15 @@ Not verified, because it needs the running desktop app:
 - whether the real `app.js` draws correctly inside the side panel (the harness replaces `mount` with a spy and never
   draws the real view in its fake DOM);
 - whether the V1 `plugin` key alongside `plugins` causes any warning in your OpenCode version.
+
+Not yet tried on the real app (the harness uses a fake client; the chat read uses the real Python command):
+
+- `client.session.prompt({ sessionID, text, delivery: "steer" })` in Desktop: the flat shape with `delivery` is proven
+  in the terminal host on OpenCode 2.3.2 only, and whether Desktop's client accepts it, and delivers the message into
+  the working turn, is untried. A plain prompt in Desktop is the call the run message already makes.
+- `client.session.interrupt({ sessionID })` in Desktop: proven in the terminal host only; untried here. It does nothing
+  to an idle session.
+- that `props.session.server.client` exposes `session.prompt` and `session.interrupt` at all in the app (a missing one
+  leaves out Send or Stop, by design); and that the `chat` Ipc method (a `Number` field in its input schema) crosses the
+  host's bridge like the string methods do.
+- the chat view drawing and scrolling inside the real side panel.

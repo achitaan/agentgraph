@@ -61,6 +61,11 @@ const FLOW_STEPS_LIMIT = 20;
 const FLOW_TEXT_MAX_CHARS = 2000;
 const FLOW_NAME = /^[a-z0-9][a-z0-9-]{1,31}$/; // a path's name, also its command's (/NAME)
 const GOAL_MAX_CHARS = 4000; // the goal of a run message
+// The chat of an agent's session (agentgraph.chatfeed): the latest messages to read (the command's own limits), and the
+// longest message the panel sends to a session (a steer or a plain prompt), in characters.
+const CHAT_LIMIT_DEFAULT = 40;
+const CHAT_LIMIT_MAX = 200;
+const CHAT_SEND_MAX_CHARS = 4000;
 const FLOW_TIMEOUT_MS = 10000;
 const FLOW_MAX_BYTES = 1024 * 1024;
 // The commands' own limits, in characters: an agent's description and prompt, a skill's text, a group's instruction.
@@ -283,6 +288,13 @@ function snapshotIpc(pluginId) {
             op: Schema.String, directory: Schema.String, task: Schema.String, node: Schema.String, artifact: Schema.String,
             record: Schema.String, text: Schema.String, expect,
           }),
+          output: Schema.String,
+        },
+        // Read one session's recent chat (`agentgraph chat --session ID --json --limit N`). Input: the session id and the
+        // number of latest messages (a whole number, 1 to 200). Output: the feed as JSON text (WEB_API.md, GET /api/chat)
+        // as the command printed it, or {"error": "..."}.
+        chat: {
+          input: Schema.Struct({ session: Schema.String, limit: Schema.Number }),
           output: Schema.String,
         },
       },
@@ -824,6 +836,29 @@ function createOutputRunner(deps) {
   return { output: serialRunner(deps, checked, "The outputs command", accept, "The demo cannot change outputs.") };
 }
 
+// Main process: `python3 -P -m agentgraph.chatfeed --session=ID --json --limit=N [--demo]` without a shell, read-only. The
+// session id and the limit are checked here as the window checks them; the feed is passed on as the command printed it
+// (it holds no tool input or output), and an error document or a failed command is { error: one line }.
+function createChatRunner(deps) {
+  const fail = (message) => ({ error: oneLine(message) });
+  function command(input) {
+    if (!isPlainObject(input)) return fail("Bad chat request.");
+    const { session, limit } = input;
+    if (typeof session !== "string" || !SESSION_ID.test(session)) return fail("The session id is not valid.");
+    if (!Number.isInteger(limit) || limit < 1 || limit > CHAT_LIMIT_MAX) return fail("The number of messages is not valid.");
+    const args = ["-P", "-m", "agentgraph.chatfeed", "--session=" + session, "--json", "--limit=" + limit];
+    if (deps.demo) args.push("--demo");
+    return { args, stdin: "" };
+  }
+  const accept = (doc) => (typeof doc.session === "string" && Array.isArray(doc.items) ? doc : null);
+  return {
+    chat(input) {
+      const request = command(input);
+      return request.error ? Promise.resolve(request) : runCommand(deps, request, "The chat command", accept);
+    },
+  };
+}
+
 function nonEmptyString(value) {
   return typeof value === "string" && value.trim() !== "";
 }
@@ -893,6 +928,8 @@ function main(ctx) {
   const skillFiles = createSkillFileRunner(commandDeps(SKILL_FILE_MAX_BYTES));
   const groups = createTeamRunner(commandDeps(FLOW_MAX_BYTES));
   const outputs = createOutputRunner(commandDeps(SKILL_FILE_MAX_BYTES));
+  // The chat is read as the snapshot is: the same time limit and size cap.
+  const chats = createChatRunner(Object.assign(commandDeps(SNAPSHOT_MAX_BYTES), { timeoutMs: SNAPSHOT_TIMEOUT_MS }));
 
   ctx.provide(snapshotIpc(ctx.id), {
     snapshot: (input) => runner.snapshot(input).then((doc) => JSON.stringify(doc)),
@@ -902,6 +939,7 @@ function main(ctx) {
     skillfile: (input) => skillFiles.skillfile(input).then((doc) => JSON.stringify(doc)),
     team: (input) => groups.team(input).then((doc) => JSON.stringify(doc)),
     output: (input) => outputs.output(input).then((doc) => JSON.stringify(doc)),
+    chat: (input) => chats.chat(input).then((doc) => JSON.stringify(doc)),
   });
 
   if (ctx.log && typeof ctx.log.write === "function") {
@@ -961,6 +999,22 @@ function renderPanel(ctx, solid, props) {
     return parseDocument(text);
   };
 
+  // The sessions of the last snapshot this panel read (the root and each agent's), for the session it was read for:
+  // a message or a stop is accepted for one of these only.
+  let known = { key: undefined, ids: new Set() };
+  const rememberSessions = (doc) => {
+    const ids = new Set();
+    const add = (id) => {
+      if (typeof id === "string" && SESSION_ID.test(id)) ids.add(id);
+    };
+    if (isPlainObject(doc.root)) add(doc.root.id);
+    for (const agent of Array.isArray(doc.agents) ? doc.agents : []) {
+      if (isPlainObject(agent) && Array.isArray(agent.sessions)) for (const item of agent.sessions) add(isPlainObject(item) ? item.id : undefined);
+    }
+    known = { key: sessionKey(), ids };
+  };
+  const isKnownSession = (id) => known.key !== undefined && known.key === sessionKey() && known.ids.has(id);
+
   const fetchSnapshot = async () => {
     if (!alive) return errorDocument("The panel is closed.");
     try {
@@ -974,6 +1028,7 @@ function renderPanel(ctx, solid, props) {
       const now = sessionRequest();
       if (!now || now.directory !== request.directory || now.session !== request.session)
         return errorDocument("The session changed while collecting the snapshot.");
+      if (!doc.error) rememberSessions(doc);
       return doc;
     } catch (error) {
       return errorDocument("The desktop main process did not answer: " + errorMessage(error));
@@ -1218,7 +1273,65 @@ function renderPanel(ctx, solid, props) {
     carryExpect(request, input, "Bad output request.");
     return askMain("output", input, "output", (doc) => typeof doc.task === "string");
   };
-  const actions = ctx.options && ctx.options.demo === true ? undefined : { flow, skills, roster, skillfile, team, output, run };
+  // The chat of an agent's session: read through main (`agentgraph chat`), the page asks for one at a time.
+  const chat = async (sessionID, request) => {
+    if (!alive) throw new Error("The panel is closed.");
+    if (typeof sessionID !== "string" || !SESSION_ID.test(sessionID)) throw new Error("Bad chat request.");
+    const asked = isPlainObject(request) ? request.limit : undefined;
+    const limit = asked === undefined || asked === null ? CHAT_LIMIT_DEFAULT : asked;
+    if (!Number.isInteger(limit) || limit < 1 || limit > CHAT_LIMIT_MAX) throw new Error("Bad chat request.");
+    const text = await ctx.main(snapshotIpc(ctx.id)).chat({ session: sessionID, limit }, { signal: ctx.signal });
+    let doc;
+    try {
+      doc = JSON.parse(text);
+    } catch (_) {
+      throw new Error("The chat command did not answer with JSON.");
+    }
+    if (!isPlainObject(doc)) throw new Error("The chat command did not answer with a chat.");
+    if (typeof doc.error === "string" && doc.error) throw new Error(oneLine(doc.error));
+    if (typeof doc.session !== "string" || !Array.isArray(doc.items)) throw new Error("The chat command did not answer with a chat.");
+    return doc;
+  };
+  // Steering and stopping use the host's own client (props.session.server.client.session), read where used, and answer
+  // { ok: true } or { ok: false, error } (one short line) and never throw. They are refused, without calling the host,
+  // for a session that is not in the last snapshot this panel read. Only the id, a count or a short error line is ever
+  // written down about them; the message text is not.
+  const sessionClient = () => {
+    const session = props.session;
+    return session && session.server && session.server.client && session.server.client.session;
+  };
+  const hostFailure = (error) => oneLine(isPlainObject(error) && typeof error.error === "string" ? error.error : errorMessage(error));
+  const hostCall = async (name, sessionID, input, failed) => {
+    try {
+      if (!alive) return { ok: false, error: "The panel is closed." };
+      const api = sessionClient();
+      if (!api || typeof api[name] !== "function") return { ok: false, error: "This OpenCode does not let a plugin do that." };
+      if (!isKnownSession(sessionID)) return { ok: false, error: "That session is not in the agent graph." };
+      const result = await api[name](input);
+      // A client that answers { error } instead of throwing refuses too.
+      if (isPlainObject(result) && result.error) return { ok: false, error: failed + oneLine(isPlainObject(result.error) ? hostFailure(result.error) : result.error) };
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: failed + hostFailure(error) };
+    }
+  };
+  const send = async (sessionID, text, request) => {
+    if (typeof sessionID !== "string" || !SESSION_ID.test(sessionID)) return { ok: false, error: "The session id is not valid." };
+    if (typeof text !== "string" || !text.trim()) return { ok: false, error: "Write a message first." };
+    if (Array.from(text).length > CHAT_SEND_MAX_CHARS) return { ok: false, error: "The message is longer than " + CHAT_SEND_MAX_CHARS + " characters." };
+    const input = isPlainObject(request) && request.steer === true ? { sessionID, text, delivery: "steer" } : { sessionID, text };
+    return hostCall("prompt", sessionID, input, "The message could not be sent: ");
+  };
+  const stop = async (sessionID) => {
+    if (typeof sessionID !== "string" || !SESSION_ID.test(sessionID)) return { ok: false, error: "The session id is not valid." };
+    return hostCall("interrupt", sessionID, { sessionID }, "The session could not be stopped: ");
+  };
+  // The page shows a control only for an action it is given: send and stop only where the host has the call.
+  const demoMode = ctx.options && ctx.options.demo === true;
+  const hostHas = (name) => typeof sessionClient()?.[name] === "function";
+  const actions = demoMode ? { chat } : { flow, skills, roster, skillfile, team, output, run, chat };
+  if (!demoMode && hostHas("prompt")) actions.send = send;
+  if (!demoMode && hostHas("interrupt")) actions.stop = stop;
 
   const showSessionToast = (sessionID, copied) => {
     try {
@@ -1283,7 +1396,7 @@ function renderPanel(ctx, solid, props) {
     target.className = "agentgraph-desktop-view";
     host.appendChild(target);
     try {
-      handle = view.mount(target, actions ? { fetchSnapshot, intervalMs, onOpenSession, actions } : { fetchSnapshot, intervalMs, onOpenSession });
+      handle = view.mount(target, { fetchSnapshot, intervalMs, onOpenSession, actions });
     } catch (error) {
       host.removeChild(target);
       showMessage(host, ctx.t("message.viewFailed", { error: oneLine(errorMessage(error)) }));
