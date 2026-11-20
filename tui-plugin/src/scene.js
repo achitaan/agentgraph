@@ -97,7 +97,7 @@ const HUB_RADIUS3 = 0.2; // the hub ball in figure radii (hubRing's radius)
 // ... but never smaller on screen than HUB_MIN_DOTS3 dots in radius, across and up: in a small panel 0.2 of the figure is a ball
 // of about three cells, too small for the sun's flares (0.6 of its radius) to leave its outline.
 const HUB_MIN_DOTS3 = 7;
-const hubRadius3 = (L) => Math.max(HUB_RADIUS3, HUB_MIN_DOTS3 / (L.rx * FIGURE_SCALE), HUB_MIN_DOTS3 / (L.ry * 0.94));
+const hubRadius3 = (L) => Math.max(HUB_RADIUS3, HUB_MIN_DOTS3 / Math.min(L.fitY * 0.7, (L.w - 2) / (PERSPECTIVE / (PERSPECTIVE - 1))));
 const MOON_TILT = 1.1; // radians: the moon ring against the group's ring
 const MOON_RING_BASE = 0.11; // figure radii; the ring grows with the number of moons
 const MOON_RING_PER = 0.04;
@@ -107,7 +107,6 @@ const MOON_RINGS_MIN_W = 48;
 const MOON_RINGS_MIN_H = 18;
 const MOON_RADIUS_STEP = 0.14; // moon i's orbit is r * (1 + 0.14 i): no two moons of a parent at the same distance
 const PERSPECTIVE = 4; // the camera's distance in figure radii
-const FIGURE_SCALE = 0.78; // the 3D figure's radius against the 2D ring's, so the near side and the labels fit
 
 // braille dot bits by [row 0-3][column 0-1]
 const DOT_BITS = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
@@ -574,6 +573,68 @@ export function orbitLayout(doc, w, h) {
   return layout;
 }
 
+// The cells (columns and rows of the canvas) the hub's ball covers.
+function hubBox(cx, cy, r) {
+  return { c0: Math.floor((cx - r) / 2), c1: Math.floor((cx + r) / 2), r0: Math.floor((cy - r) / 4), r1: Math.floor((cy + r) / 4) };
+}
+
+// Give every agent's name its place on the glyph's row: outside the ring (the glyph, one clear cell, the name) when it
+// fits, else inside it, else cut to what fits on the roomier side (at least two cells, else no name). A name never
+// covers a glyph, the hub's ball or another name, and keeps one clear cell from each; `p.dir` is the way it runs from
+// the glyph (+1 right, -1 left) and `p.name` is { text, c0, c1 } in cells, or null. The most urgent agent chooses first.
+// -> how many names are whole, less 1000 for each glyph that sits on the hub or on another glyph.
+function placeNames(placed, w, h, cx, cy, hubR) {
+  const used = new Uint8Array(w * h);
+  const mark = (c0, c1, r) => {
+    for (let c = Math.max(0, c0); c <= Math.min(w - 1, c1); c += 1) if (r >= 0 && r < h) used[r * w + c] = 1;
+  };
+  const box = hubBox(cx, cy, hubR);
+  for (let r = box.r0; r <= box.r1; r += 1) mark(box.c0, box.c1, r);
+  let clashes = 0; // glyphs on the hub's ball or on each other
+  for (const p of placed) {
+    if (used[p.row * w + p.col]) clashes += 1;
+    mark(p.col, p.col, p.row);
+  }
+  const order = placed.map((p, i) => ({ p, i })).sort((a, b) => URGENCY[a.p.state] - URGENCY[b.p.state] || a.i - b.i);
+  let whole = 0;
+  for (const { p } of order) {
+    const tw = displayWidth(p.label);
+    let pick = null;
+    for (const dir of [p.side, -p.side]) {
+      // the free cells from the first name cell on, keeping one clear cell before whatever is next
+      const first = p.col + 2 * dir;
+      const inside = (m) => first + dir * m >= 0 && first + dir * m < w;
+      let m = 0;
+      while (m <= tw && inside(m) && !used[p.row * w + first + dir * m]) m += 1;
+      const n = m > tw ? tw : inside(m) ? m - 1 : m;
+      const text = n >= tw ? p.label : n >= 2 ? truncate(p.label, n) : "";
+      if (!text) continue;
+      const width = displayWidth(text);
+      const c0 = dir > 0 ? first : first - width + 1;
+      if (!pick || width > pick.width) pick = { dir, text, width, c0, c1: c0 + width - 1 };
+      if (text === p.label) break;
+    }
+    if (pick) {
+      p.dir = pick.dir;
+      p.name = { text: pick.text, c0: pick.c0, c1: pick.c1 };
+      mark(pick.c0, pick.c1, p.row);
+      if (pick.text === p.label) whole += 1;
+    } else {
+      p.dir = p.side;
+      p.name = null;
+    }
+  }
+  return whole - 1000 * clashes;
+}
+
+const URGENCY = { stuck: 0, working: 1, back: 2, done: 3, idle: 4 };
+const MIN_RING = 4; // dots: the smallest ring radius
+
+// The ring is a circle in dots (a dot is about square: a cell is 2 dots across and 4 down), so rx == ry. It is the
+// largest circle on the canvas for which every name still has its own place (see placeNames), never more than the
+// canvas's height allows (about a row and a quarter from the top and the bottom) and never so wide that a glyph leaves
+// the canvas. In a wide panel the names fit outside it and it is as tall as the canvas; in a narrow one the names go
+// inside the ring when outside would shrink it, and the spare rows stay empty.
 function buildLayout(doc, w, h) {
   const agents = validAgents(doc);
   const hub = findHub(doc, agents);
@@ -584,38 +645,54 @@ function buildLayout(doc, w, h) {
   const cy = h * 2;
   const labelOf = (a) => truncate(clean(a.name) || "?", NAME_MAX);
   const longest = Math.max(1, ...units.map((u) => displayWidth(labelOf(u.agent))));
-  // as large as the canvas allows: the glyph, a space and the name fit outside it on both sides, at most 2:1
-  const ry = Math.max(4, h * 2 - 5); // dots: about a row and a quarter from the top and the bottom
-  const rxCells = Math.max(3, Math.min(w / 2 - 3 - longest, ry));
-  const rx = rxCells * 2;
-  const ring = ellipsePath(cx, cy, rx, ry);
+  const fitY = Math.max(MIN_RING, h * 2 - 5); // dots: what the canvas's height allows
+  const maxR = Math.max(MIN_RING, Math.min(fitY, w - 3));
   // slots: one per unit, a council-sized unit 1.5, and a larger gap between groups
   const GAP = 0.6;
   const widthOf = (u) => (u.seats.length ? 1.5 : 1);
   const slots = units.reduce((t, u) => t + widthOf(u), 0) + (groups.length + (topGap ? 1 : 0)) * GAP + (topGap ? 1 : 0);
-  const step = ring.length / Math.max(1, slots);
-  let cursor = topGap ? (step * (1 + GAP)) / 2 + (step * GAP) / 2 : -((groups[0] ? groups[0].units.reduce((t, u) => t + widthOf(u), 0) : 0) * step) / 2;
-  const placed = [];
-  groups.forEach((g, gi) => {
-    for (const u of g.units) {
-      const wu = widthOf(u) * step;
-      const along = cursor + wu / 2;
-      const [x, y] = ring.at(along);
-      cursor += wu;
-      placed.push({ agent: u.agent, seats: u.seats, x, y, along, group: gi, key: g.key });
+  const arrange = (R, phase) => {
+    const ring = ellipsePath(cx, cy, R, R);
+    const step = ring.length / Math.max(1, slots);
+    let cursor = (topGap ? (step * (1 + GAP)) / 2 + (step * GAP) / 2 : -((groups[0] ? groups[0].units.reduce((t, u) => t + widthOf(u), 0) : 0) * step) / 2) + phase * step;
+    const placed = [];
+    groups.forEach((g, gi) => {
+      for (const u of g.units) {
+        const wu = widthOf(u) * step;
+        const along = cursor + wu / 2;
+        const [x, y] = ring.at(along);
+        cursor += wu;
+        const p = { agent: u.agent, seats: u.seats, x, y, along, group: gi, key: g.key };
+        p.col = clamp(Math.floor(x / 2), 0, w - 1);
+        p.row = clamp(Math.floor(y / 4), 0, h - 1);
+        p.gx = p.col * 2 + 1; // the glyph cell's centre, in dots
+        p.gy = p.row * 4 + 2;
+        p.side = x >= cx - 0.5 ? 1 : -1;
+        p.label = labelOf(u.agent);
+        p.state = states.get(u.agent.name) || "idle";
+        placed.push(p);
+      }
+      cursor += GAP * step;
+    });
+    // the hub: a ring outline, open inside, small against the orbit so there is empty space round it
+    const hubR = clamp(Math.round(R * 0.17), 5, 9);
+    const full = placeNames(placed, w, h, cx, cy, hubR);
+    return { R, ring, placed, hubR, full };
+  };
+  // the largest ring that gives every name its place; failing that, the one that shows the most whole names
+  let best = null;
+  // (the ring may be turned a little, up to a fifth of a slot either way, to bring the names clear of one another)
+  search: for (let R = maxR; R >= MIN_RING; R -= 1) {
+    for (const phase of [0, -0.2, 0.2, -0.1, 0.1]) {
+      const a = arrange(R, phase);
+      if (!best || a.full > best.full) best = a;
+      if (a.full === units.length) break search;
     }
-    cursor += GAP * step;
-  });
-  // the hub: a ring outline, open inside, small against the orbit so there is empty space round it
-  const hubR = clamp(Math.round(Math.min(rx, ry) * 0.17), 5, 9);
+  }
+  const { R, ring, placed, hubR } = best;
+  const rx = R;
+  const ry = R;
   for (const p of placed) {
-    p.col = clamp(Math.floor(p.x / 2), 0, w - 1);
-    p.row = clamp(Math.floor(p.y / 4), 0, h - 1);
-    p.gx = p.col * 2 + 1; // the glyph cell's centre, in dots
-    p.gy = p.row * 4 + 2;
-    p.side = p.x >= cx - 0.5 ? 1 : -1;
-    p.label = labelOf(p.agent);
-    p.state = states.get(p.agent.name) || "idle";
     p.worked = hasWorked(p.agent);
     p.azimuth = Math.atan2((p.x - cx) / rx, -(p.y - cy) / ry); // clockwise from the top
     // the spoke: from outside the hub's ring to short of the glyph
@@ -630,7 +707,7 @@ function buildLayout(doc, w, h) {
     const n = p.seats.length;
     p.seatDots = p.seats.map((seat, i) => {
       const spread = Math.PI * 1.1;
-      const centre = p.side > 0 ? Math.PI : 0;
+      const centre = p.dir > 0 ? Math.PI : 0;
       const a = n === 1 ? centre : centre - spread / 2 + (spread * i) / (n - 1);
       return { agent: seat, x: p.gx + rs * Math.cos(a), y: p.gy + rs * Math.sin(a) * 0.9 };
     });
@@ -665,7 +742,7 @@ function buildLayout(doc, w, h) {
     arcs.push({ loop, points, worker: a, evaluator: b });
   }
   const keys = groups.map((g) => g.key);
-  return { w, h, cx, cy, rx, ry, ring, placed, arcs, hubR, hub, states, agents, keys, groups };
+  return { w, h, cx, cy, rx, ry, R, fitY, hubBox: hubBox(cx, cy, hubR), ring, placed, arcs, hubR, hub, states, agents, keys, groups };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -851,13 +928,13 @@ export function morphCamera(L, turn, elevation, k) {
   return project;
 }
 
-// camera3D in dots: project(point) = { x, y, depth }
-function cameraDots(L, turn, elevation) {
+// The 3D figure's scale at `elevation`: `vs` dots per figure radius (the same across and up) and `mid`, the figure's
+// middle on screen (in radii, up). The figure fills the canvas's rows (centred, and it does not grow and shrink as it
+// turns: its highest and lowest point at any turn), and never reaches past the canvas's sides, near side included.
+function figureScale(L, elevation) {
   const ce = Math.cos(elevation);
   const se = Math.sin(elevation);
   const scale = (depth) => PERSPECTIVE / (PERSPECTIVE - depth);
-  // the figure's highest and lowest point on screen at any turn, so it fills the canvas's rows, centred, and does not
-  // grow and shrink as it turns
   let hi = -Infinity;
   let lo = Infinity;
   for (const ring of figure3D(L).rings) {
@@ -875,9 +952,18 @@ function cameraDots(L, turn, elevation) {
     hi = 1;
     lo = -1;
   }
-  const mid = (hi + lo) / 2;
-  const vs = (L.ry * 0.94) / Math.max(0.35, (hi - lo) / 2); // dots per unit, up and down
-  const hs = L.rx * FIGURE_SCALE; // dots per unit, across
+  const near = PERSPECTIVE / (PERSPECTIVE - 1); // the near side's magnification
+  const vs = Math.min((L.fitY * 0.94) / Math.max(0.35, (hi - lo) / 2), (L.w - 2) / near);
+  return { vs, mid: (hi + lo) / 2 };
+}
+
+// camera3D in dots: project(point) = { x, y, depth }
+export function cameraDots(L, turn, elevation) {
+  const ce = Math.cos(elevation);
+  const se = Math.sin(elevation);
+  const scale = (depth) => PERSPECTIVE / (PERSPECTIVE - depth);
+  const { vs, mid } = figureScale(L, elevation);
+  const hs = vs; // one scale for across and up: a dot is square, so the figure is never stretched to the panel's shape
   const ct = Math.cos(turn);
   const st = Math.sin(turn);
   const dots = (p) => {
@@ -1473,24 +1559,27 @@ function agentStyle(S, P, p, blinkOn) {
 function drawLabels2D(doc, L, canvas, S, P, now, frame) {
   const blinkOn = Math.floor(now / 500) % 2 === 0;
   L.placed.forEach((p, k) => canvas.put(p.col, p.row, glyphFor(p, k, frame, blinkOn), agentStyle(S, P, p, blinkOn)));
-  const urgency = { stuck: 0, working: 1, back: 2, done: 3, idle: 4 };
-  const order = [...L.placed].sort((a, b) => urgency[a.state] - urgency[b.state]);
-  const shown = new Map();
-  for (const p of order) {
-    const start = p.col + 2 * p.side;
-    const room = canvas.room(start, p.row, p.side, NAME_MAX);
-    if (room < 1) continue;
-    const text = truncate(p.label, room);
-    const tw = displayWidth(text);
-    canvas.put(p.col + p.side, p.row, " ", 0); // a clear cell between the glyph and its name
-    canvas.put(p.side > 0 ? start : start - tw + 1, p.row, text, agentStyle(S, P, p, true));
-    shown.set(p, text);
+  // the names have their places from the layout (placeNames): none overlaps another name, a glyph or the hub
+  const shown = new Set();
+  for (const p of L.placed) {
+    if (!p.name) continue;
+    canvas.put(p.col + p.dir, p.row, " ", 0); // a clear cell between the glyph and its name
+    canvas.put(p.name.c0, p.row, p.name.text, agentStyle(S, P, p, true));
+    shown.add(p);
   }
+  // a working agent's goal and spend: on the row below its name, where there is room (not over the hub's ball, and not
+  // on a row of another agent's glyph and name, where it would read as that agent's)
   const muted = S.get("muted");
-  for (const p of order) {
-    if (p.state !== "working" || p.row + 1 >= L.h || !shown.has(p)) continue;
-    const start = p.col + 2 * p.side;
-    const room = canvas.room(start, p.row + 1, p.side, 30);
+  const box = L.hubBox;
+  const agentRows = new Set(L.placed.map((p) => p.row));
+  for (const p of L.placed) {
+    if (p.state !== "working" || p.row + 1 >= L.h || !shown.has(p) || agentRows.has(p.row + 1)) continue;
+    const start = p.col + 2 * p.dir;
+    let room = canvas.room(start, p.row + 1, p.dir, 30);
+    if (p.row + 1 >= box.r0 && p.row + 1 <= box.r1) {
+      const edge = p.dir > 0 ? box.c0 - 1 - start : start - box.c1 - 1; // cells before the ball and a clear cell
+      if (edge >= 0) room = Math.min(room, edge);
+    }
     const n = workRounds(doc, p.agent.name);
     const tail = (n >= 2 ? `${LOOP_MARK}${n} ` : "") + formatDollars(agentCost(p.agent));
     const goal = currentGoal(isObject(doc.graph) ? doc.graph : null, p.agent.name);
@@ -1499,7 +1588,7 @@ function drawLabels2D(doc, L, canvas, S, P, now, frame) {
     else if (displayWidth(tail) <= room) text = tail;
     if (!text) continue;
     const tw = displayWidth(text);
-    canvas.put(p.side > 0 ? start : start - tw + 1, p.row + 1, text, muted);
+    canvas.put(p.dir > 0 ? start : start - tw + 1, p.row + 1, text, muted);
   }
 }
 
@@ -1743,7 +1832,7 @@ export function skyColors(colors) {
 function skyPlace(L, cam) {
   const w = L.w;
   const h = L.h;
-  const frontCells = (L.rx * FIGURE_SCALE) / 2; // the near side's movement, cells per radian
+  const frontCells = figureScale(L, ELEVATION_3D).vs / 2; // the near side's movement, cells per radian
   const V = Math.max(w, Math.round(2 * Math.PI * frontCells * PARALLAX));
   const turn = wrapTurn(Number(cam.turn) || 0);
   const dc = Math.round((turn / (2 * Math.PI)) * V); // the far side's way: rightward as the turn grows; whole cells, so the sky moves as one

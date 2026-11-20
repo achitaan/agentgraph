@@ -128,9 +128,12 @@ list.
 
 **Small panels.** The orbit compresses instead of giving up. As space shrinks it gives way in this order: the three
 instruments (c, b, a), then the needs lines, then the header (its right side `4/11  $7.65` goes, then the hub's name
-is cut), then the names (cut with an ellipsis, never over another name or the figure, the nearer label wins a place),
-then the ring itself gets smaller. The hub, every agent's glyph, the working pulses, the moons and the sun's flares
-stay. At 36x14 the canvas is 12 rows: a 2D ring about 20 cells wide, and the 3D figure's moons show (a moon hidden
+is cut), then the ring itself gets smaller (always a circle: one radius in dots across and up, never stretched to the
+panel's shape; the largest circle that lets every name show whole, a name moves inside the ring beside its glyph when
+there is no room outside it, and a name over 12 characters is still cut with an ellipsis; only when even a small ring
+has no room for a name, as with twenty agents at 36 columns, is a name cut further or left out; never over another
+name, a glyph or the hub). The hub, every agent's glyph, the working pulses, the moons and the sun's flares
+stay. At 36x14 the canvas is 12 rows: a 2D ring of about 10 to 18 dots' radius (the demo's names fit at 10), and the 3D figure's moons show (a moon hidden
 behind its parent for a moment shows nothing). So the sun's flares can leave the ball at that size, the 3D ball is never
 smaller than 7 dots in radius on screen (across and up; about 3 cells, a little bigger than 0.2 of the figure there);
 larger panels keep 0.2. The `d` morph works at that size too, and a frame costs no more than the
@@ -169,7 +172,9 @@ That is not built.
 hub is a ball: a rim of dots with shaded dots inside, dithered denser toward a light at the upper left (the other
 way round on a light theme, so the lit side reads lighter either way), still at rest, its rim breathing by one dot
 while work moves (not with reduced motion). While the hub itself works it is the sun (below). The agents sit on a larger
-faint dotted ellipse in the structure order of the desktop app (lead group at the top, then decide, build, verify,
+faint dotted circle (equal radius across and up, in dots; the radius is the canvas's height or width allows, less the
+names that go outside it; the 3D camera uses the same one scale across and up, so the reference circle seen from
+above is round too, and tilted it is the circle's width times the sine of the elevation) in the structure order of the desktop app (lead group at the top, then decide, build, verify,
 understand; a folder structure keeps its groups order), with names outside it. A thin spoke (every third dot) runs
 from outside the hub's ring to short of each agent that has worked in this session; while an agent works a pulse runs
 out along it. Loop arcs bow outward between worker and checker and carry a pulse toward whoever has the work. With

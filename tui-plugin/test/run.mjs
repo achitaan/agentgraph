@@ -2257,7 +2257,7 @@ test("scene 3D: it turns when idle; near side of a ring draws @ or 1, the opposi
   assert.ok(checked >= 16, "checked " + checked);
   let good = 0;
   for (const now of [0, 9000, 21000]) {
-    for (const r of check(idleDoc, 120, 30, now)) {
+    for (const r of check(idleDoc, 160, 45, now)) { // (a full-screen panel: in 30 rows the round figure is small enough for names to sit on rings' near points)
       assert.ok(["@", "1"].includes(r.near), `demo at ${now}: near ${r.near}`);
       if (r.ok) good += 1;
     }
@@ -2271,7 +2271,7 @@ test("scene 3D: it turns when idle; near side of a ring draws @ or 1, the opposi
 
 test("scene 3D: 0s and 1s advance outward along a working agent's spoke", () => {
   const doc = D([A("orchestrator", "hub", 0, "", 1), A("worker", "build", 1, "", 0.5), A("idle", "verify", 0, "", 0.2), A("other", "decide")]);
-  const w = 120, h = 30;
+  const w = 120, h = 40; // (the figure is round and fits the canvas's height: in 30 rows its spokes are short and the stream wraps too often to read as moving outward)
   const L = S.orbitLayout(doc, w, h);
   const P = S.makePalette(L.keys, DARK);
   let ups = 0;
@@ -3303,7 +3303,9 @@ test("orbit sky: shifts at a fraction of the figure's turn (the same after a ful
   const F = S.figure3D(L);
   const p0 = S.camera3D(L, 1.0, S.ELEVATION_3D);
   const p1 = S.camera3D(L, 1.3, S.ELEVATION_3D);
-  const agentMove = Math.max(...L.placed.map((p) => Math.abs(p1(F.agents.get(p.agent.name)).col - p0(F.agents.get(p.agent.name)).col)));
+  // (the figure is round and fits the canvas's height, so in a wide panel no agent need stand where the near side moves most: the figure's rings count too)
+  const moved = (pt) => Math.abs(p1(pt).col - p0(pt).col);
+  const agentMove = Math.max(...L.placed.map((p) => moved(F.agents.get(p.agent.name))), ...F.rings.flatMap((ring) => ring.points.filter((_, i) => i % 6 === 0).map(moved)));
   assert.ok(shift.n >= a.length * 0.6, `most stars shift together (${shift.n} of ${a.length})`);
   assert.ok(shift.d >= 2 && shift.d <= agentMove * 0.7, `the sky moves ${shift.d} cells, the near agents up to ${agentMove}: a fraction`);
   // a full turn: the same sky (no jump where the turn wraps)
@@ -3352,24 +3354,24 @@ test("orbit sky: one warmer star per finished run (capped at 200); a streak flie
   many.structure.flows[0].stats.passed = 900;
   assert.deepEqual(S.runStars(many), capped, "past the cap a new run adds no star and moves none");
   assert.equal(new Set(capped.map((s) => s.u + "," + s.v)).size, capped.length, "each run its own place");
-  // a run star that shows at the held camera, and its streak
+  // a run star that shows at the held camera, and its streak // (40 rows: in 30 the round figure can cover a streak's diagonal)
   const C = S.skyColors(DARK);
-  const steadyCells = skyCells(doc, 120, 30, 50000);
+  const steadyCells = skyCells(doc, 120, 40, 50000);
   const runCells = steadyCells.filter((c) => c.color === C.run);
   assert.ok(runCells.length >= 1 && runCells.length <= 3 && runCells.every((c) => c.ch === S.RUN_STAR_CHAR), "the run stars show, warm");
   const target = S.runStars(doc).find((s) => {
-    const cells = skyCells(doc, 120, 30, 50000, { streaks: [{ flow: s.flow, run: s.run, at: 50100 }] }); // waiting: no star yet
+    const cells = skyCells(doc, 120, 40, 50000, { streaks: [{ flow: s.flow, run: s.run, at: 50100 }] }); // waiting: no star yet
     return cells.filter((c) => c.color === C.run).length < runCells.length;
   });
   assert.ok(target, "a run star on screen");
   const streaks = [{ flow: target.flow, run: target.run, at: 50000 }];
   const tail = (cells) => cells.filter((c) => c.ch === S.STREAK_CHARS.down || c.ch === S.STREAK_CHARS.up);
-  const runStarsAt = (now, options = {}) => skyCells(doc, 120, 30, now, Object.assign({ streaks }, options)).filter((c) => c.color === C.run && c.ch === S.RUN_STAR_CHAR).length;
+  const runStarsAt = (now, options = {}) => skyCells(doc, 120, 40, now, Object.assign({ streaks }, options)).filter((c) => c.color === C.run && c.ch === S.RUN_STAR_CHAR).length;
   // waiting its turn: no star, no streak
-  assert.equal(tail(skyCells(doc, 120, 30, 49900, { streaks })).length, 0);
+  assert.equal(tail(skyCells(doc, 120, 40, 49900, { streaks })).length, 0);
   assert.equal(runStarsAt(49900), runCells.length - 1);
   // in flight: a diagonal tail behind the head, on empty cells only, the star not there yet
-  const mid = skyCells(doc, 120, 30, 50000 + S.STREAK_MS / 2, { streaks });
+  const mid = skyCells(doc, 120, 40, 50000 + S.STREAK_MS / 2, { streaks });
   const t = tail(mid);
   assert.ok(t.length >= 1, "a tail");
   assert.ok(mid.every((c) => c.under === " "), "over nothing of the figure");
@@ -3385,11 +3387,11 @@ test("orbit sky: one warmer star per finished run (capped at 200); a streak flie
   assert.equal(S.frameInterval(doc, { view: "3d", streaks }, 49900), S.FRAME_MS_WORKING, "and while it waits its turn");
   // landed: no streak, the star stays; the frame is the one without the streak
   const done = 50000 + S.STREAK_MS;
-  assert.equal(tail(skyCells(doc, 120, 30, done, { streaks })).length, 0);
-  assert.deepEqual(sceneText(skyFrame(doc, 120, 30, done, { streaks })), sceneText(skyFrame(doc, 120, 30, done)));
+  assert.equal(tail(skyCells(doc, 120, 40, done, { streaks })).length, 0);
+  assert.deepEqual(sceneText(skyFrame(doc, 120, 40, done, { streaks })), sceneText(skyFrame(doc, 120, 40, done)));
   assert.equal(S.frameInterval(doc, { view: "3d", streaks }, done), S.FRAME_MS_IDLE_3D, "back to idle frames");
   // reduced motion: no streak, the star appears at its time; idle frames
-  assert.equal(tail(skyCells(doc, 120, 30, 50450, { streaks, motion: "reduced" })).length, 0);
+  assert.equal(tail(skyCells(doc, 120, 40, 50450, { streaks, motion: "reduced" })).length, 0);
   assert.equal(runStarsAt(50450, { motion: "reduced" }), runCells.length);
   assert.equal(runStarsAt(49900, { motion: "reduced" }), runCells.length - 1);
   assert.equal(S.frameInterval(doc, { view: "3d", streaks, motion: "reduced" }, 50450), S.FRAME_MS_IDLE_3D);
@@ -3402,7 +3404,7 @@ test("orbit sky: the hub drawn brighter (accent) in 3D while the orchestrator wo
   const working = JSON.parse(JSON.stringify(idle));
   working.agents.find((a) => a.group === "hub").busy = 1;
   const hubTone = (doc, view) => {
-    const lines = S.orbitLines(doc, 120, 30, 5000, { view, orbit: HELD, sky: false });
+    const lines = S.orbitLines(doc, 120, 40, 5000, { view, orbit: HELD, sky: false });
     for (const l of lines) for (const c of cellsOf(l)) if (c.ch === "◉") return c.tone;
     return null;
   };
@@ -3895,7 +3897,8 @@ test("small panel: the orbit draws from 36x14 in 2D and 3D with the hub, every a
   assert.ok(!small.some((l) => /ctx|━/.test(l)), "no instrument at 14 rows");
   const tall = sceneText(S.scene(demoWorn, { width: 36, height: 40, now: 5000 }));
   assert.ok(tall.some((l) => /ctx|━/.test(l)), "the instruments come back with room");
-  assert.ok(small.some((l) => l.includes("…")), "names cut with an ellipsis, not overlapped");
+  // (the ring gives way to the names, not the names to the ring: a smaller circle, every name whole; a name over 12 is still cut)
+  assert.ok(small.some((l) => l.includes("oracle-lite")) && !small.some((l) => l.includes("oracle-…")), "names whole at 36 columns, the ring smaller");
   // the sun's flares at the smallest size, in both views: warm cells beyond the ball while the hub works, none at rest
   for (const view of ["2d", "3d"]) {
     let flared = 0;
@@ -3912,7 +3915,10 @@ test("small panel: the orbit draws from 36x14 in 2D and 3D with the hub, every a
   // working pulses in 2D: a working agent's frame changes with the clock, an idle one's does not
   const two = (doc, now) => sceneText(S.scene(doc, { width: 36, height: 14, now })).join("\n");
   assert.notEqual(two(demoWorn, 1000), two(demoWorn, 1300), "working: it moves");
-  assert.equal(two(hubIdle(), 1000), two(hubIdle(), 1300), "at rest: it stands still");
+  // (at rest one faint dot circles the ring, a lap in twenty seconds: in 300 ms it may cross into the next cell, and that is all that changes)
+  const resting = [two(hubIdle(), 1000), two(hubIdle(), 1300)];
+  const changed = [...resting[0]].filter((ch, i) => ch !== resting[1][i]).length;
+  assert.ok(changed <= 2, `at rest: it stands still but for the one dot (${changed} cells changed)`);
 });
 
 test("orbit sky panel: no streak on opening or switching to 3D; a run finished while 3D shows flies exactly one streak and its star stays; one finished in 2D flies none; an unchanged frame is not pushed", async () => {
@@ -4697,6 +4703,90 @@ test("runner: flow prompt: arguments, goal on stdin, working directory, PYTHONPA
   assert.deepEqual(late, { error: "agentgraph flow prompt did not finish within 0 s." });
   assert.ok(Date.now() - t0 < 3000);
   assert.deepEqual(await RUNNER.runFlowPrompt({ spawn, path, env: process.env, home: tmp, python: py }, "a-b", "  "), { error: "The goal is empty." });
+});
+
+// ---- the ring is a circle (n3): equal radii in dots, in a narrow panel and full screen, in 2D and 3D
+
+const ringRoster = (n) => D([A("orchestrator", "hub", 0, "", 1)].concat(Array.from({ length: n }, (_, i) =>
+  A(`${["build", "verify", "decide", "plan"][i % 4]}-agent-${i}`, ["build", "verify", "decide", "plan"][i % 4], i % 3 === 0 ? 1 : 0, "", 0.1 * (i + 1)))));
+const RING_SIZES = [[36, 14, 0.25], [42, 38, 0.25], [130, 40, 0.1], [160, 45, 0.1]]; // panel columns x rows, the most rx and ry may differ
+const RING_CANVASES = [[36, 12], [36, 14], [42, 28], [42, 38], [130, 32], [130, 40], [160, 37], [160, 45]]; // the canvas under the header and the instruments, and the panel size itself
+
+test("orbit ring: a circle in dots (rx == ry), never more than the canvas's height and width allow, from a narrow panel to full screen", () => {
+  for (const [doc, what] of [[demoWorn, "demo"], [ringRoster(12), "12 agents"], [ringRoster(20), "20 agents"]]) {
+    for (const [w, h] of RING_CANVASES) {
+      const L = S.orbitLayout(doc, w, h);
+      const narrow = w < 60;
+      const tol = narrow ? 0.25 : 0.1;
+      assert.ok(Math.abs(L.rx - L.ry) <= tol * Math.max(L.rx, L.ry), `${what} ${w}x${h}: rx ${L.rx} against ry ${L.ry}`);
+      // the ring itself, measured in dots
+      const around = Array.from({ length: 180 }, (_, i) => L.ring.at((i / 180) * L.ring.length));
+      const xs = around.map((q) => q[0]);
+      const ys = around.map((q) => q[1]);
+      const across = Math.max(...xs) - Math.min(...xs);
+      const up = Math.max(...ys) - Math.min(...ys);
+      assert.ok(Math.abs(across - up) <= tol * Math.max(across, up), `${what} ${w}x${h}: the ring is ${across} dots across and ${up} up`);
+      assert.ok(Math.min(...xs) >= 0 && Math.max(...xs) <= 2 * w && Math.min(...ys) >= 0 && Math.max(...ys) <= 4 * h, `${what} ${w}x${h}: the ring is on the canvas`);
+      assert.ok(L.rx >= 4, "a ring, even in the smallest panel");
+    }
+  }
+  // the full screen ring is as tall as the canvas lets it be (it is not made small to be round)
+  const big = S.orbitLayout(demoWorn, 160, 45);
+  assert.ok(big.ry >= 45 * 4 / 2 * 0.8, `full screen: the ring fills the canvas's height: ${big.ry}`);
+});
+
+test("orbit ring: every name has its own cells: whole (12 characters at most), on the canvas, over no other name, glyph or the hub", () => {
+  for (const [doc, what] of [[demoWorn, "demo"], [ringRoster(12), "12 agents"], [ringRoster(20), "20 agents"]]) {
+    for (const [w, h] of RING_CANVASES) {
+      const L = S.orbitLayout(doc, w, h);
+      const used = new Map();
+      const take = (c, r, who) => {
+        assert.ok(c >= 0 && c < w && r >= 0 && r < h, `${what} ${w}x${h}: ${who} at ${c},${r} is on the canvas`);
+        assert.ok(!used.has(c + "," + r), `${what} ${w}x${h}: ${who} at ${c},${r} is over ${used.get(c + "," + r)}`);
+        used.set(c + "," + r, who);
+      };
+      for (let r = L.hubBox.r0; r <= L.hubBox.r1; r += 1) for (let c = L.hubBox.c0; c <= L.hubBox.c1; c += 1) if (c >= 0 && c < w && r >= 0 && r < h) used.set(c + "," + r, "the hub");
+      for (const p of L.placed) take(p.col, p.row, "the glyph of " + p.agent.name);
+      // (twelve or twenty agents in a 36 column panel have more names than rows to put them in: there a name may be cut, or left out, but never overlaps)
+      const whole = doc === demoWorn || w >= 42;
+      for (const p of L.placed) {
+        if (whole) {
+          assert.ok(p.name, `${what} ${w}x${h}: ${p.agent.name} has a name`);
+          assert.equal(p.name.text, p.label, `${what} ${w}x${h}: ${p.agent.name} is not cut below 12 characters`);
+        }
+        if (p.name) for (let c = p.name.c0; c <= p.name.c1; c += 1) take(c, p.row, "the name " + p.label);
+      }
+    }
+  }
+  // in the frame: each ring agent's name once, whole, on its own row, in both views
+  for (const [w, h] of [[36, 14], [42, 38], [130, 40], [160, 45]]) {
+    for (const view of ["2d", "3d"]) {
+      for (const doc of [demoWorn, ringRoster(12)]) {
+        const text = sceneText(S.sceneStrict(doc, { width: w, height: h, now: 1234, view })).slice(1).join("\n");
+        for (const a of R.validAgents(doc).filter((x) => x.group !== "hub" && !x.parent)) {
+          const name = a.name.length > 12 ? a.name.slice(0, 11) + "…" : a.name;
+          assert.ok(text.includes(name), `${view} ${w}x${h}: ${name} is shown`);
+        }
+      }
+    }
+  }
+});
+
+test("orbit ring 3D: the camera has one scale across and up, so the reference circle seen from above is round, and tilted it is the circle's width by the sine of the elevation", () => {
+  for (const [w, h] of [[42, 38], [160, 45], [36, 14], [130, 40]]) {
+    const L = S.orbitLayout(demoWorn, w, h);
+    const circle = (elevation) => {
+      const dots = S.cameraDots(L, 0, elevation);
+      const q = Array.from({ length: 180 }, (_, i) => dots([Math.cos((i / 180) * 2 * Math.PI), Math.sin((i / 180) * 2 * Math.PI), 0]));
+      return { across: Math.max(...q.map((p) => p.x)) - Math.min(...q.map((p) => p.x)), up: Math.max(...q.map((p) => p.y)) - Math.min(...q.map((p) => p.y)) };
+    };
+    const top = circle(Math.PI / 2);
+    assert.ok(Math.abs(top.across - top.up) <= 0.05 * Math.max(top.across, top.up), `${w}x${h}: from above ${top.across} dots across, ${top.up} up`);
+    assert.ok(top.across <= 2 * w && top.up <= 4 * h, `${w}x${h}: on the canvas`);
+    const tilted = circle(S.ELEVATION_3D);
+    const rule = Math.sin(S.ELEVATION_3D);
+    assert.ok(Math.abs(tilted.up / tilted.across - rule) <= 0.2 * rule, `${w}x${h}: tilted, up/across ${(tilted.up / tilted.across).toFixed(2)} against sin(elevation) ${rule.toFixed(2)}`);
+  }
 });
 
 // ---------------------------------------------------------------------------------------------------------------
