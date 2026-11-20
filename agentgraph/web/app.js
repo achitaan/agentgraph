@@ -205,7 +205,11 @@
     const status = el('div', 'ag-status');
     const attention = el('button', 'ag-attention');
     attention.type = 'button'; attention.hidden = true; attention.setAttribute('aria-label', 'Needs attention');
-    status.append(activity, attention);
+    // A refusal said where the user is looking when no details are open for it (Delete on an agent that stays):
+    // shown for a few seconds in the status line, never in the graph. Screen readers hear it from the live region.
+    const statusNote = el('span', 'ag-status-note');
+    statusNote.hidden = true; statusNote.setAttribute('aria-hidden', 'true');
+    status.append(activity, attention, statusNote);
     const usage = el('button', 'ag-usage');
     usage.type = 'button'; usage.hidden = true; usage.setAttribute('aria-label', 'Usage');
     const usageCost = el('span', 'ag-usage-cost'), usageTokens = el('span', 'ag-usage-tokens'), usageContext = el('span', 'ag-usage-context');
@@ -1539,7 +1543,10 @@
       const agent = type === 'agent' && agentsByName.get(key);
       if (type === 'agent' && !agent) return;
       if (type !== 'new-agent') failedDraft = null;
-      if (type !== 'new-agent' && draft) { draft = null; drawDraft(); }
+      // A circle whose add is still out stays until its answer (which is always shown).
+      if (type !== 'new-agent' && draft && !draft.pending) { draft = null; drawDraft(); }
+      // An added agent's instruction is read again each time its details open.
+      if (!(selected?.type === type && selected.key === key)) agentTexts.clear();
       if (type !== 'skill') skillView = null;
       if (!(type === 'agent' && teamDraft?.lead === key)) teamDraft = null;
       if (agent && agent.team !== activeTeam) switchTeam(agent.team);
@@ -1551,8 +1558,8 @@
       if (step) Array.from(detailScroll.querySelectorAll('[data-step]')).find(row => row.dataset.step === step)?.scrollIntoView({ block: 'nearest' });
     }
     function closeDetails() {
-      failedDraft = null;
-      if (draft) { draft = null; drawDraft(); }
+      failedDraft = null; agentTexts.clear();
+      if (draft && !draft.pending) { draft = null; drawDraft(); }
       selected = null; highlightedStep = ''; detail.hidden = true; root.classList.remove('ag-details-open'); detailSignature = ''; updateEdges(); scheduleResize();
       if (selectedOrigin && selectedOrigin.isConnected) selectedOrigin.focus({ preventScroll: true });
       else viewport.focus({ preventScroll: true });
@@ -1593,6 +1600,14 @@
         if (!store) return;
         if (skillOrder.size) store.setItem(SKILL_ORDER_KEY, JSON.stringify(Object.fromEntries(skillOrder))); else store.removeItem(SKILL_ORDER_KEY);
       } catch (_) { /* storage full or refused: the order still holds for this session */ }
+    }
+    // A later change keeps the order an undo put back: a skill added goes last (where the back end puts it), a skill
+    // removed leaves the others in place; "every skill" hands the order back to the back end.
+    function keepSkillOrder(name, request) {
+      const order = skillOrder.get(name);
+      if (!order) return;
+      if (request.all) setSkillOrder(name, null);
+      else if (request.on) setSkillOrder(name, [...order.filter(skill => skill !== request.skill), request.skill]);
     }
     function skillsOf(agent) {
       const list = skillOverride.get(agent.name) || agent.skills || [], order = skillOrder.get(agent.name);
@@ -1696,7 +1711,7 @@
     // Ask the host for one skill change. `record` false for an undo. One change per agent at a time.
     function askSkill(request, record = true) {
       const agent = agentsByName.get(request.agent);
-      if (!skillAction || !agent || skillPending.has(agent.name)) return Promise.reject(new Error('busy'));
+      if (!skillAction || !agent || skillPending.has(agent.name)) return Promise.reject(Object.assign(new Error('busy'), { busy: true }));
       const before = skillsOf(agent).slice();
       skillPending.set(agent.name, skillKey(request)); skillNotes.delete(agent.name); redrawDetail();
       let answer;
@@ -1711,7 +1726,7 @@
         const notes = reply.changed === false ? [{ kind: 'done', text: 'No change needed.' }] : [{ kind: 'done', text: (agent.added === true ? 'Changed in ' + agent.name + '\'s agent file. ' : 'Changed in every preset that lists ' + agent.name + ' and in SKILLS.md. ') + (text(reply.message || '') || 'Applies after OpenCode restarts; running sessions keep their skills.') }];
         (Array.isArray(reply.warnings) ? reply.warnings : []).forEach(warning => notes.push({ kind: 'warning', text: text(warning) }));
         skillNotes.set(agent.name, notes);
-        if (record && reply.changed !== false) { remember({ op: 'skill', agent: agent.name, request, before, after: after || before }); if (skillOrder.has(agent.name)) setSkillOrder(agent.name, null); }
+        if (record && reply.changed !== false) { remember({ op: 'skill', agent: agent.name, request, before, after: after || before, rev: typeof reply.rev === 'string' ? reply.rev : '' }); keepSkillOrder(agent.name, request); }
         redrawDetail();
         if (pending) await pending; // a snapshot asked for before the change may not show it
         await refresh();
@@ -1731,8 +1746,32 @@
       const requests = request.all ? (before.includes('*') ? [] : installed.filter(name => !before.includes(name)).map(skill => ({ agent, skill, on: false })))
         : request.on ? [{ agent, skill: request.skill, on: false }]
         : before.includes('*') ? [{ agent, all: true }] : [{ agent, skill: request.skill, on: true }];
-      requests.reduce((chain, next) => chain.then(() => askSkill(next, false)), Promise.resolve()).then(() => { if (alive && !before.includes('*')) { setSkillOrder(agent, before.slice()); redrawDetail(); } }, () => { if (alive) flowHistory.push(last); });
+      // The first request expects the rev the change produced; each after it, the rev the one before it wrote.
+      requests.reduce((chain, next, index) => chain.then(() => askSkill(index ? next : withRev(next, last.rev), false)), Promise.resolve()).then(() => { if (alive && !before.includes('*')) { setSkillOrder(agent, before.slice()); redrawDetail(); } }, error => {
+        if (!alive) return;
+        const said = undoRefused(last, error);
+        skillNotes.set(agent, [{ kind: 'error', text: said }]); redrawDetail(); announceLine(said);
+      });
     }
+    // ---- Undo after a refusal ----
+    // Each step's undo expects the rev its own write produced (brought along this view's later writes), so it never
+    // lands on something changed since, or on another thing that took the same id. Refused (stale, or with a reason),
+    // the step is dropped, so older steps stay reachable, and the view says what could not be undone and why. With no
+    // answer, a failed connection, or a change to the same thing still out, the step stays for another Ctrl/Cmd+Z.
+    const UNDO_WHAT = { text: 'the path\'s instruction', name: 'the path\'s name', command: 'the path\'s command', add: 'adding the path', remove: 'removing the path',
+      skill: 'the skill change', 'agent-remove': 'deleting the agent', 'agent-add': 'adding the agent', 'agent-rename': 'the rename', 'agent-text': 'the agent\'s instruction',
+      skillfile: 'the change to the skill', 'skillfile-create': 'making the skill', 'team-add': 'making the group', 'team-members': 'the group\'s members',
+      'team-text': 'the group\'s instruction', 'team-remove': 'removing the group' };
+    const FLOW_STEPS = new Set(['text', 'name', 'command', 'add', 'remove']);
+    function sentence(said) { said = text(said).trim(); return !said || /[.!?…]$/.test(said) ? said : said + '.'; }
+    function keepStep(error) { return error?.noAnswer === true || error?.busy === true || error?.transport === true || error instanceof TypeError; }
+    function undoSaid(last, error) {
+      if (error?.busy === true) return 'Not undone yet: a change to it is still being made. Ctrl+Z tries again.';
+      if (keepStep(error)) return 'Not undone: ' + sentence(message(error, 'agentgraph could not be reached')) + (error?.noAnswer === true ? '' : ' Ctrl+Z tries again.');
+      const why = isStale(error) ? (error.unloaded === true ? 'it was changed somewhere else since, and the latest did not load within 15 seconds.' : 'it was changed somewhere else since. The view now shows the latest.') : sentence(message(error, 'it was refused'));
+      return 'Could not undo ' + (UNDO_WHAT[last.op] || 'that change') + ': ' + why;
+    }
+    function undoRefused(last, error) { if (keepStep(error)) flowHistory.push(last); return undoSaid(last, error); }
     // ---- Agents, skill text and groups, written through actions.roster, actions.skillfile and actions.team ----
     // Every change is one request; its answer is followed by a fresh snapshot, and undo (Ctrl/Cmd+Z) sends the
     // opposite request. Refusals are shown beside what was asked, in the user's words kept where they typed them.
@@ -1744,8 +1783,27 @@
     // the rev it was drawn with, so a change that arrived while the user typed is not overwritten). A snapshot without
     // rev (an older back end) sends none. A stale refusal (409) brings the view up to date before the refusal is
     // handled, is said plainly, and the user's typing stays where it was.
+    const NOT_CONFIRMED = 'Not confirmed as sent. Look in the orchestrator\'s chat before you send it again.';
     const STALE_SAID = 'This was changed somewhere else since you opened it. The view now shows the latest; try again.';
     const EXPECTING = { flow: ['text', 'name', 'command', 'remove', 'prompt'], team: ['members', 'text', 'remove'], roster: ['text', 'rename', 'remove'], skillfile: ['write', 'delete'] };
+    // A write, or the refresh after a stale refusal, that gets no answer in 15 s is given up: what was typed stays,
+    // the queue for that thing goes on, and an answer that comes later is dropped (never drawn over newer state).
+    const ANSWER_MS = 15000;
+    const NO_ANSWER_SAID = 'agentgraph did not answer within 15 seconds, so the view stopped waiting. Try again.';
+    const STALE_UNLOADED = 'This was changed somewhere else since you opened it, and the latest did not load within 15 seconds. Try again.';
+    const clock = options.clock && typeof options.clock.setTimeout === 'function' && typeof options.clock.clearTimeout === 'function' ? options.clock
+      : { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: id => clearTimeout(id) };
+    const ceilings = new Set();
+    const noAnswer = () => Object.assign(new Error(NO_ANSWER_SAID), { noAnswer: true });
+    function within(work) {
+      return new Promise((resolve, reject) => {
+        let done = false;
+        const timer = clock.setTimeout(() => { if (done) return; done = true; ceilings.delete(timer); reject(noAnswer()); }, ANSWER_MS);
+        ceilings.add(timer);
+        const finish = fn => value => { if (done) return; done = true; ceilings.delete(timer); clock.clearTimeout(timer); fn(value); };
+        Promise.resolve(work).then(finish(resolve), finish(reject));
+      });
+    }
     function isStale(error) { return !!error && typeof error === 'object' && (error.status === 409 || error.stale === true || /changed since you opened it/i.test(text(error.message || ''))); }
     // A write's reply gives the thing's new rev; until a snapshot fetched after that reply is drawn, it is the one shown.
     let fetchesStarted = 0, renderedFetch = 0;
@@ -1759,6 +1817,23 @@
       return item && typeof item.rev === 'string' ? item.rev : '';
     }
     function withRev(request, rev) { return rev ? { ...request, expect: rev } : request; }
+    // Revs this view's own accepted writes moved on from: a write that expected A and was answered with B means A
+    // became B by this view's hand. A field drawn at A, a request queued expecting A, or an undo step that wrote A
+    // then expects B (and on along the chain); anything changed by someone else breaks the chain and is refused.
+    const ownMoves = new Map(), OWN_MOVES = 400;
+    function follow(id, rev) {
+      for (let hops = 0; rev && hops < 64 && ownMoves.has(id + '\n' + rev); hops++) rev = ownMoves.get(id + '\n' + rev);
+      return rev;
+    }
+    function moved(id, from, to) {
+      if (!id || !from || !to || from === to) return;
+      ownMoves.set(id + '\n' + from, to);
+      if (ownMoves.size > OWN_MOVES) ownMoves.delete(ownMoves.keys().next().value);
+    }
+    // A rename carries the agent's revs over to its new name.
+    function renamedRevs(from, to) {
+      Array.from(ownMoves).forEach(([key, rev]) => { if (key.startsWith('agent:' + from + '\n')) ownMoves.set('agent:' + to + key.slice(('agent:' + from).length), rev); });
+    }
     // What a write names: [kind, key], or ['', ''] for an add, a read or a restore.
     function thingOf(fn, request) {
       if (!request || typeof request !== 'object') return ['', ''];
@@ -1770,32 +1845,54 @@
         : fn === skillAction && typeof request.agent === 'string' ? ['agent', request.agent]
         : fn === runAction && typeof request.flow === 'string' ? ['flow', request.flow] : ['', ''];
     }
-    // The request as sent: `expect` from what is shown, unless the caller gave the rev its field was drawn with.
+    // The request as sent: `expect` from what is shown, unless the caller gave the rev its field was drawn with (or an
+    // undo step the rev its write produced); either way brought along this view's own writes since.
     function stamped(fn, request) {
       const [kind, key] = thingOf(fn, request);
-      return kind && !('expect' in request) ? withRev(request, revOf(kind, key)) : request;
+      if (!kind) return request;
+      return 'expect' in request ? { ...request, expect: follow(kind + ':' + key, request.expect) } : withRev(request, follow(kind + ':' + key, revOf(kind, key)));
+    }
+    // The rev a reply gives the thing it changed (an agent's under its new name after a rename).
+    function replyRev(kind, request, result) {
+      const rev = kind === 'flow' ? result?.flow?.rev : kind === 'team' ? result?.team?.rev : kind === 'skill' || kind === 'agent' ? result?.rev : undefined;
+      return typeof rev === 'string' ? rev : '';
     }
     // Writes to one thing go one after another, each expecting what the one before it wrote (its reply's rev).
+    // A write sent before reset() is never answered as far as the view goes: its reply and its refusal are dropped.
+    const UNHEARD = () => new Promise(() => {});
     function call(fn, request) {
-      const [kind, key] = thingOf(fn, request), id = kind ? kind + ':' + key : '', before = id ? writing.get(id) : null;
+      const [kind, key] = thingOf(fn, request), id = kind ? kind + ':' + key : '', before = id ? writing.get(id) : null, born = generation;
       const send = () => {
-        let answer;
-        try { answer = Promise.resolve(fn(stamped(fn, request))); } catch (error) { answer = Promise.reject(error); }
+        if (born !== generation) return UNHEARD();
+        let answer, sent = request;
+        try { sent = stamped(fn, request); answer = within(fn(sent)); } catch (error) { answer = Promise.reject(error); }
         return answer.then(result => {
-          const rev = kind === 'flow' ? result?.flow?.rev : kind === 'team' ? result?.team?.rev : kind === 'skill' ? result?.rev : undefined;
-          if (id && typeof rev === 'string' && rev) replyRevs.set(id, { rev, seq: fetchesStarted });
+          if (born !== generation) return UNHEARD();
+          const rev = replyRev(kind, request, result), renamed = kind === 'agent' && request.op === 'rename' && typeof request.to === 'string' ? request.to : '';
+          const now = renamed ? 'agent:' + renamed : id;
+          if (renamed) renamedRevs(key, renamed);
+          if (id && rev) { replyRevs.set(now, { rev, seq: fetchesStarted }); moved(now, sent.expect, rev); }
           return result;
-        });
+        }, error => born !== generation ? UNHEARD() : Promise.reject(error));
       };
       const answer = before ? before.then(send, send) : send();
       if (id) { const settled = answer.then(() => {}, () => {}); writing.set(id, settled); settled.then(() => { if (writing.get(id) === settled) writing.delete(id); }); }
-      return answer.catch(async error => { if (isStale(error) && alive) { try { await afterChange(); } catch (_) { /* the refusal is what is said */ } } throw error; });
+      return answer.catch(async error => {
+        if (isStale(error) && alive) {
+          try { await within(afterChange()); } catch (failed) { if (failed?.noAnswer) { try { error.unloaded = true; } catch (_) { /* a frozen error is said as stale */ } } }
+        }
+        throw error;
+      });
     }
+    // A stale refusal or no answer: what was typed is kept (the details may be drawn again).
+    function keepsTyping(error) { return isStale(error) || error?.noAnswer === true; }
     // After a stale refusal: the field the user typed in (drawn again or not) holds their text and the latest rev.
     function keepTyped(old, selector, value, rev) {
       const field = old?.isConnected ? old : detailScroll.querySelector(selector);
       if (!field) return null;
-      if (field.value !== value) field.value = value;
+      // The box the user typed in still holds their newest typing; one drawn again gets it.
+      const typed = old ? old.value : value;
+      if (field !== old && field.value !== typed) field.value = typed;
       if (rev) field.dataset.rev = rev; else delete field.dataset.rev;
       return field;
     }
@@ -1818,7 +1915,7 @@
     function installedSkill(id) { return (snapshot?.skills || []).find(skill => skill && skill.name === id) || null; }
     function forceDetail() { detailSignature = ''; renderDetail(true); }
     function setNotes(name, kind, said) { agentNotes.set(name, [{ kind, text: said }]); }
-    function undoFailed(last, error, name = hubName) { if (!alive) return; flowHistory.push(last); refuseFlow(name, error); }
+    function undoFailed(last, error, name = hubName) { if (!alive) return; refuseFlow(name, undoRefused(last, error)); }
     // Delete an agent: one request also takes its flows and groups; undo puts all of it back from the record.
     function removeAgent(name) {
       if (formBusy || !removableOf(name).ok) return;
@@ -1852,6 +1949,9 @@
       if (line) { line.textContent = said; line.hidden = !said; }
     }
     // Skill text: read when opened; Save writes it (refused when the file changed underneath, the user's text kept).
+    // Text typed and not saved outlives the details (Escape, a click away): opened again, the skill shows it, and a
+    // save of it still expects the rev it was typed against.
+    const skillDrafts = new Map();
     function openSkill(id, from, origin) {
       if (!skillfileAction) return;
       const view = { id, from, state: 'loading', text: '', description: '', draft: null, error: '', note: '' };
@@ -1860,6 +1960,8 @@
       ask(skillfileAction, { op: 'read', id }).then(reply => {
         if (!alive || skillView !== view) return;
         Object.assign(view, { state: 'ready', text: text(reply.text), description: text(reply.description ?? installedSkill(id)?.description ?? ''), rev: typeof reply.rev === 'string' ? reply.rev : revOf('skill', id) });
+        const kept = skillDrafts.get(id);
+        if (kept && kept.draft !== view.text) Object.assign(view, { draft: kept.draft, rev: kept.rev || view.rev }); else skillDrafts.delete(id);
         if (selected?.type === 'skill') forceDetail();
       }, error => {
         if (!alive || skillView !== view) return;
@@ -1893,8 +1995,9 @@
       ask(skillfileAction, withRev({ op: 'write', id: view.id, text: value }, view.rev || revOf('skill', view.id))).then(async reply => {
         formBusy = false;
         if (!alive) return;
-        remember({ op: 'skillfile', id: view.id, undo: reply.record ? { op: 'restore', record: reply.record } : { op: 'write', id: view.id, text: before } });
+        remember({ op: 'skillfile', id: view.id, undo: reply.record ? { op: 'restore', record: reply.record } : { op: 'write', id: view.id, text: before }, rev: typeof reply.rev === 'string' ? reply.rev : '' });
         Object.assign(view, { text: value, draft: null, note: 'Saved', rev: typeof reply.rev === 'string' ? reply.rev : '' });
+        if (skillDrafts.get(view.id)?.draft === value) skillDrafts.delete(view.id);
         if (skillView === view) { forceDetail(); refocusDetail(used); }
         await afterChange();
         if (skillView === view) refocusDetail(used);
@@ -1903,7 +2006,7 @@
         if (!alive) return;
         // Refused (the file changed underneath, or read-only): the message, and the user's text still in the box.
         Object.assign(view, { draft: value, note: '', error: message(error, 'Not saved') });
-        if (isStale(error)) view.rev = revOf('skill', view.id);
+        if (isStale(error)) { view.rev = revOf('skill', view.id); if (skillDrafts.has(view.id)) skillDrafts.set(view.id, { draft: value, rev: view.rev }); }
         if (skillView === view) { forceDetail(); refocusDetail(used); }
       });
     }
@@ -1967,7 +2070,7 @@
       });
     }
     function createTeam(lead, members) {
-      askTeam({ op: 'add', lead, members }, lead, reply => { teamDraft = null; if (reply.team?.id) remember({ op: 'team-add', id: reply.team.id }); }).then(reply => {
+      askTeam({ op: 'add', lead, members }, lead, reply => { teamDraft = null; if (reply.team?.id) remember({ op: 'team-add', id: reply.team.id, rev: replyRev('team', null, reply) }); }).then(reply => {
         if (!alive || !reply?.team?.id || !agentsByName.has(lead)) return;
         // A group just made opens its lead's details with the instruction focused and its made-up text selected.
         select('agent', lead, nodes.get(lead));
@@ -1975,45 +2078,44 @@
         if (box && !box.readOnly) { box.focus({ preventScroll: true }); box.select(); box.scrollIntoView({ block: 'nearest' }); }
       });
     }
-    function setMembers(team, members) {
-      const before = team.members.slice();
-      if (!members.length) { removeTeam(team); return; }
-      askTeam({ op: 'members', id: team.id, members }, team.lead, () => remember({ op: 'team-members', id: team.id, before, after: members.slice() }));
+    // A group's members as its last answer gave them, until a snapshot fetched after that answer is drawn: a change
+    // made before the refresh builds on them, never on the older snapshot's list (which would put a member back).
+    const teamOverride = new Map();
+    function noteMembers(id, reply) {
+      const members = reply?.team?.members;
+      if (Array.isArray(members)) teamOverride.set(text(reply.team.id || id), { members: members.filter(name => typeof name === 'string'), seq: fetchesStarted });
     }
-    function removeMember(key) { const view = teamLines.get(key), team = view && teamById(view.team.id); if (team) setMembers(team, team.members.filter(name => name !== view.member)); }
+    function membersOf(team) {
+      const own = teamOverride.get(team.id);
+      if (own && renderedFetch <= own.seq) return own.members.slice();
+      if (own) teamOverride.delete(team.id);
+      return team.members.slice();
+    }
+    function setMembers(team, members) {
+      const before = membersOf(team);
+      if (!members.length) { removeTeam(team); return; }
+      askTeam({ op: 'members', id: team.id, members }, team.lead, reply => { noteMembers(team.id, reply); remember({ op: 'team-members', id: team.id, before, after: members.slice(), rev: replyRev('team', null, reply) }); });
+    }
+    function removeMember(key) { const view = teamLines.get(key), team = view && teamById(view.team.id); if (team) setMembers(team, membersOf(team).filter(name => name !== view.member)); }
     function removeTeam(team) {
       const box = detailScroll.querySelector('[data-team-text]'), words = box && box.dataset.teamText === team.id && !box.readOnly ? box.dataset.saved : team.text;
-      askTeam({ op: 'remove', id: team.id }, team.lead, () => remember({ op: 'team-remove', id: team.id, lead: team.lead, members: team.members.slice(), text: words }));
+      askTeam({ op: 'remove', id: team.id }, team.lead, () => remember({ op: 'team-remove', id: team.id, lead: team.lead, members: membersOf(team), text: words }));
     }
     function setTeamState(kind, said) {
       const state = detailScroll.querySelector('[data-team-state]');
       if (!state) return;
       state.dataset.teamState = kind; state.textContent = said || { saved: 'Saved', unsaved: 'Saving', saving: 'Saving' }[kind]; state.title = state.textContent;
     }
-    // The instruction is saved when focus leaves it or on Ctrl/Cmd+Enter, as a flow's is; blank makes it again.
-    function saveTeamText(box) {
-      if (!teamAction || box.readOnly || box.dataset.saving === 'true') return;
-      const id = box.dataset.teamText, before = box.dataset.saved, value = box.value, team = teamById(id);
-      if (value === before || !team) return;
-      const long = overLimit(value);
-      if (long) { setTeamState('error', long); return; }
-      box.dataset.saving = 'true'; setTeamState('saving');
-      ask(teamAction, withRev({ op: 'text', id, text: value }, box.dataset.rev || revOf('team', id))).then(async reply => {
-        box.dataset.saving = 'false';
-        if (!alive) return;
-        box.dataset.saved = typeof reply.team?.text === 'string' ? reply.team.text : value;
-        if (box.value === value) box.value = box.dataset.saved;
-        box.dataset.rev = typeof reply.team?.rev === 'string' ? reply.team.rev : '';
-        remember({ op: 'team-text', id, before, after: box.dataset.saved });
-        setTeamState(box.value === box.dataset.saved ? 'saved' : 'unsaved');
-        await afterChange();
-        // The next save expects what this one wrote (the reply's rev, else the snapshot that followed it).
-        if (!box.dataset.rev) { const rev = revOf('team', id); if (rev) box.dataset.rev = rev; }
-      }, error => {
-        box.dataset.saving = 'false';
-        if (!alive) return;
-        if (isStale(error)) keepTyped(box, '[data-team-text="' + CSS.escape(id) + '"]', value, revOf('team', id));
-        setTeamState('error', message(error, 'Not saved'));
+    // The instruction is saved as a flow's is (saveTyped); blank makes it again.
+    function saveTeamText(box, explicit = false) {
+      const id = box.dataset.teamText;
+      if (!teamAction || !teamById(id)) return;
+      saveTyped(box, explicit, {
+        key: 'team:' + id, selector: '[data-team-text="' + CSS.escape(id) + '"]', state: setTeamState, limit: overLimit, shown: () => revOf('team', id),
+        send: (value, rev, answered) => ask(teamAction, withRev({ op: 'text', id, text: value }, rev)).then(async reply => { if (!alive) return reply; answered(reply); await afterChange(); return reply; }),
+        savedOf: (reply, value) => typeof reply.team?.text === 'string' ? reply.team.text : value, revOf: reply => replyRev('team', null, reply),
+        latest: () => ({ text: teamById(id)?.text, rev: revOf('team', id) }),
+        step: (before, after, rev) => ({ op: 'team-text', id, before, after, rev })
       });
     }
     // Undo for the three back ends: the opposite request.
@@ -2021,7 +2123,7 @@
       const done = () => afterChange();
       switch (last.op) {
         case 'agent-remove': ask(rosterAction, { op: 'restore', record: last.record }).then(done, error => undoFailed(last, error)); return true;
-        case 'agent-add': ask(rosterAction, { op: 'remove', name: last.name }).then(() => {
+        case 'agent-add': ask(rosterAction, withRev({ op: 'remove', name: last.name }, last.rev)).then(() => {
           if (last.layout) { const now = copyMoves(last.layout); if (now[last.name] && !last.before[last.name]) { delete now[last.name]; if (Object.keys(now).length) moves[last.layout] = now; else delete moves[last.layout]; saveMoves(); } }
           if (selected?.type === 'agent' && selected.key === last.name) closeDetails();
           return done();
@@ -2034,14 +2136,21 @@
           if (selected?.type === 'agent' && selected.key === last.to) { agentNotes.delete(last.to); setNotes(last.from, 'done', 'Renamed ' + last.to + ' back to ' + last.from + '.'); }
           return done().then(() => { if (alive && selected?.type === 'agent' && selected.key === last.to && agentsByName.has(last.from)) select('agent', last.from, nodes.get(last.from)); });
         }, error => undoFailed(last, error, agentsByName.has(last.to) ? last.to : last.from)); return true;
-        case 'skillfile': ask(skillfileAction, last.undo).then(() => { if (skillView?.id === last.id) { skillView = null; if (selected?.type === 'skill') closeDetails(); } return done(); }, error => undoFailed(last, error)); return true;
+        case 'skillfile': ask(skillfileAction, last.undo.op === 'write' ? withRev(last.undo, last.rev) : last.undo).then(() => { if (skillView?.id === last.id) { skillView = null; if (selected?.type === 'skill') closeDetails(); } return done(); }, error => undoFailed(last, error)); return true;
         case 'skillfile-create':
           (skillAction ? askSkill({ agent: last.agent, skill: last.id, on: false }, false) : Promise.resolve())
             .then(() => ask(skillfileAction, { op: 'delete', id: last.id })).then(done, error => undoFailed(last, error, last.agent));
           return true;
-        case 'team-add': ask(teamAction, { op: 'remove', id: last.id }).then(done, error => undoFailed(last, error)); return true;
-        case 'team-members': ask(teamAction, { op: 'members', id: last.id, members: last.before }).then(done, error => undoFailed(last, error)); return true;
-        case 'team-text': ask(teamAction, { op: 'text', id: last.id, text: last.before }).then(done, error => undoFailed(last, error)); return true;
+        case 'team-add': ask(teamAction, withRev({ op: 'remove', id: last.id }, last.rev)).then(done, error => undoFailed(last, error)); return true;
+        case 'team-members': ask(teamAction, withRev({ op: 'members', id: last.id, members: last.before }, last.rev)).then(reply => { noteMembers(last.id, reply); return done(); }, error => undoFailed(last, error)); return true;
+        case 'team-text': ask(teamAction, withRev({ op: 'text', id: last.id, text: last.before }, last.rev)).then(done, error => undoFailed(last, error)); return true;
+        case 'agent-text': ask(rosterAction, withRev({ op: 'text', name: last.name, text: last.before }, last.rev)).then(reply => {
+          if (!alive) return;
+          const view = agentTexts.get(last.name);
+          if (view?.state === 'ready') Object.assign(view, { text: typeof reply.text === 'string' ? reply.text : last.before, rev: typeof reply.rev === 'string' ? reply.rev : view.rev });
+          if (selected?.type === 'agent' && selected.key === last.name) forceDetail();
+          return done();
+        }, error => undoFailed(last, error, agentsByName.has(last.name) ? last.name : hubName)); return true;
         case 'team-remove':
           ask(teamAction, { op: 'add', lead: last.lead, members: last.members, text: last.text }).then(reply => {
             // A group put back may get a new id: later steps that name it follow it.
@@ -2272,6 +2381,74 @@
       else if (removable.why && !(agent.name === hubName && !rosterInfo().editable && removable.why === rosterInfo().why)) row.append(el('p', 'ag-form-reason ag-remove-reason', removable.why));
       if (row.childNodes.length) detailScroll.append(row);
     }
+    // An added agent's instruction (the system prompt in its file): read when its details open ({ op: "read" }) and
+    // edited as a path's instruction is ({ op: "text", name, text } with expect; the same save, stale and undo rules,
+    // saveTyped). A blank agent's is empty until the user writes it.
+    const agentTexts = new Map();
+    function agentTextSection(agent) {
+      if (!rosterAction || agent.added !== true) return;
+      const holder = section(detailScroll, 'Instruction'); holder.classList.add('ag-agent-text');
+      let view = agentTexts.get(agent.name);
+      if (!view) { view = { state: 'loading', text: '', rev: '', error: '' }; agentTexts.set(agent.name, view); readAgentText(agent.name, view); }
+      fillAgentText(holder, agent, view);
+    }
+    function fillAgentText(holder, agent, view) {
+      if (view.state === 'loading') { holder.append(el('p', 'ag-form-reason', 'Loading')); return; }
+      if (view.state === 'error') { const line = el('p', 'ag-form-error', view.error); line.setAttribute('role', 'alert'); holder.append(line); return; }
+      const box = el('textarea', 'ag-route-text ag-agent-instruction');
+      box.value = view.text; box.dataset.agentText = agent.name; box.dataset.saved = view.text; if (view.rev) box.dataset.rev = view.rev;
+      box.rows = 8; box.spellcheck = false; box.placeholder = 'Say what this agent does.'; box.setAttribute('aria-label', 'Instruction of ' + agent.name);
+      holder.append(box);
+      if (!canAddAgent()) { box.readOnly = true; return; }
+      box.setAttribute('aria-keyshortcuts', 'Control+Enter Meta+Enter');
+      const actions = el('div', 'ag-route-actions'), state = el('p', 'ag-route-state', 'Saved');
+      state.dataset.agentState = 'saved'; state.setAttribute('aria-live', 'polite'); actions.append(state); holder.append(actions);
+    }
+    function readAgentText(name, view) {
+      ask(rosterAction, { op: 'read', name }).then(reply => {
+        if (!alive || agentTexts.get(name) !== view) return;
+        Object.assign(view, { state: 'ready', text: text(reply.text ?? ''), rev: typeof reply.rev === 'string' ? reply.rev : revOf('agent', name) });
+        refillAgentText(name, view);
+      }, error => {
+        if (!alive || agentTexts.get(name) !== view) return;
+        Object.assign(view, { state: 'error', error: message(error, 'The instruction could not be read') });
+        refillAgentText(name, view);
+      });
+    }
+    // The answer fills its own section in place: the rest of the details (a name being typed, focus) is left alone.
+    function refillAgentText(name, view) {
+      const holder = selected?.type === 'agent' && selected.key === name ? detailScroll.querySelector('.ag-agent-text') : null, agent = agentsByName.get(name);
+      if (!holder || !agent) return;
+      holder.replaceChildren(holder.querySelector('h3') || el('h3', '', 'Instruction'));
+      fillAgentText(holder, agent, view);
+    }
+    function setAgentTextState(kind, said) {
+      const state = detailScroll.querySelector('[data-agent-state]');
+      if (!state) return;
+      state.dataset.agentState = kind; state.textContent = said || { saved: 'Saved', unsaved: 'Saving', saving: 'Saving' }[kind]; state.title = state.textContent;
+    }
+    function saveAgentText(box, explicit = false) {
+      const name = box.dataset.agentText;
+      if (!rosterAction || !canAddAgent() || !agentsByName.has(name)) return;
+      const keep = (saved, rev) => { const view = agentTexts.get(name); if (view?.state === 'ready') Object.assign(view, { text: saved, rev: rev || view.rev }); };
+      saveTyped(box, explicit, {
+        key: 'agent:' + name, selector: '[data-agent-text="' + CSS.escape(name) + '"]', state: setAgentTextState, shown: () => agentTexts.get(name)?.rev || revOf('agent', name),
+        send: (value, rev, answered) => ask(rosterAction, withRev({ op: 'text', name, text: value }, rev)).then(async reply => {
+          if (!alive) return reply;
+          answered(reply); keep(box.dataset.saved, box.dataset.rev);
+          await afterChange();
+          return reply;
+        }),
+        savedOf: (reply, value) => typeof reply.text === 'string' ? reply.text : value, revOf: reply => replyRev('agent', null, reply),
+        // The latest is read again (an agent's instruction is not in the snapshot).
+        latest: () => ask(rosterAction, { op: 'read', name }).then(reply => {
+          const latest = { text: text(reply.text ?? ''), rev: typeof reply.rev === 'string' ? reply.rev : '' };
+          keep(latest.text, latest.rev);
+          return latest;
+        }),
+        step: (before, after, rev) => ({ op: 'agent-text', name, before, after, rev })
+      });
+    }
     // An agent's group: whom it reports to; for a lead, its members (each with remove), an add-member control, the
     // instruction (edited as a flow's is) and Remove group; otherwise a way to make it a lead and choose members.
     function teamSection(agent) {
@@ -2394,13 +2571,15 @@
     }
     function createDraft() {
       const made = draft, request = { op: 'add', name: made.name };
+      // What the details showed when the circle was dropped: an answer never takes away what the user opened since.
+      const shownAt = () => selected ? selected.type + ':' + selected.key : '', openedAt = shownAt();
       failedDraft = null;
       if (made.kind === 'verifier') request.template = 'verifier';
       else if (made.kind === 'copy') request.copy_of = made.source;
       else {
-        // A blank agent says so: a name alone is not enough for every back end (it may ask for a description).
+        // A blank agent says so; no model, so the back end's default (the default verifier's) applies, as on the
+        // command line.
         request.template = 'blank';
-        if (rosterInfo().models[0]) request.model = rosterInfo().models[0];
       }
       formBusy = true;
       ask(rosterAction, request).then(async reply => {
@@ -2410,22 +2589,27 @@
         // Its place is kept: where it was dropped.
         const layout = layoutKey(), before = copyMoves(layout);
         (moves[layout] ||= {})[name] = { x: made.x, y: made.y }; saveMoves();
-        remember({ op: 'agent-add', name, layout, before });
+        remember({ op: 'agent-add', name, layout, before, rev: typeof reply.rev === 'string' ? reply.rev : '' });
         // When it applies is the back end's to say (an added agent is live at once).
         const said = text(reply.message || '');
         setNotes(name, 'done', name + ' added.' + (said ? ' ' + said : ''));
         announceLine(name + ' added.' + (said ? ' ' + said : ''));
         await afterChange();
         if (draft === made) { draft = null; drawDraft(); }
+        const untouched = shownAt() === openedAt || selected?.type === 'new-agent';
+        if (!untouched) return;
         if (agentsByName.has(name)) { select('agent', name, nodes.get(name)); focusRename(); }
         else if (selected?.type === 'new-agent') closeDetails();
       }, error => {
         formBusy = false;
-        if (!alive || draft !== made) return;
-        // Refused: the circle goes at once (nothing was added); the reason stays in the details, with Try again.
+        if (!alive) return;
+        // Refused: the circle goes at once (nothing was added); the reason stays in the details, with Try again. It is
+        // always shown, whatever the user opened while it was out (unless another circle is being placed: then said).
         Object.assign(made, { pending: false, error: message(error, 'The agent could not be added') });
-        draft = null; failedDraft = made; drawDraft();
-        announceLine(made.error); select('new-agent', '', plus);
+        if (draft === made) draft = null;
+        announceLine(made.error);
+        if (draft) return;
+        failedDraft = made; drawDraft(); select('new-agent', '', plus);
       });
     }
     function focusRename() {
@@ -2469,8 +2653,10 @@
         movePlace(from, to);
         const last = flowHistory.at(-1);
         // Renaming an agent just added is part of adding it: undo deletes it under its new name.
-        if (last?.op === 'agent-add' && last.name === from) { last.name = to; if (last.before) delete last.before[to]; }
+        if (last?.op === 'agent-add' && last.name === from) { last.name = to; if (last.before) delete last.before[to]; if (typeof reply.rev === 'string' && reply.rev) last.rev = reply.rev; }
         else remember({ op: 'agent-rename', from, to, record: reply.record });
+        // Its instruction's undo steps follow it to the new name (its revs did, in call()).
+        flowHistory.forEach(entry => { if (entry.op === 'agent-text' && entry.name === from) entry.name = to; });
         agentNotes.delete(from); setNotes(to, 'done', 'Renamed ' + from + ' to ' + to + '.');
         announceLine('Renamed ' + from + ' to ' + to + '.');
         await afterChange();
@@ -2481,7 +2667,7 @@
         if (!alive) return;
         const said = message(error, 'The agent could not be renamed');
         setNotes(from, 'error', said); announceLine(said);
-        if (selected?.type === 'agent' && selected.key === from) { forceDetail(); if (isStale(error)) keepTyped(null, '[data-rename]', to, ''); focusRename(); }
+        if (selected?.type === 'agent' && selected.key === from) { forceDetail(); if (keepsTyping(error)) keepTyped(null, '[data-rename]', to, ''); focusRename(); }
       });
     }
     // Undo keeps working after the element that had focus is removed (a deleted line, a removed skill row): while
@@ -2551,6 +2737,9 @@
       // Nor is a group's instruction, or a form being filled in (it is rebuilt when its answer comes).
       const teamBox = selected.type === 'agent' ? detailScroll.querySelector('[data-team-text]') : null;
       if (teamBox && teamById(teamBox.dataset.teamText) && (document.activeElement === teamBox || teamBox.value !== teamBox.dataset.saved)) return;
+      // Nor an added agent's instruction.
+      const ownBox = selected.type === 'agent' ? detailScroll.querySelector('[data-agent-text]') : null;
+      if (ownBox && ownBox.dataset.agentText === selected.key && agentsByName.has(selected.key) && (document.activeElement === ownBox || ownBox.value !== ownBox.dataset.saved)) return;
       if (!force && detailScroll.querySelector('[data-form]')?.dataset.form === selected.type + ':' + selected.key) return;
       // Nor the name of an agent being renamed.
       const renaming = selected.type === 'agent' ? detailScroll.querySelector('[data-rename]') : null;
@@ -2642,6 +2831,7 @@
         const trouble = attentionAgents().get(agent.name);
         if (trouble) { const line = el('p', 'ag-agent-note ag-attention-note', 'Needs attention: ' + trouble + '. This is the red dot on its circle, counted in the “! N” above the graph.'); line.dataset.kind = 'error'; detailScroll.append(line); }
         agentActions(agent);
+        agentTextSection(agent);
         skillSection(agent);
         teamSection(agent);
         if (sessionToOpen(agent)) { const opener = el('button', 'ag-open-session', 'Open session'); opener.type = 'button'; opener.dataset.openSession = agent.name; detailScroll.append(opener); }
@@ -2872,7 +3062,7 @@
       }
     }
     function infoKey(event) { return (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey) || (event.key.toLowerCase() === 'i' && !event.shiftKey)) && !event.ctrlKey && !event.metaKey && !event.altKey; }
-    function message(error, fallback) { if (isStale(error)) return STALE_SAID; return plainWords(text(error && typeof error === 'object' && 'message' in error ? error.message : error).replace(/\s+/g, ' ').trim()) || fallback; }
+    function message(error, fallback) { if (error?.noAnswer === true) return NO_ANSWER_SAID; if (isStale(error)) return error.unloaded === true ? STALE_UNLOADED : STALE_SAID; return plainWords(text(error && typeof error === 'object' && 'message' in error ? error.message : error).replace(/\s+/g, ' ').trim()) || fallback; }
     // Back-end reasons that speak of its files and fields, said in the user's terms (anything else is shown as it is).
     const PLAIN = [
       [/^unknown agent ([^:\s]+): there is no \S+\.md in the structure folder\.?$/i, (all, name) => name + ' is one of OpenCode\'s own agents, not one of this toolkit\'s, so it cannot be on a path or in a group.'],
@@ -2890,9 +3080,17 @@
       const node = nodes.get(name);
       if (node) { node.dataset.shake = 'true'; later(() => { delete node.dataset.shake; }, 400); }
       announceLine(said);
+      if (!show) noteInStatus(said);
       if (!show || !agentsByName.has(name)) return;
       setNotes(name, 'error', said);
       if (selected?.type === 'agent' && selected.key === name) forceDetail(); else select('agent', name, node);
+    }
+    let statusNoteTimer = 0;
+    const STATUS_NOTE_MS = 6000;
+    function noteInStatus(said) {
+      statusNote.textContent = said; statusNote.hidden = !said;
+      const mine = ++statusNoteTimer;
+      later(() => { if (mine === statusNoteTimer) { statusNote.hidden = true; statusNote.textContent = ''; } }, STATUS_NOTE_MS);
     }
     // Ask the host for a change; `before` runs on its answer, before the next snapshot is drawn.
     function askFlow(request, before) {
@@ -2924,7 +3122,7 @@
         trailPending = false; trail = []; trailChanged();
         const flow = reply.flow;
         if (flow?.id) {
-          remember({ op: 'add', id: flow.id, path: flow.path || path, text: flow.text });
+          remember({ op: 'add', id: flow.id, path: flow.path || path, text: flow.text, rev: replyRev('flow', null, reply) });
           if (routeById(flow.id)) {
             // A flow just made opens its details with the instruction box focused and its made-up text selected:
             // typing replaces it, and Escape or a click away keeps it.
@@ -2951,36 +3149,71 @@
     }
     // The instruction's limit counts characters (code points), as the command does, not UTF-16 units.
     function overLimit(value) { const length = [...value].length; return length > FLOW_TEXT_CHARS ? 'Too long: ' + length + ' of ' + FLOW_TEXT_CHARS + ' characters' : ''; }
-    function saveRouteText(box) {
-      if (!flowAction || box.readOnly) return;
-      // A save asked for while one is out waits for its answer, then goes, so a newer edit is never dropped.
-      if (box.dataset.saving === 'true') { box.dataset.queued = 'true'; return; }
-      const id = box.dataset.routeText, before = box.dataset.saved, value = box.value;
+    function saveRouteText(box, explicit = false) {
+      if (!flowAction) return;
+      const id = box.dataset.routeText;
+      saveTyped(box, explicit, {
+        key: 'flow:' + id, selector: '[data-route-text="' + CSS.escape(id) + '"]', state: setRouteState, limit: overLimit, shown: () => revOf('flow', id),
+        send: (value, rev, answered) => askFlow(withRev({ op: 'text', id, text: value }, rev), answered),
+        // A blank text comes back as the one made from the path.
+        savedOf: (reply, value) => typeof reply.flow?.text === 'string' ? reply.flow.text : value, revOf: reply => replyRev('flow', null, reply),
+        latest: () => ({ text: routeById(id)?.text, rev: revOf('flow', id) }),
+        step: (before, after, rev) => ({ op: 'text', id, before, after, rev })
+      });
+    }
+    // One instruction box's save (a path's, a group's, an added agent's), with the rules every one of them keeps:
+    // one save at a time per box, one asked for meanwhile going after it so a newer edit is never dropped; each save
+    // expects the rev the box was drawn with (or its last save's); one undo step per editing session (from focus in to
+    // leaving the box), not one per pause. Refused as stale, the typing stays, nothing queued goes, the box's saved
+    // text becomes the latest and auto-save stops for it: the user saves it (leaving the box, Ctrl/Cmd+Enter), and
+    // that save expects the latest and undoes back to it.
+    const textSessions = new Map();
+    function saveTyped(box, explicit, spec) {
+      if (box.readOnly) return;
+      if (box.dataset.manual === 'true') { if (!(explicit && box.isConnected)) return; delete box.dataset.manual; }
+      if (box.dataset.saving === 'true') { box.dataset.queued = 'true'; if (explicit) box.dataset.queuedExplicit = 'true'; return; }
+      const before = box.dataset.saved, value = box.value;
       if (value === before) return;
-      const long = overLimit(value);
-      if (long) { setRouteState('error', long); return; }
+      const long = spec.limit ? spec.limit(value) : '';
+      if (long) { spec.state('error', long); return; }
       const next = () => {
         if (box.dataset.queued !== 'true') return;
-        delete box.dataset.queued;
-        if (alive && box.isConnected && box.value !== box.dataset.saved) saveRouteText(box);
+        const again = box.dataset.queuedExplicit === 'true';
+        delete box.dataset.queued; delete box.dataset.queuedExplicit;
+        if (alive && box.isConnected && box.value !== box.dataset.saved) saveTyped(box, again, spec);
       };
-      box.dataset.saving = 'true'; setRouteState('saving');
-      askFlow(withRev({ op: 'text', id, text: value }, box.dataset.rev || revOf('flow', id)), reply => {
-        // A blank text comes back as the one made from the path.
-        box.dataset.saved = typeof reply.flow?.text === 'string' ? reply.flow.text : value;
+      box.dataset.saving = 'true'; spec.state('saving');
+      spec.send(value, box.dataset.rev || spec.shown(), reply => {
+        box.dataset.saved = spec.savedOf(reply, value);
         if (box.value === value) box.value = box.dataset.saved;
-        box.dataset.rev = typeof reply.flow?.rev === 'string' ? reply.flow.rev : '';
+        box.dataset.rev = spec.revOf(reply);
       }).then(() => {
         box.dataset.saving = 'false';
+        if (!alive) return;
         // The next save expects what this one wrote (the reply's rev, else the snapshot that followed it).
-        const rev = revOf('flow', id); if (rev && !box.dataset.rev) box.dataset.rev = rev;
-        remember({ op: 'text', id, before, after: box.dataset.saved });
-        setRouteState(box.value === box.dataset.saved ? 'saved' : 'unsaved');
+        const rev = spec.shown(); if (rev && !box.dataset.rev) box.dataset.rev = rev;
+        const open = textSessions.get(spec.key);
+        if (open && flowHistory.at(-1) === open) Object.assign(open, { after: box.dataset.saved, rev: box.dataset.rev });
+        else { const step = spec.step(before, box.dataset.saved, box.dataset.rev); remember(step); textSessions.set(spec.key, step); }
+        // A save the user asked for (Ctrl/Cmd+Enter, leaving the box) closes the step: what comes after is a new one.
+        if (explicit) textSessions.delete(spec.key);
+        spec.state(box.value === box.dataset.saved ? 'saved' : 'unsaved');
         next();
-      }, error => {
+      }, async error => {
         box.dataset.saving = 'false';
-        if (isStale(error)) keepTyped(box, '[data-route-text="' + CSS.escape(id) + '"]', value, revOf('flow', id));
-        setRouteState('error', message(error, 'Not saved'));
+        if (!alive) return;
+        if (isStale(error)) {
+          delete box.dataset.queued; delete box.dataset.queuedExplicit; textSessions.delete(spec.key);
+          const field = keepTyped(box, spec.selector, value, spec.shown()) || box;
+          field.dataset.manual = 'true'; spec.state('error', message(error, 'Not saved'));
+          const latest = await Promise.resolve(spec.latest()).catch(() => null);
+          if (!alive || !latest) return;
+          if (typeof latest.text === 'string') field.dataset.saved = latest.text;
+          if (latest.rev) field.dataset.rev = latest.rev;
+          return;
+        }
+        if (keepsTyping(error)) keepTyped(box, spec.selector, value, spec.shown());
+        spec.state('error', message(error, 'Not saved'));
         next();
       });
     }
@@ -3010,12 +3243,14 @@
       const id = field.dataset.routeName, before = field.dataset.saved, value = field.value.trim();
       if (value === before) { field.value = before; return; }
       field.dataset.saving = 'true';
+      let rev = '';
       askFlow(withRev({ op: 'name', id, name: value }, field.dataset.rev || revOf('flow', id)), reply => {
         field.dataset.saved = typeof reply.flow?.name === 'string' ? reply.flow.name : value;
+        rev = replyRev('flow', null, reply);
       }).then(() => {
         field.dataset.saving = 'false';
         pathErrors.delete('name:' + id);
-        remember({ op: 'name', id, before, after: field.dataset.saved });
+        remember({ op: 'name', id, before, after: field.dataset.saved, rev });
         announceLine(field.dataset.saved ? 'Named ' + field.dataset.saved + '.' : 'Name cleared.');
         redrawPath(id, '[data-route-name]');
       }, error => {
@@ -3023,7 +3258,7 @@
         // Refused like any other change: the reason as the field's error line and in the live region; the typed name stays.
         const said = message(error, 'The name was not changed');
         pathErrors.set('name:' + id, said); announceLine(said);
-        const shown = isStale(error) ? keepTyped(field, '[data-route-name="' + CSS.escape(id) + '"]', value, revOf('flow', id)) || field : field;
+        const shown = keepsTyping(error) ? keepTyped(field, '[data-route-name="' + CSS.escape(id) + '"]', value, revOf('flow', id)) || field : field;
         const item = shown.closest('.ag-path-name');
         item?.querySelector('.ag-path-name-error')?.remove();
         item?.append(pathLine('ag-path-name-error', said, 'error'));
@@ -3105,7 +3340,9 @@
         answer.then(result => {
           if (!alive) return;
           const reply = result && typeof result === 'object' ? result : {};
+          // Sent only when the host says so (Desktop resolves { sent: true, session } and rejects on any failure).
           if (reply.sent === false) { fail(reply.message, 'Not sent'); return; }
+          if (reply.sent !== true) { fail('', NOT_CONFIRMED); return; }
           // Sent: the goal has gone; the host's own words win.
           goals.delete(id);
           const said = text(reply.message || '') || 'Sent to the orchestrator' + (text(reply.session || '') ? ' (session ' + text(reply.session) + ').' : '.');
@@ -3209,16 +3446,21 @@
       if (error) item.append(pathLine('ag-command-error', error, 'error'));
       return item;
     }
+    // A path's remove or command switch already out is not asked for again (a double click, a held key).
+    const flowsOut = new Set();
     function setCommand(id, on, undoing) {
       const flow = routeById(id);
       if (!flowAction || !flow || (on && !text(flow.name || ''))) return Promise.resolve();
+      if (!undoing && flowsOut.has('command:' + id)) return Promise.resolve();
       // The switch keeps focus across the redraw (the refresh in between rebuilds the details).
       const held = detailScroll.contains(document.activeElement) && document.activeElement.matches('[data-route-command]');
+      let rev = '';
+      if (!undoing) flowsOut.add('command:' + id);
       return askFlow({ op: 'command', id, on }, reply => {
-        noteApplies(id, reply, on);
-      }).then(() => {
+        noteApplies(id, reply, on); rev = replyRev('flow', null, reply);
+      }).finally(() => { if (!undoing) flowsOut.delete('command:' + id); }).then(() => {
         pathErrors.delete('command:' + id);
-        if (!undoing) remember({ op: 'command', id, before: !on });
+        if (!undoing) remember({ op: 'command', id, before: !on, rev });
         const now = routeById(id);
         announceLine(on ? '/' + text(now?.command || now?.name || flow.name) + ' is a command. ' + appliesLine(now || flow) : ('No longer a command. ' + appliesLine({ ...flow, ...(now || {}), command: flow.command || flow.name }, false)).trim());
         redrawPath(id, '[data-route-command]', held);
@@ -3231,13 +3473,16 @@
     }
     function removeFlow(id) {
       const flow = routeById(id);
-      if (!flowAction || !flow) return;
+      if (!flowAction || !flow || flowsOut.has('remove:' + id)) return;
       // Undo puts back the newest instruction: one being saved as the remove goes, else the last one saved.
       const box = [...detailScroll.querySelectorAll('[data-route-text]')].find(item => item.dataset.routeText === id);
       const undoText = box && !box.readOnly ? (box.dataset.saving === 'true' && !overLimit(box.value) ? box.value : box.dataset.saved) : flow.text;
-      askFlow({ op: 'remove', id }).then(() => {
+      flowsOut.add('remove:' + id);
+      // The rev it had when it went: older steps whose writes led up to it follow it to the path put back.
+      const gone = follow('flow:' + id, revOf('flow', id));
+      askFlow({ op: 'remove', id }).finally(() => flowsOut.delete('remove:' + id)).then(() => {
         if (!alive) return;
-        remember({ op: 'remove', id, path: flow.path, text: undoText, name: text(flow.name || ''), command: !!flow.command });
+        remember({ op: 'remove', id, path: flow.path, text: undoText, name: text(flow.name || ''), command: !!flow.command, rev: gone });
         if (selected?.type === 'flow' && selected.key === id) closeDetails();
       }, error => {
         if (!alive) return;
@@ -3254,40 +3499,33 @@
       if (last.op === 'move') { applyMoves(last.layout, last.before, false); return; }
       if (undoOther(last)) return;
       if (last.op === 'name' || last.op === 'command') {
-        const request = last.op === 'name' ? { op: 'name', id: last.id, name: last.before } : { op: 'command', id: last.id, on: last.before };
+        const request = withRev(last.op === 'name' ? { op: 'name', id: last.id, name: last.before } : { op: 'command', id: last.id, on: last.before }, last.rev);
         askFlow(request, reply => { if (last.op === 'command') noteApplies(last.id, reply); })
           .then(() => { pathErrors.delete(last.op + ':' + last.id); redrawPath(last.id); }, error => {
             if (!alive) return;
-            flowHistory.push(last);
-            const said = message(error, 'Not undone');
+            const said = undoRefused(last, error);
             pathErrors.set(last.op + ':' + last.id, said); announceLine(said); redrawPath(last.id);
           });
         return;
       }
-      const request = last.op === 'add' ? { op: 'remove', id: last.id } : last.op === 'remove' ? { op: 'add', path: last.path, text: last.text } : { op: 'text', id: last.id, text: last.before };
+      // A removed path comes back in one request, with its name and its command, so one undo cannot stop half way.
+      const back = last.op === 'remove' ? { op: 'add', path: last.path, text: last.text, ...(last.name ? { name: last.name } : {}), ...(last.name && last.command ? { command: true } : {}) } : null;
+      const request = back || withRev(last.op === 'add' ? { op: 'remove', id: last.id } : { op: 'text', id: last.id, text: last.before }, last.rev);
       askFlow(request, reply => {
-        // A flow put back gets a new file, so later steps that name it follow it there.
-        if (last.op === 'remove' && reply.flow?.id) flowHistory.forEach(entry => { if (entry.id === last.id) entry.id = reply.flow.id; });
+        // A flow put back gets a new file, so later steps that name it (path steps only) follow it there.
+        if (last.op === 'remove' && reply.flow?.id) flowHistory.forEach(entry => {
+          if (!FLOW_STEPS.has(entry.op) || entry.id !== last.id) return;
+          if (entry.rev && last.rev && follow('flow:' + last.id, entry.rev) === last.rev) entry.rev = replyRev('flow', null, reply);
+          entry.id = reply.flow.id;
+        });
+        if (back?.command && reply.flow?.id) noteApplies(reply.flow.id, reply, true);
         if (last.op !== 'add' && selected?.type === 'flow' && selected.key === last.id && reply.flow?.id) selected.key = reply.flow.id;
       }).then(async reply => {
         if (alive && last.op === 'add' && selected?.type === 'flow' && selected.key === last.id) closeDetails();
-        // A path put back gets its name and its command again (add carries neither).
-        const id = reply?.flow?.id;
-        if (alive && last.op === 'remove' && id && last.name) {
-          try {
-            await askFlow({ op: 'name', id, name: last.name });
-            if (last.command) await askFlow({ op: 'command', id, on: true }, answer => noteApplies(id, answer));
-          } catch (error) {
-            if (!alive) return;
-            const said = message(error, 'The name or the command did not come back');
-            pathErrors.set('name:' + id, said); announceLine(said);
-          }
-          redrawPath(id);
-        }
+        if (alive && last.op === 'remove' && reply?.flow?.id) redrawPath(reply.flow.id);
       }, error => {
         if (!alive) return;
-        flowHistory.push(last);
-        refuseFlow((last.path || routeById(last.id)?.path || [])[0], error);
+        refuseFlow((last.path || routeById(last.id)?.path || [])[0], undoRefused(last, error));
       });
     }
     // A click (or Enter) on an agent while flows can be drawn: start a path, add a step, or finish on the newest.
@@ -3400,14 +3638,14 @@
         if ('skillOpen' in data) { openSkill(data.skillOpen, current, control); return; }
         if ('skillNew' in data) { select('new-skill', data.skillNew, control); return; }
         if ('skillSave' in data) { saveSkill(); return; }
-        if ('skillCancel' in data) { if (skillView && !formBusy) { Object.assign(skillView, { draft: null, error: '', note: '' }); forceDetail(); } return; }
+        if ('skillCancel' in data) { if (skillView && !formBusy) { skillDrafts.delete(skillView.id); Object.assign(skillView, { draft: null, error: '', note: '' }); forceDetail(); } return; }
         if ('skillDelete' in data) { deleteSkill(); return; }
         if ('teamStart' in data) { teamDraft = { lead: data.teamStart, members: [] }; forceDetail(); detailScroll.querySelector('[data-team-pick]')?.focus({ preventScroll: true }); return; }
         if ('teamCancel' in data) { teamDraft = null; forceDetail(); return; }
         if ('teamCreate' in data) { const members = [...detailScroll.querySelectorAll('[data-team-pick]:checked')].map(box => box.value); if (members.length) createTeam(data.teamCreate, members); return; }
         const team = teamLedBy(current);
-        if ('teamDrop' in data && team) { setMembers(team, team.members.filter(name => name !== data.teamDrop)); return; }
-        if ('teamAddButton' in data && team) { const choice = detailScroll.querySelector('[data-team-add]'); if (choice?.value) setMembers(team, [...team.members, choice.value]); return; }
+        if ('teamDrop' in data && team) { setMembers(team, membersOf(team).filter(name => name !== data.teamDrop)); return; }
+        if ('teamAddButton' in data && team) { const choice = detailScroll.querySelector('[data-team-add]'); if (choice?.value && !membersOf(team).includes(choice.value)) setMembers(team, [...membersOf(team), choice.value]); return; }
         if ('teamRemove' in data && team) { removeTeam(team); return; }
       }
       const link = event.target.closest('[data-flow-peer]');
@@ -3427,12 +3665,17 @@
     });
     listen(detailScroll, 'input', event => {
       const skill = event.target.closest('[data-skill-text]');
-      if (skill && skillView?.id === skill.dataset.skillText) { skillView.draft = skill.value; skillView.note = ''; const state = detailScroll.querySelector('[data-skill-state]'); if (state) state.textContent = skill.value === skillView.text ? 'Saved' : 'Changed'; }
+      if (skill && skillView?.id === skill.dataset.skillText) {
+        if (skill.value === skillView.text) skillDrafts.delete(skillView.id); else skillDrafts.set(skillView.id, { draft: skill.value, rev: skillDrafts.get(skillView.id)?.rev || skillView.rev });
+        skillView.draft = skill.value; skillView.note = ''; const state = detailScroll.querySelector('[data-skill-state]'); if (state) state.textContent = skill.value === skillView.text ? 'Saved' : 'Changed'; }
       const team = event.target.closest('[data-team-text]');
-      if (team && team.dataset.saving !== 'true') { const long = overLimit(team.value); setTeamState(long ? 'error' : team.value === team.dataset.saved ? 'saved' : 'unsaved', long); }
+      if (team && team.dataset.saving !== 'true' && team.dataset.manual !== 'true') { const long = overLimit(team.value); setTeamState(long ? 'error' : team.value === team.dataset.saved ? 'saved' : 'unsaved', long); }
       if (team) savePaused(team, saveTeamText);
       const route = event.target.closest('[data-route-text]');
       if (route) savePaused(route, saveRouteText);
+      const own = event.target.closest('[data-agent-text]');
+      if (own && own.dataset.saving !== 'true' && own.dataset.manual !== 'true') setAgentTextState(own.value === own.dataset.saved ? 'saved' : 'unsaved');
+      if (own) savePaused(own, saveAgentText);
       const goal = event.target.closest('[data-run-goal]');
       if (goal) {
         goals.set(goal.dataset.runGoal, goal.value);
@@ -3447,19 +3690,28 @@
     const pauses = new WeakMap(), TYPE_PAUSE_MS = 700;
     function savePaused(box, save) {
       clearTimeout(pauses.get(box));
+      if (box.dataset.manual === 'true') return; // after a stale refusal it waits for the user
       const timer = later(() => { if (alive && box.isConnected && box.value !== box.dataset.saved) save(box); }, TYPE_PAUSE_MS);
       pauses.set(box, timer);
     }
     function flushTyping() {
       detailScroll.querySelectorAll('[data-route-text]').forEach(box => { if (box.value !== box.dataset.saved) saveRouteText(box); });
       detailScroll.querySelectorAll('[data-team-text]').forEach(box => { if (box.value !== box.dataset.saved) saveTeamText(box); });
+      detailScroll.querySelectorAll('[data-agent-text]').forEach(box => { if (box.value !== box.dataset.saved) saveAgentText(box); });
     }
     listen(window, 'pagehide', flushTyping);
     listen(document, 'visibilitychange', () => { if (document.hidden) flushTyping(); });
-    listen(detailScroll, 'input', event => { const box = event.target.closest('[data-route-text]'); if (box && box.dataset.saving !== 'true') { const long = overLimit(box.value); if (long) setRouteState('error', long); else setRouteState(box.value === box.dataset.saved ? 'saved' : 'unsaved'); } });
-    listen(detailScroll, 'focusout', event => { const named = event.target.closest('[data-route-name]'); if (named) saveName(named); const box = event.target.closest('[data-route-text]'); if (box) saveRouteText(box); const team = event.target.closest('[data-team-text]'); if (team) saveTeamText(team); });
+    listen(detailScroll, 'input', event => { const box = event.target.closest('[data-route-text]'); if (box && box.dataset.saving !== 'true' && box.dataset.manual !== 'true') { const long = overLimit(box.value); if (long) setRouteState('error', long); else setRouteState(box.value === box.dataset.saved ? 'saved' : 'unsaved'); } });
+    listen(detailScroll, 'focusout', event => { const named = event.target.closest('[data-route-name]'); if (named) saveName(named); const box = event.target.closest('[data-route-text]'); if (box) saveRouteText(box, true); const team = event.target.closest('[data-team-text]'); if (team) saveTeamText(team, true); const own = event.target.closest('[data-agent-text]'); if (own) saveAgentText(own, true); });
+    // Focus coming into an instruction box starts its editing session: its saves until it is left are one undo step.
+    listen(detailScroll, 'focusin', event => {
+      const box = event.target.closest('[data-route-text], [data-team-text], [data-agent-text]');
+      if (box) textSessions.delete(box.dataset.routeText !== undefined ? 'flow:' + box.dataset.routeText : box.dataset.teamText !== undefined ? 'team:' + box.dataset.teamText : 'agent:' + box.dataset.agentText);
+    });
     listen(detailScroll, 'change', event => { const rename = event.target.closest?.('[data-rename]'); if (rename && rename.value.trim() && rename.value.trim() !== rename.dataset.rename) renameAgent(rename.dataset.rename, rename.value.trim(), rename); });
     listen(detailScroll, 'keydown', event => {
+      // A held Enter or Space on Remove or the command switch asks once.
+      if (event.repeat && (event.key === 'Enter' || event.key === ' ') && event.target.closest('[data-route-command], [data-route-remove]')) { event.preventDefault(); return; }
       const rename = event.target.closest('[data-rename]');
       if (rename) {
         const name = rename.dataset.rename, way = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[event.key];
@@ -3478,9 +3730,11 @@
       const goal = event.target.closest('[data-run-goal]');
       if (goal && event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); runPath(goal.dataset.runGoal); return; }
       const box = event.target.closest('[data-route-text]');
-      if (box && event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); saveRouteText(box); }
+      if (box && event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); saveRouteText(box, true); }
       const team = event.target.closest('[data-team-text]');
-      if (team && event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); saveTeamText(team); }
+      if (team && event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); saveTeamText(team, true); }
+      const own = event.target.closest('[data-agent-text]');
+      if (own && event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); saveAgentText(own, true); }
       if (event.target.closest('[data-skill-text]') && event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); saveSkill(); }
     });
     listen(root, 'keydown', event => {
@@ -3502,6 +3756,8 @@
         if (event.key === 'Enter' && plain && trail.length && !event.target.closest('.ag-detail, button, [data-agent]')) { event.preventDefault(); finishTrail(); return; }
         // Delete with a path of two or more steps pending does nothing (Backspace and Escape edit the path).
         if ((event.key === 'Delete' && trail.length <= 1 || event.key === 'Backspace' && !trail.length) && plain && !inPanel) {
+          // A held key deletes once.
+          if (event.repeat) { event.preventDefault(); return; }
           const target = deleteTarget(event.target), remove = event.key === 'Backspace' && target?.type === 'agent' ? null : deleter(target);
           if (remove) { event.preventDefault(); remove(); }
           // An agent that stays (the orchestrator, the council, a seat, one the roster keeps) says why every time: it
@@ -3616,7 +3872,7 @@
         else return;
         event.preventDefault(); camera.touched = true;
         const before = copyMoves(); moveNode(key, x, y); finishMove(before, { agent: key, by: 'key' });
-        if (arrangement === 'compact') { clampPan(); transform(); } else fitView(false);
+        if (arrangement === 'compact' || camera.own) { clampPan(); transform(); } else fitView(false);
         return;
       }
       if (event.target !== viewport) return;
@@ -3770,7 +4026,10 @@
       if (root.clientWidth > 0 && viewport.clientWidth > 0) {
         addPositions(visibleAgents);
         const labelsChanged = renderNodes(visibleAgents); updateEdges();
-        if (!camera.initialized || previousLayout !== layoutSignature || (labelsChanged && !camera.touched)) fitView(false);
+        // A new layout refits, unless the user has panned or zoomed since the last fit: their view stays, and the
+        // selected agent is brought into it.
+        if (!camera.initialized || (!camera.own && (previousLayout !== layoutSignature || (labelsChanged && !camera.touched)))) fitView(false);
+        else if (previousLayout !== layoutSignature) { clampPan(); transform(); reveal(); }
       }
       root.dataset.state = visibleAgents.length || graph ? 'ready' : 'empty';
       showEmpty();
@@ -3828,7 +4087,7 @@
       const requestGeneration = generation;
       let number = 0;
       const request = Promise.resolve().then(() => {
-        if (alive && requestGeneration === generation) { number = ++fetchesStarted; return options.fetchSnapshot(); }
+        if (alive && requestGeneration === generation) { number = ++fetchesStarted; return within(options.fetchSnapshot()); }
       }).then(data => {
         if (!alive || requestGeneration !== generation) return;
         if (!data || data.error || data.version !== 1 || !Array.isArray(data.agents)) {
@@ -3839,6 +4098,8 @@
         renderedFetch = number; render(data); notice.hidden = true;
       }).catch(error => {
         if (!alive || requestGeneration !== generation) return;
+        // A snapshot that does not come in 15 s: what is drawn stays and the next refresh can start.
+        if (error?.noAnswer && snapshot) return;
         root.dataset.state = 'error'; notice.hidden = false;
         notice.textContent = text(error?.message).replace(/\s+/g, ' ').trim() || 'Unavailable';
         notice.title = notice.textContent;
@@ -3856,6 +4117,9 @@
       pointers.clear(); drag = null; pinch = null; suppressClick = false;
       viewport.dataset.dragging = 'false';
       cancelPress(); trail = []; trailPending = false; hovered = ''; wire.style.display = 'none';
+      // Writes sent before this are not heard (call()); what waited on them starts clean.
+      busyFlows = 0; skillPending.clear(); flowsOut.clear(); replyRevs.clear(); writing.clear(); ownMoves.clear(); teamOverride.clear(); textSessions.clear(); agentTexts.clear(); skillDrafts.clear();
+      if (draft || failedDraft) { draft = null; failedDraft = null; drawDraft(); }
       freshRoutes.clear(); flowErrors.clear(); flowHistory.length = 0; routeViews.clear(); teamLines.clear(); agentNotes.clear(); skillView = null; teamDraft = null; pickedMember = ''; pickedFlow = ''; formBusy = false; trailStatus.textContent = ''; delete root.dataset.agTrail;
       selected = null; selectedOrigin = null; initialSelection = ''; highlightedStep = ''; detailSignature = '';
       teamChoice = null; activeTeam = 'main'; teamChoices = []; layoutSignature = ''; renderStamp = '';
@@ -3867,7 +4131,7 @@
       root.style.removeProperty('--ag-sheet-height');
       delete root.dataset.team; root.dataset.state = 'loading';
       notice.hidden = true; notice.textContent = ''; notice.title = '';
-      activity.hidden = true; activity.textContent = ''; attention.hidden = true; usage.hidden = true; delete runDetails.dataset.notices;
+      activity.hidden = true; activity.textContent = ''; attention.hidden = true; statusNoteTimer++; statusNote.hidden = true; statusNote.textContent = ''; usage.hidden = true; delete runDetails.dataset.notices;
       showEmpty();
       Object.assign(camera, { x: 0, y: 0, scale: 1, initialized: false, touched: false, width: 0, height: 0 }); transform();
       return refresh();
@@ -3877,7 +4141,7 @@
     refresh();
     return { refresh, reset, destroy() {
       if (!alive) return;
-      alive = false; generation++; stopLayout(); if (resizeFrame !== null) cancelAnimationFrame(resizeFrame); clearInterval(timer); timers.forEach(clearTimeout); timers.clear(); resize.disconnect(); schemeObserver.disconnect(); cleanups.forEach(fn => fn());
+      alive = false; generation++; stopLayout(); if (resizeFrame !== null) cancelAnimationFrame(resizeFrame); clearInterval(timer); timers.forEach(clearTimeout); timers.clear(); ceilings.forEach(id => clock.clearTimeout(id)); ceilings.clear(); resize.disconnect(); schemeObserver.disconnect(); cleanups.forEach(fn => fn());
       pointers.forEach((_, id) => { if (viewport.hasPointerCapture(id)) viewport.releasePointerCapture(id); });
       pointers.clear(); teamViews.clear(); root.replaceChildren(); root.classList.remove('agentgraph', 'ag-compact', 'ag-canvas-compact', 'ag-details-open'); root.style.removeProperty('--ag-sheet-height'); root.style.removeProperty('--ag-header-height'); delete root.dataset.state; delete root.dataset.team; delete root.dataset.agScheme; delete root.dataset.agSchemeSource; delete root.dataset.agMotion; delete root.dataset.agFlows; delete root.dataset.agTrail;
     } };

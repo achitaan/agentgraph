@@ -39,12 +39,12 @@
     // stored as, so a fixture changed by a check (as if elsewhere) gets a new one; the snapshot carries the rev as it was
     // at the last write or fetch. A write that names a thing with `expect` other than its rev now is refused with 409;
     // a write without `expect` for a thing whose rev the view was shown is refused too (the view must always send it).
-    const REVS = Symbol('revs'), SKILL_TEXTS = Symbol('skill texts');
+    const REVS = Symbol('revs'), SKILL_TEXTS = Symbol('skill texts'), AGENT_TEXTS = Symbol('agent texts');
     const hashOf = value => { let h = 0x811c9dc5; for (const ch of JSON.stringify(value)) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8, '0'); };
     const STORED = {
       flow: item => [item.id, item.path, item.text, item.name ?? null, item.command ?? null],
       team: item => [item.id, item.lead, item.members, item.text],
-      agent: item => [item.name, item.model ?? null, item.skills ?? null, item.added ?? null, item.description ?? null, item.variant ?? null],
+      agent: (item, data) => [item.name, item.model ?? null, item.skills ?? null, item.added ?? null, item.description ?? null, item.variant ?? null, data[AGENT_TEXTS]?.[item.name] ?? null],
       skill: (item, data) => [item.name, item.description ?? null, data[SKILL_TEXTS]?.[item.name] ?? null]
     };
     const revNow = (data, kind, item) => hashOf(STORED[kind](item, data));
@@ -72,6 +72,9 @@
       const flow = reply.flow && data.structure?.flows?.find(item => item.id === reply.flow.id), team = reply.team && data.structure?.teams?.find(item => item.id === reply.team.id);
       if (flow) reply.flow.rev = flow.rev;
       if (team) reply.team.rev = team.rev;
+      // As /api/skills and the roster's text and rename: the agent's rev after the change.
+      const named = typeof reply.agent === 'string' && reply.rev === undefined && data.agents?.find(item => item.name === reply.agent);
+      if (named) reply.rev = named.rev;
       return reply;
     }
     // The calls a check reads are the requests without `expect`, which checkExpect checks on each of them.
@@ -1535,10 +1538,18 @@
         const flows = data.structure.flows;
         if (request.op === 'add') {
           // Refused as agentgraph's structure refuses it: too short, or an agent with no file in the structure folder.
+          // As POST /api/structure/flow's add: optional text, name and command (a boolean that needs the name); no expect.
+          const extra = Object.keys(request).filter(key => !['op', 'path', 'text', 'name', 'command'].includes(key));
+          if (extra.length) throw new Error('expected {"op": "add", "path": [agents]} (and optional "text", "name", "command"), not ' + extra.join(', '));
+          if (request.command !== undefined && typeof request.command !== 'boolean') throw new Error('"command" must be true or false');
+          if (request.name !== undefined && (typeof request.name !== 'string' || !/^[a-z0-9-]{2,32}$/.test(request.name))) throw new Error('a name is 2 to 32 lowercase letters, digits and -');
+          if (request.name && flows.some(f => f.name === request.name)) throw new Error("another flow is already called '" + request.name + "'");
+          if (request.command && !request.name) throw new Error('a command needs a name');
           if (!Array.isArray(request.path) || request.path.length < 2) throw new Error('a flow needs at least two agents');
           const unknown = data.agents ? request.path.find(name => !data.agents.some(a => a.name === name)) : null;
           if (unknown) throw new Error('unknown agent ' + unknown + ': there is no ' + unknown + '.md in the structure folder');
           const item = { id: request.path.join('-') + '-' + (++made), path: request.path.slice(), text: request.text ?? 'Made from ' + request.path.join(' → '), source: 'drawn' };
+          if (request.name) { item.name = request.name; item.command = request.command ? request.name : null; }
           flows.push(item); return { flow: { ...item }, flows: flows.slice() };
         }
         const item = flows.find(f => f.id === request.id);
@@ -2201,7 +2212,7 @@
         else if (request.on) agent.skills = old.includes('*') || old.includes(request.skill) ? old : [...old, request.skill];
         else agent.skills = (old.includes('*') ? names : old).filter(name => name !== request.skill);
         stampRevs(data);
-        return { agent: agent.name, skills: agent.skills.slice(), warnings: options.warn && !request.on ? [options.warn] : [], changed: true, message: 'restart' };
+        return { agent: agent.name, skills: agent.skills.slice(), warnings: options.warn && !request.on ? [options.warn] : [], changed: true, message: 'restart', ...(data[REVS] ? { rev: agent.rev } : {}) };
       };
       return { calls, expects, skills };
     }
@@ -2989,7 +3000,7 @@
     function worldFixture(flows = []) {
       const data = flowFixture(flows);
       data.agents = data.agents.filter(a => a.team === 'main');
-      data.agents.push(agent('verifier', 'verify'), agent('oracle', 'decide'), agent('researcher', 'understand'));
+      data.agents.push(agent('verifier', 'verify', { model: 'test/verifier-model' }), agent('oracle', 'decide'), agent('researcher', 'understand'));
       data.agents.forEach(a => { a.removable = !['orchestrator', 'council', 'councillor-claude'].includes(a.name); a.added = false; a.skills = a.skills || []; a.skills_editable = true; });
       data.roster = { editable: true, models: ['test/model-a', 'test/model-b'] };
       data.skills = CATALOGUE.map(skill => ({ ...skill, editable: true }));
@@ -3006,8 +3017,11 @@
       const log = (kind, request) => calls.push(kind + ' ' + JSON.stringify(withoutExpect(request)));
       // Each write is checked against `expect` first and every rev is brought up to date after it.
       const stamping = fn => async request => { try { return fresh(data, await fn(request)); } finally { stampRevs(data); } };
+      const reads = [];
       const roster = stamping(async request => {
-        log('roster', request);
+        // An added agent's instruction is read whenever its details open: reads go to their own list, so the checks
+        // that count the roster's writes count only writes.
+        if (request.op === 'read') reads.push(withoutExpect(request)); else log('roster', request);
         if (options.gate) await options.gate();
         if (options.fail) throw new Error(options.fail);
         if (['rename', 'remove', 'text'].includes(request.op)) checkExpect(data, 'agent', data.agents.find(a => a.name === request.name), request, expects);
@@ -3022,8 +3036,18 @@
           const source = request.copy_of && data.agents.find(a => a.name === request.copy_of);
           if (request.copy_of && !source) throw new Error("there is no agent '" + request.copy_of + "' to copy");
           if (source && (source.group === 'hub' || source.name === 'council' || source.parent === 'council')) throw new Error("'" + request.copy_of + "' is the orchestrator, the council or a council seat and cannot be copied");
-          data.agents.push(agent(request.name, request.template === 'verifier' ? 'verify' : source ? source.group : 'build', { added: true, removable: true, model: source ? source.model : request.model || 'Verifier model', skills: [], skills_editable: true }));
+          data.agents.push(agent(request.name, request.template === 'verifier' ? 'verify' : source ? source.group : 'build', { added: true, removable: true, model: source ? source.model : request.model || data.agents.find(a => a.name === 'verifier')?.model || 'Verifier model', skills: [], skills_editable: true }));
           return { agent: { name: request.name }, message: LIVE };
+        }
+        if (request.op === 'read' || request.op === 'text') {
+          // As agentgraph's roster: only an added agent's instruction is read or written; text answers the new text and
+          // a record, and both answer the agent's rev.
+          const item = data.agents.find(a => a.name === request.name), texts = data[AGENT_TEXTS] ||= {};
+          if (!item || !item.added) throw new Error("'" + request.name + "' is not an agent added here; only an added agent's instruction can be read or changed here");
+          if (request.op === 'read') { stampRevs(data); return { agent: item.name, action: 'read', name: item.name, description: item.description || '', model: item.model, text: texts[item.name] ?? '', skills: item.skills || [], ...(data[REVS] ? { rev: item.rev } : {}) }; }
+          if (typeof request.text !== 'string') throw new Error('text must be a string');
+          const before = texts[item.name] ?? ''; texts[item.name] = request.text;
+          return { agent: item.name, text: request.text, changed: before !== request.text, record: { op: 'text', agent: item.name, text: before } };
         }
         if (request.op === 'remove') {
           const index = data.agents.findIndex(a => a.name === request.name);
@@ -3045,6 +3069,7 @@
           if (data.agents.some(a => a.name === to)) throw new Error("'" + to + "' is already an agent file in the agents folder (" + to + '.md)');
           const from = item.name, swap = name => name === from ? to : name;
           item.name = to;
+          if (data[AGENT_TEXTS] && from in data[AGENT_TEXTS]) { data[AGENT_TEXTS][to] = data[AGENT_TEXTS][from]; delete data[AGENT_TEXTS][from]; }
           const flows = data.structure.flows.filter(f => f.path.includes(from)).map(f => f.id), teams = (data.structure.teams || []).filter(t => t.lead === from || t.members.includes(from)).map(t => t.id);
           data.structure.flows.forEach(f => { f.path = f.path.map(swap); });
           (data.structure.teams || []).forEach(t => { t.lead = swap(t.lead); t.members = t.members.map(swap); });
@@ -3059,6 +3084,7 @@
             if (data.agents.some(a => a.name === record.agent)) throw new Error("the rename cannot be undone: '" + record.agent + "' now belongs to another agent");
             const swap = name => name === record.to ? record.agent : name;
             item.name = record.agent;
+            if (data[AGENT_TEXTS] && record.to in data[AGENT_TEXTS]) { data[AGENT_TEXTS][record.agent] = data[AGENT_TEXTS][record.to]; delete data[AGENT_TEXTS][record.to]; }
             data.structure.flows.forEach(f => { f.path = f.path.map(swap); });
             (data.structure.teams || []).forEach(t => { t.lead = swap(t.lead); t.members = t.members.map(swap); });
             return { agent: record.agent, message: LIVE };
@@ -3114,7 +3140,7 @@
       const skillDouble = skillHost(data, { revs: options.revs, expects }), flowDouble = flowHost(data, { ...(options.flow || {}), revs: options.revs, expects });
       const skills = async request => { log('skills', request); return skillDouble.skills(request); };
       const flow = async request => { log('flow', request); return flowDouble.flow(request); };
-      return { calls, expects, roster, skillfile, team, skills, flow, texts, actions: { roster, skillfile, team, skills, flow } };
+      return { calls, reads, expects, roster, skillfile, team, skills, flow, texts, actions: { roster, skillfile, team, skills, flow } };
     }
     const viewportOf = root => root.querySelector('.ag-viewport');
     const undoKey = target => press(target, 'z', { ctrlKey: true });
@@ -3212,7 +3238,7 @@
         // By keyboard: n, the first item (blank) with Enter; placed at once at a free spot; Alt+arrows move it.
         viewportOf(root).focus(); press(viewportOf(root), 'n'); await settle();
         document.activeElement.click(); await settled();
-        assert(host.calls[1] === 'roster ' + JSON.stringify({ op: 'add', name: 'agent-1', template: 'blank', model: 'test/model-a' }), 'the keyboard did not add a blank agent with the first model: ' + host.calls.join(' | '));
+        assert(host.calls[1] === 'roster ' + JSON.stringify({ op: 'add', name: 'agent-1', template: 'blank' }), 'the keyboard did not add a blank agent (template blank, no model): ' + host.calls.join(' | '));
         assert(nodeOf(root, 'agent-1') && !overlapping(root, 'agent-1').length, 'the keyboard did not place it at a free spot');
         const box = root.querySelector('.ag-detail [data-rename]'), before = at(root, 'agent-1');
         assert(document.activeElement === box, 'the name is not focused after a keyboard add');
@@ -4049,11 +4075,34 @@
         clickStep(root, 'f1'); await settle(); press(viewportOf(root), 'Delete'); await settled();
         assert(!data.structure.flows.length, 'the path was not removed');
         undoKey(viewportOf(root)); await settled(); await settled();
-        const ops = host.calls.map(call => call.op).join();
-        assert(ops === 'remove,add,name,command', 'undo did not add, name and turn the command on: ' + JSON.stringify(host.calls));
+        // One request (the back end's add takes name and command), so one undo cannot stop half way.
+        assert(JSON.stringify(host.calls.slice(1)) === JSON.stringify([{ op: 'add', path: PATH, text: 'Check it.', name: 'review-loop', command: true }]), 'undo was not one add with the name and the command: ' + JSON.stringify(host.calls));
         const back = data.structure.flows[0];
-        assert(back && back.name === 'review-loop' && back.command === 'review-loop' && JSON.stringify(host.calls.at(-1)) === JSON.stringify({ op: 'command', id: back.id, on: true }), 'the path came back without its name or command');
+        assert(back && back.name === 'review-loop' && back.command === 'review-loop' && routeOf(root, back.id), 'the path came back without its name or command');
+        openStep(root, back.id); await settle();
+        assert(root.querySelector('.ag-command-name')?.textContent === '/review-loop' && root.querySelector('[data-route-name]')?.value === 'review-loop', 'the details do not show the name and the command again');
       }, { actions: host.actions });
+      // A path with a name and no command comes back named, with no command asked for.
+      const named = pathFixture({ name: 'review-loop' }), namer = pathHost(named);
+      await using(named, async root => {
+        clickStep(root, 'f1'); await settle(); press(viewportOf(root), 'Delete'); await settled();
+        undoKey(viewportOf(root)); await settled();
+        assert(JSON.stringify(namer.calls.slice(1)) === JSON.stringify([{ op: 'add', path: PATH, text: 'Check it.', name: 'review-loop' }]) && named.structure.flows[0]?.name === 'review-loop' && !named.structure.flows[0].command, 'a named path did not come back named in one add: ' + JSON.stringify(namer.calls));
+      }, { actions: namer.actions });
+      // The name taken meanwhile by another path: the add is refused whole, nothing comes back half way, and it says what
+      // could not be undone and why. Ruled (n8 view-r1, major 4): a refused undo is dropped, not kept to try again.
+      const taken = pathFixture({ name: 'review-loop', command: 'review-loop' }), refuser = pathHost(taken, { live: true });
+      await using(taken, async root => {
+        clickStep(root, 'f1'); await settle(); press(viewportOf(root), 'Delete'); await settled();
+        taken.structure.flows.push({ id: 'g1', path: ['impl-openai', 'reviewer'], text: 'Other.', source: 'drawn', name: 'review-loop', command: null, stats: null });
+        undoKey(viewportOf(root)); await settled();
+        assert(taken.structure.flows.length === 1 && taken.structure.flows[0].id === 'g1' && refuser.calls.filter(call => call.op !== 'remove').length === 1, 'a refused undo left part of the path behind: ' + JSON.stringify(refuser.calls) + ' ' + JSON.stringify(taken.structure.flows.map(f => f.id)));
+        await sleep(60);
+        assert(liveRegion(root).includes("Could not undo removing the path: another flow is already called 'review-loop'"), 'the refused undo does not say what and why: ' + liveRegion(root));
+        taken.structure.flows.pop(); const asked = refuser.calls.length;
+        undoKey(viewportOf(root)); await settled();
+        assert(refuser.calls.length === asked && !taken.structure.flows.length, 'the refused undo step was kept: ' + JSON.stringify(refuser.calls.slice(asked)));
+      }, { actions: refuser.actions });
     });
     // ---- "gets smoshed when side bar opens there" (user, with a screenshot): the figures row and the refit ----
     // Long figures: $755.27, 3 working, a three-digit count, ! 4, 4.1M↓, a 111k context bar and 7 summaries.
@@ -4267,19 +4316,24 @@
         assert(!host.calls.some(call => /rename|restore/.test(call)) && nodeOf(root, 'scout'), 'a refused rename left an undo step: ' + host.calls.join(' | '));
       }, { actions });
     });
-    await test('rename: a refused undo (the old name now belongs to another agent) changes nothing, says why, and keeps the step for later', async () => {
+    // Ruled (n8 view-r1, major 4): a refused undo is dropped with a plain message, so the steps under it stay reachable
+    // (it was kept on top for ever, and every older step was out of reach).
+    await test('rename: a refused undo (the old name now belongs to another agent) changes nothing, says what and why, and is dropped: the step under it is undone next', async () => {
       const data = worldFixture(), host = worldHost(data);
       data.agents.push(agent('scout', 'build', { added: true, removable: true }));
       await using(data, async (root, app) => {
+        open(root, 'impl-openai'); await settle(); skillButton(root, 'remove:alpha').click(); await settled();
+        assert(!data.agents.find(a => a.name === 'impl-openai').skills.includes('alpha'), 'the older step (a skill removed) was not made');
+        root.querySelector('.ag-close').click(); await settle();
         await renameTo(root, 'scout', 'finder');
         data.agents.push(agent('scout', 'build', { added: true, removable: true })); await app.refresh(); await settle();
         host.calls.length = 0; undoKey(viewportOf(root)); await settled(); await settled();
         assert(host.calls.length === 1 && /"op":"restore"/.test(host.calls[0]), 'undo did not ask once: ' + host.calls.join(' | '));
         assert(nodeOf(root, 'finder') && nodeOf(root, 'scout'), 'the refused undo changed the agents');
-        await sleep(60); assert(liveRegion(root).includes('now belongs to another agent'), 'the refused undo does not say why: ' + liveRegion(root));
-        data.agents.splice(data.agents.findIndex(a => a.name === 'scout'), 1); await app.refresh(); await settle();
+        await sleep(60); assert(/Could not undo the rename: .*now belongs to another agent/.test(liveRegion(root)), 'the refused undo does not say what and why: ' + liveRegion(root));
         host.calls.length = 0; undoKey(viewportOf(root)); await settled(); await settled();
-        assert(nodeOf(root, 'scout') && !nodeOf(root, 'finder'), 'the undo kept after a refusal did not work later: ' + host.calls.join(' | '));
+        assert(host.calls.length === 1 && host.calls[0] === 'skills {"agent":"impl-openai","skill":"alpha","on":true}' && data.agents.find(a => a.name === 'impl-openai').skills.includes('alpha'), 'the next undo did not reach the step under the refused one: ' + host.calls.join(' | '));
+        assert(nodeOf(root, 'finder') && nodeOf(root, 'scout'), 'the dropped undo was tried again');
       }, { actions: host.actions });
     });
     await test('n88 ruling 3: names are never drawn under 11 px at any zoom the user can reach: wheel, Ctrl+wheel, pinch, the - key and Fit stop at the 11 px floor', async () => {
@@ -4355,8 +4409,10 @@
       await using(data, async root => {
         viewportOf(root).focus(); press(viewportOf(root), 'n'); await settle();
         document.activeElement.click(); await settled();
-        assert(host.calls[0] === 'roster ' + JSON.stringify({ op: 'add', name: 'agent-1', template: 'blank', model: 'test/model-a' }), 'the blank agent was not asked for with template blank: ' + host.calls.join(' | '));
+        assert(host.calls[0] === 'roster ' + JSON.stringify({ op: 'add', name: 'agent-1', template: 'blank' }), 'the blank agent was not asked for with template blank and no model: ' + host.calls.join(' | '));
         assert(nodeOf(root, 'agent-1') && !root.querySelector('[data-draft]'), 'the blank agent was not added');
+        // No model is sent, so the back end's default applies: the default verifier's model, as `agentgraph agent add NAME`.
+        assert(data.agents.find(a => a.name === 'agent-1')?.model === data.agents.find(a => a.name === 'verifier').model && data.agents.find(a => a.name === 'verifier').model !== data.roster.models[0], 'the blank agent did not get the default verifier\'s model: ' + data.agents.find(a => a.name === 'agent-1')?.model);
       }, { actions: host.actions });
     });
     await test('n89 item 1: a refused add clears the new circle at once; the details say why in plain words; Try again puts it back and asks again; Cancel closes', async () => {
@@ -4862,7 +4918,7 @@
       const writes = sent.filter(item => !['add', 'read', 'restore', 'create'].includes(item.op)), quiet = sent.filter(item => ['add', 'read', 'restore', 'create'].includes(item.op));
       const ops = writes.map(item => item.kind + ':' + (item.op ?? 'skills')).join();
       assert(['flow:text', 'team:text', 'team:members', 'agent:skills', 'skill:write', 'agent:rename', 'agent:remove', 'flow:remove'].every(op => ops.includes(op)), 'not every kind of write was made: ' + ops);
-      assert(writes.every(item => REV.test(item.expect || '') && (item.op === 'text' && item.kind === 'flow' || item.expect === item.shown)), 'a write went without expect, or with a rev other than the one shown: ' + writes.filter(item => !REV.test(item.expect || '') || (item.expect !== item.shown && !(item.op === 'text' && item.kind === 'flow'))).map(item => item.kind + ':' + item.op + ' ' + item.expect + ' shown ' + item.shown).join() + ' / all: ' + writes.filter(item => !REV.test(item.expect || '')).map(item => item.kind + ':' + item.op).join());
+      assert(writes.every(item => REV.test(item.expect || '') && item.expect === item.shown), 'a write went without expect, or with a rev other than the one shown: ' + writes.filter(item => !REV.test(item.expect || '') || item.expect !== item.shown).map(item => item.kind + ':' + item.op + ' ' + item.expect + ' shown ' + item.shown).join() + ' / all: ' + writes.filter(item => !REV.test(item.expect || '')).map(item => item.kind + ':' + item.op).join());
       assert(host.expects.every(line => REV.test(line.split(':').at(-1))) && host.expects.length >= writes.length, 'the host saw a write without expect: ' + host.expects.join());
       assert(!quiet.some(item => item.expect !== undefined), 'an add, read or restore sent expect: ' + quiet.filter(item => item.expect !== undefined).map(item => item.op).join());
       const texts = writes.filter(item => item.kind === 'flow' && item.op === 'text');
@@ -4893,6 +4949,532 @@
       assert(sent.length >= 8 && !sent.some(request => 'expect' in request), 'an older back end was sent expect: ' + sent.filter(request => 'expect' in request).map(request => request.op).join());
       assert(data.structure.flows.length === 0 && data.structure.teams[0].text === 'Mine.' && data.structure.teams[0].members.join() === 'oracle' && host.texts.beta === 'Beta, better.' && !data.agents.some(a => a.name === 'scout' || a.name === 'finder'), 'a write without expect did not go through: ' + host.calls.join(' | '));
     });
+    // ---- A write the host never answers (a fake clock: no real 15 s wait) ----
+    const NO_ANSWER = 'agentgraph did not answer within 15 seconds, so the view stopped waiting. Try again.';
+    const STALE_UNLOADED = 'This was changed somewhere else since you opened it, and the latest did not load within 15 seconds. Try again.';
+    function fakeClock() {
+      let now = 0, seq = 0; const waiting = new Map();
+      return { setTimeout(fn, ms) { const id = ++seq; waiting.set(id, { at: now + ms, fn }); return id; }, clearTimeout(id) { waiting.delete(id); },
+        tick(ms) { now += ms; [...waiting].filter(([, item]) => item.at <= now).forEach(([id, item]) => { waiting.delete(id); item.fn(); }); }, get waiting() { return waiting.size; } };
+    }
+    await test('no answer: a write the host never answers is given up after 15 s (not before), the typing kept and said plainly, the queue released, and its late answer dropped; the refresh after a stale refusal has the same ceiling', async () => {
+      const problems = [], state = root => root.querySelector('[data-route-state]')?.textContent;
+      { const clock = fakeClock(), data = pathFixture(), host = pathHost(data); let late = null, hang = true;
+        const flow = request => { if (hang && request.op === 'text') { hang = false; return new Promise(resolve => { late = resolve; }); } return host.flow(request); };
+        await using(data, async root => {
+          openStep(root, 'f1'); await settle();
+          const box = root.querySelector('[data-route-text]'); box.focus(); typeIn(box, 'Mine.'); press(box, 'Enter', { ctrlKey: true }); await settled();
+          if (!late) problems.push('the write was not sent');
+          clock.tick(14999); await settled();
+          if (state(root) === NO_ANSWER) problems.push('given up before 15 s');
+          clock.tick(1); await settled(); await sleep(60);
+          if (!(state(root) === NO_ANSWER && root.querySelector('[data-route-text]').value === 'Mine.')) problems.push('after 15 s: ' + state(root) + ' / ' + root.querySelector('[data-route-text]').value);
+          if (!liveRegion(root).includes(NO_ANSWER) && state(root) !== NO_ANSWER) problems.push('no answer is not said');
+          const again = root.querySelector('[data-route-text]'); again.focus(); press(again, 'Enter', { ctrlKey: true }); await settled();
+          if (!(data.structure.flows[0].text === 'Mine.' && state(root) === 'Saved')) problems.push('the queue was not released: ' + state(root) + ' / ' + JSON.stringify(host.calls));
+          late({ flow: { ...data.structure.flows[0], text: 'Late.', rev: 'deadbeef' }, flows: data.structure.flows.slice() }); await settled();
+          if (!(root.querySelector('[data-route-text]').value === 'Mine.' && state(root) === 'Saved')) problems.push('the late answer was applied: ' + root.querySelector('[data-route-text]').value + ' / ' + state(root));
+          // The next write that takes the rev the view holds (a delete) must not expect the late answer's rev.
+          press(viewportOf(root), 'Delete'); await settled();
+          if (data.structure.flows.length || routeOf(root, 'f1')) problems.push('a write after the late answer expected its rev: ' + root.querySelector('[data-route-state]')?.textContent);
+          if (clock.waiting) problems.push(clock.waiting + ' ceilings left running');
+        }, { actions: { ...host.actions, flow }, clock }); }
+      { const clock = fakeClock(), data = pathFixture(), host = pathHost(data); let hangFetch = false;
+        await using(data, async root => {
+          openStep(root, 'f1'); await settle(); flowElsewhere(data); hangFetch = true;
+          const box = root.querySelector('[data-route-text]'); box.focus(); typeIn(box, 'Mine.'); press(box, 'Enter', { ctrlKey: true }); await settled();
+          if (state(root) === STALE || state(root) === STALE_UNLOADED) problems.push('the stale refusal was said before the refresh ended');
+          clock.tick(15000); await settled();
+          if (!(state(root) === STALE_UNLOADED && root.querySelector('[data-route-text]').value === 'Mine.')) problems.push('a hung refresh: ' + state(root) + ' / ' + root.querySelector('[data-route-text]').value);
+          hangFetch = false;
+          const again = root.querySelector('[data-route-text]'); again.focus(); press(again, 'Enter', { ctrlKey: true }); await settled();
+          if (state(root) !== STALE) problems.push('after a hung refresh the next try did not refresh: ' + state(root));
+          const third = root.querySelector('[data-route-text]'); third.focus(); press(third, 'Enter', { ctrlKey: true }); await settled();
+          if (data.structure.flows[0].text !== 'Mine.') problems.push('trying again did not save: ' + state(root));
+        // The view gets a copy, as from the server, so the host's revs move only when a snapshot is drawn.
+        }, { actions: host.actions, clock, fetchSnapshot: async () => hangFetch ? new Promise(() => {}) : JSON.parse(JSON.stringify(stampRevs(data))) }); }
+      assert(!problems.length, problems.join('; '));
+    });
+    // ---- Text from the back end or the user is shown as text, never as markup ----
+    const HOSTILE = label => '<img src=x onerror="window.__agHostile=1"><b>' + label + '</b><script>window.__agHostile=1<\/script>';
+    // No markup made it into the view (the view itself draws no img, b or script) and nothing ran.
+    const markupIn = root => { const found = [...root.querySelectorAll('img, b, script')].map(node => node.tagName.toLowerCase()); if (window.__agHostile) found.push('ran'); return found; };
+    const agentNode = (root, name) => [...root.querySelectorAll('[data-agent]')].find(node => node.dataset.agent === name);
+    const openHostile = async (root, name) => { root.querySelector('.ag-close')?.click(); await settle(); agentNode(root, name).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); await settle(); };
+    await test('hostile text on a path: a goal, a path name, the command name, the applies sentence, a host run message and the refusals show literally and add no img, b or script', async () => {
+      const problems = [], expectText = (label, got, want) => { if (got !== want) problems.push(label + ' shows ' + JSON.stringify(got)); };
+      const NAME = HOSTILE('path name'), APPLIES = HOSTILE('applies'), SAID = HOSTILE('run message'), GOAL = HOSTILE('goal');
+      delete window.__agHostile;
+      { const data = pathFixture(), host = pathHost(data, { live: false, applies: APPLIES, runReply: { sent: true, session: 'ses_1', message: SAID } });
+        await using(data, async root => {
+          openStep(root, 'f1'); await settle();
+          const field = root.querySelector('[data-route-name]'); field.focus(); field.value = NAME; press(field, 'Enter'); await settled();
+          expectText('the path name field', root.querySelector('[data-route-name]').value, NAME);
+          root.querySelector('[data-route-command]').click(); await settled(); await sleep(60);
+          expectText('the command name', root.querySelector('.ag-command-name')?.textContent, '/' + NAME);
+          expectText('the applies sentence', root.querySelector('.ag-command-applies')?.textContent, APPLIES);
+          if (!liveRegion(root).includes('/' + NAME)) problems.push('the command name is not announced as text');
+          typeIn(goalBox(root), GOAL); runButton(root).click(); await settled();
+          expectText('the goal sent', host.runs[0]?.goal, GOAL);
+          expectText('the run message', runNote(root)?.textContent, SAID);
+          const found = markupIn(root); if (found.length) problems.push('markup in the view: ' + found.join());
+        }, { actions: host.actions }); }
+      { const data = pathFixture({ name: 'review-loop' }), host = pathHost(data, { nameFail: HOSTILE('name refused'), commandFail: HOSTILE('command refused'), runFail: HOSTILE('run refused') });
+        await using(data, async root => {
+          openStep(root, 'f1'); await settle();
+          const field = root.querySelector('[data-route-name]'); field.focus(); field.value = 'other'; press(field, 'Enter'); await settled();
+          expectText('the name refusal', root.querySelector('.ag-path-name-error')?.textContent, HOSTILE('name refused'));
+          root.querySelector('[data-route-command]').click(); await settled();
+          expectText('the command refusal', root.querySelector('.ag-command-error')?.textContent, HOSTILE('command refused'));
+          typeIn(goalBox(root), GOAL); runButton(root).click(); await settled();
+          expectText('the run refusal', runNote(root)?.textContent, HOSTILE('run refused'));
+          expectText('the goal kept', goalBox(root).value, GOAL);
+          const found = markupIn(root); if (found.length) problems.push('markup in the view after refusals: ' + found.join());
+        }, { actions: host.actions }); }
+      { const data = pathFixture(), host = pathHost(data, { noRun: true });
+        await using(data, async root => {
+          openStep(root, 'f1'); await settle(); typeIn(goalBox(root), GOAL);
+          await withClipboard(null, async () => { runButton(root).click(); await settled(); });
+          expectText('the run message to copy', root.querySelector('[data-run-copy]')?.value, 'RUN MESSAGE for f1\nGoal:\n' + GOAL);
+          const found = markupIn(root); if (found.length) problems.push('markup in the view with the run message: ' + found.join());
+        }, { actions: host.actions }); }
+      assert(!problems.length, problems.join('; '));
+    });
+    // The plain page (index.html) hands the view every write action, each posting to its own URL.
+    await test('index passes actions.flow, roster, skillfile and team, each posting its body to its own URL, and a refusal (409 included) carries the status', async () => {
+      let options; const posted = [], problems = [];
+      let answer = { ok: true, status: 200, json: async () => ({ done: true }) };
+      const fakeWindow = { AgentGraph: { mount: (_, value) => { options = value; } } };
+      new Function('window', 'document', 'location', 'fetch', indexBootstrap)(fakeWindow, { getElementById: () => ({ dataset: {} }) }, { search: '' }, async (url, init) => { posted.push({ url, method: init?.method, body: init?.body, type: init?.headers?.['Content-Type'] }); return answer; });
+      const wired = { flow: ['/api/structure/flow', { op: 'text', id: 'f1', text: 'Look.', expect: 'abcd1234' }], roster: ['/api/roster', { op: 'rename', name: 'scout', to: 'finder', expect: 'abcd1234' }], skillfile: ['/api/skillfile', { op: 'write', id: 'gamma', text: 'Gamma.', expect: 'abcd1234' }], team: ['/api/structure/team', { op: 'members', id: 't1', members: ['oracle'], expect: 'abcd1234' }] };
+      for (const [name, [url, request]] of Object.entries(wired)) {
+        posted.length = 0; answer = { ok: true, status: 200, json: async () => ({ done: name }) };
+        if (typeof options.actions?.[name] !== 'function') { problems.push(name + ': not passed'); continue; }
+        const reply = await options.actions[name](request);
+        const sent = posted[0] || {};
+        if (!(posted.length === 1 && sent.url === url && sent.method === 'POST' && sent.body === JSON.stringify(request) && sent.type === 'application/json' && reply.done === name)) problems.push(name + ': ' + JSON.stringify(posted));
+        posted.length = 0; answer = { ok: false, status: 409, json: async () => ({ error: 'changed since you opened it; reload and try again', rev: 'feed0001' }) };
+        let refused = null; try { await options.actions[name](request); } catch (error) { refused = error; }
+        if (!(refused && refused.status === 409 && refused.rev === 'feed0001' && refused.message === 'changed since you opened it; reload and try again' && posted[0]?.url === url)) problems.push(name + ': a 409 is not refused with its status: ' + (refused && JSON.stringify({ status: refused.status, rev: refused.rev, message: refused.message })));
+        answer = { ok: false, status: 400, json: async () => ({ error: 'no' }) };
+        refused = null; try { await options.actions[name](request); } catch (error) { refused = error; }
+        if (!(refused && refused.status === 400 && refused.message === 'no')) problems.push(name + ': a refusal does not carry its status');
+      }
+      assert(!problems.length, problems.join('; '));
+    });
+    await test('hostile text everywhere else: an added agent\'s name and description, a group\'s id and instruction, skill names, descriptions and text, refusal reasons and the stale message show literally and add no img, b or script', async () => {
+      const problems = [], expectText = (label, got, want) => { if (got !== want) problems.push(label + ' shows ' + JSON.stringify(got)); };
+      const AGENT = '<b>scout</b><img src=x onerror=window.__agHostile=1>', SKILL = '<b>sk</b><img src=x onerror=window.__agHostile=1>', TEAM = '<b>t1</b><img src=x onerror=window.__agHostile=1>';
+      const fixture = () => {
+        const data = worldFixture();
+        data.agents.push(agent(AGENT, 'build', { added: true, removable: true, about: HOSTILE('about'), skills: [SKILL, 'alpha'], skills_editable: true }));
+        data.skills.push({ name: SKILL, description: HOSTILE('skill description'), editable: true });
+        data.structure.teams = [{ id: TEAM, lead: 'impl-claude', members: [AGENT, 'oracle'], text: HOSTILE('group text') }];
+        return data;
+      };
+      delete window.__agHostile;
+      { const data = fixture(), host = worldHost(data); host.texts[SKILL] = HOSTILE('skill text');
+        await using(data, async root => {
+          if (!agentNode(root, AGENT)) problems.push('the added agent is not drawn');
+          await openHostile(root, AGENT);
+          expectText('the agent name', titleOf(root), AGENT);
+          expectText('the description', root.querySelector('.ag-detail-about')?.textContent, HOSTILE('about'));
+          const opener = skillOpener(root, SKILL);
+          if (!opener || !root.querySelector('.ag-detail').textContent.includes(SKILL)) problems.push('the skill name is not shown as text');
+          opener?.click(); await settled();
+          expectText('the skill text', root.querySelector('[data-skill-text]')?.value, HOSTILE('skill text'));
+          if (!root.querySelector('.ag-detail').textContent.includes(HOSTILE('skill description'))) problems.push('the skill description is not shown as text');
+          await openHostile(root, 'impl-claude');
+          expectText('the group instruction', root.querySelector('[data-team-text]')?.value, HOSTILE('group text'));
+          if (!root.querySelector('.ag-detail').textContent.includes(AGENT)) problems.push('the member name is not shown as text');
+          const found = markupIn(root); if (found.length) problems.push('markup in the view: ' + found.join());
+        }, { actions: host.actions }); }
+      { const data = fixture(), host = worldHost(data, { fail: HOSTILE('roster refused'), skillFail: HOSTILE('skillfile refused') });
+        const refuse = said => async () => { throw new Error(said); };
+        const stale = async () => { const error = new Error(HOSTILE('changed since you opened it')); error.status = 409; throw error; };
+        await using(data, async root => {
+          await openHostile(root, AGENT);
+          root.querySelector('[data-agent-remove]').click(); await settled();
+          if (!noteLines(root).includes('error:' + HOSTILE('roster refused'))) problems.push('the roster refusal: ' + noteLines(root));
+          skillButton(root, 'remove:alpha')?.click(); await settled();
+          if (!skillLines(root).includes('error:' + HOSTILE('skills refused'))) problems.push('the skills refusal: ' + skillLines(root));
+          skillOpener(root, SKILL)?.click(); await settled();
+          expectText('the skillfile refusal', root.querySelector('.ag-detail .ag-form-error')?.textContent, HOSTILE('skillfile refused'));
+          await openHostile(root, 'impl-claude');
+          root.querySelector('[data-team-drop="oracle"]')?.click(); await settled();
+          if (!noteLines(root).includes('error:' + HOSTILE('group refused'))) problems.push('the group refusal: ' + noteLines(root));
+          const box = root.querySelector('[data-team-text]'); box.focus(); typeIn(box, HOSTILE('typed')); press(box, 'Enter', { ctrlKey: true }); await settled();
+          expectText('the stale message', root.querySelector('[data-team-state]')?.textContent, STALE);
+          expectText('the typed instruction', root.querySelector('[data-team-text]')?.value, HOSTILE('typed'));
+          const found = markupIn(root); if (found.length) problems.push('markup in the view after refusals: ' + found.join());
+        }, { actions: { ...host.actions, skills: refuse(HOSTILE('skills refused')), team: request => request.op === 'text' ? stale() : refuse(HOSTILE('group refused'))() } }); }
+      assert(!problems.length, problems.join('; '));
+    });
+    // ---- The back end's documentation (WEB_API.md): the run reply as Desktop gives it, and stats.last ----
+    await test('path run reply as Desktop gives it: only sent true reads as sent; a reply without it is not confirmed and keeps the goal; a rejection is the reason in plain words and keeps the goal', async () => {
+      const problems = [];
+      const cases = [
+        ['{ sent: true, session }', async () => ({ sent: true, session: 'ses_2' }), 'Sent to the orchestrator (session ses_2).', 'done', ''],
+        ['{ session } without sent', async () => ({ session: 'ses_3' }), 'Not confirmed as sent. Look in the orchestrator\'s chat before you send it again.', 'error', 'Ship it'],
+        ['nothing', async () => undefined, 'Not confirmed as sent. Look in the orchestrator\'s chat before you send it again.', 'error', 'Ship it'],
+        ['{ sent: "yes" }', async () => ({ sent: 'yes', message: 'Sent.' }), 'Not confirmed as sent. Look in the orchestrator\'s chat before you send it again.', 'error', 'Ship it'],
+        ['{ sent: false, message }', async () => ({ sent: false, message: 'The orchestrator is busy.' }), 'The orchestrator is busy.', 'error', 'Ship it'],
+        ['a rejection', async () => { throw new Error('the orchestrator session is not open'); }, 'the orchestrator session is not open', 'error', 'Ship it'],
+        ['a rejection in developer words', async () => { throw new Error('unknown agent impl-x: there is no impl-x.md in the structure folder'); }, 'impl-x is one of OpenCode\'s own agents, not one of this toolkit\'s, so it cannot be on a path or in a group.', 'error', 'Ship it'],
+        ['a rejection with no words', async () => { throw new Error(''); }, 'Not sent', 'error', 'Ship it'],
+        ['a rejection that is not an Error', async () => { throw 'session closed'; }, 'session closed', 'error', 'Ship it']];
+      for (const [label, run, said, kind, kept] of cases) {
+        const data = pathFixture(), host = pathHost(data);
+        await using(data, async root => {
+          openStep(root, 'f1'); await settle(); typeIn(goalBox(root), 'Ship it'); runButton(root).click(); await settled();
+          const note = runNote(root);
+          if (!(note?.textContent === said && note.dataset.kind === kind && goalBox(root).value === kept && !runButton(root).disabled)) problems.push(label + ': ' + note?.textContent + ' [' + note?.dataset.kind + '] goal ' + JSON.stringify(goalBox(root).value));
+          if (kind === 'error' && /^Sent\b/.test(note?.textContent || '')) problems.push(label + ': said sent');
+        }, { actions: { flow: host.flow, run } });
+      }
+      assert(!problems.length, problems.join('; '));
+    });
+    await test('path cost: stats.last is Unix seconds of the newest run (an integer, as the back end writes it) and reads as how long ago', async () => {
+      const now = Math.floor(Date.now() / 1000), problems = [];
+      for (const [last, want] of [[now - 20, 'just now'], [now - 45 * 60, '45m ago'], [now - 5 * 3600, '5h ago'], [now - 3 * 86400, '3d ago'], [now + 30, 'just now'], [String(now - 600), '10m ago']]) {
+        const data = pathFixture({ stats: { runs: 1, passed: 1, rounds: { avg: 1, max: 1 }, cost: { total: 0.5, avg: 0.5 }, last } });
+        await using(data, async root => {
+          openStep(root, 'f1'); await settle();
+          const values = [...root.querySelectorAll('.ag-path-cost .ag-stat-value')].map(node => node.textContent);
+          if (values.at(-1) !== want) problems.push(last + ' reads ' + values.at(-1) + ', not ' + want);
+        });
+      }
+      assert(!problems.length, problems.join('; '));
+    });
+    // Geometry (the review's major 6, made before the view work was split; the geometry lane owns refit from here).
+    await test('refit: once the user has zoomed, a new layout (an agent added) and a keyboard nudge keep their zoom; Fit hands the view back and a new layout refits again', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      await using(data, async (root, app) => {
+        const scale = () => root.querySelector('.ag-drawing > g').getCTM().a, viewport = viewportOf(root), r = viewport.getBoundingClientRect();
+        viewport.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, clientX: r.x + r.width / 2, clientY: r.y + r.height / 2, bubbles: true, cancelable: true }));
+        const mine = scale();
+        data.agents.push(agent('scout', 'build', { added: true, removable: true, skills: [], skills_editable: true })); await app.refresh(); await settle();
+        assert(nodeOf(root, 'scout') && Math.abs(scale() - mine) < 1e-6, 'a new agent refit the user\'s zoom: ' + mine + ' → ' + scale());
+        const node = nodeOf(root, 'impl-claude'); node.focus(); press(node, 'ArrowRight', { altKey: true }); await settle();
+        assert(Math.abs(scale() - mine) < 1e-6, 'a keyboard nudge refit the user\'s zoom: ' + mine + ' → ' + scale());
+        root.querySelector('.ag-fit').click(); await settle();
+        const fitted = scale();
+        data.agents.push(agent('finder', 'build', { added: true, removable: true, skills: [], skills_editable: true })); await app.refresh(); await settle();
+        assert(Math.abs(fitted - mine) > 1e-3 && nodeOf(root, 'finder'), 'Fit did not hand the view back: ' + fitted);
+      }, { actions: host.actions });
+    });
+    // ==== write lane: start (checks for writes, the stale layer, the queue, undo and the details' fields) ====
+    // ---- Overlapping writes and undo (n8 view-r1, the correctness review of 773adf1): the steps that race are made
+    // with no settled() between them, as a quick user makes them ----
+    // A fetchSnapshot whose answers can be held: each fetch takes the data as it is when it is asked for (a snapshot
+    // asked for before a write shows the state before it, whenever it lands); while `hold` is on its answer waits.
+    function heldSnapshots(data) {
+      const feed = { hold: false, waiting: [],
+        fetchSnapshot: () => { const copy = JSON.parse(JSON.stringify(stampRevs(data))); if (!feed.hold) return Promise.resolve(copy); const gate = deferred(); feed.waiting.push(gate); return gate.promise.then(() => copy); },
+        next: () => feed.waiting.shift()?.resolve(),
+        release: () => { feed.hold = false; feed.waiting.splice(0).forEach(gate => gate.resolve()); } };
+      return feed;
+    }
+    // Focus events do not fire while the headless page has no focus, so coming into a box says so itself (see leave).
+    function enter(box) { box.focus(); if (!(document.hasFocus() && document.activeElement === box)) box.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); }
+    const staleShown = root => [...root.querySelectorAll('.ag-detail [data-route-state], .ag-detail .ag-form-error, .ag-detail .ag-path-name-error, .ag-detail .ag-command-error, .ag-detail .ag-skill-note, .ag-detail .ag-agent-note')].map(node => node.textContent).filter(said => /changed somewhere else/.test(said));
+    await test('overlap 1: a path\'s text, then its name (and its name, then its text), each saved before the one before it is answered: neither is refused, each expecting what the one before it wrote; nor after a snapshot asked for before a write lands after it', async () => {
+      const problems = [];
+      { const data = pathFixture(), host = pathHost(data);
+        await using(data, async root => {
+          openStep(root, 'f1'); await settle();
+          const box = root.querySelector('[data-route-text]'), field = root.querySelector('[data-route-name]');
+          enter(box); typeIn(box, 'One.'); leave(box);
+          field.focus(); field.value = 'tidy'; press(field, 'Enter');
+          await settled(); await settled();
+          const flow = data.structure.flows[0];
+          if (!(flow.text === 'One.' && flow.name === 'tidy' && !staleShown(root).length)) problems.push('text then name: ' + JSON.stringify([flow.text, flow.name]) + ' ' + staleShown(root).join());
+        }, { actions: host.actions }); }
+      { const data = pathFixture(), host = pathHost(data);
+        await using(data, async root => {
+          openStep(root, 'f1'); await settle();
+          const box = root.querySelector('[data-route-text]'), field = root.querySelector('[data-route-name]');
+          field.focus(); field.value = 'tidy'; press(field, 'Enter');
+          enter(box); typeIn(box, 'Two.'); press(box, 'Enter', { ctrlKey: true });
+          await settled(); await settled();
+          const flow = data.structure.flows[0];
+          if (!(flow.text === 'Two.' && flow.name === 'tidy' && !staleShown(root).length)) problems.push('name then text: ' + JSON.stringify([flow.text, flow.name]) + ' ' + staleShown(root).join());
+        }, { actions: host.actions }); }
+      { const data = pathFixture(), host = pathHost(data), feed = heldSnapshots(data);
+        await using(data, async (root, app) => {
+          openStep(root, 'f1'); await settle();
+          feed.hold = true; app.refresh();
+          const field = root.querySelector('[data-route-name]'); field.focus(); field.value = 'tidy'; press(field, 'Enter');
+          await sleep(30); feed.next(); await sleep(30);
+          const box = root.querySelector('[data-route-text]'); enter(box); typeIn(box, 'Three.'); press(box, 'Enter', { ctrlKey: true });
+          await sleep(30); feed.release(); await settled(); await settled();
+          const flow = data.structure.flows[0];
+          if (!(flow.text === 'Three.' && flow.name === 'tidy' && !staleShown(root).length)) problems.push('old snapshot: ' + JSON.stringify([flow.text, flow.name]) + ' ' + staleShown(root).join());
+        }, { actions: host.actions, fetchSnapshot: feed.fetchSnapshot }); }
+      assert(!problems.length, problems.join('; '));
+    });
+    await test('overlap 2: two skill changes on one agent, the second made after the first is answered and before its snapshot is drawn: the second is not refused (the agent\'s rev from the first answer is kept)', async () => {
+      const data = worldFixture(), host = worldHost(data), feed = heldSnapshots(data);
+      await using(data, async root => {
+        open(root, 'impl-openai'); await settle();
+        feed.hold = true;
+        skillButton(root, 'remove:alpha').click(); await sleep(30);
+        const second = skillButton(root, 'remove:beta');
+        assert(second && !second.disabled, 'the second skill cannot be changed before the snapshot comes');
+        second.click(); await sleep(30);
+        feed.release(); await settled(); await settled();
+        const skills = data.agents.find(a => a.name === 'impl-openai').skills;
+        assert(!skills.includes('alpha') && !skills.includes('beta') && !staleShown(root).length, 'the second skill change was refused: ' + JSON.stringify(skills) + ' ' + staleShown(root).join() + ' ' + host.expects.join());
+      }, { actions: host.actions, fetchSnapshot: feed.fetchSnapshot });
+    });
+    await test('overlap 3: two members taken out of a group in a row, the second before the first\'s snapshot is drawn: the first stays out (the list is the answer\'s, not the older snapshot\'s), and two undos put both back', async () => {
+      const data = worldFixture(), host = worldHost(data), feed = heldSnapshots(data);
+      data.structure.teams = [{ id: 't1', lead: 'impl-claude', members: ['oracle', 'researcher', 'verifier'], text: 'Report.' }];
+      await using(data, async root => {
+        open(root, 'impl-claude'); await settle();
+        feed.hold = true;
+        root.querySelector('[data-team-drop="oracle"]').click(); await sleep(30);
+        root.querySelector('[data-team-drop="researcher"]').click(); await sleep(30);
+        feed.release(); await settled(); await settled();
+        assert(JSON.stringify(data.structure.teams[0].members) === '["verifier"]', 'a member taken out came back: ' + JSON.stringify(data.structure.teams[0].members) + ' / ' + host.calls.join(' | '));
+        root.querySelector('.ag-close').click(); await settle();
+        undoKey(viewportOf(root)); await settled(); undoKey(viewportOf(root)); await settled();
+        assert(JSON.stringify(data.structure.teams[0].members) === '["oracle","researcher","verifier"]', 'two undos did not put both back: ' + JSON.stringify(data.structure.teams[0].members) + ' / ' + host.calls.join(' | '));
+      }, { actions: host.actions, fetchSnapshot: feed.fetchSnapshot });
+    });
+    await test('undo after a refusal: an undo expects the rev its own write produced, so another tab\'s change is not overwritten and another thing that took the same id is not touched; refused, it is dropped with what and why and the step under it is undone next; with no answer from a failed connection it stays', async () => {
+      const data = pathFixture(), base = pathHost(data);
+      data.structure.flows.push({ id: 'f2', path: ['impl-openai', 'reviewer'], text: 'Other path.', source: 'drawn', name: null, command: null, stats: null });
+      let cut = false;
+      const flow = async request => { if (cut) { cut = false; throw new TypeError('Failed to fetch'); } return base.flow(request); };
+      await using(data, async (root, app) => {
+        const nameIt = async (id, name) => { openStep(root, id); await settle(); const field = root.querySelector('[data-route-name]'); field.focus(); field.value = name; press(field, 'Enter'); await settled(); root.querySelector('.ag-close').click(); await settle(); };
+        tap(root, 'impl-openai'); tap(root, 'verifier'); tap(root, 'verifier'); await settled();
+        const made = data.structure.flows.find(f => f.path.join() === 'impl-openai,verifier');
+        assert(made, 'the path was not added');
+        root.querySelector('.ag-close').click(); await settle();
+        await nameIt('f2', 'second-path'); await nameIt('f1', 'first-path');
+        // Elsewhere: f1 renamed; the added path removed and another made with its id.
+        data.structure.flows[0].name = 'named-elsewhere'; made.path = ['impl-claude', 'verifier']; made.text = 'Someone else\'s path.';
+        await app.refresh(); await settle();
+        undoKey(viewportOf(root)); await settled(); await sleep(40);
+        const first = liveRegion(root);
+        if (data.structure.flows[0].name !== 'named-elsewhere') throw new Error('undo overwrote the name given elsewhere: ' + data.structure.flows[0].name);
+        assert(/^Could not undo the path's name: it was changed somewhere else since\./.test(first), 'the refused undo does not say what and why: ' + first);
+        undoKey(viewportOf(root)); await settled();
+        assert(!data.structure.flows.find(f => f.id === 'f2').name, 'the step under the refused one was not undone next');
+        undoKey(viewportOf(root)); await settled(); await sleep(40);
+        assert(data.structure.flows.includes(made) && /^Could not undo adding the path: it was changed somewhere else since\./.test(liveRegion(root)), 'undo removed another path that took the same id, or did not say so: ' + liveRegion(root));
+        await nameIt('f1', 'third-path');
+        assert(data.structure.flows[0].name === 'third-path', 'the path was not named again');
+        cut = true; undoKey(viewportOf(root)); await settled(); await sleep(40);
+        assert(data.structure.flows[0].name === 'third-path' && /^Not undone: Failed to fetch\. Ctrl\+Z tries again\./.test(liveRegion(root)), 'a failed connection is not said as one: ' + liveRegion(root));
+        undoKey(viewportOf(root)); await settled();
+        assert(data.structure.flows[0].name === 'named-elsewhere', 'the step was not kept after a failed connection: ' + data.structure.flows[0].name);
+      }, { actions: { flow, run: base.run } });
+    });
+    await test('auto-save after a stale refusal: the typing stays, the save queued behind it is dropped and nothing more goes until the user saves; that save expects the latest and its undo goes back to the text from elsewhere', async () => {
+      const data = pathFixture(), host = pathHost(data);
+      await using(data, async root => {
+        openStep(root, 'f1'); await settle(); flowElsewhere(data);
+        const box = root.querySelector('[data-route-text]'); enter(box);
+        typeIn(box, 'One.'); press(box, 'Enter', { ctrlKey: true });
+        typeIn(box, 'One. Two.'); press(box, 'Enter', { ctrlKey: true });
+        await sleep(850);
+        const texts = () => host.calls.filter(call => call.op === 'text');
+        const now = root.querySelector('[data-route-text]');
+        assert(data.structure.flows[0].text === 'Check it. (changed elsewhere)' && texts().length === 1, 'the text from elsewhere was overwritten without the user saving: ' + data.structure.flows[0].text + ' / ' + texts().length + ' text writes');
+        assert(now.value === 'One. Two.' && root.querySelector('[data-route-state]').textContent === STALE, 'the typing or the stale message is gone: ' + now.value + ' / ' + root.querySelector('[data-route-state]').textContent);
+        typeIn(now, 'One. Two. Three.'); await sleep(850);
+        assert(texts().length === 1, 'typing after the refusal saved by itself');
+        press(now, 'Enter', { ctrlKey: true }); await settled();
+        assert(data.structure.flows[0].text === 'One. Two. Three.' && texts().length === 2, 'the user\'s save did not go with the latest rev: ' + data.structure.flows[0].text);
+        leave(now); root.querySelector('.ag-close').click(); await settle();
+        undoKey(viewportOf(root)); await settled();
+        assert(data.structure.flows[0].text === 'Check it. (changed elsewhere)', 'undo did not go back to the text from elsewhere: ' + data.structure.flows[0].text);
+      }, { actions: host.actions });
+    });
+    await test('double click and held keys: Remove and the command switch ask once while their request is out (one undo step), and a held Delete deletes once', async () => {
+      const data = pathFixture({ name: 'review-loop' }); let held = null;
+      const host = pathHost(data, { gate: () => held?.promise, live: false });
+      await using(data, async root => {
+        openStep(root, 'f1'); await settle();
+        held = deferred(); const flip = root.querySelector('[data-route-command]'); flip.click(); flip.click(); await sleep(30);
+        held.resolve(); held = null; await settled();
+        assert(host.calls.filter(call => call.op === 'command').length === 1 && data.structure.flows[0].command === 'review-loop', 'a double click on the switch asked twice: ' + JSON.stringify(host.calls));
+        held = deferred(); const remove = root.querySelector('[data-route-remove]'); remove.click(); remove.click(); press(viewportOf(root), 'Delete', { repeat: true }); await sleep(30);
+        held.resolve(); held = null; await settled();
+        assert(host.calls.filter(call => call.op === 'remove').length === 1 && !data.structure.flows.length, 'a double click on Remove asked twice: ' + JSON.stringify(host.calls));
+        undoKey(viewportOf(root)); await settled(); undoKey(viewportOf(root)); await settled();
+        assert(data.structure.flows.length === 1 && !data.structure.flows[0].command && host.calls.filter(call => call.op === 'command').length === 2, 'the undo steps do not match one remove and one switch: ' + JSON.stringify(host.calls));
+      }, { actions: host.actions });
+      const kept = pathFixture(), keys = pathHost(kept);
+      await using(kept, async root => {
+        clickStep(root, 'f1'); await settle();
+        held = null; press(viewportOf(root), 'Delete'); press(viewportOf(root), 'Delete', { repeat: true }); await settled();
+        assert(keys.calls.filter(call => call.op === 'remove').length === 1, 'a held Delete asked more than once: ' + JSON.stringify(keys.calls));
+      }, { actions: keys.actions });
+    });
+    await test('a new agent\'s circle while its add is out: opening another agent keeps the circle; a refusal is still shown (with Try again) and a success adds it without taking the details the user opened', async () => {
+      for (const refuse of [true, false]) {
+        const data = worldFixture(), host = worldHost(data); let held = deferred();
+        const roster = request => request.op === 'add' ? held.promise.then(() => refuse ? Promise.reject(new Error('Refused for the check.')) : host.roster(request)) : host.roster(request);
+        await using(data, async root => {
+          viewportOf(root).focus(); press(viewportOf(root), 'n'); await settle();
+          document.activeElement.click(); await settle();
+          open(root, 'reviewer'); await settle();
+          assert(root.querySelector('[data-draft]'), (refuse ? 'refused' : 'added') + ': opening another agent took the pending circle away');
+          held.resolve(); await settled(); await settled();
+          if (refuse) {
+            const error = root.querySelector('.ag-detail .ag-form-error');
+            assert(error?.textContent === 'Refused for the check.' && root.querySelector('[data-draft-retry]'), 'the refusal of a circle was swallowed: ' + titleOf(root) + ' / ' + error?.textContent);
+          } else assert(nodeOf(root, 'agent-1') && titleOf(root) === 'reviewer', 'the answer took away the details the user opened: ' + titleOf(root));
+        }, { actions: { ...host.actions, roster } });
+      }
+    });
+    await test('undo of a removed path moves only path steps to the path put back: a group step with the same id still undoes its own group', async () => {
+      const data = worldFixture([{ id: 'f1', path: ['impl-hard', 'reviewer'], text: 'Look.', source: 'drawn' }]), host = worldHost(data);
+      data.structure.teams = [{ id: 'f1', lead: 'impl-claude', members: ['oracle'], text: 'Report.' }];
+      await using(data, async root => {
+        open(root, 'impl-claude'); await settle();
+        const team = root.querySelector('[data-team-text]'); enter(team); typeIn(team, 'Report back.'); press(team, 'Enter', { ctrlKey: true }); await settled();
+        leave(team); root.querySelector('.ag-close').click(); await settle();
+        clickStep(root, 'f1'); await settle(); press(viewportOf(root), 'Delete'); await settled();
+        assert(!data.structure.flows.length && data.structure.teams[0].text === 'Report back.', 'the steps were not made');
+        undoKey(viewportOf(root)); await settled();
+        undoKey(viewportOf(root)); await settled();
+        assert(data.structure.flows.length === 1 && data.structure.teams[0].text === 'Report.', 'the group step followed the path put back: ' + data.structure.teams[0].text + ' / ' + host.calls.slice(-2).join(' | '));
+      }, { actions: host.actions });
+    });
+    await test('reset: a write sent before reset() is not heard: its answer is not said and does not go into the new undo history', async () => {
+      const data = pathFixture(); let held = deferred();
+      const host = pathHost(data, { gate: () => held?.promise });
+      await using(data, async (root, app) => {
+        openStep(root, 'f1'); await settle();
+        const field = root.querySelector('[data-route-name]'); field.focus(); field.value = 'tidy'; press(field, 'Enter'); await sleep(20);
+        await app.reset(); await settle();
+        held.resolve(); held = null; await settled(); await sleep(40);
+        assert(data.structure.flows[0].name === 'tidy', 'the write did not reach the back end');
+        assert(!liveRegion(root).includes('Named tidy'), 'the answer to a write sent before reset was said: ' + liveRegion(root));
+        const asked = host.calls.length; undoKey(viewportOf(root)); await settled();
+        assert(host.calls.length === asked, 'the answer to a write sent before reset went into the undo history: ' + JSON.stringify(host.calls.slice(asked)));
+      }, { actions: host.actions });
+    });
+    await test('skill text: Escape (any close) keeps what was typed: opened again the skill shows it as Changed, and Save expects the rev it was typed against (refused when it changed meanwhile, the typing kept)', async () => {
+      const data = worldFixture(), host = worldHost(data);
+      await using(data, async root => {
+        open(root, 'impl-openai'); await settle(); skillOpener(root, 'beta').click(); await settled();
+        const box = root.querySelector('[data-skill-text]'); box.focus(); typeIn(box, 'Beta, mine.'); press(box, 'Escape'); await settle();
+        assert(!detailOpen(root), 'Escape did not close the details');
+        host.texts.beta = 'Beta from elsewhere.';
+        open(root, 'impl-openai'); await settle(); skillOpener(root, 'beta').click(); await settled();
+        const again = root.querySelector('[data-skill-text]');
+        assert(again?.value === 'Beta, mine.' && root.querySelector('[data-skill-state]')?.textContent === 'Changed', 'the typed text was lost: ' + again?.value);
+        root.querySelector('[data-skill-save]').click(); await settled();
+        assert(host.texts.beta === 'Beta from elsewhere.' && root.querySelector('[data-skill-text]')?.value === 'Beta, mine.' && root.querySelector('.ag-detail .ag-form-error')?.textContent === STALE, 'the kept text overwrote a change made elsewhere: ' + host.texts.beta);
+      }, { actions: host.actions });
+    });
+    await test('path text: one undo step per editing session (focus in to leaving the box), not one per save on a pause', async () => {
+      const data = pathFixture(), host = pathHost(data);
+      await using(data, async root => {
+        openStep(root, 'f1'); await settle();
+        const box = root.querySelector('[data-route-text]'); enter(box);
+        typeIn(box, 'One.'); window.dispatchEvent(new Event('pagehide')); await settled();
+        typeIn(box, 'One. Two.'); window.dispatchEvent(new Event('pagehide')); await settled();
+        leave(box); await settled();
+        assert(host.calls.filter(call => call.op === 'text').length === 2 && data.structure.flows[0].text === 'One. Two.', 'the saves did not go: ' + JSON.stringify(host.calls));
+        root.querySelector('.ag-close').click(); await settle();
+        undoKey(viewportOf(root)); await settled();
+        assert(data.structure.flows[0].text === 'Check it.', 'one undo did not take the whole session back: ' + data.structure.flows[0].text);
+      }, { actions: host.actions });
+    });
+    await test('agent instruction: an added agent\'s details show its instruction in a monospace box (read with { op: "read" }); typing saves { op: "text", name, text } with expect; a stale save keeps the typing and waits for the user; undo goes back; a preset agent has no box', async () => {
+      const data = worldFixture();
+      data.agents.push(agent('scout', 'build', { added: true, removable: true, skills: [], skills_editable: true }));
+      data[AGENT_TEXTS] = { scout: 'Scout the code.' };
+      const host = worldHost(data);
+      await using(data, async root => {
+        open(root, 'scout'); await settled();
+        const box = root.querySelector('.ag-detail [data-agent-text="scout"]');
+        assert(box && box.value === 'Scout the code.' && /monospace/.test(getComputedStyle(box).fontFamily) && host.reads.some(read => read.op === 'read' && read.name === 'scout'), 'the instruction is not shown from a read: ' + box?.value);
+        enter(box); typeIn(box, 'Scout the code and report.'); leave(box); await settled();
+        assert(data[AGENT_TEXTS].scout === 'Scout the code and report.' && host.calls.includes('roster {"op":"text","name":"scout","text":"Scout the code and report."}') && host.expects.some(line => /^agent:scout:text:[0-9a-f]{8}$/.test(line)), 'typing was not saved with expect: ' + host.calls.join(' | ') + ' / ' + host.expects.join());
+        data[AGENT_TEXTS].scout = 'Changed elsewhere.';
+        const now = root.querySelector('[data-agent-text="scout"]'); enter(now); typeIn(now, 'Mine.'); press(now, 'Enter', { ctrlKey: true }); await settled();
+        const shown = root.querySelector('[data-agent-text="scout"]');
+        assert(shown.value === 'Mine.' && root.querySelector('[data-agent-state]').textContent === STALE && data[AGENT_TEXTS].scout === 'Changed elsewhere.', 'a stale save did not keep the typing and say so: ' + shown.value + ' / ' + root.querySelector('[data-agent-state]').textContent);
+        press(shown, 'Enter', { ctrlKey: true }); await settled();
+        assert(data[AGENT_TEXTS].scout === 'Mine.', 'the user\'s save after the refusal did not go');
+        leave(shown); root.querySelector('.ag-close').click(); await settle();
+        undoKey(viewportOf(root)); await settled();
+        assert(data[AGENT_TEXTS].scout === 'Changed elsewhere.', 'undo did not go back to the text from elsewhere: ' + data[AGENT_TEXTS].scout);
+        undoKey(viewportOf(root)); await settled(); await sleep(40);
+        assert(data[AGENT_TEXTS].scout === 'Changed elsewhere.' && /^Could not undo the agent's instruction: it was changed somewhere else since\./.test(liveRegion(root)), 'an undo past a change made elsewhere went through: ' + data[AGENT_TEXTS].scout + ' / ' + liveRegion(root));
+        open(root, 'impl-claude'); await settle();
+        assert(!root.querySelector('.ag-detail [data-agent-text]'), 'a preset agent offers an instruction box');
+      }, { actions: host.actions });
+    });
+    // Two real page instances on one back end (trial n89 r2 blocking 1, the review's major 5 seen in real Chrome):
+    // A saves; later B, which opened the same thing before A saved, edits the box and leaves it. B is refused and
+    // says so, keeps its typing, and sends nothing more by itself: A's text stays, B never ends on "Saved".
+    async function twoTabs(data, actions, run) {
+      clearPositions();
+      const mountOn = () => { const root = host(); return { root, app: AgentGraph.mount(root, { fetchSnapshot: async () => stampRevs(data), intervalMs: 60000, motion: 'none', actions }) }; };
+      const a = mountOn(), b = mountOn();
+      try { await a.app.refresh(); await b.app.refresh(); await run(a.root, b.root); } finally { a.app.destroy(); b.app.destroy(); a.root.remove(); b.root.remove(); }
+    }
+    await test('two tabs: a path\'s and a group\'s text saved in tab A, then edited and left in tab B (opened before A saved): B is refused, says it changed elsewhere, keeps its typing and never resends; A\'s text stays', async () => {
+      const problems = [];
+      for (const kind of ['path', 'group']) {
+        const data = worldFixture([{ id: 'f1', path: ['impl-hard', 'reviewer'], text: 'Look.', source: 'drawn' }]), world = worldHost(data);
+        data.structure.teams = [{ id: 't1', lead: 'impl-claude', members: ['oracle'], text: 'Report.' }];
+        const selector = kind === 'path' ? '[data-route-text]' : '[data-team-text]', stateOf = root => root.querySelector(kind === 'path' ? '[data-route-state]' : '[data-team-state]')?.textContent || '';
+        const stored = () => kind === 'path' ? data.structure.flows[0].text : data.structure.teams[0].text, writes = () => world.calls.filter(call => call.startsWith((kind === 'path' ? 'flow' : 'team') + ' {"op":"text"')).length;
+        await twoTabs(data, world.actions, async (a, b) => {
+          // The two pages sit one under the other; each is scrolled into sight to be clicked.
+          const show = async root => { root.scrollIntoView({ block: 'start' }); await sleep(20); if (kind === 'path') openStep(root, 'f1'); else open(root, 'impl-claude'); await settle(); };
+          await show(a); await show(b);
+          const boxA = a.querySelector(selector); enter(boxA); typeIn(boxA, 'From A.'); leave(boxA); await settled();
+          if (stored() !== 'From A.') { problems.push(kind + ': A did not save: ' + stored()); return; }
+          const boxB = b.querySelector(selector); enter(boxB); typeIn(boxB, 'From B.'); leave(boxB);
+          await sleep(900); await settled();
+          const now = b.querySelector(selector);
+          if (stored() !== 'From A.') problems.push(kind + ': B overwrote A (' + writes() + ' text writes): ' + stored() + ', B says ' + stateOf(b));
+          else if (!(now?.value === 'From B.' && stateOf(b) === STALE && writes() === 2)) problems.push(kind + ': B ' + JSON.stringify([now?.value, stateOf(b), writes()]));
+        });
+      }
+      assert(!problems.length, problems.join('; '));
+    });
+    await test('Delete on the orchestrator, the council or a seat with no details open shows the reason in the status line (not in the graph), at 11 px or more', async () => {
+      const data = worldFixture(), world = worldHost(data);
+      await using(data, async root => {
+        for (const [name, why] of [['orchestrator', 'The orchestrator cannot be deleted.'], ['council', 'The council cannot be deleted'], ['councillor-claude', 'A council seat cannot be deleted.']]) {
+          nodeOf(root, name).focus(); press(nodeOf(root, name), 'Delete'); await sleep(60);
+          const shown = [...root.querySelectorAll('.ag-status *')].filter(item => !item.closest('svg') && item.getClientRects().length && item.textContent.startsWith(why) && !item.children.length);
+          assert(!detailOpen(root) && shown.length === 1, 'the reason for ' + name + ' is not shown with the details closed: ' + root.querySelector('.ag-status').textContent);
+          assert(parseFloat(getComputedStyle(shown[0]).fontSize) >= 11 && !shown[0].closest('.ag-drawing, svg'), 'the reason for ' + name + ' is under 11 px or in the graph');
+        }
+      }, { actions: world.actions });
+    });
+    await test('an undone skill keeps its place in the list after later skill changes on the agent and after a reload (the back end appends it)', async () => {
+      const data = worldFixture(), world = worldHost(data);
+      const listed = root => skillRows(root).filter(row => !row.closest('details')).map(row => row.dataset.skill).join();
+      await using(data, async root => {
+        open(root, 'impl-openai'); await settle();
+        skillButton(root, 'remove:alpha').click(); await settled();
+        undoKey(viewportOf(root)); await settled();
+        const fold = foldOf(root, 'agent-skills-add'); fold.open = true; fold.dispatchEvent(new Event('toggle')); await sleep(20);
+        skillButton(root, 'add:gamma').click(); await settled(); await sleep(1100);
+        assert(data.agents.find(a => a.name === 'impl-openai').skills.join() === 'beta,alpha,gamma', 'the double did not append: ' + data.agents.find(a => a.name === 'impl-openai').skills);
+        assert(listed(root) === 'alpha,beta,gamma', 'after a later change alpha is not back in its place: ' + listed(root));
+        const again = host(), app = AgentGraph.mount(again, { fetchSnapshot: async () => stampRevs(data), intervalMs: 60000, motion: 'none', actions: world.actions });
+        try {
+          await app.refresh(); open(again, 'impl-openai'); await settle();
+          assert(listed(again) === 'alpha,beta,gamma', 'after a reload alpha is not back in its place: ' + listed(again));
+        } finally { app.destroy(); again.remove(); }
+      }, { actions: world.actions });
+    });
+    // ==== write lane: end ====
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
   })().catch(error => { document.getElementById('results').textContent = 'RESULT: FAIL ' + error.stack; });
 </script>

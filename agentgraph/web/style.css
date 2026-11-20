@@ -392,6 +392,7 @@
 /* Readouts: usage top right, what needs the user top left, an alert dot on the agent. */
 .agentgraph .ag-network > .ag-status { position: absolute; top: 9px; left: 12px; z-index: 3; display: flex; align-items: center; gap: 10px; pointer-events: none; }
 .agentgraph .ag-activity { position: static; }
+.agentgraph .ag-status-note { max-width: min(46ch, 60vw); border-radius: 5px; padding: 2px 7px; background: var(--ag-paper); color: var(--ag-danger); box-shadow: 0 0 0 1px var(--ag-divider); font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; }
 .agentgraph .ag-attention { pointer-events: auto; border: 0; border-radius: 5px; padding: 1px 6px; background: var(--ag-danger); color: var(--ag-paper); font-size: 10px; font-weight: 600; }
 .agentgraph .ag-usage { position: absolute; top: 5px; right: 8px; z-index: 3; display: flex; align-items: baseline; gap: 9px; border: 0; border-radius: 6px; padding: 4px 6px; background: none; color: var(--ag-muted); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .agentgraph .ag-usage:hover { background: var(--ag-control-hover); }
