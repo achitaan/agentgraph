@@ -179,13 +179,17 @@ nothing working one faint dot circles the ring, a lap in 20 s.
 ring (like an armillary sphere), the whole figure turning once in 40 s round its vertical axis. Characters are chosen
 by depth, far to near: `·` `.` `:` `0` `1` `@`; far parts are also dimmed toward the muted colour. Agents keep their
 glyph and name; near names are at full strength, far ones muted, and the nearer label wins a place. The hub is a
-ball of depth characters shaded from the upper left (`@` the lit side on a dark theme, `·` the shadow side; the other
-way round on a light one), drawn behind the near arcs of the rings. The agents under a parent (the council's seats, or
+ball in block shades `░` `▒` `▓` `█` (none of the rings' characters), lighter toward the upper left and denser toward
+the lower right, drawn over the far parts of the rings and spokes and under the parts nearer than the hub. The agents under a parent (the council's seats, or
 any group built the same way: `agents[].parent`) are its **moons**: a `•` and a short name each (`fable`, not
-`councillor-fable`) on one small faint ring round the parent, evenly spaced, the ring leaning 63° out of the group's
-ring and growing with the number of moons (0.11 + 0.04 per moon of the figure's radius, at most 0.4). The moons go
-round once in 24 s, from the clock (`now`), not the frame count, whatever the camera does; with `motion: "reduced"`
-they stand still. A moon's name takes a place like any other, nearest first, and never goes over another name or its
+`councillor-fable`), each on **its own orbit** round the parent. The parent's moons are ordered by name, `i = 0 … n-1`.
+Orbit `i` lies in the plane of a single small ring (leaning 63° out of the group's ring, turned the way that keeps the
+planes furthest apart) turned about the vertical axis through the parent by 360° × i / n, so the planes are at least
+20° apart; its radius is `r × (1 + 0.14 i)` with `r = min(0.4, 0.11 + 0.04 n)` of the figure's radius; the moon starts
+360° × i / n round it and all go the same way. Each orbit is drawn as its own faint dotted ring where the canvas is at
+least 48×18 (never over a name; the sky keeps clear of where a moon or its name can be). The moons go round once in
+24 s, from the clock (`now`), not the frame count, whatever the camera does; with `motion: "reduced"` each stands at its
+time-0 place. A moon's name takes a place like any other, nearest first, and never goes over another name or its
 parent's; a moon hidden behind its parent shows no glyph and no name for that moment. In 2D the seats stay dots in a
 small circle round the parent and nothing about them moves. While an agent
 works, `0`/`1` digits stream along its spoke from the hub out to it in its group colour; on a loop's arc they stream
@@ -197,9 +201,12 @@ and its own start (so they are out of step; one life in five is skipped, and eac
 length), reaching at most 0.6 of the ball's radius beyond its rim; a faint glow ring swells and shrinks round the ball
 every 1.4 s, and in 2D the ball's shaded dots turn warm. They start ramped in over 0.3 s after the hub begins to work
 and die down over 1 s after it stops: the scene knows when from `previous` (`{ doc, at }`, the document drawn before and
-when this one arrived), and `frameInterval` keeps the working rate for that second. In 2D they are braille dots, in 3D
-the depth characters `:` `.` `·` (a spike's base `:`, its tip `·`), at a depth below the whole figure, so every spoke,
-arc, agent and name covers them and the ball covers the spikes that point at the camera. Colours: the build group's
+when this one arrived), and `frameInterval` keeps the working rate for that second. In 2D they are braille dots. In 3D
+a flare is a run of `|` `-` `/` `\` along its direction on the screen that ends in an arrow `^` `v` `<` `>` pointing
+outward, and the glow is a ring of backticks `` ` `` (none is a depth character or a sky star: `·.:01@`, `'+*`); they
+are drawn over the rings, spokes and arcs that pass behind or beside the hub, and under only the agents' glyphs, the
+names and what is nearer than the hub; a cell shows only outside the ball's rim and within 0.6 of its radius of it. The
+ball and its flares are drawn after the rings; at rest it is still, with no flares. Colours: the build group's
 orange toward a pale yellow core, none green and none a group's colour (dark: core `#ffe9a8`, flame `#f2a65a`, glow
 `#a9673f`; light: core `#b87200`, flame `#c0501a`, glow `#cf8a60`, all at least 2:1 against white). With
 `motion: "reduced"` the spikes are short (0.3 of the radius), still and drawn while the hub works, the glow does not

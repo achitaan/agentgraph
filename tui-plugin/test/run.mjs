@@ -3412,7 +3412,7 @@ test("orbit sky: the hub drawn brighter (accent) in 3D while the orchestrator wo
   assert.equal(hubTone(idle, "2d"), "plain");
   // the hub's ring too: accent cells round it only while it works
   const accents = (doc) => S.orbitLines(doc, 120, 30, 5000, { view: "3d", orbit: HELD, sky: false }).flat().filter((s) => s.tone === "accent").map((s) => s.text).join("");
-  assert.ok(/[·.:01@]/.test(accents(working)), "the ring lit");
+  assert.ok(/[·.:01@░▒▓█]/.test(accents(working)), "the ball lit");
   assert.equal(accents(idle).replace(/\s/g, ""), "");
 });
 
@@ -3454,44 +3454,94 @@ const hubBusy = () => {
   return d;
 };
 
-test("moons 3D: each parent's moons are on one small ring round it, evenly spaced, leaning out of the group's ring, growing with their number", () => {
-  const doc = hubIdle();
-  const L = S.orbitLayout(doc, 120, 30);
-  const F = S.figure3D(L);
-  const council = L.placed.find((p) => p.seats.length === 3);
-  assert.ok(council, "the demo's council has three seats");
-  const seats = F.seats.filter((x) => x.lead === council.agent.name);
-  assert.deepEqual(seats.map((x) => x.agent.name).sort(), council.seats.map((x) => x.name).sort());
-  const c = F.agents.get(council.agent.name);
+test("moons 3D: each moon on its own orbit plane round its parent (planes turned about the vertical axis, 20 degrees apart at least), its own radius r (1 + 0.14 i), 360 degrees * i / n round at time 0, a lap in 24 s", () => {
   const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
   const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
   const len = (a) => Math.hypot(...a);
-  for (const phase of [0, 1.3, 4]) {
-    const rel = seats.map((x) => sub(S.moonPoint(x, phase), c));
-    // one ring: the same distance from the parent, all in one plane through it
-    for (const r of rel) assert.ok(Math.abs(len(r) - len(rel[0])) < 1e-9 && len(r) > 0.1 && len(r) < 0.45, "a small ring round the parent: " + len(r));
-    const n = [rel[0][1] * rel[1][2] - rel[0][2] * rel[1][1], rel[0][2] * rel[1][0] - rel[0][0] * rel[1][2], rel[0][0] * rel[1][1] - rel[0][1] * rel[1][0]];
-    for (const r of rel) assert.ok(Math.abs(dot(r, n)) / (len(n) * len(r)) < 1e-9, "one plane");
-    // evenly spaced: the same angle between neighbours (120 degrees for three)
-    for (let i = 0; i < 3; i += 1) {
-      const a = rel[i];
-      const b = rel[(i + 1) % 3];
-      assert.ok(Math.abs(dot(a, b) / (len(a) * len(b)) + 0.5) < 1e-9, "120 degrees apart");
+  const unit = (a) => a.map((x) => x / len(a));
+  const deg = (r) => (r * 180) / Math.PI;
+  const angleBetween = (a, b) => deg(Math.acos(Math.min(1, Math.abs(dot(a, b)))));
+  const check = (doc, w, h, lead, label) => {
+    const L = S.orbitLayout(doc, w, h);
+    const F = S.figure3D(L);
+    const placed = L.placed.find((p) => p.agent.name === lead);
+    const n = placed.seats.length;
+    const names = placed.seats.map((x) => x.name).sort();
+    const seats = names.map((name) => F.seats.find((x) => x.agent.name === name));
+    assert.ok(seats.every(Boolean) && seats.length === n, label + ": every moon has a seat");
+    const c = F.agents.get(lead);
+    const rel = (x, t) => sub(S.moonPoint(x, S.moonPhase(t, false)), c);
+    const base = len(rel(seats[0], 0));
+    assert.ok(base > 0.1 && base < 0.45, label + ": a small orbit " + base);
+    assert.ok(Math.abs(base - Math.min(0.4, 0.11 + 0.04 * n)) < 1e-9, label + ": r, the single ring's radius rule: " + base);
+    const normals = seats.map((x) => unit(cross(rel(x, 0), rel(x, 3000)))); // a quarter of the way on: the orbit's own normal
+    const mids = seats.map((x) => unit(cross(rel(x, 7000), rel(x, 11000))));
+    seats.forEach((x, i) => {
+      // its own plane for the whole lap, its own radius
+      for (let t = 0; t <= 24000; t += 1500) {
+        assert.ok(Math.abs(len(rel(x, t)) - base * (1 + 0.14 * i)) < 1e-9, `${label}: moon ${i} radius ${len(rel(x, t))} at ${t}`);
+        assert.ok(Math.abs(dot(rel(x, t), normals[i])) < 1e-9 * 10, `${label}: moon ${i} stays in its plane at ${t}`);
+      }
+      assert.ok(angleBetween(normals[i], mids[i]) < 1e-3, label + ": the plane does not turn");
+      // all go round the same way, a lap in 24 s: 90 degrees in 6 s
+      const swept = deg(Math.acos(dot(unit(rel(x, 0)), unit(rel(x, 6000)))));
+      assert.ok(Math.abs(swept - 90) < 1e-6, `${label}: moon ${i} sweeps ${swept} degrees in 6 s`);
+      assert.ok(len(sub(rel(x, 24000), rel(x, 0))) < 1e-9, label + ": back where it began after 24 s");
+      assert.ok(len(sub(S.moonPoint(x, S.moonPhase(9999, true)), S.moonPoint(x, 0))) < 1e-9, label + ": reduced motion stands at time 0");
+    });
+    // the sense: the plane's normal (cross of the position and where it goes) is the same hand for every moon of a parent
+    // (here: it is the stored ring normal)
+    seats.forEach((x, i) => assert.ok(dot(unit(cross(rel(x, 0), rel(x, 1000))), x.ring.normal) > 0.999, label + ": the ring's own sense"));
+    // each pair of planes at least 20 degrees apart, over the lap
+    for (let i = 0; i < n; i += 1) {
+      for (let j = i + 1; j < n; j += 1) {
+        const apart = angleBetween(normals[i], normals[j]);
+        assert.ok(apart >= 20, `${label}: moons ${seats[i].agent.name} and ${seats[j].agent.name} orbit ${apart.toFixed(1)} degrees apart`);
+      }
     }
-    // tilted differently from the group's ring: the plane's normal is not the ring's
-    const ring = F.rings.find((x) => x.key === council.key);
-    const tilt = Math.acos(Math.abs(dot(n, ring.normal)) / len(n));
-    assert.ok(tilt > 0.6, "leans out of the group's ring by " + tilt.toFixed(2) + " rad");
+    // no two moons at one place at any time of the lap
+    for (let t = 0; t < 24000; t += 250) {
+      for (let i = 0; i < n; i += 1) {
+        for (let j = i + 1; j < n; j += 1) assert.ok(len(sub(rel(seats[i], t), rel(seats[j], t))) > 0.02, `${label}: moons ${i} and ${j} meet at ${t}`);
+      }
+    }
+    // in the plane turned about the vertical axis through the parent by 360 * i / n: the first plane turned
+    const turned = (v, a) => [Math.cos(a) * v[0] - Math.sin(a) * v[1], Math.sin(a) * v[0] + Math.cos(a) * v[1], v[2]];
+    seats.forEach((x, i) => assert.ok(angleBetween(normals[i], turned(normals[0], (2 * Math.PI * i) / n)) < 1e-3, `${label}: plane ${i} is plane 0 turned by 360 * ${i} / ${n} about the vertical`));
+    // moon i starts 360 * i / n round its orbit from the first plane's start (the parent's radial line)
+    seats.forEach((x, i) => assert.ok(Math.abs(x.a0 - (2 * Math.PI * i) / n) < 1e-9, label + ": phase at time 0"));
+    return { F, seats, base, c };
+  };
+  // the demo's council (three moons), at the sizes the panel takes, and groups of 2 to 5 moons
+  for (const [w, h] of [[120, 40], [160, 45], [48, 20], [36, 14]]) check(hubIdle(), w, h, "council", `council ${w}x${h}`);
+  const groups = ["council", "decide", "build", "verify", "understand"];
+  for (const k of [2, 3, 4, 5]) {
+    for (const g of groups) {
+      const ags = [A("orchestrator", "hub")];
+      groups.forEach((x) => {
+        ags.push(A("lead-" + x, x));
+        if (x === g) for (let i = 0; i < k; i += 1) ags.push(A("m" + i, x, 0, "lead-" + x));
+      });
+      check(D(ags), 120, 30, "lead-" + g, `${k} moons in ${g}`);
+    }
   }
-  // the ring grows with the number of moons
+  // the orbit grows with the number of moons (r)
   const mk = (k) => {
     const d = D([A("orchestrator", "hub"), A("lead", "council"), ...Array.from({ length: k }, (_, i) => A("m" + i, "council", 0, "lead"))]);
     return S.figure3D(S.orbitLayout(d, 120, 30)).seats[0].ring.radius;
   };
   assert.ok(mk(2) < mk(4) && mk(4) < mk(6), "radius " + [mk(2), mk(4), mk(6)]);
-  // morph: flat with the group's ring at the start (the moons sit on the 2D plane), the full lean at the end
-  const flat = S.figure3D(L, 0).seats.filter((x) => x.lead === council.agent.name);
-  for (const x of flat) assert.ok(Math.abs(S.moonPoint(x, 0.7)[2] - S.figure3D(L, 0).agents.get(council.agent.name)[2]) < 1e-9, "flat at the start of the morph");
+  // a moon's orbit leans out of its group's ring at full lean; the morph starts flat with it
+  const L = S.orbitLayout(hubIdle(), 120, 30);
+  const F = S.figure3D(L);
+  const flat = S.figure3D(L, 0);
+  for (const x of flat.seats) {
+    const parent = flat.agents.get(x.lead);
+    const ringNormal = flat.rings.find((r) => r.key === x.key).normal;
+    for (const t of [0, 1700, 5000]) assert.ok(Math.abs(dot(sub(S.moonPoint(x, S.moonPhase(t, false)), parent), ringNormal)) < 1e-9 || x.index > 0, "moon 0 flat with its group's ring at the start of the morph");
+  }
+  for (const x of F.seats) assert.ok(Math.acos(Math.abs(dot(x.ring.normal, F.rings.find((r) => r.key === x.key).normal))) > 0.2 || F.seats.filter((y) => y.lead === x.lead).length > 1, "leans out of the group's ring");
 });
 
 test("moons 3D: a lap in 24 s from the clock, never from the frame count; still with reduced motion; names once, none over another or the parent's", () => {
@@ -3528,6 +3578,13 @@ test("moons 3D: a lap in 24 s from the clock, never from the frame count; still 
     }
     assert.ok(shown >= 0.8 * moonNames.length * frames, `the moons' names are drawn: ${shown} of ${moonNames.length * frames} at ${size}`);
   }
+  // 36x14: no name cut by another (a name's start shows only with the whole name), whether the sun works or not
+  for (const d of [doc, hubBusy()]) {
+    for (let now = t0; now < t0 + 24000; now += 1500) {
+      const flat = sceneText(S.scene(d, { width: 36, height: 14, now, view: "3d", orbit })).join("\n");
+      for (const name of moonNames) if (flat.includes(name.slice(0, 3))) assert.ok(flat.includes(name), `${name} cut at 36x14 @${now}\n${flat}`);
+    }
+  }
   // the moons' glyphs `•` stay put with reduced motion and move with the clock
   const bullets = (now, extra) => at(now, Object.assign({ sky: false }, extra)).flatMap((l, r) => [...l].map((ch, c) => (ch === "•" ? r * 1000 + c : -1)).filter((x) => x >= 0)).join(",");
   assert.ok(bullets(t0).length > 0);
@@ -3547,12 +3604,12 @@ test("hub 3D and 2D at rest: a ball, lit from the upper left, still, no sun colo
   const w = 120;
   const h = 30;
   const L = S.orbitLayout(doc, w, h);
-  // 3D: the nearest-to-the-light side takes the heavier characters
+  // 3D: lighter shades toward the upper left (the light), denser toward the lower right
   const o3 = { view: "3d", orbit: HELD, sky: false };
   const project = S.camera3D(L, HELD.turn, HELD.elevation);
   const hub = project.hub;
   const grid = (now) => S.orbitLines(doc, w, h, now, o3).map((l) => cellsOf(l).map((c) => c.ch));
-  const weight = (ch) => Math.max(0, S.DEPTH_CHARS.indexOf(ch));
+  const weight = (ch) => Math.max(0, S.BALL_SHADES.indexOf(ch));
   const g0 = grid(0);
   let ul = 0;
   let lr = 0;
@@ -3568,7 +3625,7 @@ test("hub 3D and 2D at rest: a ball, lit from the upper left, still, no sun colo
     }
   }
   assert.ok(cells >= 20, "a ball of " + cells + " cells");
-  assert.ok(ul > lr + 3, `3D: heavier characters toward the upper left (${ul}) than the lower right (${lr})`);
+  assert.ok(lr > ul + 3, `3D: denser shades toward the lower right (${lr}) than the upper left (${ul})`);
   // still: the ball's cells do not change from one frame to the next, with the camera held
   const inBall = (g) => g.flatMap((row, r) => row.filter((_, c) => ((c * 2 + 1 - hub.x) / hub.rx) ** 2 + ((r * 4 + 2 - hub.y) / hub.ry) ** 2 <= 0.8)).join("");
   assert.equal(inBall(grid(0)), inBall(grid(1500)));
@@ -3587,7 +3644,7 @@ test("hub 3D and 2D at rest: a ball, lit from the upper left, still, no sun colo
   assert.equal(hubRegion(100), hubRegion(2100));
 });
 
-test("hub working, the sun: 7 to 12 spikes by size, each its own seeded time 0.6 to 1.6 s, within 0.6 of the radius beyond the rim, in warm colours, under the agents and names", () => {
+test("hub working, the sun: 7 to 12 spikes by size, each its own seeded time 0.6 to 1.6 s, within 0.6 of the radius beyond the rim, in warm colours, over the rings, under the agents and names", () => {
   assert.equal(S.spikeCount(5), 7);
   assert.equal(S.spikeCount(9), 12);
   assert.ok(S.spikeCount(7) > 7 && S.spikeCount(7) < 12);
@@ -3656,7 +3713,7 @@ test("hub working, the sun: 7 to 12 spikes by size, each its own seeded time 0.6
   for (let now = 0; now < 8000; now += 100) {
     const cells = warmCells(S.orbitLines(doc, w, h, now, { view: "3d", orbit: HELD, sky: false }));
     for (const c of cells) {
-      assert.ok(/^[:.·]$/.test(c.ch), "the sun is drawn in depth characters: " + c.ch);
+      assert.ok(/^[`|\\/\-^v<>]$/.test(c.ch) && !S.DEPTH_CHARS.includes(c.ch), "the 3D sun is drawn in flare characters, none a depth character: " + c.ch);
       const dx = (c.col * 2 + 1 - hub.x) / hub.rx;
       const dy = (c.row * 4 + 2 - hub.y) / hub.ry;
       const d = Math.hypot(dx, dy);
@@ -3680,8 +3737,59 @@ test("hub working, the sun: 7 to 12 spikes by size, each its own seeded time 0.6
   for (const view of [{}, { view: "3d" }]) {
     for (let now = 0; now < 4000; now += 400) {
       for (const lineSet of [S.scene(doc, Object.assign({ width: 120, height: 40, now }, view))]) {
-        for (const line of lineSet) for (const span of line) if (span.color && SUN_ALL.has(span.color)) assert.ok(!/[A-Za-z0-9○●◉!↩•⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(span.text) || /^[⠀-⣿:.·]+$/.test(span.text), `a sun-coloured span over text: ${JSON.stringify(span.text)}`);
+        for (const line of lineSet) for (const span of line) if (span.color && SUN_ALL.has(span.color)) assert.match(span.text, /^[⠀-⣿ :.·|\\/\-^v<>`]+$/, `a sun-coloured span over text: ${JSON.stringify(span.text)}`);
       }
+    }
+  }
+});
+
+test("hub working in 3D: the sun's flares are drawn over the rings and spokes behind it, in characters that are no depth character, changing from frame to frame, never over an agent or a name; none at rest", () => {
+  const FLARE = /^[`|\\/\-^v<>]$/;
+  const busy = hubBusy();
+  const idle = hubIdle();
+  for (const [w, h] of [[120, 40], [48, 20]]) {
+    const L = S.orbitLayout(busy, w, h);
+    const project = S.camera3D(L, HELD.turn, HELD.elevation);
+    const hub = project.hub;
+    const radii = (c, r) => Math.hypot((c * 2 + 1 - hub.x) / hub.rx, (r * 4 + 2 - hub.y) / hub.ry);
+    const grid = (doc, now) => S.orbitLines(doc, w, h, now, { view: "3d", orbit: HELD, sky: false }).map((l) => cellsOf(l));
+    const seen = new Set();
+    const sets = new Set();
+    let overRings = 0;
+    for (let now = 50000; now < 53000; now += 100) {
+      const a = grid(busy, now);
+      const b = grid(idle, now);
+      const here = [];
+      a.forEach((row, r) => row.forEach((c, k) => {
+        const was = b[r][k].ch;
+        if (c.color && SUN_ALL.has(c.color) && c.ch !== " ") {
+          const d = radii(k, r);
+          if (d > 1) {
+            assert.match(c.ch, FLARE, `${w}x${h}: a flare in a flare character, not ${c.ch}`);
+            assert.ok(!S.DEPTH_CHARS.includes(c.ch), "no depth character");
+            // outside the ball's rim, within 0.6 of its radius (plus a cell)
+            assert.ok(d <= 1 + S.SPIKE_REACH + Math.max(2 / hub.rx, 4 / hub.ry) + 0.15, `${w}x${h}: a flare ${d.toFixed(2)} radii out`);
+            here.push(k + "," + r);
+            seen.add(k + "," + r);
+            if (S.DEPTH_CHARS.includes(was) && was !== " ") overRings += 1;
+          }
+        }
+        // never over an agent's glyph or a name: whatever was there with the hub at rest and is no ring, spoke or ball character
+        if (was !== " " && !S.DEPTH_CHARS.includes(was) && !S.BALL_SHADES.includes(was)) assert.equal(c.ch, was, `${w}x${h}: ${JSON.stringify(c.ch)} over ${JSON.stringify(was)} at ${r},${k}`);
+      }));
+      sets.add(here.join(" "));
+    }
+    assert.ok(seen.size >= 7, `${w}x${h}: ${seen.size} distinct flare cells over 3 s`);
+    assert.ok(sets.size >= 10, `${w}x${h}: the flares change from frame to frame (${sets.size} distinct frames of 30)`);
+    assert.ok(overRings >= 1, `${w}x${h}: a flare drawn over a ring or spoke cell (${overRings})`);
+    // at rest: none, and the ball still
+    const first = grid(idle, 50000);
+    for (let now = 50000; now < 53000; now += 500) {
+      const g = grid(idle, now);
+      g.forEach((row, r) => row.forEach((c, k) => {
+        assert.ok(!(c.color && SUN_ALL.has(c.color) && c.ch !== " "), `${w}x${h}: a sun cell at rest at ${r},${k}`);
+        if (radii(k, r) <= 1) assert.equal(c.ch, first[r][k].ch, `${w}x${h}: the ball at rest is still`);
+      }));
     }
   }
 });

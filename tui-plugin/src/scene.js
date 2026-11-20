@@ -25,7 +25,8 @@
  * about square, so geometry is done in dots and comes out round. The hub is a shaded ball (a rim and dithered dots), and
  * the sun while it works: flame spikes and a glow (see "The hub as a ball").
  * 3D: every structure group has its own orbit ring round the hub, each tilted differently; the figure turns round its
- * vertical axis once in TURN_MS (the agents under a parent are moons on a small ring round it, a lap in MOON_LAP_MS) and is drawn far to near with `·` `.` `:` `0` `1` `@`, far parts dimmed. Behind it, in 3D
+ * vertical axis once in TURN_MS (the agents under a parent are moons, each on its own orbit plane round it, a lap in MOON_LAP_MS) and is drawn far to near
+ * with `·` `.` `:` `0` `1` `@`, far parts dimmed; the hub is a ball in block shades with the sun's flares drawn over the rings behind it. Behind it, in 3D
  * only, a sky (drawSky): sparse fixed stars, one warmer star per finished run, a streak when a run finishes.
  *
  * Pure: no host imports, no timers, no mutation of the document. The layout of a document at a size is cached.
@@ -101,6 +102,10 @@ const MOON_TILT = 1.1; // radians: the moon ring against the group's ring
 const MOON_RING_BASE = 0.11; // figure radii; the ring grows with the number of moons
 const MOON_RING_PER = 0.04;
 const MOON_RING_MAX = 0.4;
+// the moons' orbits are drawn (faint, one each) only where the canvas has room for them beside the names
+const MOON_RINGS_MIN_W = 48;
+const MOON_RINGS_MIN_H = 18;
+const MOON_RADIUS_STEP = 0.14; // moon i's orbit is r * (1 + 0.14 i): no two moons of a parent at the same distance
 const PERSPECTIVE = 4; // the camera's distance in figure radii
 const FIGURE_SCALE = 0.78; // the 3D figure's radius against the 2D ring's, so the near side and the labels fit
 
@@ -299,6 +304,7 @@ class Canvas {
     this.figDepth = new Float32Array(n).fill(-Infinity);
     this.text = new Array(n).fill(null); // a character, "" for the right half of a wide one, null for none
     this.textStyle = new Uint16Array(n);
+    this.kept = new Uint8Array(n);
   }
 
   dot(x, y, style) {
@@ -322,12 +328,17 @@ class Canvas {
   }
 
   // The cell and its eight neighbours hold no figure character and no text (a star there reads as sky).
+  // Cells where something will pass later (the moons' glyphs and names): the sky leaves them clear.
+  reserve(c, r) {
+    if (c >= 0 && r >= 0 && c < this.w && r < this.h) this.kept[r * this.w + c] = 1;
+  }
+
   open(c, r) {
     for (let rr = r - 1; rr <= r + 1; rr += 1) {
       for (let cc = c - 1; cc <= c + 1; cc += 1) {
         if (cc < 0 || rr < 0 || cc >= this.w || rr >= this.h) continue;
         const i = rr * this.w + cc;
-        if (this.fig[i] !== null || this.text[i] !== null) return false;
+        if (this.fig[i] !== null || this.text[i] !== null || this.kept[i]) return false;
       }
     }
     return true;
@@ -699,9 +710,12 @@ export function figure3D(L, rise = 1) {
       agents.set(p.agent.name, at(Math.atan2(Math.sin(beta), Math.cos(beta) * Math.cos(inc))));
     }
   }
-  // moons: the agents under a parent sit on one small ring round it, evenly spaced. The ring leans out of the group's
-  // ring by MOON_TILT about the radial line through the parent (flat with the group at rise 0), its radius grows with
-  // the number of moons, and the moons go round it (moonPoint): the ring itself stands still.
+  // moons: each agent under a parent travels on its own orbit round it, in its own plane. The moons of a parent are
+  // ordered by name, i = 0 .. n-1. The first plane is the one the single small ring had: it leans out of the group's
+  // ring by MOON_TILT about the radial line through the parent (flat with the group at rise 0); moon i's plane is that
+  // one turned about the vertical axis through the parent by 360 degrees * i / n, its radius is r * (1 + 0.14 i) (r:
+  // MOON_RING_BASE + MOON_RING_PER per moon, at most MOON_RING_MAX) and it starts 360 degrees * i / n round its orbit.
+  // The orbits themselves stand still and the moons go round them (moonPoint).
   const seats = [];
   const moonRings = [];
   for (const p of L.placed) {
@@ -710,18 +724,36 @@ export function figure3D(L, rise = 1) {
     const group = rings.find((r) => r.key === p.key);
     const ng = group ? group.normal : [0, 0, 1];
     const u = norm(cross(ng, c)) || [1, 0, 0];
-    const lean = MOON_TILT * k;
-    const nm = [Math.cos(lean) * ng[0] + Math.sin(lean) * u[0], Math.cos(lean) * ng[1] + Math.sin(lean) * u[1], Math.cos(lean) * ng[2] + Math.sin(lean) * u[2]];
+    // the lean goes the way (out of the two) that keeps the moons' planes furthest apart: a plane that is flat, or
+    // that stands upright and is turned by 180 degrees, is turned about the vertical axis into itself. The sign is
+    // decided at full lean, so the morph does not flip.
+    const leaned = (lean) => [Math.cos(lean) * ng[0] + Math.sin(lean) * u[0], Math.cos(lean) * ng[1] + Math.sin(lean) * u[1], Math.cos(lean) * ng[2] + Math.sin(lean) * u[2]];
+    const n = p.seats.length;
+    const apart = (nz) => {
+      let least = Infinity;
+      for (let i = 0; i < n; i += 1) {
+        for (let j = i + 1; j < n; j += 1) {
+          const a = turnZ(nz, (2 * Math.PI * i) / n);
+          const b = turnZ(nz, (2 * Math.PI * j) / n);
+          least = Math.min(least, Math.acos(Math.min(1, Math.abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]))));
+        }
+      }
+      return least;
+    };
+    const sign = apart(leaned(-MOON_TILT)) > apart(leaned(MOON_TILT)) + 1e-9 ? -1 : 1;
+    const nm = leaned(sign * MOON_TILT * k);
     const e1 = norm(c) || [1, 0, 0];
     const e2 = norm(cross(nm, e1)) || [0, 0, 1];
-    const radius = Math.min(MOON_RING_MAX, MOON_RING_BASE + MOON_RING_PER * p.seats.length);
-    const ring = { key: p.key, lead: p.agent.name, centre: c, e1, e2, radius, points: [] };
-    for (let i = 0; i < 48; i += 1) ring.points.push(moonOn(ring, (i / 48) * 2 * Math.PI));
-    moonRings.push(ring);
-    p.seats.forEach((agent, i) => {
-      const a0 = (2 * Math.PI * i) / p.seats.length + 0.5;
-      seats.push({ agent, key: p.key, lead: p.agent.name, ring, a0, point: moonOn(ring, a0) });
-    });
+    const base = Math.min(MOON_RING_MAX, MOON_RING_BASE + MOON_RING_PER * n);
+    [...p.seats]
+      .sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0))
+      .forEach((agent, i) => {
+        const turn = (2 * Math.PI * i) / n;
+        const ring = { key: p.key, lead: p.agent.name, centre: c, e1: turnZ(e1, turn), e2: turnZ(e2, turn), normal: turnZ(nm, turn), radius: base * (1 + MOON_RADIUS_STEP * i), points: [] };
+        for (let j = 0; j < 48; j += 1) ring.points.push(moonOn(ring, (j / 48) * 2 * Math.PI));
+        moonRings.push(ring);
+        seats.push({ agent, key: p.key, lead: p.agent.name, ring, a0: turn, index: i, point: moonOn(ring, turn) });
+      });
   }
   // loops: an arc over the sphere between the two agents, bowed outward
   const arcs = L.arcs.map((arc) => {
@@ -768,6 +800,13 @@ export function moonPhase(now, reduced) {
 // The place of a moon (an entry of figure3D(L).seats) at moonPhase `phase`.
 export function moonPoint(seat, phase) {
   return moonOn(seat.ring, seat.a0 + phase);
+}
+
+// `v` turned about the vertical axis (z) by `a`.
+function turnZ(v, a) {
+  const ca = Math.cos(a);
+  const sa = Math.sin(a);
+  return [ca * v[0] - sa * v[1], sa * v[0] + ca * v[1], v[2]];
 }
 
 function cross(a, b) {
@@ -1285,20 +1324,44 @@ function drawBall2D(canvas, S, L, P, r, tint) {
   }
 }
 
-// 3D: the glow and spikes, under everything: the glow a ring of `·` just outside the ball, the spikes short runs of
-// `:` `.` `·` from its surface outward, at a depth below every other part of the figure.
-const SUN_DEPTH = -1.2;
+// 3D: the flares and the glow, drawn over the rings and spokes (SUN_TOP is above every figure depth; only the text layer,
+// the agents' glyphs and names, stays on top) and in characters that are none of the depth characters: a flame is a run
+// of `|` `-` `/` `\` along its direction on the screen and ends in an arrow, `^` `v` `<` `>`, pointing outward; the glow
+// is a ring of backticks (the sky's stars are `'` `+` `*`). A cell is drawn only if its centre is outside the ball's rim and no farther than SPIKE_REACH of the
+// ball's radius beyond it (so a flame that points at the camera, or away, shows only where it clears the ball).
+const SUN_TOP = 4;
+export const FLARE_BODY = Object.freeze(["|", "-", "/", "\\"]);
+export const FLARE_TIPS = Object.freeze(["^", "v", "<", ">"]);
+export const GLOW_CHAR = "`";
+function ballRadiusOf(hub, c, r) {
+  const dx = (c * 2 + 1 - hub.x) / hub.rx;
+  const dy = (r * 4 + 2 - hub.y) / hub.ry;
+  return Math.hypot(dx, dy);
+}
+function flareChar(hub, c, r, tip) {
+  const vx = c * 2 + 1 - hub.x;
+  const vy = r * 4 + 2 - hub.y;
+  if (tip) return Math.abs(vx) > Math.abs(vy) ? (vx > 0 ? ">" : "<") : vy > 0 ? "v" : "^";
+  const m = Math.hypot(vx, vy) || 1;
+  if (Math.abs(vy) / m > 0.92) return "|";
+  if (Math.abs(vx) / m > 0.92) return "-";
+  return vx * vy < 0 ? "/" : "\\";
+}
 function drawSun3D(canvas, S, project, P, now, level, reduced, count) {
   if (!(level > 0)) return;
   const sun = sunColors(P);
   const hub = project.hub;
+  const reach = 1 + SPIKE_REACH;
   const glow = S.get("plain", sun.glow);
   const swell = reduced ? 0.5 : 0.5 + 0.5 * Math.sin((2 * Math.PI * now) / GLOW_MS);
-  const gr = 1.1 + 0.1 * swell * level;
+  const gr = 1.12 + 0.2 * swell * level;
   const gn = Math.max(24, Math.ceil(2 * Math.PI * Math.max(hub.rx / 2, hub.ry / 2)));
   for (let i = 0; i < gn; i += 2) {
     const a = (i / gn) * 2 * Math.PI;
-    canvas.plot(Math.floor((hub.x + hub.rx * gr * Math.cos(a)) / 2), Math.floor((hub.y + hub.ry * gr * Math.sin(a)) / 4), "·", glow, SUN_DEPTH - 0.1);
+    const c = Math.floor((hub.x + hub.rx * gr * Math.cos(a)) / 2);
+    const r = Math.floor((hub.y + hub.ry * gr * Math.sin(a)) / 4);
+    const d = ballRadiusOf(hub, c, r);
+    if (d > 1 && d <= reach) canvas.plot(c, r, GLOW_CHAR, glow, SUN_TOP - 0.1);
   }
   const core = S.get("plain", sun.core);
   const flame = S.get("plain", sun.flame);
@@ -1308,15 +1371,20 @@ function drawSun3D(canvas, S, project, P, now, level, reduced, count) {
       const rho = (project.hubRho || HUB_RADIUS3) * (1 + (sp.reach * j) / 12);
       pts.push([sp.dir[0] * rho, sp.dir[1] * rho, sp.dir[2] * rho]);
     }
-    const cells = cellPath(project, pts);
+    const cells = cellPath(project, pts).filter((c) => {
+      const d = ballRadiusOf(hub, c.col, c.row);
+      return d > 1 && d <= reach;
+    });
     cells.forEach((c, i) => {
       const f = (i + 1) / cells.length;
-      canvas.plot(c.col, c.row, f <= 0.4 ? ":" : f <= 0.75 ? "." : "·", f <= 0.5 ? core : flame, SUN_DEPTH);
+      canvas.plot(c.col, c.row, flareChar(hub, c.col, c.row, i === cells.length - 1), f <= 0.5 ? core : flame, SUN_TOP);
     });
   }
 }
 
-// 3D: the ball: a cell inside its outline takes the character for how lit it is (`@` the lit side on a dark theme).
+// 3D: the ball: a cell inside its outline takes the shade for how lit it is, in block shades none of the rings' or the
+// flares' characters (BALL_SHADES, light to dense: lighter toward the upper left, denser toward the lower right).
+export const BALL_SHADES = Object.freeze(["░", "▒", "▓", "█"]);
 function drawBall3D(canvas, project, style, P) {
   const hub = project.hub;
   const c0 = Math.floor((hub.x - hub.rx) / 2) - 1;
@@ -1331,8 +1399,8 @@ function drawBall3D(canvas, project, style, P) {
       if (d2 > 1) continue;
       const nz = Math.sqrt(1 - d2);
       const lum = ballLum(dx, -dy, nz);
-      const k = clamp(Math.round((P.dark ? lum : 1 - lum) * 5), 0, 5);
-      canvas.plot(c, r, DEPTH_CHARS[k], style, (project.hubRho || HUB_RADIUS3) * nz);
+      const k = clamp(Math.round((1 - lum) * (BALL_SHADES.length - 1)), 0, BALL_SHADES.length - 1);
+      canvas.plot(c, r, BALL_SHADES[k], style, (project.hubRho || HUB_RADIUS3) * nz);
     }
   }
 }
@@ -1514,8 +1582,8 @@ function draw3D(doc, L, canvas, S, P, now, frame, cam, options) {
   const hubStyle = hubWorking(doc, L.hub) ? S.get("accent", undefined, 4) : S.get("plain", undefined, 3);
   drawSun3D(canvas, S, project, P, now, level, reduced, spikeCount(L.hubR));
   drawBall3D(canvas, project, hubStyle, P);
-  // the moons' rings: a faint dotted ring round each parent
-  for (const ring of F.moonRings) {
+  // the moons' orbits: a faint dotted ring each, round its parent
+  for (const ring of L.w >= MOON_RINGS_MIN_W && L.h >= MOON_RINGS_MIN_H ? F.moonRings : []) {
     cellPath(project, ring.points).forEach((q, i) => {
       if (i % 2) return;
       const lvl = depthLevel(q.depth);
@@ -1545,6 +1613,14 @@ function draw3D(doc, L, canvas, S, P, now, frame, cam, options) {
     });
     return { arc, cells };
   });
+  // the sky keeps clear of every place a moon, or its name, can reach: a star next to a moon would blink in and out as
+  // the moon goes round
+  const reach = F.seats.reduce((m, x) => Math.max(m, displayWidth(truncate(clean(seatName(x.agent.name)) || "?", NAME_MAX))), 1) + 2;
+  for (const ring of F.moonRings) {
+    for (const q of cellPath(project, ring.points)) {
+      for (let r = q.row - 1; r <= q.row + 1; r += 1) for (let c = q.col - reach; c <= q.col + reach; c += 1) canvas.reserve(c, r);
+    }
+  }
   // moons: where they are on their rings now (a lap in MOON_LAP_MS from the clock; still with reduced motion)
   const phase = moonPhase(now, reduced);
   const moons = F.seats.map((seat) => ({ seat, q: project(moonPoint(seat, phase)) }));

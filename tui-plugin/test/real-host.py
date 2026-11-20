@@ -130,7 +130,8 @@ SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 # the group colours of src/scene.js (GROUP_COLORS), as pyte reports a 24-bit foreground
 GROUP_HEX = {"council": ("b39ddb", "6a4fb3"), "decide": ("7fb2ff", "2f6fd0"), "build": ("e8a07c", "ac563d"),
              "verify": ("f28fb5", "b8336a"), "understand": ("e6c15a", "8a6d00")}
-CHART = re.compile(r"[▁▂▃▄▅▆▇█]{5}")
+# the context chart: five of its blocks, one a partial block (the 3D ball is drawn in shades and full blocks: a row of `█` is no chart)
+CHART = re.compile(r"(?=█*[▁▂▃▄▅▆▇])[▁▂▃▄▅▆▇█]{5}")
 # the ring agents of test/fixtures/demo.json (council seats are dots, not names)
 DEMO_NAMES = ["council", "oracle", "oracle-lite", "designer", "impl-claude", "impl-hard", "impl-openai", "reviewer",
               "explorer", "researcher"]
