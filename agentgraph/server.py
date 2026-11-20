@@ -14,8 +14,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote
 
 from . import (agentfiles, chatfeed, flowcommands, flowrun, mcpview, outputs, roster, setups, sidechat, skillfiles,
-               skillset, structure, teams)
-from .demo import demo_activity, demo_setup, demo_sidechat, demo_snapshot
+               skillset, spend, structure, teams)
+from .demo import demo_activity, demo_setup, demo_sidechat, demo_snapshot, demo_spend
 from .snapshot_json import (ledger_home, learning_document, live_activity, load_structure, skills_document,
                             snapshot_document)
 from .sources import DB_PATH, ORCHESTRATION_GRAPH_DIR, build_snapshot, find_graph_dir
@@ -35,7 +35,9 @@ _OUTPUT_PATH = "/api/output"  # a step's output: read, write (undoable), restore
 _OUTPUT_BODY_LIMIT = 12 * outputs.TEXT_LIMIT + 16384  # an output's text as escaped JSON
 _SETUP_PATH = "/api/setup"  # the default preset and saved setups: switch, save, restore, undo, remove (agentgraph.setups)
 _SETUP_BODY_LIMIT = 4096
-_POSTS = (_FLOW_PATH, _SKILLS_PATH, _ROSTER_PATH, _SKILLFILE_PATH, _TEAM_PATH, _OUTPUT_PATH, _SETUP_PATH)
+_SPEND_PATH = "/api/spend"  # the project's spend limit: set or remove (agentgraph.spend)
+_SPEND_BODY_LIMIT = 4096
+_POSTS = (_FLOW_PATH, _SKILLS_PATH, _ROSTER_PATH, _SKILLFILE_PATH, _TEAM_PATH, _OUTPUT_PATH, _SETUP_PATH, _SPEND_PATH)
 _LOOPBACK = frozenset({"127.0.0.1", "::1"})
 _FLOW_BODY_LIMIT = 32768  # an instruction of 2000 characters, each up to 12 bytes as escaped JSON (and a goal of 4000)
 # A write from a view that has not seen a later change (stale-contract.md): every op that names an existing thing
@@ -187,7 +189,8 @@ def make_server(
         def do_POST(self):
             target = self.path.partition("?")[0]
             handler = {_SKILLS_PATH: self._skills, _ROSTER_PATH: self._roster, _SKILLFILE_PATH: self._skillfile,
-                       _TEAM_PATH: self._team, _OUTPUT_PATH: self._output, _SETUP_PATH: self._setup}.get(target)
+                       _TEAM_PATH: self._team, _OUTPUT_PATH: self._output, _SETUP_PATH: self._setup,
+                       _SPEND_PATH: self._spend}.get(target)
             if handler is not None:
                 handler()
                 return
@@ -529,6 +532,18 @@ def make_server(
 
             self._answer(run, setups.SetupError)
 
+        def _spend(self):
+            # Keep, change or remove the project's spend limit (agentgraph.spend); nothing is enforced by it.
+            request = self._request("the spend limit", _SPEND_BODY_LIMIT, {
+                "limit": ({"op", "limit"}, {"op", "limit", "warn"}, {"limit": (int, float, str), "warn": (int, float, str)}),
+                "off": ({"op"}, {"op"}, {})},
+                '{"op": "limit", "limit": dollars} (with an optional "warn": dollars) or {"op": "off"}')
+            if request is None:
+                return
+            project = cwd if cwd is not None else Path.cwd()
+            self._answer(lambda: spend.remove(project=project) if request["op"] == "off"
+                         else spend.set_limit(request["limit"], request.get("warn"), project=project), spend.SpendError)
+
         def _reply(self, status: int, content_type: str, body: bytes):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -564,6 +579,7 @@ def make_server(
                 if use_demo:
                     document["setup"] = demo_setup()
                     document["sidechat"] = demo_sidechat()
+                    document["spend"] = demo_spend(document)
                 else:
                     document["learning"] = learning_document(ledger_root, config_path=paths["config"])
                     flowrun.annotate(document, structure_dir=structure_dir,
@@ -579,6 +595,8 @@ def make_server(
                                     agents_dir=agents_dir or roster.AGENTS_DIR, structure=structure_root)
                     skillfiles.annotate(document, skills=skills_dir or skillfiles.SKILLS, bundled=skills_bundled)
                     setups.annotate(document, project=cwd, **self._setup_paths())
+                    spend.annotate(document, project=cwd, root=snapshot.root, sessions=snapshot.sessions,
+                                   db_path=sessions_db if sessions_db is not None else DB_PATH, now=snapshot.now)
                     sidechat.annotate(document, project=cwd, agents_dir=agents_dir,
                                       db_path=sessions_db if sessions_db is not None else DB_PATH)
                     outputs.annotate(document)  # each output of the shown graph: rev, size, editable, why

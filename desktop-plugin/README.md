@@ -32,6 +32,14 @@ It is a GUI-only plugin (no server or TUI part), loaded as a local directory. It
   `python3 -P -m agentgraph.snapshot_json [--session=ID]` with `execFile` (no shell), `cwd` = the session's directory,
   `PYTHONPATH` = the orchestration directory, a 20 s timeout and an 8 MiB output cap. Overlapping requests for the same
   (directory, session) share one process. Any failure returns `{"version": 1, "error": "<one line>"}`.
+- **The preset, the saved setups and the spend limit** (the run details the top total opens; `options.actions.setup` and
+  `spend`, neither given in demo mode): two more Ipc methods, `setup({ op, directory, name, record, replace, expect? })` and
+  `spend({ op, directory, limit, warn })`, every field a string, run `python3 -P -m agentgraph.setups preset switch|restore ...`
+  or `setup save|restore|remove|undo ...` and `python3 -P -m agentgraph.spend limit AMOUNT [--warn W] | --off`, each with
+  `--dir <the session's directory> --json`, with `execFile` (no shell) and the other writes' environment and limits. There is no
+  free text to send: a setup name is checked against the flow-id rule, a preset name against a plain-name rule, an amount
+  against a number of dollars and an undo record against an absolute path, in the window and again in main; a bad one never
+  reaches Python. `expect` goes before `--json`; a stale refusal rejects with `status: 409, stale: true, rev`.
 - **The chat on every agent** (the view's details; `options.actions.chat`, `send`, `stop`):
   - `chat(sessionID, { limit })` reads one session's recent chat through a second Ipc method,
     `chat({ session, limit }) -> JSON text`, which runs `python3 -P -m agentgraph.chatfeed --session=ID --json --limit=N`

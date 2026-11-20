@@ -306,6 +306,24 @@ function snapshotIpc(pluginId) {
           input: Schema.Struct({ main: Schema.String, text: Schema.String }),
           output: Schema.String,
         },
+        // ---- n10: the default preset, the saved setups and the spend limit (run details) ----
+        // setup (`agentgraph.setups`): op ("preset-switch", "preset-restore", "save", "restore", "remove" or "undo"), the
+        // session's directory (the project folder checked for a preset override), name, record (an undo record) and
+        // replace ("true" or ""); "" when not given; `expect` is the rev of the setup shown. Output: JSON text, the
+        // command's answer or {"error": "...", "rev"?}.
+        setup: {
+          input: Schema.Struct({
+            op: Schema.String, directory: Schema.String, name: Schema.String, record: Schema.String, replace: Schema.String, expect,
+          }),
+          output: Schema.String,
+        },
+        // spend (`agentgraph.spend limit`): op ("limit" or "off"), the session's directory (the project the limit belongs
+        // to), limit and warn (dollars as decimal text; "" when not given). Output: JSON text or {"error": "..."}.
+        spend: {
+          input: Schema.Struct({ op: Schema.String, directory: Schema.String, limit: Schema.String, warn: Schema.String }),
+          output: Schema.String,
+        },
+        // ---- end n10 ----
       },
     });
     ipcTokens.set(pluginId, token);
@@ -845,6 +863,65 @@ function createOutputRunner(deps) {
   return { output: serialRunner(deps, checked, "The outputs command", accept, "The demo cannot change outputs.") };
 }
 
+// ---- n10 ---- Main process: `python3 -P -m agentgraph.setups preset switch|restore ... | setup save|restore|remove|undo ...
+// --dir SESSION_DIR --json` and `python3 -P -m agentgraph.spend limit AMOUNT|--off --dir SESSION_DIR --json`, without a
+// shell; names, records and amounts are checked here as the window checks them, and nothing but the answer's JSON comes back.
+const PRESET_NAME = /^[^\s\0-][^\s\0]{0,63}$/; // a preset's name is the preset file's own; the command checks it against the file
+const MONEY_TEXT = /^\d{1,7}(\.\d{1,2})?$/;
+function sessionDirectory(deps, directory) {
+  if (typeof directory !== "string" || !directory || directory.length > 4096 || directory.includes("\0") || !deps.path.isAbsolute(directory)) return "";
+  return deps.path.resolve(directory);
+}
+function createSetupRunner(deps) {
+  const fail = (message) => ({ error: oneLine(message) });
+  const KEYS = ["op", "directory", "name", "record", "replace"];
+  function command(input) {
+    if (!isPlainObject(input) || !KEYS.every((key) => typeof input[key] === "string")) return fail("Bad setup request.");
+    const { op, name, record, replace } = input;
+    const dir = sessionDirectory(deps, input.directory);
+    if (!dir) return fail("The session has no usable directory.");
+    const tail = ["--dir", dir, "--json"];
+    if (replace && (replace !== "true" || op !== "save")) return fail("Bad setup request.");
+    if (op === "preset-switch") {
+      if (record || !PRESET_NAME.test(name)) return fail("The preset needs a valid name.");
+      return { args: ["-P", "-m", "agentgraph.setups", "preset", "switch", name].concat(tail), stdin: "" };
+    }
+    if (op === "preset-restore" || op === "undo") {
+      if (name || !recordPath(record)) return fail("The undo needs the record a change returned.");
+      return { args: ["-P", "-m", "agentgraph.setups", op === "undo" ? "setup" : "preset", op === "undo" ? "undo" : "restore", record].concat(tail), stdin: "" };
+    }
+    if (op !== "save" && op !== "restore" && op !== "remove") return fail("Bad setup request.");
+    if (record || !FLOW_ID.test(name)) return fail("A setup needs a valid name.");
+    const args = ["-P", "-m", "agentgraph.setups", "setup", op, name];
+    if (replace) args.push("--replace");
+    return { args: args.concat(tail), stdin: "" };
+  }
+  const accept = (doc) => (typeof doc.message === "string" ? doc : null);
+  const checked = (input) => withExpect(command(input), isPlainObject(input) ? input : {},
+    isPlainObject(input) && ["save", "restore", "remove"].includes(input.op), fail);
+  return { setup: serialRunner(deps, checked, "The setups command", accept, "The demo cannot change setups.") };
+}
+function createSpendRunner(deps) {
+  const fail = (message) => ({ error: oneLine(message) });
+  const KEYS = ["op", "directory", "limit", "warn"];
+  function command(input) {
+    if (!isPlainObject(input) || !KEYS.every((key) => typeof input[key] === "string")) return fail("Bad spend request.");
+    const { op, limit, warn } = input;
+    const dir = sessionDirectory(deps, input.directory);
+    if (!dir) return fail("The session has no usable directory.");
+    const base = ["-P", "-m", "agentgraph.spend", "limit"], tail = ["--dir", dir, "--json"];
+    if (op === "off") {
+      if (limit || warn) return fail("Bad spend request.");
+      return { args: base.concat(["--off"], tail), stdin: "" };
+    }
+    if (op !== "limit" || !MONEY_TEXT.test(limit) || (warn && !MONEY_TEXT.test(warn))) return fail("The limit needs an amount in dollars.");
+    return { args: base.concat([limit], warn ? ["--warn", warn] : [], tail), stdin: "" };
+  }
+  const accept = (doc) => (isPlainObject(doc.previous) ? doc : null);
+  return { spend: serialRunner(deps, (input) => command(input), "The spend command", accept, "The demo cannot change the spend limit.") };
+}
+// ---- end n10 ----
+
 // Main process: `python3 -P -m agentgraph.chatfeed --session=ID --json --limit=N [--demo]` without a shell, read-only. The
 // session id and the limit are checked here as the window checks them; the feed is passed on as the command printed it
 // (it holds no tool input or output), and an error document or a failed command is { error: one line }.
@@ -960,6 +1037,8 @@ function main(ctx) {
   const skillFiles = createSkillFileRunner(commandDeps(SKILL_FILE_MAX_BYTES));
   const groups = createTeamRunner(commandDeps(FLOW_MAX_BYTES));
   const outputs = createOutputRunner(commandDeps(SKILL_FILE_MAX_BYTES));
+  const setups = createSetupRunner(commandDeps(FLOW_MAX_BYTES)); // n10
+  const spends = createSpendRunner(commandDeps(FLOW_MAX_BYTES)); // n10
   // The chat is read as the snapshot is: the same time limit and size cap.
   const chats = createChatRunner(Object.assign(commandDeps(SNAPSHOT_MAX_BYTES), { timeoutMs: SNAPSHOT_TIMEOUT_MS }));
 
@@ -973,6 +1052,8 @@ function main(ctx) {
     skillfile: (input) => skillFiles.skillfile(input).then((doc) => JSON.stringify(doc)),
     team: (input) => groups.team(input).then((doc) => JSON.stringify(doc)),
     output: (input) => outputs.output(input).then((doc) => JSON.stringify(doc)),
+    setup: (input) => setups.setup(input).then((doc) => JSON.stringify(doc)), // n10
+    spend: (input) => spends.spend(input).then((doc) => JSON.stringify(doc)), // n10
     chat: (input) => chats.chat(input).then((doc) => JSON.stringify(doc)),
     side: (input) => sides.side(input).then((doc) => JSON.stringify(doc)),
   });
@@ -1308,6 +1389,52 @@ function renderPanel(ctx, solid, props) {
     carryExpect(request, input, "Bad output request.");
     return askMain("output", input, "output", (doc) => typeof doc.task === "string");
   };
+  // ---- n10 ---- The default preset, the saved setups and the spend limit take the requests of the loopback endpoints
+  // (/api/setup, /api/spend): {op: "preset-switch", name}, {op: "preset-restore", record}, {op: "save", name, replace?,
+  // expect?}, {op: "restore", name, expect?}, {op: "remove", name, expect?}, {op: "undo", record}; {op: "limit", limit,
+  // warn?} and {op: "off"}. The session's folder goes with each, so main checks the project's preset override and finds
+  // its limit file.
+  const setup = async (request) => {
+    if (!alive) throw new Error("The panel is closed.");
+    const ops = ["preset-switch", "preset-restore", "save", "restore", "remove", "undo"];
+    if (!isPlainObject(request) || !ops.includes(request.op)) throw new Error("Bad setup request.");
+    const where = sessionRequest();
+    if (!where || !where.directory) throw new Error("No session is open.");
+    const input = { op: request.op, directory: where.directory, name: "", record: "", replace: "" };
+    if (request.op === "preset-restore" || request.op === "undo") {
+      if (typeof request.record !== "string" || !request.record || request.record.startsWith("-")) throw new Error("Bad setup request.");
+      input.record = request.record;
+    } else {
+      const named = request.op === "preset-switch" ? typeof request.name === "string" && PRESET_NAME.test(request.name) : typeof request.name === "string" && FLOW_ID.test(request.name);
+      if (!named) throw new Error("Bad setup request.");
+      input.name = request.name;
+    }
+    if (request.replace !== undefined) {
+      if (request.op !== "save" || request.replace !== true) throw new Error("Bad setup request.");
+      input.replace = "true";
+    }
+    if (request.expect !== undefined && !["save", "restore", "remove"].includes(request.op)) throw new Error("Bad setup request.");
+    carryExpect(request, input, "Bad setup request.");
+    return askMain("setup", input, "setup", (doc) => typeof doc.message === "string");
+  };
+  const spend = async (request) => {
+    if (!alive) throw new Error("The panel is closed.");
+    if (!isPlainObject(request) || (request.op !== "limit" && request.op !== "off")) throw new Error("Bad spend request.");
+    const where = sessionRequest();
+    if (!where || !where.directory) throw new Error("No session is open.");
+    const input = { op: request.op, directory: where.directory, limit: "", warn: "" };
+    const dollars = (value) => typeof value === "number" && Number.isFinite(value) && value > 0 && value <= 1000000;
+    if (request.op === "limit") {
+      if (!dollars(request.limit)) throw new Error("Bad spend request.");
+      input.limit = request.limit.toFixed(2);
+      if (request.warn !== undefined && request.warn !== null) {
+        if (!dollars(request.warn)) throw new Error("Bad spend request.");
+        input.warn = request.warn.toFixed(2);
+      }
+    } else if (request.limit !== undefined || request.warn !== undefined) throw new Error("Bad spend request.");
+    return askMain("spend", input, "spend", (doc) => isPlainObject(doc.previous));
+  };
+  // ---- end n10 ----
   // The chat of an agent's session: read through main (`agentgraph chat`), the page asks for one at a time.
   const chat = async (sessionID, request) => {
     if (!alive) throw new Error("The panel is closed.");
@@ -1388,7 +1515,7 @@ function renderPanel(ctx, solid, props) {
   // The page shows a control only for an action it is given: send and stop only where the host has the call.
   const demoMode = ctx.options && ctx.options.demo === true;
   const hostHas = (name) => typeof sessionClient()?.[name] === "function";
-  const actions = demoMode ? { chat } : { flow, skills, roster, skillfile, team, output, run, chat, side };
+  const actions = demoMode ? { chat } : { flow, skills, roster, skillfile, team, output, run, chat, side, setup, spend };
   if (!demoMode && hostHas("prompt")) actions.send = send;
   if (!demoMode && hostHas("interrupt")) actions.stop = stop;
 
