@@ -600,16 +600,39 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   path's second, and so on, in the snapshot's order; past 200 a new run adds no star and no streak. When a snapshot shows a run finished while 3D is
 //   shown, one shooting star (0.9 s) crosses to where that run's star then appears; several are spaced 0.7 s apart
 //   (at most 8 a snapshot, none for a path new in it); none on load, on entering 3D or for a failed run. The orchestrator glows as the sun, swelling while it works
-//   (still when idle); every other agent is shaded as a sphere lit from it. Nothing else moves by itself. Reduced
+//   (still when idle); every other agent is shaded as a sphere lit from it. Nothing else moves by itself but the moons (below). Reduced
 //   motion: no streak (the star simply appears), no swell, no fade. A name over a speck keeps 4.5:1 or better even
 //   without its halo. The sky draws no frame of its own: it moves only with the frames below. A frame is drawn only when the angle or the data changed. root carries
 //   data-ag-view ("2d"/"3d"), data-ag-blend (0 to 1), data-ag-turn, data-ag-elevation (the 3D angle), data-ag-camera-elevation (the
-//   camera's, through the morph; 3D only), data-ag-frames and
-//   data-ag-frame-ms (mean of the last frames) for hosts and tests. Where the web differs from the terminal (pixels,
+//   camera's, through the morph; 3D only), data-ag-frames,
+//   data-ag-moon (the moons' phase, radians) and data-ag-frame-ms (mean of the last frames) for hosts and tests. Where the web differs from the terminal (pixels,
 //   not cells): the drag's rate per pixel; one screen scale for both axes, the rings fitted to the free canvas; the
 //   field's density (a star per 9,000 px^2, a cell taken as 8 x 16 px) over a sky a quarter taller than the view
 //   above and below instead of wrapped rows; the depth mix continuous rather than six steps; the streak a line on
 //   the terminal's diagonal (one column, one row a step), not characters; the sun's glow and sphere shading.
+// Moons (n119; the same model as the terminal): an agent with agents[].parent (other than the hub) is a moon of its parent (today the
+//   council's seats). In 3D the parent sits on its group's ring like any planet and its moons sit on one small ring
+//   round it (path.ag-moon-ring in the rings' layer, data-moons = the parent, data-side near/far, data-radius), evenly
+//   spaced in their 2D seats' order, the ring tilted 1.1 rad up from the system's plane about the line across the
+//   parent's way round the sun (so it lies unlike the group's ring and is narrow toward and away from the sun), its
+//   radius the smallest at which, seen face on at rest size, no moon's circle or name comes within 3 of another
+//   moon's or the parent's at any phase (only a canvas where that would leave the figure under half its size gets
+//   smaller moon rings). They go round once in 24 s on the clock the system turns by, and stand still
+//   whenever it does (reduced motion, a hidden page, a press). A moon's name is under its circle in 3D; it is drawn
+//   at its parent's size there (its own circle smaller than a planet's), never under 11 px, nearer over farther. The
+//   fit counts each ring as seen from each sampled angle. In 2D nothing changes and nothing new moves; the morph takes
+//   each moon in a straight line from its 2D seat to its 3D place and back. A moon picks, opens its details, and keeps
+//   its spoke, pulses, loops, badges and paths, as before.
+// The sun (n119): the hub (hubName) is a ball lit from the upper left (g.ag-sun-ball: radial gradients #<uid>-ball-rest
+//   and -fire, colours --ag-ball-light/--ag-ball-dark/--ag-flare-core), in 2D and 3D, still at rest. While the hub
+//   works it flares: g.ag-flare, the stage's first child (under every line, ring, agent and name; aria-hidden, no
+//   pointer events, no text; its transform is the hub's), holds a warm glow (three rings to 1.5 r, swelling) and
+//   clamp(round(r / 4), 7, 12) flame spikes, each on its own time from 0.6 to 1.6 s seeded from "flare:<hub name>"
+//   (FNV-1a and hash32, as the sky), at most 0.6 r beyond the rim. data-state "on" while it works, "dying" for 0.7 s
+//   after it stops (fading over 0.6 s), "" at rest. Colours --ag-flare-spike/--ag-flare-warm/--ag-flare-core, warm
+//   only (no green), a spike's base 2:1 or more against the page in light and dark. Picking, the fit, the camera and
+//   the 8 px ring clearance (from the hub's circle) are unchanged. Reduced motion: short still spikes, no swell. In 3D
+//   the flare's glow gives way to the sky's sun glow as the morph goes on.
 // options.motion: "full" (default) or "none" for a still picture (tests, screenshots). The system's
 //   reduced-motion setting is always honoured.
 // options.autofocus: true to give the canvas keyboard focus once the graph is first drawn (N, F and the arrows
