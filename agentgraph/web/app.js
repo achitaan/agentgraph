@@ -3,6 +3,8 @@
   const NS = 'http://www.w3.org/2000/svg';
   const LIST_LIMIT = 200;
   const EDGE = 12, SLOT = 104, GROUP_GAP = 34, SEAT_DISTANCE = 68;
+  const DETAIL_WIDTH = 340; // the details panel beside a wide graph (style.css: .ag-details-open .ag-network margin)
+  const READABLE = 11 / 12; // agent names are 12 px: the automatic view never shows them under 11 px; it pans instead
   let instance = 0;
   const STATES = { pending: 'Waiting', waiting: 'Waiting', running: 'Working', returned: 'Returned', passed: 'Passed', failed: 'Failed', blocked: 'Blocked' };
   const LOOP_STATES = { working: 'Revising', checking: 'In review', sent_back: 'Sent back', closed: 'Done', idle: 'Idle' };
@@ -301,12 +303,20 @@
       camera.y = y - (y - camera.y) * next / camera.scale;
       camera.scale = next; camera.touched = true; transform();
     }
-    // Bring the selected agent into the space the details leave uncovered.
+    // Bring the selected agent, with its name and its count, fully into the space the details leave uncovered
+    // (the graph may be larger than that space: it is never shrunk below a readable size).
     function reveal() {
       const point = selected?.type === 'agent' || selected?.type === 'work-loop' ? positions.get(selected.key) : null;
-      if (!point || arrangement !== 'compact') return;
-      const y = point.y * camera.scale + camera.y, height = viewport.clientHeight;
-      if (y < point.r + 16 || y > height - point.r - 44) { camera.y += height / 2 - y; clampPan(); transform(); }
+      const width = viewport.clientWidth, height = viewport.clientHeight;
+      if (!point || !width || !height) return;
+      const e = extentOf(point), s = camera.scale;
+      const top = (point.y + e.top) * s + camera.y, bottom = (point.y + e.bottom) * s + camera.y;
+      const left = (point.x + e.left) * s + camera.x, right = (point.x + e.right) * s + camera.x;
+      const outside = top < EDGE || bottom > height - EDGE || left < EDGE || right > width - EDGE;
+      if (!outside) return;
+      if (top < EDGE || bottom > height - EDGE) camera.y += height / 2 - (top + bottom) / 2;
+      if (left < EDGE || right > width - EDGE) camera.x += width / 2 - (left + right) / 2;
+      clampPan(); transform();
     }
     function fitView(userAction) {
       if (!positions.size) return;
@@ -314,15 +324,17 @@
       if (!rect.width || !rect.height || !bounds) return;
       if (arrangement === 'compact' && !userAction) {
         // Every agent, its name and its count fit in the space left (the details sheet takes the lower part):
-        // full size when they fit, smaller when they do not.
+        // full size when they fit, smaller as far as names stay readable; past that the graph pans.
         const pad = 8, fit = Math.min((rect.width - pad * 2) / (bounds.right - bounds.left), (rect.height - pad * 2) / (bounds.bottom - bounds.top));
-        camera.scale = clamp(fit, .05, 1);
+        camera.scale = clamp(fit, READABLE, 1);
         camera.x = rect.width / 2 - (bounds.left + bounds.right) / 2 * camera.scale;
         camera.y = rect.height / 2 - (bounds.top + bounds.bottom) / 2 * camera.scale;
         clampPan();
       } else {
-        const pad = arrangement === 'compact' ? 6 : 26;
-        camera.scale = clamp(Math.min((rect.width - pad * 2) / (bounds.right - bounds.left), (rect.height - pad * 2) / (bounds.bottom - bounds.top), arrangement === 'compact' ? 1 : 1.3), .05, 3);
+        const fitWith = pad => clamp(Math.min((rect.width - pad * 2) / (bounds.right - bounds.left), (rect.height - pad * 2) / (bounds.bottom - bounds.top), arrangement === 'compact' ? 1 : 1.3), .05, 3);
+        camera.scale = fitWith(arrangement === 'compact' ? 6 : 26);
+        // The automatic wide view keeps names readable: a narrower margin first, then the floor (and the graph pans).
+        if (!userAction && camera.scale < READABLE) camera.scale = Math.max(READABLE, fitWith(EDGE));
         camera.x = rect.width / 2 - (bounds.left + bounds.right) / 2 * camera.scale;
         camera.y = rect.height / 2 - (bounds.top + bounds.bottom) / 2 * camera.scale;
       }
@@ -487,7 +499,7 @@
       viewport.dataset.dragging = 'false';
     }
     function updateDetailSpace() {
-      if (root.classList.contains('ag-compact') && !detail.hidden) root.style.setProperty('--ag-sheet-height', Math.max(0, Math.min(root.clientHeight * .6, root.clientHeight - 112)) + 'px');
+      if (root.classList.contains('ag-compact') && !detail.hidden) root.style.setProperty('--ag-sheet-height', Math.max(0, Math.min(root.clientHeight * .4, root.clientHeight - 112)) + 'px');
       else root.style.removeProperty('--ag-sheet-height');
     }
     function perimeter(a, b) { return Math.PI * (3 * (a + b) - Math.sqrt((3 * a + b) * (a + 3 * b))); }
@@ -531,7 +543,9 @@
       // out the agents (the camera fits them into what is left).
       const sheet = compact && root.classList.contains('ag-details-open') ? parseFloat(getComputedStyle(root).getPropertyValue('--ag-sheet-height')) || 0 : 0;
       const canvasHeight = Math.max(1, Math.round(viewport.clientHeight + sheet));
-      const aspect = Math.round(clamp(rect.width / rect.height, 1, 1.3) * 20) / 20;
+      // Wide: the oval is shaped for the canvas the details panel (DETAIL_WIDTH) leaves, open or not, so opening it
+      // never re-lays out the agents and they still fit at a readable size beside it.
+      const aspect = Math.round(clamp((rect.width - DETAIL_WIDTH) / rect.height, 1, 1.3) * 20) / 20;
       const signature = JSON.stringify([arrangement, compact ? [Math.round(rect.width), canvasHeight] : aspect, hubName, snapshot?.structure?.source === 'folder' ? (snapshot.groups || []).map(group => group.id) : null, agents.map(a => [a.name, a.group, a.parent]).sort()]);
       if (signature === layoutSignature) return;
       layoutSignature = signature;
@@ -1094,6 +1108,7 @@
       selected = { type, key }; selectedOrigin = origin || selectedOrigin; highlightedStep = step || '';
       if (step) openSteps.add(step);
       detailSignature = ''; detail.hidden = false; root.classList.add('ag-details-open'); renderDetail(); updateEdges(); scheduleResize();
+      reveal();
       close.focus({ preventScroll: true });
       if (step) Array.from(detailScroll.querySelectorAll('[data-step]')).find(row => row.dataset.step === step)?.scrollIntoView({ block: 'nearest' });
     }

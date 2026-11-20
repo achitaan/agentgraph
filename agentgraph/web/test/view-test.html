@@ -59,10 +59,12 @@
       const anchor = root.querySelector('[data-agent="orchestrator"] .ag-core') || root.querySelector('[data-agent] .ag-core');
       const anchorY = anchor?.getBoundingClientRect().y;
       assert(viewport.width > 0 && viewport.height > 0, 'canvas has no room');
+      // Round 6 (R): a wide canvas too small for the graph with names at 11 px (1000x300) keeps that size and pans.
+      const atFloor = root.querySelector('.ag-drawing > g').getCTM().a <= 11 / 12 + .001;
       circles.forEach(({ name, bounds: b }) => {
         assert(b.left >= viewport.left - .1 && b.right <= viewport.right + .1, name + ' is horizontally clipped');
-        // Round 5 (ui D): the compact canvas fits every agent too, instead of panning to the ones below.
-        assert(b.top >= viewport.top - .1 && b.bottom <= viewport.bottom + .1, name + ' is vertically clipped');
+        // Round 6 (R): names never go under 11 px, so a compact canvas too short for the graph at that size pans.
+        if (!compact && !atFloor) assert(b.top >= viewport.top - .1 && b.bottom <= viewport.bottom + .1, name + ' is vertically clipped');
       });
       circles.forEach(({ name, bounds: a }, i) => circles.slice(i + 1).forEach(({ name: other, bounds: b }) => {
         const distance = Math.hypot(a.x + a.width / 2 - b.x - b.width / 2, a.y + a.height / 2 - b.y - b.height / 2);
@@ -76,12 +78,14 @@
         assert(b.left >= frame.left - .1 && b.right <= frame.right + .1, 'header or controls clipped: ' + item.className);
       });
       if (compact) {
-        // Round 5 (ui D): full size (names at 11 px or more) whenever the graph fits; when the height does not allow it,
-        // smaller just enough to fit (the graph then fills the height), never panning.
+        // Round 6 (R): the floor is back: names at 11 px or more at any size. Full size when the graph fits; smaller only
+        // just enough to fit (the graph then fills the height or the width) and never under the floor; past it, it pans.
         const scale = root.querySelector('.ag-drawing > g').getCTM().a;
         assert(scale <= 1.001, 'the compact layout is enlarged: ' + scale);
-        if (scale >= .999) root.querySelectorAll('.ag-agent-name').forEach(label => assert(parseFloat(getComputedStyle(label).fontSize) * scale >= 11, 'agent label is too small'));
-        else {
+        assert(scale >= .85, 'automatic layout shrank below readable scale: ' + scale);
+        root.querySelectorAll('.ag-agent-name').forEach(label => assert(parseFloat(getComputedStyle(label).fontSize) * scale >= 11 - .01, 'agent label is too small: ' + (parseFloat(getComputedStyle(label).fontSize) * scale).toFixed(2) + ' px'));
+        const overflowing = circles.some(({ bounds: b }) => b.top < viewport.top || b.bottom > viewport.bottom);
+        if (scale < .999 && !overflowing) {
           const parts = [...circles.map(c => c.bounds), ...[...root.querySelectorAll('.ag-agent-name')].map(label => label.getBoundingClientRect())];
           const top = Math.min(...parts.map(b => b.top)), bottom = Math.max(...parts.map(b => b.bottom)), left = Math.min(...parts.map(b => b.left)), right = Math.max(...parts.map(b => b.right));
           assert(bottom - top >= viewport.height - 48 || right - left >= viewport.width - 40, 'the compact layout shrank further than it needs: ' + scale + ', ' + Math.round(bottom - top) + ' of ' + Math.round(viewport.height) + ' high, ' + Math.round(right - left) + ' of ' + Math.round(viewport.width) + ' wide');
@@ -153,7 +157,16 @@
         });
       });
     }
+    // The suite runs as several pages in parallel (run.mjs): page k of n runs every n-th test from the k-th, and
+    // skips the rest without running them (the code between tests still runs, so every helper is defined).
+    const shardOf = new URLSearchParams(location.search), SHARD = Number(shardOf.get('shard')) || 0, SHARDS = Number(shardOf.get('shards')) || 1;
+    let testIndex = 0;
+    // What run.mjs checks the pages against: every check declared, and the ones this page ran.
+    const checks = window.agentgraphChecks = { declared: [], ran: [] };
     async function test(name, run) {
+      checks.declared.push(name);
+      if (testIndex++ % SHARDS !== SHARD) return;
+      checks.ran.push(name);
       try { await run(); results.push('PASS ' + name); } catch (error) { results.push('FAIL ' + name + ': ' + error.message); }
     }
 
@@ -591,15 +604,15 @@
           const viewport = root.querySelector('.ag-viewport').getBoundingClientRect();
           const circles = [...root.querySelectorAll('[data-agent] .ag-core')].map(circle => circle.getBoundingClientRect());
           assert(Math.abs(viewport.width - width) <= 1, 'canvas does not use the full panel width');
-          // Round 5 (ui D): this crowded roster is taller than these canvases at full size, so it is fitted into the height
-          // (no panning) instead of keeping full size; the full width is kept whenever full size fits.
+          // Round 6 (R): this crowded roster is taller than these canvases at full size: it is made smaller only as far as
+          // names stay at 11 px (assertFits) and pans past that; the full width is kept whenever full size fits.
           const scale = root.querySelector('.ag-drawing > g').getCTM().a;
           assertFits(root);
           const left = Math.min(...circles.map(circle => circle.left)), right = Math.max(...circles.map(circle => circle.right)), top = Math.min(...circles.map(circle => circle.top)), bottom = Math.max(...circles.map(circle => circle.bottom));
           if (scale >= .999) {
             assert(left - viewport.left <= 14 && viewport.right - right <= 14, 'circle margins remain wider than 12px');
             assert((right - left) / viewport.width >= .9, 'circles do not span 90% of the available width');
-          } else assert(scale >= .75 && (bottom - top) / viewport.height >= .8, 'a sidebar too short for full size is not filled top to bottom: ' + scale);
+          } else assert(scale * 12 >= 11 - .01 && ((bottom - top) / viewport.height >= .8 || !root.querySelector('.ag-pan-cue').hidden), 'a sidebar too short for full size is neither filled top to bottom nor panned: ' + scale);
           // Council seats are a tight circle round their lead by design; every other agent keeps its distance.
           const apart = [...root.querySelectorAll('[data-agent]')].filter(node => !node.dataset.parent).map(node => node.querySelector('.ag-core').getBoundingClientRect());
           let smallest = Infinity;
@@ -1814,6 +1827,18 @@
         await sleep(450); assert(!node.dataset.shake, 'the shake repeats');
       }, { actions: { flow: host.flow } });
     });
+    await test('a path no task graph could follow (a second return to work done after the check) shows the back end\'s reason when finished and saves nothing', async () => {
+      const data = flowFixture(), reason = 'impl-hard cannot get the work back from reviewer: impl-hard\'s work came after reviewer\'s, and a check can only send work back to work done before it; send it forward to another agent first';
+      const host = flowHost(data, { fail: reason });
+      await using(data, async root => {
+        for (const name of ['impl-claude', 'reviewer', 'impl-hard', 'reviewer', 'impl-hard']) tap(root, name);
+        assert(root.dataset.agTrail === 'impl-claude reviewer impl-hard reviewer impl-hard', 'the path was not built: ' + root.dataset.agTrail);
+        press(root.querySelector('.ag-viewport'), 'Enter'); await settled();
+        assert(host.calls.length === 1 && host.calls[0].op === 'add' && host.calls[0].path.join(' ') === 'impl-claude reviewer impl-hard reviewer impl-hard', 'not one add: ' + calls(host));
+        assert(!data.structure.flows.length && !root.querySelector('[data-route]') && !root.dataset.agTrail, 'the refused path was saved or stays');
+        assert(nodeOf(root, 'impl-claude').querySelector('title').textContent === reason, 'the reason is not shown');
+      }, { actions: { flow: host.flow } });
+    });
     await test('the keyboard starts a path with c, moves with the arrows, adds with Enter, finishes with Enter on the newest and cancels with Escape', async () => {
       const data = flowFixture(), host = flowHost(data);
       await using(data, async root => {
@@ -2659,9 +2684,10 @@
         assert(badge('impl-openai') === '', 'a badge at 0');
       });
     });
-    function assertInside(root, label, margin = 3) {
+    function assertInside(root, label, margin = 3, only = '') {
       const view = box(root.querySelector('.ag-viewport'));
       root.querySelectorAll('.ag-drawing [data-agent]').forEach(node => {
+        if (only && node.dataset.agent !== only) return;
         [node.querySelector('.ag-core'), node.querySelector('.ag-agent-name'), node.querySelector('.ag-busy-count')].forEach(part => {
           if (!part || getComputedStyle(part).display === 'none' || !part.getBBox().width) return;
           const b = box(part);
@@ -2670,23 +2696,51 @@
         });
       });
     }
-    await test('ui D: every node, name and badge fits inside the graph area with a margin, with or without details, and a moved agent is clamped inside', async () => {
+    // Round 6 (R): the smallest agent name on screen, in px.
+    const nameSize = root => Math.min(...[...root.querySelectorAll('.ag-drawing .ag-agent-name')].map(label => parseFloat(getComputedStyle(label).fontSize) * label.getScreenCTM().a));
+    const allInside = root => { try { assertInside(root, ''); return true; } catch (_) { return false; } };
+    await test('ui D / R: names never under 11 px; everything fits with the details closed at 530x670 and in any state at 900x600 and 1400x900; a compact sheet takes at most 40% and scrolls; past the floor the graph pans and the open agent is brought fully into view', async () => {
+      const sizes = [];
       await using(busyFixture(), async root => {
-        for (const [width, height] of [[530, 670], [900, 600], [1400, 900]]) {
+        for (const [width, height] of [[530, 670], [360, 640], [900, 600], [1400, 900]]) {
+          const label = width + 'x' + height;
           await resizeTo(root, width, height); await settled();
-          assertInside(root, width + 'x' + height);
+          const closed = nameSize(root);
+          assert(closed >= 11 - .01, 'names at ' + closed.toFixed(2) + ' px at ' + label);
+          // The busy roster (15 agents) needs more height than 360x640 gives at the floor: there, and only there, it pans.
+          if (width === 360) assert(allInside(root) || !root.querySelector('.ag-pan-cue').hidden, 'cut off without a pan cue at ' + label);
+          else assertInside(root, label);
           await openAgent(root, 'impl-openai'); await settled();
-          assertInside(root, width + 'x' + height + ' with details');
+          const open = nameSize(root);
+          assert(open >= 11 - .01, 'names at ' + open.toFixed(2) + ' px at ' + label + ' with details');
+          if (root.classList.contains('ag-compact')) {
+            const sheet = box(root.querySelector('.ag-detail')), scroller = root.querySelector('.ag-detail-scroll');
+            assert(sheet.height <= height * .4 + 1, 'the sheet takes ' + Math.round(sheet.height) + ' of ' + height + ' px');
+            assert(getComputedStyle(scroller).overflowY === 'auto' && scroller.scrollHeight > scroller.clientHeight, 'the sheet does not scroll inside itself');
+            assertInside(root, label + ' with details, the open agent', 3, 'impl-openai');
+            // Another agent's details while the sheet is open: the agent furthest out of view is brought into it.
+            const far = [...root.querySelectorAll('.ag-drawing [data-agent]')].filter(node => !node.dataset.parent).sort((a, b) => box(b.querySelector('.ag-core')).bottom - box(a.querySelector('.ag-core')).bottom)[0].dataset.agent;
+            context(nodeOf(root, far), centre(root, far)); await settled();
+            assertInside(root, label + ' with the details of ' + far, 3, far);
+            assert(nameSize(root) >= 11 - .01, 'names shrank when another agent was opened at ' + label);
+          } else assertInside(root, label + ' with details');
+          sizes.push(label + ' closed ' + closed.toFixed(2) + ' open ' + open.toFixed(2));
           root.querySelector('.ag-close').click(); await resizeTo(root, width, height);
         }
-        // A moved agent keeps its place but never leaves the canvas.
-        await resizeTo(root, 530, 670); await settled();
-        const view = box(root.querySelector('.ag-viewport'));
-        realPress(root, 'impl-claude', { moves: [{ x: 10, y: 0 }, { x: view.right + 300 - centre(root, 'impl-claude').x, y: -view.height }] }); await settled();
-        assertInside(root, 'after a drag out of the canvas');
-        await openAgent(root, 'reviewer'); await settled();
-        assertInside(root, 'after a drag, with details');
+        // A moved agent keeps its place but never leaves the canvas, in a narrow and in a wide layout. With the details
+        // open a wide layout still shows every agent; a narrow one may pan, and shows the moved agent.
+        for (const [width, height] of [[530, 670], [1400, 900]]) {
+          await resizeTo(root, width, height); await settled();
+          const view = box(root.querySelector('.ag-viewport'));
+          realPress(root, 'impl-claude', { moves: [{ x: 10, y: 0 }, { x: view.right + 300 - centre(root, 'impl-claude').x, y: -view.height }] }); await settled();
+          assertInside(root, 'after a drag out of the canvas at ' + width + 'x' + height);
+          await openAgent(root, 'impl-claude'); await settled();
+          if (root.classList.contains('ag-compact')) assertInside(root, 'after a drag, with its details at ' + width + 'x' + height, 3, 'impl-claude');
+          else assertInside(root, 'after a drag, with its details at ' + width + 'x' + height);
+          root.querySelector('.ag-close').click(); await resizeTo(root, width, height);
+        }
       });
+      window.nameSizes = sizes;
     });
     await test('ui E/F (report): which lines show in the busy state; none ends outside the canvas; lines near a third agent', async () => {
       await using(busyFixture(), async root => {
