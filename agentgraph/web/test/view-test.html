@@ -6452,6 +6452,102 @@
           assert(in3d(root) && root.dataset.agTrail === 'verifier', 'the morph did not finish, or the pick was dropped');
         }, { actions: host.actions, motion: 'full' });
       });
+      // Item 9: the 3D fit counts everything drawn round an agent. Mounted at a width; the council's details opened
+      // (the sheet below at 420 and 620, the side panel at 1100), in 3D, then every 15 degrees of turn at the plane,
+      // the side view and straight above: every agent's circle and name and the sun's glow inside the canvas the
+      // details leave, names 11 px or more. `late` opens the details only once 3D is shown and zoomed by the user (the
+      // canvas shrinks under it and the view keeps the user's zoom); `reopen` closes them and opens them again in 3D.
+      async function fitSweep(width, { late = false, reopen = false } = {}) {
+        clearPositions();
+        const root = host(); root.style.width = width + 'px';
+        const app = AgentGraph.mount(root, { fetchSnapshot: async () => stampRevs(n105Data()), intervalMs: 60000, motion: 'none' });
+        try {
+          await app.refresh(); await settled();
+          const steady = async () => { let last = ''; for (let i = 0; i < 60; i++) { await frame(); const now = JSON.stringify([viewportOf(root).getBoundingClientRect(), root.querySelector('.ag-drawing > g').getAttribute('transform'), root.dataset.agTurn, root.dataset.agElevation]); if (now === last) return; last = now; } };
+          const openCouncil = async () => { open(root, 'council'); await until(() => detailOpen(root)); await steady(); };
+          if (!late) await openCouncil();
+          viewportOf(root).focus(); press(viewportOf(root), 'd');
+          await until(() => in3d(root)); await steady();
+          if (late) {
+            // The wheel in and out again (the user's own zoom, back at the same scale), then the details open.
+            const c = viewportOf(root).getBoundingClientRect(), wheel = deltaY => viewportOf(root).dispatchEvent(new WheelEvent('wheel', { deltaY, clientX: c.left + c.width / 2, clientY: c.top + c.height / 2, bubbles: true, cancelable: true }));
+            wheel(-60); wheel(60); await steady();
+            await openCouncil(); viewportOf(root).focus();
+          }
+          if (reopen) { press(viewportOf(root), 'Escape'); await until(() => !detailOpen(root)); await steady(); await openCouncil(); viewportOf(root).focus(); }
+          assert(in3d(root) && detailOpen(root), 'not in 3D with the council open');
+          const out = [];
+          const check = label => {
+            const view = viewportOf(root).getBoundingClientRect();
+            root.querySelectorAll('.ag-nodes > [data-agent]').forEach(node => {
+              if (!node.getClientRects().length) return;
+              [':scope > .ag-core', ':scope > .ag-agent-name', ':scope > .ag-sun-glow'].forEach(selector => {
+                const part = node.querySelector(selector);
+                if (!part) return;
+                const b = part.getBoundingClientRect();
+                if (b.left < view.left - .5 || b.right > view.right + .5 || b.top < view.top - .5 || b.bottom > view.bottom + .5) out.push(label + ' ' + node.dataset.agent + ' ' + selector.slice(10) + ' [' + [b.left - view.left, view.right - b.right, b.top - view.top, view.bottom - b.bottom].map(v => v.toFixed(0)).join() + ']');
+                if (selector.endsWith('name')) { const size = part.getScreenCTM().a * parseFloat(getComputedStyle(part).fontSize); if (size < 11 - 1e-3) out.push(label + ' ' + node.dataset.agent + ' name ' + size.toFixed(1) + ' px'); }
+              });
+            });
+          };
+          for (const [tilt, keys] of [['plane', Array(10).fill('ArrowDown')], ['side', ['r']], ['above', Array(16).fill('ArrowUp')]]) {
+            press(viewportOf(root), 'r'); keys.forEach(key => press(viewportOf(root), key)); await frame(); await frame();
+            for (let step = 0; step < 24; step++) { check(tilt + ' ' + step * 15 + 'deg'); press(viewportOf(root), 'ArrowRight'); await frame(); await frame(); }
+          }
+          const tilts = [];
+          press(viewportOf(root), 'r'); Array(10).fill('ArrowDown').forEach(key => press(viewportOf(root), key)); await frame(); tilts.push(tiltOf(root));
+          press(viewportOf(root), 'r'); Array(16).fill('ArrowUp').forEach(key => press(viewportOf(root), key)); await frame(); tilts.push(tiltOf(root));
+          assert(Math.abs(tilts[0]) < 1e-3 && Math.abs(tilts[1] - Math.PI / 2) < 1e-3, 'the sweep did not reach the plane and straight above: ' + tilts.join());
+          assert(!out.length, width + ' px: ' + out.length + ' parts outside the canvas or names too small, e.g. ' + out.slice(0, 6).join('; '));
+        } finally { app.destroy(); root.remove(); }
+      }
+      await test('n105 item 9: at 420 px with the council\'s details open (before 3D, and closed and opened again while 3D is shown), at every 15 degrees of turn and at the plane, the side view and straight above, every seat, agent, name and the sun\'s glow stay inside the canvas the details leave; names 11 px or more', async () => {
+        await fitSweep(420); await fitSweep(420, { reopen: true });
+      });
+      await test('n105 item 9b: the same at 620 px and 1100 px with the council\'s details opened once 3D is shown and zoomed by the user (the figure is fitted again into the canvas left)', async () => {
+        await fitSweep(620, { late: true }); await fitSweep(1100, { late: true });
+      });
+      await test('n105 item 10: in 3D a step\'s output (the details\' Outputs in TASK) opens to read; typing in it, its Save, Ctrl+Enter and Cmd+Enter there, and a save queued in 2D that would go out after the switch are each refused with the status-line sentence and send nothing; Ctrl+Z of an output edit saved in 2D puts it back as other undo does in 3D', async () => {
+        let held = true, release = null;
+        const data = outputFixture(), host = outputHost(data, { gate: request => request.op === 'write' && held ? new Promise(resolve => { release = resolve; }) : undefined });
+        await using(data, async root => {
+          const note = root.querySelector('.ag-orbit-note'), SAID = '3D is for looking: press D to change things in 2D.';
+          const said = () => { const ok = !note.hidden && note.textContent === SAID && root.querySelector('.ag-status').contains(note); note.hidden = true; note.textContent = ''; return ok; };
+          const opener = () => root.querySelector('.ag-detail [data-output-open]');
+          // In 2D: an edit saved (its write held back by the host), more typed and saved again while it is out (queued).
+          await openOutput(root);
+          outputBox(root).focus(); typeIn(outputBox(root), 'mine\n'); press(outputBox(root), 'Enter', { ctrlKey: true });
+          await until(() => release !== null);
+          typeIn(outputBox(root), 'more\n'); press(outputBox(root), 'Enter', { ctrlKey: true });
+          assert(host.writes().length === 1 && outputBox(root).dataset.queued === 'true', 'the second save was not queued behind the first');
+          // To 3D; then the first write is answered: the queued save would go out now, in 3D.
+          viewportOf(root).focus(); press(viewportOf(root), 'd'); await until(() => in3d(root));
+          assert(in3d(root), 'not in 3D');
+          held = false; release(); await settled();
+          assert(host.writes().length === 1 && host.files['write-report/report'].text === 'mine\n' && said(), 'the save queued in 2D wrote the output in 3D (' + host.writes().map(call => JSON.stringify(call.text)).join() + ') or was not refused');
+          // Closing and opening it again to read is allowed, and says nothing.
+          opener().click(); await settled();
+          assert(!outputBox(root), 'the output did not close in 3D');
+          opener().click(); await settled();
+          assert(outputBox(root) && outputBox(root).value === 'more\n' && note.hidden, 'the output does not open to read in 3D');
+          // Typing in it is refused.
+          const box = outputBox(root); box.focus();
+          const typing = new InputEvent('beforeinput', { inputType: 'insertText', data: 'x', bubbles: true, cancelable: true });
+          box.dispatchEvent(typing);
+          assert(typing.defaultPrevented && said(), 'typing in the output was not refused in 3D');
+          // Save, Ctrl+Enter and Cmd+Enter (with text in the box) are refused and send nothing.
+          typeIn(box, 'not this\n');
+          root.querySelector('.ag-detail [data-output-save]').click(); await settle();
+          assert(said() && host.writes().length === 1, 'Save wrote the output in 3D or was not refused');
+          press(box, 'Enter', { ctrlKey: true }); await settle();
+          assert(said() && host.writes().length === 1, 'Ctrl+Enter wrote the output in 3D or was not refused');
+          press(box, 'Enter', { metaKey: true }); await settle();
+          assert(said() && host.writes().length === 1 && host.files['write-report/report'].text === 'mine\n', 'Cmd+Enter wrote the output in 3D or was not refused');
+          // Undo of the 2D edit works in 3D: the text is put back.
+          viewportOf(root).focus(); undoKey(viewportOf(root)); await settled();
+          assert(host.restores().length === 1 && host.files['write-report/report'].text === 'line one\n' && outputBox(root)?.dataset.saved === 'line one\n' && in3d(root), 'Ctrl+Z of the output edit did not put it back in 3D');
+        }, { actions: { output: host.output } });
+      });
     }
     // ---- orbit lane (n105) ----
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
