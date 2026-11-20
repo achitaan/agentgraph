@@ -4,7 +4,8 @@
   const LIST_LIMIT = 200;
   const EDGE = 12, SLOT = 104, GROUP_GAP = 34, SEAT_DISTANCE = 68, MEMBER_DISTANCE = 96, MEMBER_REACH = 40;
   // A full loop's agents sit on a circle of their own: neighbours RING_GAP apart, the circle never under RING_MIN.
-  const RING_GAP = 124, RING_MIN = 82, RING_MS = 240;
+  // A narrow canvas has little room beside the picture: there a loop of two or three is a smaller circle (n114).
+  const RING_GAP = 124, RING_MIN = 82, RING_MIN_NARROW = 66, RING_MS = 240;
   // Out of the canvas counts against a place, but less than running into a circle or a name (n103).
   const RING_OUT = .25;
   const DETAIL_WIDTH = 340; // the details panel beside a wide graph (style.css: .ag-details-open .ag-network margin)
@@ -330,13 +331,41 @@
     function graphBounds() {
       const points = visibleAgents.map(a => positions.get(a.name)).filter(Boolean);
       if (!points.length) return null;
-      const spans = points.map(p => ({ p, e: extentOf(p) }));
+      const spans = points.map(p => { const e = extentOf(p); return { left: p.x + e.left, right: p.x + e.right, top: p.y + e.top, bottom: p.y + e.bottom }; });
+      // And every loop's circle (n114): the fit shows it, and a drag reaches it.
+      spans.push(...ringBoxes());
       return {
-        left: Math.min(...spans.map(({ p, e }) => p.x + e.left)),
-        right: Math.max(...spans.map(({ p, e }) => p.x + e.right)),
-        top: Math.min(...spans.map(({ p, e }) => p.y + e.top)),
-        bottom: Math.max(...spans.map(({ p, e }) => p.y + e.bottom))
+        left: Math.min(...spans.map(b => b.left)),
+        right: Math.max(...spans.map(b => b.right)),
+        top: Math.min(...spans.map(b => b.top)),
+        bottom: Math.max(...spans.map(b => b.bottom))
       };
+    }
+    // The box (drawing units) of each loop's circle, of the loops through any of `names` (all when omitted): the circle
+    // through its agents where they are going (a glide in progress), and as drawn (a step that bows round an agent).
+    function ringBoxes(names) {
+      const boxes = [];
+      routes().forEach(flow => {
+        const start = loopStart(flow.path), ring = start >= 0 ? [...new Set(flow.path.slice(start, -1))] : [];
+        if (ring.length < 2 || (names && !ring.some(name => names.has(name)))) return;
+        const p = ring.map(finalOf);
+        if (p.some(point => !point)) return;
+        let cx = (p[0].x + p[1].x) / 2, cy = (p[0].y + p[1].y) / 2, r = Math.hypot(p[1].x - p[0].x, p[1].y - p[0].y) / 2;
+        if (p.length > 2) {
+          const [a, b, c] = p, d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+          if (Math.abs(d) > 1e-6) {
+            const aa = a.x * a.x + a.y * a.y, bb = b.x * b.x + b.y * b.y, cc = c.x * c.x + c.y * c.y;
+            cx = (aa * (b.y - c.y) + bb * (c.y - a.y) + cc * (a.y - b.y)) / d; cy = (aa * (c.x - b.x) + bb * (a.x - c.x) + cc * (b.x - a.x)) / d; r = Math.hypot(a.x - cx, a.y - cy);
+          }
+        }
+        const box = { left: cx - r - 6, right: cx + r + 6, top: cy - r - 6, bottom: cy + r + 6 };
+        if (!glideState) routeViews.get(flow.id)?.steps.forEach(({ line }) => {
+          const b = line.dataset.step === 'loop' && line.getBBox?.();
+          if (b && (b.width || b.height)) { box.left = Math.min(box.left, b.x - 4); box.right = Math.max(box.right, b.x + b.width + 4); box.top = Math.min(box.top, b.y - 4); box.bottom = Math.max(box.bottom, b.y + b.height + 4); }
+        });
+        boxes.push(box);
+      });
+      return boxes;
     }
     function updatePanCue() {
       const bounds = graphBounds(), height = viewport.clientHeight;
@@ -480,6 +509,18 @@
       let side = arrangement === 'compact' ? 2 : EDGE, foot = arrangement === 'compact' ? 8 : EDGE;
       let inset = Math.max(arrangement === 'compact' ? 8 : EDGE, topInset()), x0 = camera.x, y0 = camera.y;
       const fits = () => box.right - box.left <= width - 2 * side && box.bottom - box.top <= height - foot - inset;
+      // What changed comes into view with the loop circles through it, when they fit too (n114: a loop just drawn is
+      // never left cut by the edge).
+      if (!whole) {
+        const grown = { ...box };
+        ringBoxes(new Set(names)).forEach(b => {
+          grown.left = Math.min(grown.left, b.left * s + camera.x); grown.right = Math.max(grown.right, b.right * s + camera.x);
+          grown.top = Math.min(grown.top, b.top * s + camera.y); grown.bottom = Math.max(grown.bottom, b.bottom * s + camera.y);
+        });
+        const kept = { ...box };
+        Object.assign(box, grown);
+        if (!fits()) Object.assign(box, kept);
+      }
       // A set that must come into view together may use the margins too (the extents already pad each name).
       if (whole && !fits()) { side = 0; foot = 0; inset = Math.max(0, ...coverRects().filter(b => b.top < 24).map(b => b.bottom)); }
       if (whole && !fits()) return false;
@@ -661,11 +702,13 @@
     // loops meet only at an agent on both, and touch there rather than cross). Its moving agents, circle and name, land
     // clear of everything else. Of the places that do, the one that moves its agents least and grows the picture least.
     // Nothing else moves, so removing the loop puts every agent back.
-    const RING_SPACE = 12, RING_APART = 24;
+    const RING_SPACE = 12, RING_CLEAR = 8, RING_APART = 24;
     // An agent's name box round its centre: as last drawn, else estimated from its length.
     function labelBox(name, r, labelUp, lead) {
       const p = positions.get(name);
-      if (p && Number.isFinite(p.labelLeft) && Math.abs((p.r || r) - r) < .01 && !!p.labelUp === !!labelUp) return { left: p.labelLeft, right: p.labelRight, top: p.labelTop, bottom: p.labelBottom };
+      // Centred under the agent wherever it was last drawn (a narrow canvas slides a name in from its edge there), so
+      // where a loop puts an agent does not depend on where it was before (n114).
+      if (p && Number.isFinite(p.labelLeft) && Math.abs((p.r || r) - r) < .01 && !!p.labelUp === !!labelUp) { const shift = p.labelShift || 0; return { left: p.labelLeft - shift, right: p.labelRight - shift, top: p.labelTop, bottom: p.labelBottom }; }
       const agent = shownAgents.get(name), shown = agent ? displayName(agent) : name, size = name === hubName ? 18 : lead ? 15 : 12;
       const half = shown.length * size * .31 + 2, base = labelUp ? -r - 8 : r + 20;
       return { left: -half, right: half, top: base - size * .8, bottom: base + size * .25 };
@@ -682,9 +725,15 @@
     // How far a circle (c, R) actually runs through or round a shape, and how far two shapes actually overlap.
     const realOf = (s, x, y, R) => Math.max(0, R + s.r - Math.hypot(s.x - x, s.y - y)) + Math.max(0, R - boxNear(s.box, x, y));
     const hitOf = (m, o) => Math.max(0, m.r + o.r - Math.hypot(m.x - o.x, m.y - o.y)) + Math.max(0, o.r - boxNear(m.box, o.x, o.y)) + Math.max(0, m.r - boxNear(o.box, m.x, m.y)) + Math.max(0, -boxGap(m.box, o.box));
+    // A loop's line closer than RING_CLEAR (and the drawn curve's leeway) to a circle not on it: the user's ruled clearance
+    // (n114). It outweighs everything else, so a loop goes anywhere clear first, out of the view if it must.
+    const tightOf = (s, x, y, R) => 1000 * Math.max(0, R + s.r + RING_CLEAR + 2 - Math.hypot(s.x - x, s.y - y));
     const insideOf = (s, x, y, R) => Math.max(0, R + s.r + RING_SPACE - Math.hypot(s.x - x, s.y - y)) + Math.max(0, R + RING_SPACE - boxNear(s.box, x, y));
     function placeRings(rings, placed, targets, placedByUser, canvas) {
       const byName = new Map(targets.map(target => [target.name, target])), movers = new Set(rings.flatMap(ring => ring.movable).filter(name => !byName.get(name)?.pinned)), bands = [];
+      // A narrow canvas draws a loop smaller (`small`) only where the full size finds no clear place in the room; never one
+      // through a group's member (it sits close by its lead, and the smaller circle would pass the lead too near).
+      const ringRadius = (count, names = [], small = false) => Math.max(small && !canvas.wide && !names.some(name => byName.get(name)?.parent) ? RING_MIN_NARROW : RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / count)));
       const at = target => { const owner = target.parent && placed.get(target.parent); return owner ? { x: owner.x + target.dx, y: owner.y + target.dy } : { x: target.x, y: target.y }; };
       const lead = target => !target.parent && target.r === 29;
       const shapeOf = (target, p = at(target)) => shapeAt(target.name, p.x, p.y, target.r, !!target.parent && target.dy < -1, lead(target));
@@ -695,37 +744,51 @@
       // A wide canvas shows the picture at up to 1.3 times, with the details open and closed: the room is what both show.
       const across = area.right - area.left || 1, high = area.bottom - area.top || 1;
       let half = Infinity, halfY = Infinity;
-      // A narrow one at up to 1 (its fit keeps 2 px each side and 8 px top and bottom), and its panel may be taller than
-      // the canvas laid out for (the sheet closed), so the view can be as large as the width allows.
+      // A narrow one as its fit shows it with the details open: as small as names stay readable (n114: the fit counts the
+      // loops, so it zooms out that far for them), keeping 2 px each side and 8 px top and bottom.
       (canvas.wide ? [canvas.width, canvas.width + DETAIL_WIDTH] : [canvas.width]).forEach(w => {
         const side = canvas.wide ? EDGE : 2, top = canvas.wide ? EDGE + 44 : 8;
-        const s = clamp(Math.min((w - 2 * side) / across, canvas.wide ? (canvas.height - 2 * top) / high : Infinity), READABLE, canvas.wide ? 1.3 : 1);
+        const s = canvas.wide ? clamp(Math.min((w - 2 * side) / across, (canvas.height - 2 * top) / high), READABLE, 1.3) : READABLE;
         // Less the room the view keeps round each circle and name when it brings one into view (extentOf).
         half = Math.min(half, (w / 2 - side) / s - 14); halfY = Math.min(halfY, (canvas.height / 2 - top) / s - 22);
       });
       half = Math.max(half, across / 2); halfY = Math.max(halfY, high / 2);
+      // Of the places in that room, one in the narrow view as it is (up to full size) comes first: then the view need not
+      // move or zoom out for the loop.
+      const viewScale = canvas.wide ? 0 : clamp((canvas.width - 4) / across, READABLE, 1);
+      const viewHalf = canvas.wide ? half : Math.max((canvas.width / 2 - 2) / viewScale - 14, across / 2), viewHalfY = canvas.wide ? halfY : Math.max((canvas.height / 2 - 8) / viewScale - 22, high / 2);
       const centre = (area.left + area.right) / 2, middle = (area.top + area.bottom) / 2;
       // The best place for one loop's circle, its `movable` agents moving onto it (null: it cannot be drawn).
       // `ahead`: later loops through one of this loop's moving agents (and otherwise free): each needs room on the far side
       // of that agent, touching this circle there, so this circle leaves it.
-      const search = (ring, ahead = []) => {
-        const count = ring.names.length, radius = Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / count))), step = Math.PI * 2 / count;
+      const search = (ring, ahead = [], small = false) => {
+        const count = ring.names.length, radius = ringRadius(count, ring.names, small), step = Math.PI * 2 / count;
         const spots = ring.names.map(name => byName.has(name) ? at(byName.get(name)) : null);
         if (spots.some(spot => !spot)) return;
         const fixed = ring.names.map((name, i) => i).filter(i => !ring.movable.includes(ring.names[i]));
         const others = shapes.filter(s => !ring.names.includes(s.name)), hub = shapes.find(s => s.name === hubName && ring.names.includes(s.name));
+        // How far `e` takes the picture out of the room. A wide view stays where it is when a loop forms: the room round the
+        // picture's middle. A narrow one is fitted again as the details open, round the whole picture (what stays, the
+        // agents earlier loops moved and their circles): the whole may then be no wider or taller than the room (n114).
+        const whole = extent([...shapes, ...bands.map(band => ({ x: band.x, y: band.y, r: band.r, box: { left: band.x, right: band.x, top: band.y, bottom: band.y } }))]);
+        const beyond = e => canvas.wide ? Math.max(0, centre - half - e.left) + Math.max(0, e.right - centre - half) + Math.max(0, middle - halfY - e.top) + Math.max(0, e.bottom - middle - halfY)
+          : Math.max(0, Math.max(e.right, whole.right) - Math.min(e.left, whole.left) - 2 * half) + Math.max(0, Math.max(e.bottom, whole.bottom) - Math.min(e.top, whole.top) - 2 * halfY);
         let best = null;
         // The ring's line at (x, y): how far it comes into what stays and into the other loops.
         const lineBad = (x, y) => {
           let bad = hub ? Math.max(0, radius + RING_SPACE - boxNear(hub.box, x, y)) : 0;
-          for (const s of others) { bad += insideOf(s, x, y, radius); if (best && bad > best.bad) return bad; }
+          for (const s of others) { bad += insideOf(s, x, y, radius) + tightOf(s, x, y, radius); if (best && bad > best.bad) return bad; }
           bands.forEach(band => {
             const d = Math.hypot(x - band.x, y - band.y) || 1e-6, shared = ring.names.find(name => band.names.includes(name));
-            if (!shared) { bad += Math.max(0, radius + band.r + RING_APART - d); return; }
+            if (!shared) { bad += Math.max(0, radius + band.r + RING_APART - d) + 1000 * Math.max(0, radius + band.r + RING_CLEAR - d); return; }
             // Through a common agent: they touch there (the second meeting point inside its circle), each outside the other.
             const s = placed.get(shared) || at(byName.get(shared)), ux = (band.x - x) / d, uy = (band.y - y) / d, along = (s.x - x) * ux + (s.y - y) * uy;
             const sx = 2 * (x + ux * along) - s.x, sy = 2 * (y + uy * along) - s.y;
-            bad += Math.max(0, Math.hypot(sx - s.x, sy - s.y) - (byName.get(shared).r + 10)) + Math.max(0, .9 * (radius + band.r) - d);
+            const apart = Math.hypot(sx - s.x, sy - s.y);
+            // Nearly touching at the agent's centre is best: the two lines then leave it side by side and draw apart
+            // fast, so a click a few px off one is nearer that one (n114); crossing there near its edge keeps them close.
+            // A narrow canvas draws at about 11/12 (a wide one up to 1.3): there they must nearly touch.
+            bad += Math.max(0, apart - (byName.get(shared).r + 10)) + .3 * Math.max(0, apart - 6) + Math.max(0, .9 * (radius + band.r) - d) + 1000 * ((canvas.wide ? 0 : Math.max(0, apart - 12)) + Math.max(0, .75 * (radius + band.r) - d));
           });
           return bad;
         };
@@ -737,7 +800,7 @@
             if (!ring.movable.includes(name)) continue;
             const a = start + dir * i * step, px = x + radius * Math.cos(a), py = y + radius * Math.sin(a), m = shapeOf(byName.get(name), { x: px, y: py });
             for (const s of others) bad += clashOf(m, s);
-            bands.forEach(band => { if (!band.names.includes(name)) bad += insideOf(m, band.x, band.y, band.r); });
+            bands.forEach(band => { if (!band.names.includes(name)) bad += insideOf(m, band.x, band.y, band.r) + tightOf(m, band.x, band.y, band.r); });
             if (best && bad > best.bad + 1e-6) return;
             moved += Math.hypot(px - spots[i].x, py - spots[i].y); made.push([name, px, py]); list.push(m);
           }
@@ -748,7 +811,7 @@
             for (const s of shapes) if (!skip.has(s.name)) bad += insideOf(s, nx, ny, next.radius);
             for (const s of list) if (!next.names.includes(s.name)) bad += insideOf(s, nx, ny, next.radius);
             bands.forEach(band => { if (!band.names.some(name => next.names.includes(name))) bad += Math.max(0, next.radius + band.r + RING_APART - Math.hypot(nx - band.x, ny - band.y)); });
-            bad += RING_OUT * (Math.max(0, centre - half - (nx - next.radius)) + Math.max(0, nx + next.radius - centre - half) + Math.max(0, middle - halfY - (ny - next.radius)) + Math.max(0, ny + next.radius - middle - halfY));
+            bad += RING_OUT * beyond(extent([...list, { x: nx, y: ny, r: next.radius, box: { left: nx, right: nx, top: ny, bottom: ny } }]));
             if (best && bad > best.bad + 1e-6) return;
           }
           // A, B, C, B: the circle stays near A, so the step into it is short and both come into view together.
@@ -765,10 +828,11 @@
           const e = extent(list), grown = Math.max(0, area.left - e.left) + Math.max(0, e.right - area.right) + Math.max(0, area.top - e.top) + Math.max(0, e.bottom - area.bottom);
           // The canvas has no room to spare: a circle out of it would refit the view, which moves everything on
           // screen, so it counts as running into something.
-          const over = Math.max(0, centre - half - e.left) + Math.max(0, e.right - centre - half) + Math.max(0, middle - halfY - e.top) + Math.max(0, e.bottom - middle - halfY);
-          if (over > 0) { bad += RING_OUT * over; if (best && bad > best.bad + 1e-6) return; }
-          const cost = moved + 3 * grown + 1000 * (Math.max(0, centre - half - e.left) + Math.max(0, e.right - centre - half) + Math.max(0, middle - halfY - e.top) + Math.max(0, e.bottom - middle - halfY));
-          if (!best || bad < best.bad - 1e-6 || cost < best.cost) best = { bad, cost, x, y, start, dir, made, over };
+          const over = beyond(e);
+          const outView = canvas.wide ? 0 : Math.max(0, centre - viewHalf - e.left) + Math.max(0, e.right - centre - viewHalf) + Math.max(0, middle - viewHalfY - e.top) + Math.max(0, e.bottom - middle - viewHalfY);
+          if (over + outView > 0) { bad += RING_OUT * (over + outView); if (best && bad > best.bad + 1e-6) return; }
+          const cost = moved + 3 * grown + 1000 * over + 1000 * outView;
+          if (!best || bad < best.bad - 1e-6 || cost < best.cost) best = { bad, cost, x, y, start, dir, made, over, radius };
         };
         if (fixed.length === 1) {
           // One agent stays (the orchestrator, a seat, one on an earlier loop): the circle passes through it.
@@ -799,13 +863,14 @@
           const ahead = !looking.has(index) ? [] : looking.get(index).map(k => rings[k]).flatMap(next => {
             const common = next.names.filter(name => full.movable.includes(name));
             if (common.length !== 1 || next.names.some(name => name !== common[0] && (!next.movable.includes(name) || byName.get(name)?.pinned))) return [];
-            return [{ name: common[0], names: next.names, radius: Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / next.names.length))) }];
+            return [{ name: common[0], names: next.names, radius: ringRadius(next.names.length, next.names) }];
           });
           // An agent the user put somewhere stays there and the circle goes through it, unless the circle would then run
           // into something; then it moves onto a circle in free space like the rest.
           let ring = { ...full, movable: full.movable.filter(name => !byName.get(name)?.pinned) }, best = search(ring, ahead);
           if (ring.movable.length < full.movable.length && (!best || best.bad > .5)) { const other = search(full, ahead); if (other && (!best || other.bad < best.bad)) { ring = full; best = other; } }
-          const count = ring.names.length, radius = Math.max(RING_MIN, RING_GAP / (2 * Math.sin(Math.PI / count)));
+          if (!canvas.wide && (!best || best.bad > .5 || best.over > 1)) { const other = search(ring, ahead, true); if (other && (!best || other.bad < best.bad - 1e-6 || (other.bad <= best.bad + 1e-6 && other.cost < best.cost))) best = other; }
+          const radius = best ? best.radius : ringRadius(ring.names.length, ring.names);
           results[index] = (best ? { bad: best.bad, x: best.x, y: best.y, radius, names: ring.names, made: best.made.map(([name]) => name), over: best.over } : null);
           if (!best) return;
           const shift = placedByUser[ring.key], sx = shift && Number.isFinite(shift.dx) ? shift.dx : 0, sy = shift && Number.isFinite(shift.dy) ? shift.dy : 0;
@@ -1279,7 +1344,7 @@
         label.setAttribute('x', shift);
         low = Math.min(low, shift - measured / 2 - 2); high = Math.max(high, shift + measured / 2 + 2);
         // The name's height, for lines that keep clear of it.
-        const box = label.getBBox(); Object.assign(point, { labelLeft: box.x, labelRight: box.x + box.width, labelTop: box.y, labelBottom: box.y + box.height });
+        const box = label.getBBox(); Object.assign(point, { labelLeft: box.x, labelRight: box.x + box.width, labelTop: box.y, labelBottom: box.y + box.height, labelShift: shift });
       });
       const changed = Math.abs((point.labelMin ?? 0) - low) > .1 || Math.abs((point.labelMax ?? 0) - high) > .1;
       point.labelMin = low; point.labelMax = high; point.labelWidth = Math.max(-low, high);
@@ -3483,7 +3548,12 @@
         return Math.hypot(a.x + dx * t - clientX, a.y + dy * t - clientY);
       }
       const length = element.getTotalLength?.() || 0, count = Math.max(8, Math.min(120, Math.ceil(length * (matrix.a || 1) / 3)));
-      for (let i = 0; i <= count; i++) { const q = element.getPointAtLength(length * i / count).matrixTransform(matrix); least = Math.min(least, Math.hypot(q.x - clientX, q.y - clientY)); }
+      const gap = at => { const q = element.getPointAtLength(clamp(at, 0, length)).matrixTransform(matrix); return Math.hypot(q.x - clientX, q.y - clientY); };
+      let near = 0;
+      for (let i = 0; i <= count; i++) { const d = gap(length * i / count); if (d < least) { least = d; near = length * i / count; } }
+      // Then to a fraction of a px round the nearest sample, so where two lines run a few px apart (rings that meet at an
+      // agent) the nearer one wins (n114).
+      for (let span = length / count; span > .05; span /= 2) for (const at of [near - span / 2, near + span / 2]) { const d = gap(at); if (d < least) { least = d; near = at; } }
       return least;
     }
     // Hovering any part of a line marks the whole of it (a flow's every step) and fades the others; only while the
