@@ -23,6 +23,7 @@ import tempfile
 import termios
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -33,7 +34,7 @@ from agentgraph.viewstate import KEY_HELP, ViewState
 
 PROJECT = Path(__file__).resolve().parent.parent
 AT = "1795000000"
-TIMEOUT = 5.0
+TIMEOUT = 60.0  # a guard against a hang, never a verdict on speed: every wait below ends on an event
 
 ENTER = b"\x1b[?1049h"
 HIDE = b"\x1b[?25l"
@@ -89,10 +90,33 @@ def _set_size(fd, cols, rows):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
-def _full_frame(data: bytes, rows: int) -> bool:
-    """A full repaint whose last row has been written, at the end of data."""
+CSI = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]")
+ROW_START = re.compile(rb"\x1b\[\d+;1H")
+
+
+def _row_done(data: bytes, cols: int) -> bool:
+    """Whether data ends where a row write ends: the last row written is followed by its erase, or fills the line
+    (the viewer writes no erase after a row that fills it). A cut escape or character is not an end."""
+    starts = list(ROW_START.finditer(data))
+    if not starts:
+        return False
+    tail = data[starts[-1].end():]
+    if tail.endswith(EL):
+        return True
+    text = CSI.sub(b"", tail)
+    if b"\x1b" in text:
+        return False
+    try:
+        return len(text.decode("utf-8")) >= cols
+    except UnicodeDecodeError:
+        return False
+
+
+def _full_frame(data: bytes, rows: int, cols: int) -> bool:
+    """A full repaint whose last row has been written to its end, at the end of data: the viewer has finished
+    writing it (the event the tests wait on, never a length of time)."""
     start = data.rfind(CLEAR)
-    return start >= 0 and (b"\x1b[%d;1H" % rows) in data[start:]
+    return start >= 0 and (b"\x1b[%d;1H" % rows) in data[start:] and _row_done(data[start:], cols)
 
 
 def _last_frame_rows(data: bytes):
@@ -193,7 +217,7 @@ class Live:
             self.pump(min(remaining, 0.1))
 
     def wait_frame(self, since=0):
-        self.wait_for(lambda: _full_frame(bytes(self.out[since:]), self.rows), "a full frame")
+        self.wait_for(lambda: _full_frame(bytes(self.out[since:]), self.rows, self.cols), "a full frame")
 
     def wait_exit(self):
         self.wait_for(lambda: self.code is not None, "the viewer to exit")
@@ -248,6 +272,33 @@ class Live:
                     os.close(fd)
             self.status_r = None
             self.err.close()
+
+
+class FrameComplete(unittest.TestCase):
+    """The tests below act on the viewer once its frame is on screen. A frame whose last row is still being
+    written is not on screen yet: the viewer is still writing it, so taking its output away then loses output
+    (under load the test's read can end anywhere inside that row)."""
+
+    def frame(self, rows, cols, color):
+        parts = [CLEAR]
+        for row in range(1, rows + 1):
+            text = (b"x" * (cols if row == rows else 10)).decode()
+            if color:
+                text = "\x1b[0;38;2;230;230;230m" + text + "\x1b[0m"
+            parts.append(f"\x1b[{row};1H{text}".encode() + (b"" if row == rows else EL))
+        return b"".join(parts)
+
+    def test_a_frame_cut_inside_its_last_row_is_not_full(self):
+        for color in (False, True):
+            whole = self.frame(24, 80, color)
+            self.assertTrue(_full_frame(whole, 24, 80))
+            last = whole.rfind(b"\x1b[24;1H")
+            for cut in (last + len(b"\x1b[24;1H"), last + 30, len(whole) - 1 if not color else len(whole) - 2):
+                with self.subTest(color=color, cut=cut - last):
+                    self.assertFalse(_full_frame(whole[:cut], 24, 80))
+        short = CLEAR + b"\x1b[1;1Hab" + EL + b"\x1b[2;1Hcd" + EL
+        self.assertTrue(_full_frame(short, 2, 80))
+        self.assertFalse(_full_frame(short[:-1], 2, 80))
 
 
 class LiveTerminal(unittest.TestCase):
@@ -416,7 +467,7 @@ class LiveTerminal(unittest.TestCase):
         mark = len(run.out)
         _set_size(run.master, 100, 30)
         run.signal(signal.SIGWINCH)
-        run.wait_for(lambda: _full_frame(run.since(mark), 30), "a full repaint at 100 x 30")
+        run.wait_for(lambda: _full_frame(run.since(mark), 30, 100), "a full repaint at 100 x 30")
         rows = _last_frame_rows(run.since(mark))
         self.assertEqual(max(rows), 30)
         self.assertTrue(80 < max(len(text) for text in rows.values()) <= 100)
@@ -447,6 +498,37 @@ class FakeCanvas:
 
     def rows_ansi(self, color=True):
         return list(self.rows)
+
+
+class VirtualClock:
+    """The loop's clock (`time.monotonic`, `time.sleep`) and its waits (`select.select`) on a clock that moves only
+    while the loop waits for nothing: a wait whose descriptors are not ready returns at once and moves the clock
+    by its timeout. What the loop does then depends on what it was given, never on how busy the machine is."""
+
+    def __init__(self):
+        self.now = 1000.0
+        self.waited = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.advance(seconds)
+
+    def advance(self, seconds):
+        seconds = max(0.0, seconds or 0.0)
+        self.now += seconds
+        self.waited += seconds
+
+    def select(self, read, write, other, timeout=None):
+        ready = select.select(read, write, other, 0)
+        if not any(ready):
+            self.advance(timeout)
+        return ready
+
+    def installed(self):
+        clock = types.SimpleNamespace(monotonic=self.monotonic, sleep=self.sleep, time=time.time)
+        return mock.patch.multiple(cli, time=clock, select=types.SimpleNamespace(select=self.select))
 
 
 class LiveLoop(unittest.TestCase):
@@ -547,37 +629,37 @@ class LiveLoop(unittest.TestCase):
 
     def test_held_key_repaints_at_once_but_reads_data_once_per_interval(self):
         loads = []
+        clock = VirtualClock()
 
         def counting_load(args, previous):
-            loads.append(time.monotonic())
+            loads.append(clock.monotonic())
             return demo_snapshot(float(AT)), "demo", ""
 
         def on_frame(n, state, send):
             send(b"j" if n < 40 else b"q")
             return ["x"] * 30
 
-        started = time.monotonic()
-        with mock.patch.object(cli, "_load", counting_load):
+        with clock.installed(), mock.patch.object(cli, "_load", counting_load):
             calls, _ = self.run_loop(on_frame, argv=["--interval", "60"])
-        elapsed = time.monotonic() - started
         self.assertEqual(len(loads), 1)
         self.assertEqual(calls[-1]["state"].scroll, 39)
-        # 40 frames at the animation rate would take 5 seconds: keys repaint at once.
-        self.assertLess(elapsed, 40 * cli.FRAME_SECONDS / 2)
+        # 40 frames at the animation rate would wait 5 seconds: keys repaint at once, so no frame waited at all.
+        self.assertEqual(clock.waited, 0.0)
 
     def test_data_is_reread_every_interval(self):
         loads = []
+        clock = VirtualClock()
 
         def counting_load(args, previous):
-            loads.append(time.monotonic())
+            loads.append(clock.monotonic())
             return demo_snapshot(float(AT)), "demo", ""
 
         def on_frame(n, state, send):
-            if len(loads) >= 3 or time.monotonic() - loads[0] > 3:
+            if len(loads) >= 3 or clock.monotonic() - loads[0] > 3:
                 send(b"q")
             return ["x"] * 30
 
-        with mock.patch.object(cli, "_load", counting_load):
+        with clock.installed(), mock.patch.object(cli, "_load", counting_load):
             self.run_loop(on_frame, argv=["--interval", "0.3"])
         self.assertGreaterEqual(len(loads), 3)
         gaps = [b - a for a, b in zip(loads, loads[1:])]

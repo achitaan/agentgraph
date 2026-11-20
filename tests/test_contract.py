@@ -1,6 +1,5 @@
 import unittest
 from pathlib import Path
-from time import perf_counter
 
 from agentgraph import contract
 from agentgraph.contract import (
@@ -15,6 +14,7 @@ from agentgraph.contract import (
     waves,
 )
 from agentgraph.demo import demo_snapshot
+from tests.test_bounds import counted
 
 
 def node(node_id, *, depends_on=(), scope=(), status="pending", done_when="tests pass"):
@@ -173,12 +173,16 @@ class Validate(unittest.TestCase):
         from agentgraph.sources import graph_from_raw
 
         raw = {"nodes": [{"id": f"n{i}", "scope": ["a"], "done_when": "tests pass"} for i in range(5000)]}
-        start = perf_counter()
-        task = graph_from_raw(raw, Path("test.json"))
+
+        def read_and_validate():
+            task = graph_from_raw(raw, Path("test.json"))
+            return task, validate(task)
+
+        # Work counted in function calls, not timed (see tests/test_bounds.py): about 170 per node kept today;
+        # comparing every pair of the 1000 writers would be 500,000 comparisons.
+        (task, issues), calls = counted(read_and_validate)
         self.assertEqual(len(task.nodes), 1000)
-        issues = validate(task)
-        elapsed = perf_counter() - start
-        self.assertLess(elapsed, 1.0, f"large graph validation took {elapsed:.3f}s")
+        self.assertLess(calls, 250 * 1000)
         self.assertEqual(len(issues), 101)
         self.assertTrue(all("share write scope" in issue for issue in issues[:100]))
         self.assertIn("more parallel writers", issues[-1])
@@ -216,9 +220,9 @@ class Validate(unittest.TestCase):
         workers = [node(f"n{i}", depends_on=[f"n{i - 1}"] if i else []) for i in range(1000)]
         for worker in workers[1:]:
             worker.feedback_to = ["n0"]
-        start = perf_counter()
-        self.assertEqual(validate(graph(workers)), [])
-        self.assertLess(perf_counter() - start, 0.5)
+        issues, calls = counted(validate, graph(workers))
+        self.assertEqual(issues, [])
+        self.assertLess(calls, 40 * 1000)  # about 26 per node today; walking every chain back would be 500,000
 
     def test_pattern_must_be_empty_or_known(self):
         from agentgraph.contract import PATTERNS
@@ -499,10 +503,9 @@ class Validate(unittest.TestCase):
         chain += [node(f"n{i}", depends_on=[f"n{i - 1}"]) for i in range(1, 3000)]
         chain[-1].scope = ["src/a.py"]
         task = graph(chain)
-        start = perf_counter()
-        self.assertEqual(validate(task), [])
-        elapsed = perf_counter() - start
-        self.assertLess(elapsed, 0.75, f"validating 3000 nodes took {elapsed:.3f}s")
+        issues, calls = counted(validate, task)
+        self.assertEqual(issues, [])
+        self.assertLess(calls, 30 * 3000)  # about 18 per node today; every pair of the chain would be 4.5 million
         task.nodes.append(node("independent", scope=["src/a.py"]))
         self.assertEqual(validate(task), [
             "n0 and independent can run in parallel but share write scope",

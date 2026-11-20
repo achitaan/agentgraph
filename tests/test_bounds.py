@@ -4,10 +4,10 @@ import contextlib
 import io
 import json
 import random
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-from time import perf_counter
 from unittest.mock import patch
 
 from agentgraph import check, contract, snapshot_json
@@ -16,7 +16,13 @@ from agentgraph.contract import (
 )
 from agentgraph.sources import graph_from_raw
 
-LIMIT = 3.0  # seconds; each case below takes about one second or less today
+# Each case's cost is counted in function calls (Python and built-in), not timed: a count is the same on a quiet
+# machine and under load, so the suite's verdict never depends on the wall clock. Each budget is linear in what the
+# file controls, about 1.5 times today's count; a step that compared every pair (writers x entries squared) would
+# take thousands of times the budget, as would one that took 3 s on a quiet machine (the old wall-clock limit:
+# the cases ran in one second or less, at 58 to 94 calls per scope entry and 32 per dependency edge).
+CALLS_PER_ENTRY = 100  # per scope entry (writers x entries): validate, and the check command on a file
+CALLS_PER_EDGE = 50  # per dependency edge: waves, advice, flows, loops, stale inputs and validate together
 GRAPH_PATH = "/project/.opencode/graph/bounds.json"
 
 
@@ -29,10 +35,23 @@ def task(nodes, path=GRAPH_PATH):
     return TaskGraph(path, "bounds", "goal", "running", 1, 2, nodes=list(nodes))
 
 
-def timed(function, *args):
-    start = perf_counter()
-    result = function(*args)
-    return result, perf_counter() - start
+def counted(function, *args):
+    """(result, the number of Python and built-in function calls made while running it). Deterministic: it counts
+    work, not time, so load on the machine does not change it."""
+    calls = 0
+
+    def profile(frame, event, arg):
+        nonlocal calls
+        if event in ("call", "c_call"):
+            calls += 1
+
+    previous = sys.getprofile()
+    sys.setprofile(profile)
+    try:
+        result = function(*args)
+    finally:
+        sys.setprofile(previous)
+    return result, calls
 
 
 # --- the slow methods, as they were before the scope index -------------------
@@ -133,14 +152,15 @@ class ScopeIndexAgreesWithPairwise(unittest.TestCase):
 class BoundedCost(unittest.TestCase):
     def test_1000_writers_with_200_disjoint_scope_entries(self):
         nodes = [worker(f"n{i}", [f"d{i}/{k}" for k in range(MAX_NODE_LIST)]) for i in range(1000)]
-        problems, elapsed = timed(validate, task(nodes))
+        budget = CALLS_PER_ENTRY * 1000 * MAX_NODE_LIST
+        problems, calls = counted(validate, task(nodes))
         self.assertEqual(problems, [])
-        self.assertLess(elapsed, LIMIT)
+        self.assertLess(calls, budget)
         # One real overlap among them is still found, and only that one.
         nodes[999].scope[-1] = "d0"
-        problems, elapsed = timed(validate, task(nodes))
+        problems, calls = counted(validate, task(nodes))
         self.assertEqual(problems, ["n0 and n999 can run in parallel but share write scope"])
-        self.assertLess(elapsed, LIMIT)
+        self.assertLess(calls, budget)
 
     def test_one_node_with_200_changed_paths_against_200_scope_entries(self):
         scope = [f"src/m{k}/" for k in range(MAX_NODE_LIST)]
@@ -149,10 +169,11 @@ class BoundedCost(unittest.TestCase):
         for changed, expected in ((inside, []), (outside, [f"n0 changed path {p!r} outside its scope" for p in outside])):
             with self.subTest(inside=changed is inside):
                 graph = task([worker("n0", scope, changed_paths=changed)])
-                problems, elapsed = timed(validate, graph)
+                problems, calls = counted(validate, graph)
                 self.assertEqual(problems, expected)
                 self.assertEqual(set(problems), slow_scope_problems(graph))
-                self.assertLess(elapsed, LIMIT)
+                # Pairwise would compare 200 x 200 entries: 40,000 checks, beyond this budget by themselves.
+                self.assertLess(calls, 150 * MAX_NODE_LIST)
 
     def test_dense_dependencies_and_inputs_stay_fast(self):
         nodes = []
@@ -164,15 +185,20 @@ class BoundedCost(unittest.TestCase):
             node.feedback_to = node.depends_on[-3:]
             nodes.append(node)
         graph = task(nodes)
-        start = perf_counter()
-        layers = waves(graph)
-        contract.shape_advice(graph, layers)
-        contract.agent_flows(graph, {"x"})
-        contract.agent_loops(graph, {"x"})
-        self.assertEqual(len(contract.agent_work_loops(graph, {"x"})), 2)
-        contract.stale_inputs(graph)
-        validate(graph)
-        self.assertLess(perf_counter() - start, LIMIT)
+
+        def everything():
+            layers = waves(graph)
+            contract.shape_advice(graph, layers)
+            contract.agent_flows(graph, {"x"})
+            contract.agent_loops(graph, {"x"})
+            loops = contract.agent_work_loops(graph, {"x"})
+            contract.stale_inputs(graph)
+            validate(graph)
+            return layers, loops
+
+        (layers, loops), calls = counted(everything)
+        self.assertEqual(len(loops), 2)
+        self.assertLess(calls, CALLS_PER_EDGE * sum(len(node.depends_on) for node in nodes))
         self.assertEqual(len(layers), 1000)
 
     def write(self, directory, raw, name="bounds.json"):
@@ -197,9 +223,8 @@ class BoundedCost(unittest.TestCase):
         for writers, entries, fmt in ((300, 100, "d{i}/{k}"), (1000, MAX_NODE_LIST, "{i:x}/{k:x}")):
             with self.subTest(writers=writers, entries=entries), tempfile.TemporaryDirectory() as directory:
                 self.write(directory, self.raw_graph(writers, entries, fmt=fmt))
-                start = perf_counter()
-                code, output = self.run_check("--dir", directory)
-                self.assertLess(perf_counter() - start, LIMIT)
+                (code, output), calls = counted(self.run_check, "--dir", directory)
+                self.assertLess(calls, CALLS_PER_ENTRY * writers * entries)
                 self.assertEqual(code, 0, output)
                 self.assertTrue(output.startswith(f"OK          bounds: 0/{writers} nodes passed"), output)
 
