@@ -240,7 +240,18 @@
     plus.setAttribute('aria-haspopup', 'menu'); plus.setAttribute('aria-expanded', 'false'); plus.setAttribute('aria-keyshortcuts', 'N');
     const addMenu = el('div', 'ag-add-menu');
     addMenu.hidden = true; addMenu.setAttribute('role', 'menu'); addMenu.setAttribute('aria-label', 'Add an agent');
-    controls.append(plus, fit, runDetails);
+    // The MCP button, right beside the menu button: a plug (no words), opening the list of all MCP servers over the graph.
+    const mcpButton = el('button', 'ag-control ag-mcp-toggle');
+    mcpButton.type = 'button'; mcpButton.hidden = true; mcpButton.setAttribute('aria-label', 'MCP servers'); mcpButton.title = 'MCP servers';
+    mcpButton.setAttribute('aria-haspopup', 'true'); mcpButton.setAttribute('aria-expanded', 'false');
+    const mcpIcon = svg('svg', { viewBox: '0 0 16 16', 'aria-hidden': 'true', focusable: 'false' });
+    // Lines and a polyline only: the view's own checks keep every path in the picture for a loop's edge.
+    mcpIcon.append(svg('line', { x1: 6, y1: 2, x2: 6, y2: 5 }), svg('line', { x1: 10, y1: 2, x2: 10, y2: 5 }), svg('polyline', { points: '4.5,5 11.5,5 11.5,8 10.4,10.3 8,11.2 5.6,10.3 4.5,8 4.5,5' }), svg('line', { x1: 8, y1: 11.2, x2: 8, y2: 14.5 }));
+    mcpButton.append(mcpIcon);
+    const mcpPanel = el('div', 'ag-mcp-panel');
+    mcpPanel.hidden = true; mcpPanel.tabIndex = -1; mcpPanel.setAttribute('role', 'region'); mcpPanel.setAttribute('aria-label', 'MCP servers');
+    mcpButton.setAttribute('aria-controls', 'ag-mcp-panel-' + uid); mcpPanel.id = 'ag-mcp-panel-' + uid;
+    controls.append(plus, fit, mcpButton, runDetails);
     const status = el('div', 'ag-status');
     const attention = el('button', 'ag-attention');
     attention.type = 'button'; attention.hidden = true; attention.setAttribute('aria-label', 'Needs attention');
@@ -268,7 +279,7 @@
     // The pending path, for assistive technology only: nothing is written in the graph area.
     const trailStatus = el('div', 'ag-sr-only');
     trailStatus.setAttribute('role', 'status'); trailStatus.setAttribute('aria-live', 'polite');
-    network.append(status, usage, viewport, controls, addMenu, trailStatus);
+    network.append(status, usage, viewport, controls, addMenu, mcpPanel, trailStatus);
     const detail = el('aside', 'ag-detail');
     detail.hidden = true; detail.setAttribute('aria-label', 'Details');
     const detailHeader = el('div', 'ag-detail-header');
@@ -2969,6 +2980,32 @@
       row.title = server.name + ' · ' + state + (reason ? ' · ' + reason : '');
       return row;
     }
+    // The list of all servers, opened from the plug beside the menu button. Reading only: a click on an agent's name picks it.
+    function mcpServers() { return Array.isArray(snapshot.mcp) ? snapshot.mcp.filter(row => row && typeof row.name === 'string') : []; }
+    function drawMcpPanel() {
+      const servers = mcpServers(), top = mcpPanel.scrollTop, parts = [];
+      if (!servers.length) parts.push(el('p', 'ag-run-empty', 'None'));
+      const holder = el('div', 'ag-mcp-list');
+      appendList(holder, servers, server => holder.append(mcpRow(server)));
+      parts.push(holder);
+      mcpPanel.replaceChildren(...parts); mcpPanel.scrollTop = top;
+    }
+    function openMcpPanel(fromKey) {
+      if (!Array.isArray(snapshot.mcp)) return;
+      closeAddMenu(false);
+      drawMcpPanel(); mcpPanel.hidden = false; mcpButton.setAttribute('aria-expanded', 'true');
+      if (fromKey) mcpPanel.focus({ preventScroll: true });
+    }
+    function closeMcpPanel(refocus) {
+      if (mcpPanel.hidden) return;
+      mcpPanel.hidden = true; mcpButton.setAttribute('aria-expanded', 'false');
+      if (refocus) mcpButton.focus({ preventScroll: true });
+    }
+    function updateMcp() {
+      const has = Array.isArray(snapshot.mcp);
+      mcpButton.hidden = !has;
+      if (!has) closeMcpPanel(false); else if (!mcpPanel.hidden) drawMcpPanel();
+    }
     function renderRunDetail(graph) {
       eyebrow.textContent = '';
       detailScroll.append(el('h2', 'ag-detail-title ag-run-title', 'Run'));
@@ -3056,13 +3093,6 @@
         row.append(el('span', 'ag-skill-name', text(skill.name)), el('span', 'ag-skill-users', users.join(' · ') || '—'), el('span', 'ag-skill-about', text(skill.description)));
         row.title = text(skill.description); body.append(row);
       }));
-      if (Array.isArray(snapshot.mcp)) {
-        const servers = snapshot.mcp.filter(row => row && typeof row.name === 'string');
-        runFold('MCP servers', 'mcp', servers.length, body => {
-          if (!servers.length) body.append(el('p', 'ag-run-empty', 'None'));
-          appendList(body, servers, server => body.append(mcpRow(server)));
-        });
-      }
       runFold('History', 'history', graph?.events.length || 0, body => section(body, 'Recent activity', graph?.events.length ? [...graph.events].reverse() : 'None', false, event => [event.node, event.event, text(event.note)].filter(Boolean).join(' · ')));
       runFold('Amendments', 'amendments', graph?.amendments.length || 0, body => section(body, 'Amendments', graph?.amendments.length ? graph.amendments : 'None'));
       runFold('Lessons', 'lessons', graph?.lessons.length || 0, body => section(body, 'Lessons', graph?.lessons.length ? graph.lessons : 'None'));
@@ -5108,7 +5138,21 @@
     orbitMark();
     // ---- orbit lane (n105) ----
 
-    listen(plus, 'click', event => { if (addMenu.hidden) openAddMenu(event.detail === 0); else closeAddMenu(false); });
+    listen(plus, 'click', event => { if (addMenu.hidden) { closeMcpPanel(false); openAddMenu(event.detail === 0); } else closeAddMenu(false); });
+    listen(mcpButton, 'click', event => { if (mcpPanel.hidden) openMcpPanel(event.detail === 0); else closeMcpPanel(false); });
+    listen(mcpPanel, 'click', event => {
+      const link = event.target.closest('[data-flow-peer]');
+      if (!link) return;
+      closeMcpPanel(false);
+      select('agent', link.dataset.flowPeer, nodes.get(link.dataset.flowPeer)); detailScroll.scrollTop = 0;
+    });
+    listen(document, 'keydown', event => {
+      if (event.key !== 'Escape' || mcpPanel.hidden) return;
+      const inside = mcpPanel.contains(document.activeElement) || document.activeElement === mcpButton;
+      if (inside) { event.preventDefault(); event.stopPropagation(); }
+      closeMcpPanel(inside);
+    }, true);
+    listen(document, 'pointerdown', event => { if (!mcpPanel.hidden && !mcpPanel.contains(event.target) && !mcpButton.contains(event.target)) closeMcpPanel(false); }, true);
     // A press on a starting point takes the new circle at once: drag it out and release to drop it, or click and
     // then click where it goes.
     listen(addMenu, 'pointerdown', event => {
@@ -5610,7 +5654,7 @@
       if (trail.some(name => !shownAgents.has(name))) dropTrail();
       const graph = data.graph;
       runDetails.dataset.notices = String(data.warnings.length + (graph ? graph.problems.length : 0) > 0 || !!data.learning?.due);
-      renderActivity(); updatePlus();
+      renderActivity(); updatePlus(); updateMcp();
       orbitRuns();
       const previousLayout = layoutSignature;
       if (root.clientWidth > 0 && viewport.clientWidth > 0) {
