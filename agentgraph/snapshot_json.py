@@ -681,6 +681,8 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
         # writers pass no --structure either), and removable reads the flow files as the removal does.
         roster.annotate(document, structure=STRUCTURE_DIR)
         skillfiles.annotate(document)
+        from . import outputs  # outputs imports this module
+        outputs.annotate(document)  # each output of the shown graph: rev, size, editable, why
     return document
 
 

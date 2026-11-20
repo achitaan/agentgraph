@@ -17,6 +17,8 @@
 #   agentgraph agent list           the agents in the presets and agent files (agent add NAME --model M ... | --copy-of A, agent remove NAME,
 #                                   agent rename NAME TO, agent restore RECORD; --config, --map, --backups, --structure, --commands)
 #   agentgraph skill show ID        a skill's text (skill create ID / write ID --text-file F|-, skill delete ID, skill restore RECORD)
+#   agentgraph output read TASK NODE ARTIFACT   a step's output (output write ... --text-file F|- [--expect REV] /
+#                                   output restore RECORD; --dir DIR or --from DIR, --home DIR, --backups DIR)
 #   agentgraph cost [--session ID]  where one chat's money went, and what would have made it cheaper
 #   agentgraph cost --trend         cost per turn over time, split at each change to the cost settings
 # -P: do not put the current directory on the import path, so a project that
@@ -53,6 +55,8 @@ case "$1" in
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.roster "$@" ;;
   skill)
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.skillfiles "$@" ;;
+  output)
+    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.outputs "$@" ;;
   team)
     shift
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.teams "$@" ;;
