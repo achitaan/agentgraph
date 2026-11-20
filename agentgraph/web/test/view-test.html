@@ -5375,7 +5375,7 @@
             let right = 0, tried = 0, shared = 0; const wrong = [];
             const clouds = [...root.querySelectorAll('.ag-route-hit, .ag-team-hit, .ag-line-hit')].filter(item => viewportOf(root).contains(item) && item.getClientRects().length && item.getScreenCTM()).map(item => ({ owner: item.closest('[data-route]')?.dataset.route || '', points: item.tagName.toLowerCase() === 'line' ? pointsOf(item, 80) : (() => { const length = item.getTotalLength(), m = item.getScreenCTM(); return Array.from({ length: 121 }, (_, i) => item.getPointAtLength(length * i / 120).matrixTransform(m)); })() }));
             const nearOther = (id, spot) => clouds.some(cloud => cloud.owner !== id && cloud.points.some(q => Math.hypot(q.x - spot.x, q.y - spot.y) <= 6.5));
-            N105_PATHS.forEach(flow => [...routeOf(root, flow.id).querySelectorAll('.ag-route-step')].forEach((step, si) => Array.from({ length: 15 }, (_, i) => (i + 1) / 16).forEach(t => {
+            N105_PATHS.forEach(flow => [...routeOf(root, flow.id).querySelectorAll('.ag-route-step')].forEach((step, si) => Array.from({ length: 23 }, (_, i) => (i + 1) / 24).forEach(t => {
               const length = step.getTotalLength(), m = step.getScreenCTM(), p = step.getPointAtLength(length * t).matrixTransform(m), q = step.getPointAtLength(Math.min(length, length * t + .5)).matrixTransform(m);
               const n = Math.hypot(q.x - p.x, q.y - p.y) || 1;
               for (const side of [6, -6]) {

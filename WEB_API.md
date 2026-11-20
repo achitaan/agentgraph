@@ -469,8 +469,8 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   rev on the thrown error.
 // 3D view (orbit lane n105; the terminal's model in tui-plugin/src/scene.js): a button beside the controls (named
 //   "3D view", aria-pressed) and the key D (wherever the view has the keys, not while typing) switch 2D and 3D; the
-//   camera moves between them over 700 ms (at once with reduced motion). In 3D the orchestrator is the sun, each
-//   group its own ring tilted differently, its agents on it near their 2D places, council seats and a group's
+//   camera moves between them over 700 ms (at once with reduced motion). In 3D the orchestrator is the sun (at the
+//   middle of the canvas the details leave, the rings narrowed to fit there), each group its own ring tilted differently, its agents on it near their 2D places, council seats and a group's
 //   members round their lead; nearer agents are larger, fully opaque and drawn over farther ones (which dim); names
 //   stay upright and at 11 px or more. Every line, loop (a closed dotted ring), group line, badge and pick follows
 //   the agents. Going back puts the 2D view back exactly (pan, zoom, every position). The choice is kept in the

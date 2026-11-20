@@ -3518,7 +3518,12 @@
         group.members.forEach(member => { const beta = member.azimuth - node; points.set(member.name, at(Math.atan2(Math.sin(beta), Math.cos(beta) * Math.cos(inc)))); });
         return { key: group.key, at };
       });
-      orbit.figure = { rings, points, hub, radius: count ? total / count * 1.08 : 180 };
+      // The sun at the middle of the canvas the details leave (the space the camera had when 3D began), the rings as
+      // wide as the 2D view's agents are from it, narrower where that would not fit there at the nearest (4/3 size).
+      const frame = orbit.frame || { x: hub.x, y: hub.y, fit: Infinity }, wide = count ? total / count * 1.08 : 180;
+      points.set(hubName, [0, 0, 0]);
+      const radius = Math.max(wide * .45, Math.min(wide, frame.fit));
+      orbit.figure = { rings, points, hub: { x: frame.x, y: frame.y }, radius, shrink: Math.max(.6, radius / wide) };
       return orbit.figure;
     }
     // The camera: the figure turned by `turn` round its upright axis, seen from `elevation` above its plane (PI/2:
@@ -3544,7 +3549,7 @@
       positions.forEach((p, name) => {
         if (full.has(name)) return;
         // A seat or a member: round its lead as in 2D, at its lead's depth and size.
-        const lead = full.get(p.parent) || { ...orbit.base.get(p.parent), depth: 0 }, b = orbit.base.get(name), l = orbit.base.get(p.parent), size = 1 + .3 * (lead.depth + 1) / 2;
+        const lead = full.get(p.parent) || { ...orbit.base.get(p.parent), depth: 0 }, b = orbit.base.get(name), l = orbit.base.get(p.parent), size = (1 + .3 * (lead.depth + 1) / 2) * figure.shrink;
         full.set(name, { x: lead.x + (b.x - l.x) * size, y: lead.y + (b.y - l.y) * size, depth: lead.depth + 1e-4 });
       });
       positions.forEach((p, name) => {
@@ -3642,7 +3647,7 @@
       const saved = orbit.saved, view = viewport.getBoundingClientRect();
       const resized = !!saved && (Math.abs(view.width - saved.width) > .5 || Math.abs(view.height - saved.height) > .5);
       if (saved && camera.initialized) Object.assign(camera, { x: saved.x, y: saved.y, scale: saved.scale, own: saved.own, touched: saved.touched });
-      orbit.base = null; orbit.saved = null; orbit.from3d = null; orbit.figure = null;
+      orbit.base = null; orbit.saved = null; orbit.from3d = null; orbit.figure = null; orbit.frame = null;
       orbitLayer.replaceChildren(); orbitLayer.style.opacity = '';
       orbitOrder(false); orbit.dom = null;
       nodes.forEach(node => { node.style.opacity = ''; });
@@ -3693,6 +3698,8 @@
         orbit.base = new Map(); positions.forEach((p, name) => orbit.base.set(name, { x: p.x, y: p.y }));
         orbit.saved = { x: camera.x, y: camera.y, scale: camera.scale, own: camera.own, touched: camera.touched, width: camera.width, height: camera.height };
         orbit.figure = null; orbit.shown = true; orbit.k = 0; orbit.order = ''; orbit.dom = [...nodeLayer.children];
+        const view = viewport.getBoundingClientRect(), s = camera.scale || 1;
+        orbit.frame = { x: (view.width / 2 - camera.x) / s, y: (view.height / 2 - camera.y) / s, fit: (Math.min(view.width, view.height) / 2 / s - 46) / 1.34 };
       }
       orbit.from3d = null; orbit.dirty = true;
       if (animate && !reducedMotion()) orbit.change = { from: orbit.k, to: 1, at: performance.now() };
