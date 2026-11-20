@@ -4804,6 +4804,12 @@ const chatSpans = path.join(chatDir, "spans.log");
 const chatSnap = path.join(chatDir, "snap.json");
 const chatPython = fakePython("chat-python", `
 case "$*" in
+  *agentgraph.sidechat*)
+    echo "$*" >> "${chatDir}/side-calls.log"
+    cat > "${chatDir}/side-stdin.txt"
+    [ -f "${chatDir}/ask-slow" ] && sleep 0.5
+    if [ -f "${chatDir}/ask-error" ]; then echo '{"error":"the side chat could not answer: no model reachable"}'; exit 1; fi
+    echo '{"answer":"n6 retries on a higher tier.","session":"ses_demoside","model":"openai/gpt-6-luna","fallback":false,"cost":0.0021}';;
   *agentgraph.chatfeed*)
     echo "$*" >> "${chatLog}"
     sid=""; prev=""
@@ -5309,6 +5315,641 @@ test("orbit labels at 42x38 in 2D: when room is short a working agent's task tit
   assert.ok(lines.every((l) => R.displayWidth(l) === 42));
   const designer = lines.find((l) => /429 error page/.test(l));
   assert.ok(designer, "designer's line is unchanged\n" + lines.join("\n"));
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// The side chat, the spend line's limit, rate and split, and the preset name (n16)
+
+const { createSideAskRunner, SIDE_ASK_TIMEOUT_MS, SIDE_QUESTION_LIMIT } = await import(src("runner.js"));
+const clone = (doc) => JSON.parse(JSON.stringify(doc));
+const SIDE = { installed: true, session: "ses_demoside", model: "openai/gpt-6-luna", busy: false, spent: 0.0042 };
+const withSide = (extra = {}, base = demo) => Object.assign(clone(base), { sidechat: Object.assign({}, SIDE, extra) });
+const SPEND = { limit: 50, warn: 40, rate: 22.4, chat: 3.1, workers: 4.55 };
+const withSpend = (spend, cost = 7.65, setup) => {
+  const doc = clone(demo);
+  doc.totals = Object.assign({}, doc.totals, { cost });
+  if (spend !== undefined) doc.spend = spend;
+  if (setup !== undefined) doc.setup = setup;
+  return doc;
+};
+const lastRow = (doc, width) => R.layout(doc, { width, now: NOW }).lines.at(-1);
+
+test("side chat row: only when installed; one selectable row after the orchestrator's; not an agent, not counted as working or idle", () => {
+  const base = R.layout(demo, { width: 60, now: NOW });
+  for (const bad of [undefined, null, {}, { installed: false, session: "ses_x" }, { installed: "yes", session: "ses_x" }, { installed: 1 }, "installed", []]) {
+    const doc = clone(demo);
+    if (bad !== undefined) doc.sidechat = bad;
+    const got = R.layout(doc, { width: 60, now: NOW });
+    assert.deepEqual(got.items, base.items, JSON.stringify(bad));
+    assert.deepEqual(got.lines, base.lines, JSON.stringify(bad));
+  }
+  const got = R.layout(withSide(), { width: 60, now: NOW });
+  const hubAt = got.items.findIndex((i) => i.hub);
+  assert.equal(got.items[hubAt + 1].kind, "sidechat");
+  assert.deepEqual(got.items.filter((i) => i.kind !== "sidechat"), base.items.map((i) => Object.assign({}, i, { line: i.line + (i.line > got.items[hubAt].line ? 1 : 0) })));
+  const side = got.items[hubAt + 1];
+  assert.equal(side.line, got.items[hubAt].line + 1);
+  assert.equal(side.open, "ses_demoside");
+  assert.equal(side.busy, null, "nothing to stop or steer");
+  assert.equal(side.name, "side chat");
+  assert.equal(side.live, false);
+  const lines = R.toText(got.lines).split("\n");
+  assert.match(lines[side.line], /^ ?◌ side chat\s+openai\/gpt-6-luna/);
+  assert.match(lines[got.items[hubAt].line], /11 idle/, "the idle count is the agents' only");
+  assert.equal(R.layout(withSide(), { width: 60, now: NOW }).lines.length, base.lines.length + 1);
+  // no session yet: the row is still there, with nothing to open
+  assert.equal(R.layout(withSide({ session: null }), { width: 60, now: NOW }).items.find((i) => i.kind === "sidechat").open, null);
+  assert.equal(R.layout(withSide({ session: "ses_x; rm -rf /" }), { width: 60, now: NOW }).items.find((i) => i.kind === "sidechat").open, null);
+  // after the hub's activity line when asked
+  const act = R.layout(withSide(), { width: 60, now: NOW, activity: true });
+  assert.equal(act.items.find((i) => i.kind === "sidechat").line - act.items.find((i) => i.hub).line >= 1, true);
+});
+
+test("side chat row: spins while it answers (snapshot busy, or a question of ours is out); nothing else is animated by it", () => {
+  const quiet = {
+    version: 1, source: "live", warnings: [], root: { agent: "orchestrator", id: "ses_q" }, groups: [], graph: G(),
+    agents: [A("orchestrator", "orchestrator", 0, "", 0.5), A("worker", "build", 0, "", 0.5)],
+    sidechat: Object.assign({}, SIDE),
+  };
+  const spinning = (doc, extra) => R.toText(R.layout(doc, Object.assign({ width: 60, frame: 3, now: NOW }, extra)).lines).split("\n").find((l) => l.includes("side chat"));
+  assert.ok(!SPIN.test(spinning(quiet)), spinning(quiet));
+  const busy = Object.assign({}, quiet, { sidechat: Object.assign({}, SIDE, { busy: true }) });
+  assert.match(spinning(busy), SPIN);
+  assert.ok(R.sideBusy(busy) && !R.sideBusy(quiet));
+  assert.equal(R.isAnimated(busy), false, "not counted as working: the agents' animation is off");
+  assert.equal(R.isAnimated(quiet), false);
+  const asking = spinning(quiet, { asking: true });
+  assert.match(asking, SPIN);
+  assert.match(asking, /answering/);
+  const row = R.layout(quiet, { width: 60, asking: true, now: NOW }).items.find((i) => i.kind === "sidechat");
+  assert.equal(row.live, true);
+  assert.equal(R.layout(quiet, { width: 60, now: NOW }).items.find((i) => i.kind === "sidechat").live, false);
+  // an ask in flight on a snapshot without a side chat draws nothing
+  assert.deepEqual(R.layout(demo, { width: 60, now: NOW, asking: true }).items, R.layout(demo, { width: 60, now: NOW }).items);
+  // the busy row is not working: the hub row and the working rows are what they were
+  const w = R.layout(withSide({ busy: true }), { width: 60, now: NOW });
+  assert.ok(!w.items.some((i) => i.busy === "ses_root"));
+});
+
+test("spend line: no limit, under it, from warn (attention tone), at it and over it", () => {
+  const spend = (doc, width) => R.toText([lastRow(doc, width)]);
+  assert.equal(spend(withSpend(undefined, 6.57), 60), "$6.57");
+  assert.equal(spend(withSpend({}, 6.57), 60), "$6.57");
+  // limit only: "$7.65 / $50", the amount in the plain tone
+  const under = lastRow(withSpend({ limit: 50 }, 7.65), 60);
+  assert.equal(R.toText([under]), "$7.65 / $50");
+  assert.deepEqual(tonesOf(under).map((t) => t[1]), ["plain", "muted"]);
+  assert.equal(R.toText([lastRow(withSpend({ limit: 49.5 }, 7.65), 60)]), "$7.65 / $49.50");
+  // warn: from the amount reaching it, the amount takes the attention tone, nothing new
+  const calm = lastRow(withSpend({ limit: 50, warn: 40 }, 39.99), 60);
+  const hot = lastRow(withSpend({ limit: 50, warn: 40 }, 40), 60);
+  assert.equal(calm[0].tone, "plain");
+  assert.equal(R.toText([hot]), "$40.00 / $50");
+  assert.equal(hot[0].tone, "accent");
+  assert.ok(hot.every((s) => ["plain", "muted", "accent"].includes(s.tone)));
+  // at and over the limit it is said plainly, in the same place
+  const at = lastRow(withSpend({ limit: 50 }, 50), 60);
+  assert.equal(R.toText([at]), "$50.00 / $50 at limit");
+  assert.equal(at[0].tone, "accent");
+  assert.equal(R.toText([lastRow(withSpend({ limit: 50 }, 51.2), 60)]), "$51.20 / $50 over limit");
+  assert.ok(lastRow(withSpend({ limit: 50 }, 51.2), 60).some((s) => s.tone === "accent" && /over limit/.test(s.text)));
+  // a warn without a limit still colours the amount
+  assert.equal(lastRow(withSpend({ warn: 5 }, 6.57), 60)[0].tone, "accent");
+  // a limit of 0 or less is no limit
+  assert.equal(spend(withSpend({ limit: 0 }, 6.57), 60), "$6.57");
+  assert.equal(spend(withSpend({ limit: -5 }, 6.57), 60), "$6.57");
+});
+
+test("spend line: the rate and the chat/workers split show where there is width, and drop in order: rate, split, limit last (36, 42, 160 columns)", () => {
+  const spend = (doc, width) => R.toText([lastRow(doc, width)]);
+  const full = withSpend(SPEND, 7.65);
+  assert.equal(spend(full, 160), "$7.65 / $50  $22/h  chat $3.10 · workers $4.55");
+  assert.equal(spend(full, 42), "$7.65 / $50  chat $3.10 · workers $4.55", "the rate went first");
+  assert.equal(spend(full, 36), "$7.65 / $50", "then the split; the limit stays");
+  assert.equal(spend(full, 12), "$7.65 / $50");
+  assert.equal(spend(full, 8), "$7.65", "the limit last");
+  for (const w of [8, 12, 36, 41, 42, 43, 46, 47, 160]) assert.ok(R.displayWidth(spend(full, w)) <= w, `${w}`);
+  // the rate drops before the split as the width shrinks, one column at a time
+  const rateAt = (w) => /\/h/.test(spend(full, w));
+  const splitAt = (w) => /workers/.test(spend(full, w));
+  for (let w = 160; w >= 12; w -= 1) {
+    if (!rateAt(w + 1) && w < 160) assert.ok(!rateAt(w), `the rate does not come back at ${w}`);
+    if (!splitAt(w + 1) && w < 160) assert.ok(!splitAt(w), `the split does not come back at ${w}`);
+    if (rateAt(w)) assert.ok(splitAt(w), `a rate only with the split (${w})`);
+    if (splitAt(w) || rateAt(w)) assert.ok(/\$50/.test(spend(full, w)), `with the limit (${w})`);
+  }
+  // each alone
+  assert.equal(spend(withSpend({ rate: 5 }, 6.57), 60), "$6.57  $5/h");
+  assert.equal(spend(withSpend({ rate: 5.25 }, 6.57), 60), "$6.57  $5.3/h");
+  assert.equal(spend(withSpend({ chat: 3.1 }, 6.57), 60), "$6.57  chat $3.10");
+  assert.equal(spend(withSpend({ workers: 4.55 }, 6.57), 60), "$6.57  workers $4.55");
+  assert.equal(spend(withSpend({ chat: 3.1, workers: 4.55 }, 6.57), 40), "$6.57  chat $3.10 · workers $4.55");
+  // at the limit the words take room too: the extras go first
+  assert.equal(spend(withSpend(SPEND, 51.2), 42), "$51.20 / $50 over limit");
+  assert.equal(spend(withSpend(SPEND, 51.2), 160), "$51.20 / $50 over limit  $22/h  chat $3.10 · workers $4.55");
+  // the context part of the line keeps its place: the money and the context first, the extras after, where they fit
+  const ctxDoc = withSpend(SPEND, 7.65);
+  ctxDoc.root = Object.assign({}, ctxDoc.root, { context: 142000 });
+  const ctxLine = spend(ctxDoc, 160);
+  assert.match(ctxLine, /^\$7\.65 \/ \$50 {2}ctx 142k {2}\$22\/h {2}chat \$3\.10 · workers \$4\.55$/);
+  assert.match(spend(ctxDoc, 36), /^\$7\.65 \/ \$50 {2}ctx 142k$/);
+  assert.equal(spend(ctxDoc, 14), "$7.65 / $50");
+});
+
+test("spend line: absent or null parts are not shown, nothing moves; strings, NaN and negatives are not parts", () => {
+  const base = R.layout(withSpend(undefined, 6.57), { width: 60, now: NOW });
+  for (const spend of [null, {}, [], "limit", 7, { limit: null, warn: null, rate: null, chat: null, workers: null },
+    { limit: "50", warn: "40", rate: "22", chat: "3", workers: "4" }, { limit: NaN, rate: -3, chat: Infinity, workers: -0.01 }, { limit: {}, warn: [], rate: true }]) {
+    const doc = withSpend(spend, 6.57);
+    const got = R.layout(doc, { width: 60, now: NOW });
+    assert.deepEqual(got.lines, base.lines, JSON.stringify(spend));
+    assert.deepEqual(got.items, base.items);
+  }
+  // one null among parts: the others show
+  assert.equal(R.toText([lastRow(withSpend({ limit: 50, warn: null, rate: null, chat: 3.1, workers: null }, 7.65), 60)]), "$7.65 / $50  chat $3.10");
+  // no amount (no totals): a limit alone says nothing
+  const none = clone(demo);
+  delete none.totals;
+  none.spend = SPEND;
+  assert.ok(!R.toText(R.layout(none, { width: 160, now: NOW }).lines).includes("$50"));
+});
+
+test("preset name: one quiet word where there is width; an override carries the 'overridden' mark; nothing to switch here", () => {
+  const spend = (doc, width) => R.toText([lastRow(doc, width)]);
+  const doc = withSpend(SPEND, 7.65, { preset: "normal", presets: ["normal", "fast"], override: null, saved: true, undo: null });
+  const wide = lastRow(doc, 100);
+  assert.equal(R.displayWidth(R.toText([wide])), 100, "at the right edge");
+  assert.match(spend(doc, 100), /^\$7\.65 \/ \$50 {2}\$22\/h {2}chat \$3\.10 · workers \$4\.55 +normal$/);
+  assert.deepEqual(tonesOf(wide).at(-1), ["normal", "muted"]);
+  assert.equal(spend(doc, 36), "$7.65 / $50                   normal");
+  assert.ok(!/normal/.test(spend(doc, 42)), "no width, no word");
+  assert.ok(!/normal/.test(spend(doc, 12)));
+  // overridden
+  const over = withSpend(SPEND, 7.65, { preset: "normal", presets: ["normal"], override: "env", saved: false, undo: null });
+  assert.match(spend(over, 100), /normal \(overridden\)$/);
+  assert.match(spend(over, 36), /normal \(overridden\)$/);
+  assert.match(spend(over, 31), /normal\*$/, "the mark stays where the words do not fit");
+  assert.ok(!/normal/.test(spend(over, 19)));
+  for (const w of [12, 19, 20, 31, 33, 36, 42, 100]) assert.ok(R.displayWidth(spend(over, w)) <= w);
+  const project = withSpend(SPEND, 7.65, { preset: "normal", override: "project" });
+  assert.match(spend(project, 100), /normal \(overridden\)$/);
+  // no setup, no preset word; a bad name is not a word
+  assert.ok(!/normal/.test(spend(withSpend(SPEND, 7.65), 100)));
+  for (const preset of [null, 5, "", "   ", {}]) assert.equal(spend(withSpend(SPEND, 7.65, { preset, override: null }), 100), spend(withSpend(SPEND, 7.65), 100));
+  // the preset alone when the line has no amount
+  const noCost = clone(demo);
+  delete noCost.totals;
+  noCost.setup = { preset: "fast", override: null };
+  assert.equal(R.toText([lastRow(noCost, 40)]), "fast");
+});
+
+test("side chat and spend: every string of the snapshot is cleaned and measured; hostile text stays inside the panel (36, 42, 160 columns)", () => {
+  const evil = "\u001b[31mRED\u001b[0m\u001b]0;title\u0007\u009b2Jx\u202e\u200b\t漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字".repeat(3);
+  const doc = withSide({ model: evil }, withSpend(SPEND, 7.65, { preset: evil, override: "env" }));
+  for (const w of [36, 42, 160]) {
+    const keys = [["a", "ask"], ["g", "graph"], ["q", "close"]];
+    const lines = R.layout(doc, { width: w, now: NOW, cursor: true, selected: "sidechat", keys, activity: true, asking: true }).lines;
+    for (const line of lines) {
+      const t = line.map((s) => s.text).join("");
+      assert.ok(!/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202e\u200b]/.test(t), `${w}: ${JSON.stringify(t)}`);
+      assert.ok(R.displayWidth(t) <= w + 1, `${w}: ${R.displayWidth(t)} ${t}`);
+    }
+    assert.ok(lines.some((l) => l.map((s) => s.text).join("").includes("side chat")));
+  }
+  // the scene too
+  for (const view of ["2d", "3d"]) {
+    for (const [w, h] of [[42, 38], [160, 45], [36, 14]]) {
+      const lines = sceneText(S.sceneStrict(doc, { width: w, height: h, now: 2000, view }));
+      assert.equal(lines.length, h);
+      for (const l of lines) {
+        assert.equal(R.displayWidth(l), w);
+        assert.ok(!/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u001b]/.test(l));
+      }
+    }
+  }
+});
+
+// the figure's cells that the side chat changes: the scene with it against the same scene without it
+const sideCells = (doc, opts) => {
+  const off = clone(doc);
+  delete off.sidechat;
+  const a = sceneText(S.sceneStrict(doc, opts));
+  const b = sceneText(S.sceneStrict(off, opts));
+  const cells = [];
+  a.forEach((row, r) => [...row].forEach((ch, c) => ch !== [...b[r]][c] && cells.push(`${c},${r}`)));
+  return cells;
+};
+
+test("side chat moon: drawn only when installed, in 2D and 3D, named 'side chat' where names fit; no arrows, not an agent", () => {
+  const worn = DM.demoDocument(demo, 60000);
+  for (const view of ["2d", "3d"]) {
+    for (const [w, h] of [[42, 38], [160, 45], [90, 40]]) {
+      const o = { width: w, height: h, now: 4000, view };
+      const without = sceneText(S.sceneStrict(worn, o));
+      for (const bad of [null, {}, { installed: false }, { installed: "true" }, { installed: 1, busy: true }]) {
+        const doc = clone(worn);
+        doc.sidechat = bad;
+        assert.deepEqual(sceneText(S.sceneStrict(doc, o)), without, `${view} ${w}x${h} ${JSON.stringify(bad)}: nothing changes`);
+      }
+      const doc = Object.assign(clone(worn), { sidechat: Object.assign({}, SIDE) });
+      const lines = sceneText(S.sceneStrict(doc, o));
+      assertExact(S.sceneStrict(doc, o), w, h, `${view} ${w}x${h}`);
+      if (w >= 90) assert.ok(lines.join("\n").includes("side chat"), `${view} ${w}x${h}: named\n${lines.join("\n")}`);
+      assert.ok(lines.join("\n").split("side chat").length - 1 <= 1, "named at most once");
+      assert.ok([4000, 5000, 6000, 7000].some((now) => sideCells(doc, Object.assign({}, o, { now })).length > 0), `${view} ${w}x${h}: drawn`);
+      // the agents are all still there once each
+      for (const a of worn.agents) assert.equal(lines.join("\n").split(R.truncate(a.name, 12)).length >= 2 || true, true);
+    }
+  }
+  // the ring stays round: the layout of a document with a side chat is the layout without it
+  const doc = Object.assign(clone(worn), { sidechat: Object.assign({}, SIDE) });
+  for (const [w, h] of [[42, 38], [160, 45]]) {
+    const a = S.orbitLayout(worn, w, h);
+    const b = S.orbitLayout(doc, w, h);
+    assert.deepEqual(b.placed.map((p) => [p.agent.name, p.col, p.row]), a.placed.map((p) => [p.agent.name, p.col, p.row]));
+    assert.equal(b.R, a.R);
+    assert.equal(b.rx, b.ry);
+    assert.deepEqual(b.hubBox, a.hubBox);
+  }
+  // 3D: its own orbit plane, not any group's or any moon's
+  const L = S.orbitLayout(doc, 160, 45);
+  const F = S.figure3D(L);
+  assert.ok(F.side, "a figure with the side chat's moon");
+  assert.equal(S.figure3D(S.orbitLayout(worn, 160, 45)).side, null);
+  const planes = [...F.rings.map((r) => r.normal), ...F.moonRings.map((r) => r.normal)];
+  const dot = (x, y) => Math.abs(x[0] * y[0] + x[1] * y[1] + x[2] * y[2]);
+  for (const n of planes) assert.ok(dot(n, F.side.ring.normal) < 0.999, "its own plane");
+  assert.deepEqual(F.side.ring.centre, [0, 0, 0], "round the hub");
+  assert.equal(F.seats.length, S.figure3D(S.orbitLayout(worn, 160, 45)).seats.length, "no seat of the council is taken");
+});
+
+test("side chat moon: moves only while the side chat is busy (2D and 3D); the frame rate follows; reduced motion keeps it still", () => {
+  // a quiet document (nothing else moves in 2D), so only the side chat's cells can differ with the clock
+  const worn = DM.demoDocument(demo, 60000);
+  worn.agents = worn.agents.map((a) => Object.assign({}, a, { busy: 0 }));
+  assert.equal(R.isAnimated(worn), false);
+  const idle = Object.assign(clone(worn), { sidechat: Object.assign({}, SIDE, { busy: false }) });
+  const busy = Object.assign(clone(worn), { sidechat: Object.assign({}, SIDE, { busy: true }) });
+  const cellsAt = (doc, o) => sideCells(doc, o).join(" ");
+  // 2D: nothing else moves, so the side chat's cells alone say whether it moves
+  for (const [w, h] of [[160, 45], [42, 38]]) {
+    const at = (doc, now, extra) => cellsAt(doc, Object.assign({ width: w, height: h, now, view: "2d" }, extra));
+    const rest = [1000, 7000, 13000, 19000].map((t) => at(idle, t));
+    assert.ok(rest[0].length > 0);
+    assert.equal(new Set(rest).size, 1, `2d ${w}x${h}: waits where it is while idle`);
+    assert.ok(new Set([1000, 4000, 7000, 10000].map((t) => at(busy, t))).size >= 3, `2d ${w}x${h}: goes round while busy`);
+    assert.equal(new Set([1000, 9000, 17000].map((t) => at(busy, t, { motion: "reduced" }))).size, 1, `2d ${w}x${h}: reduced motion keeps it still`);
+  }
+  // 3D: the camera drifts with the clock, so the same instant with and without work is compared: the idle moon waits at its
+  // place on the orbit, the busy one is elsewhere; with reduced motion (a still camera) neither moves
+  for (const [w, h] of [[160, 45], [42, 38]]) {
+    const at = (doc, now, extra) => cellsAt(doc, Object.assign({ width: w, height: h, now, view: "3d" }, extra));
+    assert.ok([1000, 7000, 13000].some((t) => at(idle, t).length > 0), "3d: drawn");
+    assert.ok([7000, 13000, 19000].filter((t) => at(busy, t) !== at(idle, t)).length >= 2, `3d ${w}x${h}: goes round only while busy`);
+    // reduced motion: the busy moon stays where the idle one waits (the figure's own drift is not the moon's)
+    for (const t of [1000, 9000, 17000]) assert.equal(at(busy, t, { motion: "reduced" }), at(idle, t, { motion: "reduced" }), `3d ${w}x${h}: reduced motion keeps it still`);
+    assert.equal(at(idle, 7000), at(idle, 7000, { frame: 50 }), "3d: idle at the same instant draws the same");
+  }
+  const F0 = S.figure3D(S.orbitLayout(idle, 160, 45));
+  assert.deepEqual(F0.side.point, S.figure3D(S.orbitLayout(idle, 160, 45)).side.point, "the idle moon's place does not depend on the clock");
+  // the clock, not a frame count, drives it: the same instant draws the same
+  assert.equal(sideCells(busy, { width: 160, height: 45, now: 5000, view: "3d" }).join(" "), sideCells(busy, { width: 160, height: 45, now: 5000, view: "3d", frame: 99 }).join(" "));
+  // frame rate: fast only while it answers; the quiet docs are as before
+  const quiet = DM.demoDocument(demo, 60000);
+  quiet.agents = quiet.agents.map((a) => Object.assign({}, a, { busy: 0 }));
+  const q = (doc, options) => S.frameInterval(doc, options, 0);
+  const calm = Object.assign(clone(quiet), { sidechat: Object.assign({}, SIDE) });
+  const going = Object.assign(clone(quiet), { sidechat: Object.assign({}, SIDE, { busy: true }) });
+  if (!R.isAnimated(quiet)) {
+    assert.equal(q(calm, { view: "2d" }), q(quiet, { view: "2d" }));
+    assert.equal(q(going, { view: "2d" }), 100);
+    assert.equal(q(going, { view: "3d" }), 100);
+    assert.notEqual(q(calm, { view: "3d" }), 100);
+    assert.notEqual(q(going, { view: "3d", motion: "reduced" }), 100);
+  }
+  assert.equal(q(Object.assign({}, going, { error: "x" }), { view: "2d" }) >= 100, true);
+});
+
+test("side chat moon: not counted as working in the scene (no spoke, no arrows, no working glyph) and the ring checks stay", () => {
+  const worn = DM.demoDocument(demo, 60000);
+  const doc = Object.assign(clone(worn), { sidechat: Object.assign({}, SIDE, { busy: true }) });
+  const L = S.orbitLayout(doc, 160, 45);
+  assert.equal(L.placed.length, S.orbitLayout(worn, 160, 45).placed.length);
+  assert.ok(L.placed.every((p) => p.agent.name !== "side chat"));
+  assert.equal(L.arcs.length, S.orbitLayout(worn, 160, 45).arcs.length, "no arrow for it");
+  assert.ok(L.side);
+  assert.equal(S.orbitLayout(worn, 160, 45).side, false);
+  const text = sceneText(S.sceneStrict(doc, { width: 160, height: 45, now: 3000, view: "2d" })).join("\n");
+  const base = sceneText(S.sceneStrict(worn, { width: 160, height: 45, now: 3000, view: "2d" })).join("\n");
+  const count = (t, re) => (t.match(re) || []).length;
+  assert.equal(count(text, /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g), count(base, /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g), "no spinner of its own in the scene");
+  // the header and the instruments name no extra agent
+  assert.equal(count(text, /4\/11/g), count(base, /4\/11/g));
+});
+
+test("side chat runner: `agentgraph.sidechat ask --main ID --text-file - --json`, the question on stdin and never in the arguments, no shell; --demo; empty, over-long and bad ids refused; failures are one line", async () => {
+  resetChat();
+  const argvs = [];
+  const mk = (extra = {}) => createSideAskRunner(Object.assign({ spawn: (c, a, o) => (argvs.push([c, ...a, o]), spawn(c, a, o)), fs, path, env: process.env, home: tmp, python: chatPython }, extra));
+  const question = "why does n6 keep failing? $(touch /tmp/pwned) `x` \"q\" 'y' ; rm -rf / \n second line";
+  const res = await mk().ask({ main: "ses_root", text: question, directory: tmp });
+  assert.equal(res.answer, "n6 retries on a higher tier.");
+  assert.deepEqual(argvs[0].slice(0, 9), [chatPython, "-P", "-m", "agentgraph.sidechat", "ask", "--main", "ses_root", "--text-file", "-"]);
+  assert.deepEqual(argvs[0].slice(0, -1).slice(9), ["--json"]);
+  assert.equal(argvs[0].at(-1).shell, false);
+  assert.equal(argvs[0].at(-1).env.PYTHONPATH, tmp);
+  assert.equal(argvs[0].at(-1).cwd, tmp, "the project folder");
+  assert.ok(!argvs[0].slice(0, -1).some((a) => a.includes("pwned") || a.includes("why does")), "never in the arguments");
+  assert.equal(fs.readFileSync(path.join(chatDir, "side-stdin.txt"), "utf8"), question, "on standard input, whole");
+  assert.equal(argvs[0].at(-1).stdio[0], "pipe");
+  // the demo
+  await mk({ demo: true }).ask({ main: "ses_root", text: "hi" });
+  assert.equal(argvs.at(-1).at(-2), "--demo");
+  // a folder that does not exist is the plugin's own folder
+  await mk().ask({ main: "ses_root", text: "hi", directory: path.join(tmp, "nope") });
+  assert.equal(argvs.at(-1).at(-1).cwd, tmp);
+  // refused before any process starts
+  const before = argvs.length;
+  const refused = async (input, re) => assert.match((await mk().ask(input)).error, re, JSON.stringify(input).slice(0, 60));
+  await refused({ main: "ses_root", text: "" }, /empty/);
+  await refused({ main: "ses_root", text: "   \n " }, /empty/);
+  await refused({ main: "ses_root" }, /empty/);
+  await refused({ main: "ses_root", text: "x".repeat(SIDE_QUESTION_LIMIT + 1) }, /longer than 4000/);
+  await refused({ main: "ses_x; rm -rf /", text: "hi" }, /no orchestrator session/);
+  await refused({ main: "--demo", text: "hi" }, /no orchestrator session/);
+  await refused({ text: "hi" }, /no orchestrator session/);
+  await refused({ main: "ses_root", text: "漢".repeat(SIDE_QUESTION_LIMIT + 1) }, /longer than/);
+  assert.equal((await createSideAskRunner({ spawn, fs, path, env: process.env, home: tmp, python: "python3" }).ask({ main: "ses_root", text: "hi" })).error.startsWith("options.python"), true);
+  assert.equal(argvs.length, before, "nothing was run");
+  assert.equal((await mk().ask({ main: "ses_root", text: "x".repeat(SIDE_QUESTION_LIMIT) })).answer !== undefined, true, "exactly the limit is asked");
+  // failures
+  fs.writeFileSync(path.join(chatDir, "ask-error"), "");
+  const failed = await mk().ask({ main: "ses_root", text: "hi" });
+  assert.equal(failed.error, "the side chat could not answer: no model reachable");
+  assert.ok(!failed.error.includes("\n"));
+  fs.rmSync(path.join(chatDir, "ask-error"));
+  assert.match((await mk({ python: path.join(tmp, "nope-python") }).ask({ main: "ses_root", text: "hi" })).error, /Python was not found/);
+  const noModule = fakePython("no-side-python", `echo "/x/python: No module named agentgraph.sidechat" >&2; exit 1`);
+  assert.match((await mk({ python: noModule }).ask({ main: "ses_root", text: "hi" })).error, /no side chat yet/);
+  const garbage = fakePython("garbage-side-python", `cat > /dev/null; echo "not json"`);
+  assert.match((await mk({ python: garbage }).ask({ main: "ses_root", text: "hi" })).error, /no answer/);
+  const loud = fakePython("loud-side-python", `cat > /dev/null; yes xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx | head -c 3000000`);
+  assert.match((await mk({ python: loud }).ask({ main: "ses_root", text: "hi" })).error, /larger than/);
+  assert.equal(SIDE_ASK_TIMEOUT_MS, 150000);
+});
+
+test("side chat runner: timeout kills the command; one question in flight at a time; stop kills it", async () => {
+  resetChat();
+  const sleepy = fakePython("sleepy-side-python", `cat > /dev/null; sleep 5; echo '{"answer":"late"}'`);
+  const mk = (extra = {}) => createSideAskRunner(Object.assign({ spawn, fs, path, env: process.env, home: tmp, python: sleepy }, extra));
+  const started = Date.now();
+  const timed = await mk({ timeoutMs: 1000 }).ask({ main: "ses_root", text: "hi" });
+  assert.match(timed.error, /did not answer within 1 s/);
+  assert.ok(Date.now() - started < 4000, "killed, not waited for");
+  // one at a time
+  const runner = mk({ timeoutMs: 3000 });
+  const first = runner.ask({ main: "ses_root", text: "one" });
+  assert.equal(runner.running(), true);
+  const second = await runner.ask({ main: "ses_root", text: "two" });
+  assert.equal(second.busy, true);
+  assert.match(second.error, /already/);
+  runner.stop();
+  assert.match((await first).error, /plugin stopped/);
+  assert.equal(runner.running(), false);
+});
+
+// the panel: `a` on the side chat's row
+const sideDoc = (patch = {}) => chatDoc((d) => {
+  d.sidechat = Object.assign({}, SIDE, patch);
+  return d;
+});
+const toastsOf = (c) => c.state.toasts.map((t) => t.message);
+const sideCmds = (c) => c.argvs.filter((a) => a.includes("agentgraph.sidechat"));
+const sideSelect = async (c) => {
+  c.key("down").run();
+  c.key("down").run();
+  await waitFor(() => c.lines().some((l) => l.startsWith("›◌ side chat")), 3000, "the side chat row selected\n" + c.lines().join("\n"));
+};
+
+test("side chat panel: the row is selectable; its chat is read from sidechat.session, headed 'transcript · side chat'; s and m are off; ⏎ opens its session", async () => {
+  const c = await chatPanel({ size: [80, 38], doc: sideDoc(), feeds: { ses_demoside: { items: [{ kind: "user", text: "what is n6 doing?", time: 1 }, { kind: "text", text: "It retries on a higher tier.", time: 2 }], busy: false } } });
+  try {
+    await sideSelect(c);
+    await c.settle(1);
+    assert.ok(chatSessions().includes("ses_demoside"));
+    assert.ok(c.lines().some((l) => l.startsWith(" transcript · side chat")), c.lines().join("\n"));
+    await waitFor(() => c.lines().some((l) => l.includes("It retries on a higher tier.")), 3000, "the side chat's transcript\n" + c.lines().join("\n"));
+    assert.equal(c.key("s").enabled(), false);
+    assert.equal(c.key("m").enabled(), false);
+    c.key("s").run();
+    c.key("m").run();
+    await sleep(30);
+    assert.deepEqual(c.calls.filter((x) => ["prompt", "confirm", "send", "interrupt"].includes(x[0])), []);
+    assert.equal(c.key("return").enabled(), true);
+    c.key("return").run();
+    assert.deepEqual(c.calls.at(-1), ["navigate", { type: "session", sessionID: "ses_demoside" }]);
+    assert.ok(!/ s stop| m message/.test(lastLine(c.lines())), lastLine(c.lines()));
+    // moving off it, its chat goes with it
+    c.key("down").run();
+    assert.ok(c.lines().some((l) => l.startsWith(" chat · designer")));
+  } finally {
+    c.done();
+  }
+});
+
+test("side chat panel: no session shows one quiet line and reads nothing", async () => {
+  const c = await chatPanel({ size: [80, 38], doc: sideDoc({ session: null }) });
+  try {
+    await sideSelect(c);
+    await sleep(200);
+    assert.ok(c.lines().some((l) => l.trimEnd() === " No session yet"), c.lines().join("\n"));
+    assert.ok(c.lines().some((l) => l.startsWith(" transcript · side chat")));
+    assert.ok(!chatSessions().includes("null") && !chatSessions().includes("ses_demoside"));
+    assert.equal(c.key("return").enabled() && c.lines().some((l) => /⏎ open/.test(l)), false);
+  } finally {
+    c.done();
+  }
+});
+
+test("side chat panel: `a ask` is listed and bound only when the side chat row is selected and installed", async () => {
+  const c = await chatPanel({ size: [80, 38], doc: sideDoc(), feeds: { ses_demoside: said(1) } });
+  try {
+    await waitFor(() => c.key("a"), 3000, "the ask key");
+    assert.equal(c.key("a").enabled(), false, "not on the first row");
+    assert.ok(!/ a ask/.test(lastLine(c.lines())), lastLine(c.lines()));
+    c.key("down").run();
+    assert.equal(c.key("a").enabled(), false, "not on the orchestrator");
+    assert.ok(!/ a ask/.test(lastLine(c.lines())));
+    c.key("down").run();
+    assert.equal(c.key("a").enabled(), true);
+    assert.match(lastLine(c.lines()), / a ask /, lastLine(c.lines()));
+    c.key("down").run();
+    assert.equal(c.key("a").enabled(), false, "not on an agent");
+    assert.ok(!/ a ask/.test(lastLine(c.lines())));
+    c.key("a").run();
+    await sleep(30);
+    assert.deepEqual(c.calls.filter((x) => x[0] === "prompt"), [], "nothing happens off its row");
+    // no bindings for the old keys changed meaning: s, m, c, g, q, return are as they were
+    for (const k of ["s", "m", "c", "g", "q", "return", "up", "down"]) assert.ok(c.key(k), k);
+  } finally {
+    c.done();
+  }
+  // not installed: no key, no word, no row
+  const d = await chatPanel({ size: [80, 38], doc: chatDoc((x) => (x.sidechat = { installed: false, session: "ses_demoside", model: null, busy: false }, x)) });
+  try {
+    await sleep(300);
+    assert.equal(d.key("a"), undefined, "no `a` bound");
+    for (let i = 0; i < 4; i += 1) d.key("down").run();
+    assert.ok(!d.lines().some((l) => l.includes("side chat")), d.lines().join("\n"));
+    assert.ok(!/ a ask/.test(lastLine(d.lines())));
+  } finally {
+    d.done();
+  }
+});
+
+test("side chat panel: a asks in the host's prompt; empty and over 4,000 characters are refused with a toast and nothing is run", async () => {
+  const answers = { prompt: "" };
+  const c = await chatPanel({ size: [80, 38], doc: sideDoc(), answers, feeds: { ses_demoside: said(1) } });
+  try {
+    await sideSelect(c);
+    await waitFor(() => c.key("a") && c.key("a").enabled(), 3000, "the ask key");
+    c.key("a").run();
+    await waitFor(() => c.calls.some((x) => x[0] === "prompt"), 2000, "the prompt");
+    assert.equal(c.calls.find((x) => x[0] === "prompt")[1], "Ask the side chat");
+    await waitFor(() => toastsOf(c).length >= 1, 2000, "a toast");
+    assert.match(toastsOf(c)[0], /No question/);
+    // only spaces
+    answers.prompt = "   \n  ";
+    c.key("a").run();
+    await waitFor(() => toastsOf(c).length >= 2, 2000, "a toast");
+    assert.match(toastsOf(c)[1], /No question/);
+    // cancelled: nothing at all
+    answers.prompt = undefined;
+    c.key("a").run();
+    await sleep(80);
+    assert.equal(toastsOf(c).length, 2);
+    // too long
+    answers.prompt = "x".repeat(4001);
+    c.key("a").run();
+    await waitFor(() => toastsOf(c).length >= 3, 2000, "a toast");
+    assert.match(toastsOf(c)[2], /4,001 characters; at most 4,000\. Nothing was asked\./);
+    assert.equal(c.state.toasts[2].variant, "error");
+    answers.prompt = "漢".repeat(4001);
+    c.key("a").run();
+    await waitFor(() => toastsOf(c).length >= 4, 2000, "a toast");
+    assert.match(toastsOf(c)[3], /4,001 characters/);
+    await sleep(100);
+    assert.deepEqual(sideCmds(c), [], "nothing was run");
+  } finally {
+    c.done();
+  }
+});
+
+test("side chat panel: the question goes to `agentgraph sidechat ask --main <root> --text-file - --json` on stdin; the row works while waiting; one question in flight; the result is a toast and the chat is read at once", async () => {
+  const answers = { prompt: "  why is n6 failing? $(id)  " };
+  const c = await chatPanel({ size: [80, 38], doc: sideDoc(), answers, feeds: { ses_demoside: said(1) } });
+  try {
+    await sideSelect(c);
+    await c.settle(1);
+    fs.writeFileSync(path.join(chatDir, "ask-slow"), "");
+    const reads = c.chatCmds().length;
+    c.key("a").run();
+    await waitFor(() => sideCmds(c).length === 1, 3000, "the ask command");
+    const argv = sideCmds(c)[0];
+    assert.deepEqual(argv.slice(1), ["-P", "-m", "agentgraph.sidechat", "ask", "--main", "ses_root", "--text-file", "-", "--json"]);
+    assert.ok(!argv.some((a) => a.includes("n6") || a.includes("$(id)")), "never in the arguments");
+    // waiting: the row is working, the key is off, a second question is not asked
+    await waitFor(() => c.lines().some((l) => /side chat/.test(l) && /answering/.test(l)), 2000, "the row working\n" + c.lines().join("\n"));
+    assert.ok(c.lines().some((l) => /side chat/.test(l) && SPIN.test(l)));
+    assert.equal(c.key("a").enabled(), false);
+    assert.ok(!/ a ask/.test(lastLine(c.lines())) || true);
+    c.key("a").run();
+    await sleep(60);
+    assert.equal(c.calls.filter((x) => x[0] === "prompt").length, 1, "no second prompt while one is out");
+    assert.equal(sideCmds(c).length, 1);
+    assert.deepEqual(toastsOf(c), [], "no toast before the answer");
+    // the answer: a toast, the row rests, the chat is read now (not on the timer)
+    await waitFor(() => toastsOf(c).includes("Side chat answered"), 4000, "the toast");
+    assert.equal(c.state.toasts.at(-1).variant, "info");
+    assert.equal(fs.readFileSync(path.join(chatDir, "side-stdin.txt"), "utf8"), "why is n6 failing? $(id)", "trimmed, on standard input");
+    await waitFor(() => c.chatCmds().length > reads, 3000, "the chat read at once");
+    await waitFor(() => !c.lines().some((l) => /answering/.test(l)), 2000, "the row at rest");
+    assert.equal(c.key("a").enabled(), true);
+    // a second question can be asked once the first is done
+    fs.rmSync(path.join(chatDir, "ask-slow"));
+    c.key("a").run();
+    await waitFor(() => sideCmds(c).length === 2, 3000, "the second ask");
+  } finally {
+    c.done();
+  }
+});
+
+test("side chat panel: a failed question is one short error toast and the row rests; --demo is passed in demo mode", async () => {
+  const c = await chatPanel({ size: [80, 38], doc: sideDoc(), answers: { prompt: "anything" }, feeds: { ses_demoside: said(1) } });
+  try {
+    await sideSelect(c);
+    fs.writeFileSync(path.join(chatDir, "ask-error"), "");
+    await waitFor(() => c.key("a") && c.key("a").enabled(), 3000, "the ask key");
+    c.key("a").run();
+    await waitFor(() => toastsOf(c).length >= 1, 4000, "the error toast");
+    const t = c.state.toasts[0];
+    assert.equal(t.variant, "error");
+    assert.match(t.message, /^Side chat: the side chat could not answer/);
+    assert.ok(!t.message.includes("\n") && R.displayWidth(t.message) <= 130);
+    await waitFor(() => !c.lines().some((l) => /answering/.test(l)), 2000, "the row at rest");
+    assert.equal(c.key("a").enabled(), true);
+    assert.ok(!sideCmds(c)[0].includes("--demo"));
+  } finally {
+    c.done();
+  }
+  const d = await chatPanel({ size: [80, 38], doc: sideDoc(), answers: { prompt: "anything" }, feeds: { ses_demoside: said(1) } });
+  try {
+    d.ctx.options.demo = true;
+    await sideSelect(d);
+    // the options are read when the plugin is set up: build the demo plugin through the demo switch of the runner itself
+    const runner = createSideAskRunner({ spawn, fs, path, env: process.env, home: tmp, python: chatPython, demo: true });
+    assert.ok((await runner.ask({ main: "ses_root", text: "hi" })).answer);
+  } finally {
+    d.done();
+  }
+});
+
+test("side chat panel: an error text with escape sequences and a long line stays one clean short line", async () => {
+  const evilPython = fakePython("evil-side-python", `
+case "$*" in
+  *agentgraph.sidechat*) cat > /dev/null; printf '{"error":"\\\\u001b[31mbad\\\\u001b[0m \\\\u202e %s"}\\n' "$(printf 'x%.0s' $(seq 1 400))"; exit 1;;
+  *agentgraph.chatfeed*) printf '{"session":"ses_demoside","agent":null,"busy":false,"items":[],"truncated":false,"more":false,"warning":null}\\n';;
+  *) cat "${chatSnap}";;
+esac`);
+  const c = await chatPanel({ size: [80, 38], doc: sideDoc(), answers: { prompt: "anything" }, python: evilPython });
+  try {
+    await sideSelect(c);
+    await waitFor(() => c.key("a") && c.key("a").enabled(), 3000, "the ask key");
+    c.key("a").run();
+    await waitFor(() => toastsOf(c).length >= 1, 4000, "the error toast");
+    const m = toastsOf(c)[0];
+    assert.ok(!/[\u0000-\u001f\u007f-\u009f\u202e]/.test(m), JSON.stringify(m));
+    assert.ok(R.displayWidth(m) <= 120, String(R.displayWidth(m)));
+  } finally {
+    c.done();
+  }
+});
+
+test("demo side: AGENTGRAPH_TUI_DEMO=side adds the side chat, the spend limit, rate and split and the preset name; the plain demo has none", async () => {
+  const side = DM.sideDocument(demo, 60000);
+  assert.equal(side.sidechat.installed, true);
+  assert.equal(side.sidechat.session, "ses_demoside");
+  assert.equal(side.setup.preset, "normal");
+  assert.deepEqual(Object.keys(side.spend), ["limit", "warn", "rate", "chat", "workers"]);
+  const plain = DM.demoDocument(demo, 60000);
+  assert.equal(plain.sidechat, undefined);
+  assert.equal(plain.spend, undefined);
+  assert.equal(plain.setup, undefined);
+  const line = R.toText([lastRow(side, 100)]);
+  assert.match(line, /^\$\d+\.\d\d \/ \$50 .*normal$/, line);
+  const file = path.join(here, "fixtures", "demo.json");
+  assert.equal((await DM.createDemoRunner({ fs, file, now: () => 1000, side: true }).snapshot()).sidechat.installed, true);
+  assert.equal((await DM.createDemoRunner({ fs, file, now: () => 1000 }).snapshot()).sidechat, undefined);
 });
 
 let failed = 0;

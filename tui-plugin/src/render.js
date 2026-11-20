@@ -18,6 +18,8 @@ export const TONES = Object.freeze(["plain", "muted", "accent", "danger"]);
 export const SPINNER = Object.freeze(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
 export const MARK_HUB = "◉";
 export const MARK_IDLE = "○";
+export const MARK_SIDE = "◌";
+export const SIDE_NAME = "side chat";
 export const LOOP_MARK = "↻";
 export const ATTENTION = "!";
 export const SENT_BACK = "↩";
@@ -240,6 +242,23 @@ function hubWorking(doc, hub) {
 }
 
 // True when anything is working: the hub or any other agent. Only then does anything animate.
+// The side chat of a snapshot (WEB_API.md `sidechat`: { installed, session, model, busy, spent? }): null unless it is
+// installed. It is not an agent: it is no row of the agents, not counted as working, and `isAnimated` never counts it.
+const BIDI_MARKS = /[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g; // direction marks and zero-width characters
+export function sideChatOf(doc) {
+  const side = isObject(doc) && isObject(doc.sidechat) ? doc.sidechat : null;
+  if (!side || side.installed !== true) return null;
+  const session = typeof side.session === "string" && /^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$/.test(side.session) ? side.session : null;
+  return { session, model: typeof side.model === "string" ? clean(side.model.replace(BIDI_MARKS, "")) : "", busy: side.busy === true };
+}
+
+// The side chat is installed and answering: its moon moves, its row spins.
+export const sideBusy = (doc) => {
+  if (!isObject(doc) || (doc.error !== undefined && doc.error !== null)) return false;
+  const side = sideChatOf(doc);
+  return !!side && side.busy;
+};
+
 export function isAnimated(doc) {
   if (!isObject(doc) || (doc.error !== undefined && doc.error !== null)) return false;
   const agents = validAgents(doc);
@@ -664,6 +683,18 @@ function hubRow(doc, hub, idle, width, frame) {
   });
 }
 
+// The side chat's row, after the orchestrator's: the mark, the name, a spinner while it answers (the snapshot says busy, or
+// a question of ours is out), and its model. It is not an agent: nobody counts it as working.
+function sideRow(side, asking, width, frame) {
+  const live = side.busy || asking;
+  return composeRow(width, {
+    head: [sp(MARK_SIDE, live ? "accent" : "muted"), sp(" ", "plain")],
+    name: SIDE_NAME,
+    tail: live ? [sp(" ", "plain"), sp(spinnerGlyph(frame), "accent")] : [],
+    what: asking ? "answering" : side.model,
+  });
+}
+
 function workingRow(item, width, frame, index, now) {
   const loop = item.rounds >= 2 ? [sp(` ${LOOP_MARK}${item.rounds}`, "accent")] : [];
   return composeRow(width, {
@@ -739,20 +770,86 @@ function progressRow(doc, width) {
   return candidates.find((c) => lineWidth(c) <= width) || count;
 }
 
+// The spend line (WEB_API.md `spend`: { limit, warn, rate, chat, workers }, dollars; rate in dollars an hour). Every part
+// can be absent or null: it is then not shown. Limit: "$7.65 / $50"; from `warn` the amount takes the attention tone;
+// at or over the limit the line says so ("at limit", "over limit"). Rate "$22/h" and the split "chat $3.10 · workers
+// $4.55" show where there is width; they drop in this order: the rate, the split, the limit last.
+const moneyOf = (value) => {
+  const n = finiteNumber(value);
+  return n !== null && n >= 0 ? n : null;
+};
+const limitText = (n) => "$" + (Number.isInteger(n) ? String(n) : n.toFixed(2));
+const rateText = (n) => "$" + (n >= 10 ? String(Math.round(n)) : n.toFixed(1).replace(/\.0$/, "")) + "/h";
+
+function spendParts(doc, cost) {
+  const spend = isObject(doc.spend) ? doc.spend : null;
+  const limit = spend ? moneyOf(spend.limit) : null;
+  const warn = spend ? moneyOf(spend.warn) : null;
+  const rate = spend ? moneyOf(spend.rate) : null;
+  const chat = spend ? moneyOf(spend.chat) : null;
+  const workers = spend ? moneyOf(spend.workers) : null;
+  const hot = cost !== null && ((warn !== null && cost >= warn) || (limit !== null && limit > 0 && cost >= limit));
+  const amount = cost !== null ? [sp(formatDollars(cost), hot ? "accent" : "plain")] : [];
+  const plain = amount;
+  let withLimit = amount;
+  if (cost !== null && limit !== null && limit > 0) {
+    withLimit = [...amount, sp(" / " + limitText(limit), "muted")];
+    if (cost >= limit) withLimit.push(sp(cost > limit ? " over limit" : " at limit", "accent"));
+  }
+  const split = [];
+  if (chat !== null) split.push(`chat ${formatDollars(chat)}`);
+  if (workers !== null) split.push(`workers ${formatDollars(workers)}`);
+  return { plain, withLimit, rate: rate !== null ? [sp(rateText(rate), "muted")] : null, split: split.length ? [sp(split.join(" · "), "muted")] : null };
+}
+
+function presetSpans(doc, room) {
+  const setup = isObject(doc.setup) ? doc.setup : null;
+  const name = setup && typeof setup.preset === "string" ? clean(setup.preset.replace(BIDI_MARKS, "")) : "";
+  if (!name) return null;
+  const overridden = !!setup.override;
+  const forms = overridden ? [`${name} (overridden)`, `${name}*`] : [name];
+  const text = forms.find((f) => displayWidth(f) <= room);
+  return text ? [sp(text, "muted")] : null;
+}
+
 function costRow(doc, width) {
   const totals = isObject(doc.totals) ? doc.totals : null;
   const cost = totals ? finiteNumber(totals.cost) : null;
   const root = isObject(doc.root) ? doc.root : null;
   const wear = root && isObject(root.wear) ? root.wear : null;
   const ctx = (wear ? finiteNumber(wear.context) : null) ?? (root ? finiteNumber(root.context) : null);
-  const money = cost !== null ? [sp(formatDollars(cost), "plain")] : [];
+  const spend = spendParts(doc, cost);
   const label = sp("ctx ", "muted");
   const ctxParts = ctx === null ? [] : wear ? wearParts(wear, ctx).map((p) => [label, ...p]) : [[label, ...numberSpans(formatTokens(ctx))]];
-  for (const part of ctxParts) {
-    const line = money.length ? [...money, sp(SECTION_GAP, "plain"), ...part] : part;
-    if (lineWidth(line) <= width) return line;
+  const joined = (...parts) => {
+    const out = [];
+    for (const part of parts) {
+      if (!part || !part.length) continue;
+      if (out.length) out.push(sp(SECTION_GAP, "plain"));
+      out.push(...part);
+    }
+    return out;
+  };
+  // the richest line that fits: the ctx part as before, then the rate and the split (rate first to go), the limit last
+  const extras = [[spend.rate, spend.split], [spend.split], []].map((set) => set.filter(Boolean));
+  const tries = [];
+  if (spend.withLimit.length) {
+    for (const part of ctxParts) for (const set of extras) tries.push(joined(spend.withLimit, part, ...set));
+    for (const set of extras) tries.push(joined(spend.withLimit, ...set));
   }
-  return money.length ? money : ctxParts.length ? ctxParts[ctxParts.length - 1] : null;
+  for (const part of ctxParts) {
+    for (const set of spend.plain.length ? extras : [[]]) tries.push(joined(spend.plain, part, ...set));
+  }
+  let line = tries.find((t) => t.length && lineWidth(t) <= width);
+  if (!line) {
+    if (spend.plain.length) line = spend.plain;
+    else if (ctxParts.length) line = ctxParts[ctxParts.length - 1];
+    else line = [];
+  }
+  const preset = line.length ? presetSpans(doc, width - lineWidth(line) - 2) : presetSpans(doc, width);
+  if (!preset) return line.length ? line : null;
+  if (!line.length) return preset;
+  return [...line, sp(" ".repeat(Math.max(2, width - lineWidth(line) - lineWidth(preset))), "plain"), ...preset];
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -867,7 +964,8 @@ function keysRow(keys, width) {
 //   and message act on (null for the hub and for agents that do not work). selected: the selected item's key (the
 //   first item's when `selected` names none). With `cursor` every row has a one-column gutter, `›` on the selected
 //   row; `keys` adds the dim key line ([[key, label], ...]; `keysLine` is its index in `lines`, else null); `activity`
-//   adds one line under each working agent's row with what it is doing now. Also returned: `flows` (the drawn paths, most recently run
+//   adds one line under each working agent's row with what it is doing now. A side chat (snapshot `sidechat.installed`) is one
+//   more row after the orchestrator's (kind "sidechat", `live` while it answers or `asking` says a question of ours is out). Also returned: `flows` (the drawn paths, most recently run
 //   first) and `root` (the root session's id, the orchestrator's session, or null). With paths and nothing at work
 //   (nothing needs the user, nobody works, the hub is idle) one row after the hub says how many and which ran last.
 export function layout(snapshot, options = {}) {
@@ -931,6 +1029,14 @@ export function layout(snapshot, options = {}) {
     const doing = activityRow(hub, inner);
     if (doing) rows.push({ line: doing });
   }
+  const side = sideChatOf(snapshot);
+  if (side) {
+    const asking = options.asking === true;
+    rows.push({
+      line: sideRow(side, asking, inner, frame),
+      item: { key: "sidechat", kind: "sidechat", agent: null, name: SIDE_NAME, hub: false, open: side.session, busy: null, live: side.busy || asking },
+    });
+  }
   const shownWorking = working.length > WORKING_MAX + 1 ? working.slice(0, WORKING_MAX) : working;
   shownWorking.forEach((item, i) => {
     rows.push({ line: workingRow(item, inner, frame, i, at), item });
@@ -960,8 +1066,8 @@ export function layout(snapshot, options = {}) {
   const items = [];
   rows.forEach((r, i) => {
     if (!r.item) return;
-    const { key, kind, agent, name, hub: isHub, open, busy } = r.item;
-    items.push({ key, line: i, kind, agent, name, hub: !!isHub, open: open || null, busy: busy || null });
+    const { key, kind, agent, name, hub: isHub, open, busy, live } = r.item;
+    items.push(Object.assign({ key, line: i, kind, agent, name, hub: !!isHub, open: open || null, busy: busy || null }, live === undefined ? {} : { live }));
   });
   const root = isObject(snapshot.root) && typeof snapshot.root.id === "string" && snapshot.root.id ? snapshot.root.id : null;
   return { lines: finish(lines), items, selected, flows, root, keysLine: keysAt };

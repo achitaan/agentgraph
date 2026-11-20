@@ -28,12 +28,12 @@
  * AGENTGRAPH_TUI_DEMO=1 in the TUI's environment draws a moving demo document instead of running Python;
  * AGENTGRAPH_TUI_DEMO=paths draws it at rest with sample paths (src/demo.js). The demo never sends a path.
  */
-import { render, layout, isAnimated, truncate as truncateText, flowLabel, flowName, flowStatsText, clipLine } from "./render.js";
+import { render, layout, isAnimated, sideBusy, truncate as truncateText, flowLabel, flowName, flowStatsText, clipLine } from "./render.js";
 import {
   scene, sceneFits, frameInterval, changeAt, orbitTurned, orbitReset, TURN_STEP, ELEVATION_STEP, DRAG_TURN_PER_CELL, DRAG_ELEVATION_PER_ROW,
   finishedRuns, STREAK_MS, STREAK_GAP_MS,
 } from "./scene.js";
-import { createSnapshotRunner, createChatRunner, errorDocument, errorMessage, oneLine, runFlowPrompt, GOAL_LIMIT } from "./runner.js";
+import { createSnapshotRunner, createChatRunner, createSideAskRunner, errorDocument, errorMessage, oneLine, runFlowPrompt, GOAL_LIMIT, SIDE_QUESTION_LIMIT } from "./runner.js";
 import { chatLines, chatWindow, chatHeading, cleanChat, CHAT_MIN_INLINE } from "./chat.js";
 import { createDemoRunner, DEMO_INTERVAL_MS } from "./demo.js";
 
@@ -345,7 +345,7 @@ export function createPlugin(host) {
     if (noSend) report("mode", "nosend: r stops before the send (AGENTGRAPH_TUI_NOSEND)");
     if (demo) options.intervalMs = Math.min(options.intervalMs, DEMO_INTERVAL_MS);
     const runner = demo
-      ? createDemoRunner({ fs: host.fs, file: host.demoFile, now: clock, paths: String(host.env.AGENTGRAPH_TUI_DEMO).trim() === "paths" })
+      ? createDemoRunner({ fs: host.fs, file: host.demoFile, now: clock, paths: String(host.env.AGENTGRAPH_TUI_DEMO).trim() === "paths", side: String(host.env.AGENTGRAPH_TUI_DEMO).trim() === "side" })
       : createSnapshotRunner({
           spawn: host.spawn,
           fs: host.fs,
@@ -388,6 +388,18 @@ export function createPlugin(host) {
       demo: demo || options.demo,
       onSpawn: (argv) => report("chat", argv.join(" ")), // debug log only
     });
+    // The side chat's question (`a` on its row): one in flight; `asking` draws the row as working until the answer is in.
+    const sideRunner = createSideAskRunner({
+      spawn: host.spawn,
+      fs: host.fs,
+      path: host.path,
+      env: host.env,
+      home: options.home,
+      python: options.python,
+      demo: demo || options.demo,
+      onSpawn: (argv) => report("sidechat", argv.join(" ")), // debug log only
+    });
+    const [asking, setAsking] = host.createSignal(false);
     const SENT_KEEP_MS = 60000; // a sent message the feed has not shown yet is drawn as pending for this long
     const [chatState, setChatState] = host.createSignal({ session: null, feed: null, error: null, extras: [] });
     const chatFeed = (() => {
@@ -497,7 +509,7 @@ export function createPlugin(host) {
         let ms = 0;
         if (!disposed && !stopped) {
           if (sceneOn) ms = isPlainObject(doc) && (doc.error === undefined || doc.error === null) ? sceneInterval(doc) : 0;
-          else ms = isAnimated(doc) ? SPINNER_MS : 0;
+          else ms = isAnimated(doc) || sideBusy(doc) || asking() ? SPINNER_MS : 0;
         }
         if (ms === spinMs && !!spinTimer === ms > 0) return;
         if (spinTimer) timers.clearInterval(spinTimer);
@@ -661,6 +673,7 @@ export function createPlugin(host) {
           const height = resolved.height || null;
           const columns = resolved.columns || null;
           const base = { width, frame: watcher.frame(), now: clock(), requests, cursor: !!listOptions.cursor, selected };
+          if (typeof listOptions.asking === "function" && listOptions.asking()) base.asking = true;
           // the panel's rows carry what each working agent is doing; they go when the panel is too short for the rows
           let more = listOptions.activity ? { activity: true } : {};
           let first = layout(snap.doc, Object.assign({}, base, more));
@@ -735,6 +748,7 @@ export function createPlugin(host) {
     const canOpen = () => !!(ctx.ui && ctx.ui.router && has(ctx.ui.router.navigate));
     const canStop = () => !!(ctx.client && ctx.client.session && has(ctx.client.session.interrupt) && ctx.ui && ctx.ui.dialog && has(ctx.ui.dialog.confirm));
     const canMessage = () => !!(ctx.client && ctx.client.session && has(ctx.client.session.prompt) && ctx.ui && ctx.ui.dialog && has(ctx.ui.dialog.prompt));
+    const canAsk = () => !!(ctx.ui && ctx.ui.dialog && has(ctx.ui.dialog.prompt));
     const canRun = canMessage; // the goal's prompt and the send are the calls `m` uses; the chooser is optional
     let runBusy = false; // a path is being run: from `r` until it was sent or given up
     const [runShown, setRunShown] = host.createSignal(true); // the key line's `r run`: hidden while runBusy
@@ -743,6 +757,7 @@ export function createPlugin(host) {
       setRunShown(!busy);
       requestRender();
     };
+    let askKeyWanted = null; // the mounted panel's setAskKey(want): `a` is there while the snapshot has a side chat row
     let runKeyWanted = null; // the mounted panel's setRunKey(want): `r` is there while the snapshot has a path
     // The chat of the selected row, in the panel's list: `chatOpen` is the user's `c` (the chat in place of the lower part of
     // the panel, for when it does not fit beside the list); `chatView` is where it is scrolled (lines up from the newest,
@@ -762,6 +777,8 @@ export function createPlugin(host) {
     };
     // The chat's place: beside the list when the panel has the room, in place of its lower part after `c`, else nowhere.
     // -> { mode: "inline" | "open" | "none" | "off", item, win, live, name, width }
+    // the row's session is working: an agent's running session, or the side chat answering
+    const itemLive = (item) => (item.kind === "sidechat" ? item.live === true : !!item.busy);
     const chatPlan = (first, height, width) => {
       chatTick();
       const item = first.items.find((i) => i.key === first.selected) || null;
@@ -793,7 +810,7 @@ export function createPlugin(host) {
       chatView.total = lines.length;
       const win = chatWindow(lines, rowsAvail, chatView.scroll);
       Object.assign(chatView, { scroll: win.scroll, max: win.max, rows: win.rows });
-      return { mode, item, win, live: !!item.busy, name: item.kind === "human" ? "orchestrator" : item.name, width: cw };
+      return { mode, item, win, live: itemLive(item), name: item.kind === "human" ? "orchestrator" : item.name, width: cw };
     };
     // The lines to draw: the list's, with the chat under its rows (before the key line) or in place of them (the
     // selected row, the chat, the key line).
@@ -818,6 +835,7 @@ export function createPlugin(host) {
       if (item && item.open && canOpen()) pieces.push(["⏎", "open"]);
       if (item && item.busy && canStop()) pieces.push(["s", "stop"]);
       if (item && item.busy && canMessage()) pieces.push(["m", "message"]);
+      if (item && item.kind === "sidechat" && canAsk()) pieces.push(["a", "ask"]);
       if (plan && item && item.open) {
         if (plan.mode === "open") pieces.push(["c", "back"]);
         else if (plan.mode === "none") pieces.push(["c", "chat"]);
@@ -830,6 +848,7 @@ export function createPlugin(host) {
     const panelList = {
       cursor: true,
       activity: true,
+      asking: () => asking(),
       selected: () => selection(),
       keys: (item, items, result, plan) => (hasKeys() ? keyPieces(item, items, result, plan) : []),
       plan: chatPlan,
@@ -846,10 +865,11 @@ export function createPlugin(host) {
         rows.chatRows = plan && plan.win ? plan.win.rows : 0;
         // the chat is read for the selected row while it shows; never on the orbit, hidden or with no rows
         if (!result.scene && rows.items.length && plan && plan.item && plan.item.open && (plan.mode === "inline" || plan.mode === "open")) {
-          chatFeed.want(plan.item.open, !!plan.item.busy);
+          chatFeed.want(plan.item.open, itemLive(plan.item));
         } else {
           chatFeed.want(null);
         }
+        if (Array.isArray(result.flows) && askKeyWanted) askKeyWanted(result.items.some((i) => i.kind === "sidechat")); // a list's layout, not the orbit's
         if (Array.isArray(result.flows) && runKeyWanted) runKeyWanted(result.flows.length > 0); // a list's layout, not the orbit's
         if (Array.isArray(result.flows)) {
           // debug log only, when they change (real-host.py --live-paths waits on a path's new rev after a refresh)
@@ -959,6 +979,57 @@ export function createPlugin(host) {
         .catch((error) => {
           report("message", error);
           toast(`Could not message ${item.name}: ${errorMessage(error)}`, "error");
+        });
+    };
+    // `a` on the side chat's row: one question to `agentgraph sidechat ask` (the text goes on its standard input), asked in the
+    // host's prompt. Empty and over-long questions are refused; one is in flight at a time; the result is a toast and the chat
+    // (and the snapshot, which has the side session once it exists) is read at once.
+    const askSide = () => {
+      const item = selectedItem();
+      if (!item || item.kind !== "sidechat" || !canAsk() || asking()) return;
+      withDialog(() => ctx.ui.dialog.prompt({ title: "Ask the side chat", placeholder: "A question about the running task" }))
+        .then((answer) => {
+          if (typeof answer !== "string") return undefined; // cancelled
+          const question = answer.trim();
+          if (!question) {
+            toast("No question: nothing was asked.");
+            return undefined;
+          }
+          const length = [...question].length;
+          if (length > SIDE_QUESTION_LIMIT) {
+            toast(`The question is ${length.toLocaleString("en-US")} characters; at most ${SIDE_QUESTION_LIMIT.toLocaleString("en-US")}. Nothing was asked.`, "error");
+            return undefined;
+          }
+          if (asking()) return undefined;
+          if (!rows.root) {
+            toast("The side chat could not be asked: no orchestrator session.", "error");
+            return undefined;
+          }
+          setAsking(true);
+          for (const watcher of watchers) watcher.retime();
+          requestRender();
+          report("action", "ask side chat");
+          return sideRunner
+            .ask({ main: rows.root, text: question, directory: directory() })
+            .then((res) => {
+              if (disposed) return;
+              if (res && typeof res.answer === "string") toast("Side chat answered");
+              else toast("Side chat: " + truncateText(cleanChat((res && res.error) || "no answer").replace(/\s+/g, " ").trim() || "no answer", 100), "error");
+            })
+            .finally(() => {
+              if (disposed) return;
+              setAsking(false);
+              for (const watcher of watchers) {
+                watcher.retime();
+                watcher.refresh();
+              }
+              chatFeed.read();
+              requestRender();
+            });
+        })
+        .catch((error) => {
+          report("ask", error);
+          if (!disposed) toast("Side chat: " + truncateText(cleanChat(errorMessage(error)).replace(/\s+/g, " ").trim() || "failed", 100), "error");
         });
     };
     // `r`: run a drawn path. The chooser (skipped with one path), the goal, the run message from the back end, then the
@@ -1480,7 +1551,9 @@ export function createPlugin(host) {
         if (removed) return;
         removed = true;
         if (runKeyWanted === setRunKey) runKeyWanted = null;
+        if (askKeyWanted === setAskKey) askKeyWanted = null;
         dropRunKey();
+        dropAskKey();
         panelLayers.delete(remove);
         for (const fn of unregisters) {
           try {
@@ -1557,6 +1630,39 @@ export function createPlugin(host) {
           /* ignore */
         }
       };
+      // `a` (ask the side chat): registered while the list has the side chat's row (it is installed), like `r`; it acts only
+      // while that row is selected.
+      let askKey = false;
+      let askOff = null;
+      const setAskKey = (want) => {
+        want = !!want && canAsk();
+        if (want === askKey || removed) return;
+        askKey = want;
+        setTimeout(() => {
+          if (removed) return;
+          if (askKey && !askOff) {
+            try {
+              askOff = ctx.keymap.layer(() => ({
+                commands: [{ id: PANEL_NAME + ".ask", bind: "a", enabled: () => ours() && onList() && !asking() && (selectedItem() || {}).kind === "sidechat", run: () => ours() && onList() && askSide() }],
+              }));
+            } catch (error) {
+              report("ask key", error);
+            }
+          } else if (!askKey && askOff) {
+            dropAskKey();
+          }
+        }, 0);
+      };
+      const dropAskKey = () => {
+        const off = askOff;
+        askOff = null;
+        try {
+          if (typeof off === "function") off();
+        } catch (_) {
+          /* ignore */
+        }
+      };
+      askKeyWanted = setAskKey;
       runKeyWanted = setRunKey;
       panelLayers.add(remove);
       return { remove, addViewKey, sized };
@@ -1600,6 +1706,7 @@ export function createPlugin(host) {
       disposed = true;
       for (const watcher of watchers) watcher.stop();
       chatFeed.stop();
+      sideRunner.stop();
       runner.stop();
       for (const remove of [...panelLayers]) remove();
       for (const unregister of disposers) {

@@ -33,7 +33,7 @@
  */
 import {
   SPINNER, MARK_HUB, MARK_IDLE, SENT_BACK, ATTENTION, LOOP_MARK, BAR_FULL, BAR_EMPTY, ELLIPSIS,
-  charWidth, displayWidth, truncate, clean, clipLine, lineWidth, formatDollars, formatTokens, seatName, isAnimated,
+  charWidth, displayWidth, truncate, clean, clipLine, lineWidth, formatDollars, formatTokens, seatName, isAnimated, sideBusy, sideChatOf, SIDE_NAME,
   isObject, list, busyCount, finiteNumber, rounds, validAgents, findHub, hubWorking, currentGoal, agentCost,
   numberSpans, spinnerGlyph, wearParts, needsEntries, needsLine, flowsOf,
 } from "./render.js";
@@ -105,6 +105,10 @@ const MOON_RING_MAX = 0.4;
 // the moons' orbits are drawn (faint, one each) only where the canvas has room for them beside the names
 const MOON_RINGS_MIN_W = 48;
 const MOON_RINGS_MIN_H = 18;
+// The side chat's moon goes round the hub, on a plane of its own (steeper than the groups' rings), only while it answers.
+const SIDE_NODE = 0.7; // radians clockwise from the top: where its plane crosses the flat one
+const SIDE_TILT = 1.3; // radians: the plane's lean (flat at rise 0)
+const SIDE_REST = 2.2; // radians round its orbit where the moon waits
 const MOON_RADIUS_STEP = 0.14; // moon i's orbit is r * (1 + 0.14 i): no two moons of a parent at the same distance
 const PERSPECTIVE = 4; // the camera's distance in figure radii
 
@@ -133,6 +137,7 @@ export function frameInterval(doc, options = {}, now = 0) {
   if (changeAt(options, now)) return FRAME_MS_WORKING;
   if (streaking(options, now)) return FRAME_MS_WORKING;
   if (isAnimated(doc)) return FRAME_MS_WORKING;
+  if (isObject(options) && options.motion !== "reduced" && sideBusy(doc)) return FRAME_MS_WORKING; // the side chat's moon goes round
   if (isObject(options) && options.motion !== "reduced" && sunFading(doc, options, now)) return FRAME_MS_WORKING; // the spikes draw back
   return isObject(options) && options.view === "3d" ? FRAME_MS_IDLE_3D : FRAME_MS_IDLE;
 }
@@ -742,7 +747,7 @@ function buildLayout(doc, w, h) {
     arcs.push({ loop, points, worker: a, evaluator: b });
   }
   const keys = groups.map((g) => g.key);
-  return { w, h, cx, cy, rx, ry, R, fitY, hubBox: hubBox(cx, cy, hubR), ring, placed, arcs, hubR, hub, states, agents, keys, groups };
+  return { w, h, cx, cy, rx, ry, R, fitY, hubBox: hubBox(cx, cy, hubR), ring, placed, arcs, hubR, hub, states, agents, keys, groups, side: !!sideChatOf(doc) };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -832,6 +837,17 @@ export function figure3D(L, rise = 1) {
         seats.push({ agent, key: p.key, lead: p.agent.name, ring, a0: turn, index: i, point: moonOn(ring, turn) });
       });
   }
+  // the side chat's moon (only when installed): round the hub itself, in its own plane
+  let side = null;
+  if (L.side) {
+    const hubRho0 = hubRadius3(L);
+    const inc = SIDE_TILT * k;
+    const n = horizontal(SIDE_NODE);
+    const m = [Math.cos(SIDE_NODE) * Math.cos(inc), -Math.sin(SIDE_NODE) * Math.cos(inc), Math.sin(inc)];
+    const ring = { key: "side", lead: "", centre: [0, 0, 0], e1: n, e2: m, normal: norm(cross(n, m)) || [0, 0, 1], radius: clamp(hubRho0 * 1.9, 0.2, 0.38), points: [] };
+    for (let j = 0; j < 48; j += 1) ring.points.push(moonOn(ring, (j / 48) * 2 * Math.PI));
+    side = { ring, a0: SIDE_REST, point: moonOn(ring, SIDE_REST) };
+  }
   // loops: an arc over the sphere between the two agents, bowed outward
   const arcs = L.arcs.map((arc) => {
     const a = agents.get(arc.worker.agent.name);
@@ -854,7 +870,7 @@ export function figure3D(L, rise = 1) {
     const a = (i / 96) * 2 * Math.PI;
     hubRing.push([hubRho * Math.sin(a), hubRho * Math.cos(a), 0]);
   }
-  const figure = { rings, agents, seats, moonRings, arcs, hubRing };
+  const figure = { rings, agents, seats, moonRings, arcs, hubRing, side };
   if (k === 1) L.figure = figure;
   return figure;
 }
@@ -1548,6 +1564,45 @@ function draw2D(doc, L, canvas, S, P, now, frame, options) {
     }
   }
   drawLabels2D(doc, L, canvas, S, P, now, frame);
+  drawSide2D(doc, L, canvas, S, now, reduced);
+}
+
+// The side chat's moon (only when installed): two dots on a faint orbit round the hub's ball, going round only while it
+// answers, and its name beside it where the cells are free (after the agents' names, which it never covers).
+function drawSide2D(doc, L, canvas, S, now, reduced) {
+  if (!L.side) return;
+  const busy = sideBusy(doc);
+  const rm = L.hubR + 6;
+  const at = (a) => [L.cx + rm * Math.cos(a), L.cy + rm * 0.9 * Math.sin(a)];
+  if (L.w >= MOON_RINGS_MIN_W && L.h >= MOON_RINGS_MIN_H) {
+    for (let j = 0; j < 36; j += 1) {
+      const [x, y] = at((j / 36) * 2 * Math.PI);
+      canvas.dot(x, y, S.get("muted"));
+    }
+  }
+  const [x, y] = at(SIDE_REST - Math.PI / 2 + (busy ? moonPhase(now, reduced) : 0));
+  const st = busy ? S.get("plain", undefined, 4) : S.get("muted");
+  canvas.dot(x, y, st);
+  canvas.dot(x + 1, y, st);
+  const text = truncate(SIDE_NAME, NAME_MAX);
+  const tw = displayWidth(text);
+  const col = Math.floor(x / 2);
+  const row = Math.floor(y / 4);
+  const out = col >= Math.floor(L.cx / 2) ? 1 : -1;
+  const fits = (c, r) => {
+    if (c < 0 || c + tw > L.w || r < 0 || r >= L.h) return false;
+    for (let i = -1; i <= tw; i += 1) if (c + i >= 0 && c + i < L.w && !canvas.free(c + i, r)) return false;
+    return true;
+  };
+  for (const dr of [0, -1, 1]) {
+    for (const side of [out, -out]) {
+      const c = side > 0 ? col + 2 : col - 1 - tw;
+      if (fits(c, row + dr)) {
+        canvas.put(c, row + dr, text, st);
+        return;
+      }
+    }
+  }
 }
 
 function agentStyle(S, P, p, blinkOn) {
@@ -1685,6 +1740,15 @@ function draw3D(doc, L, canvas, S, P, now, frame, cam, options) {
       canvas.plot(q.col, q.row, DEPTH_CHARS[Math.max(0, Math.min(2, lvl - 1))], S.get("plain", P.depth(ring.key, Math.max(1, lvl)), 2), q.depth - 0.02);
     });
   }
+  // the side chat moon's orbit: faint, muted (it has no group colour), where the moons' orbits are drawn too
+  const sideOn = !!F.side;
+  const sideBusyNow = sideOn && sideBusy(doc);
+  if (sideOn && L.w >= MOON_RINGS_MIN_W && L.h >= MOON_RINGS_MIN_H) {
+    cellPath(project, F.side.ring.points).forEach((q, i) => {
+      if (i % 2) return;
+      canvas.plot(q.col, q.row, DEPTH_CHARS[Math.max(0, Math.min(2, depthLevel(q.depth) - 1))], S.get("muted"), q.depth - 0.02);
+    });
+  }
   // spokes: dotted, from outside the hub's ring to short of the agent
   const spokes = new Map();
   for (const p of L.placed) {
@@ -1716,9 +1780,17 @@ function draw3D(doc, L, canvas, S, P, now, frame, cam, options) {
       for (let r = q.row - 1; r <= q.row + 1; r += 1) for (let c = q.col - reach; c <= q.col + reach; c += 1) canvas.reserve(c, r);
     }
   }
+  if (sideOn) {
+    const reachSide = displayWidth(SIDE_NAME) + 2;
+    for (const q of cellPath(project, F.side.ring.points)) {
+      for (let r = q.row - 1; r <= q.row + 1; r += 1) for (let c = q.col - reachSide; c <= q.col + reachSide; c += 1) canvas.reserve(c, r);
+    }
+  }
   // moons: where they are on their rings now (a lap in MOON_LAP_MS from the clock; still with reduced motion)
   const phase = moonPhase(now, reduced);
   const moons = F.seats.map((seat) => ({ seat, q: project(moonPoint(seat, phase)) }));
+  // the side chat's moon goes round only while it answers; otherwise it waits where it is
+  const sideQ = sideOn ? project(moonPoint(F.side, sideBusyNow ? phase : 0)) : null;
   // motion: 0s and 1s stream from the hub to each working agent, and round a loop toward whoever has the work
   if (animated) {
     L.placed.forEach((p, k) => {
@@ -1745,9 +1817,9 @@ function draw3D(doc, L, canvas, S, P, now, frame, cam, options) {
   // cells are still free (a moon behind its parent, or under a name, shows none) and their names, nearest first
   const placeLabels = (labels) => {
     labels.sort((a, b) => b.q.depth - a.q.depth);
-    for (const { text, q, key, stuck, lit } of labels) {
+    for (const { text, q, key, stuck, lit, style } of labels) {
       const tw = displayWidth(text);
-      const st = stuck ? S.get("danger") : q.depth >= 0 || lit ? S.get("plain", P.full(key), 4) : muted;
+      const st = style !== undefined ? style : stuck ? S.get("danger") : q.depth >= 0 || lit ? S.get("plain", P.full(key), 4) : muted;
       const out = q.col >= Math.floor(L.cx / 2) ? 1 : -1;
       const fits = (c, r) => {
         if (c < 0 || c + tw > L.w || r < 0 || r >= L.h) return false;
@@ -1783,6 +1855,11 @@ function draw3D(doc, L, canvas, S, P, now, frame, cam, options) {
     const busy = busyCount(seat.agent) > 0;
     canvas.put(q.col, q.row, "•", busy ? S.get("plain", P.full(seat.key), 4) : S.get("plain", P.depth(seat.key, Math.min(4, depthLevel(q.depth))), 2));
     moonLabels.push({ text: truncate(clean(seatName(seat.agent.name)) || "?", NAME_MAX), q, key: seat.key, stuck: false, lit: busy });
+  }
+  if (sideQ && canvas.free(sideQ.col, sideQ.row)) {
+    const st = sideBusyNow ? S.get("plain", undefined, 4) : S.get("muted");
+    canvas.put(sideQ.col, sideQ.row, "•", st);
+    moonLabels.push({ text: truncate(SIDE_NAME, NAME_MAX), q: sideQ, key: "side", stuck: false, lit: false, style: st });
   }
   placeLabels(moonLabels);
 }

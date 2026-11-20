@@ -471,3 +471,149 @@ export function runFlowPrompt(deps, id, goal, rev) {
     }
   });
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// The side chat's question: `<python> -P -m agentgraph.sidechat ask --main SESSION --text-file - --json` (what
+// `agentgraph sidechat ask` runs), the question on standard input and never in the arguments, no shell, the same
+// interpreter and PYTHONPATH rules as the snapshot, the project folder as the working directory. One question at a
+// time. Resolves { answer, ... } (the command's JSON) or { error } (one line) or { busy: true, error }; never rejects.
+
+export const SIDE_ASK_TIMEOUT_MS = 150000;
+export const SIDE_ASK_MAX_BYTES = 1024 * 1024;
+export const SIDE_QUESTION_LIMIT = 4000; // characters
+
+// deps: { spawn, fs, path, env, home, python, demo?, timeoutMs?, onSpawn? }
+export function createSideAskRunner(deps) {
+  const timeoutMs = deps.timeoutMs || SIDE_ASK_TIMEOUT_MS;
+  const children = new Set();
+  let running = false;
+  let stopped = false;
+  let killNow = null;
+
+  const directoryFor = (candidate) => {
+    if (typeof candidate === "string" && candidate && !candidate.includes("\0") && deps.path.isAbsolute(candidate)) {
+      try {
+        if (deps.fs.statSync(candidate).isDirectory()) return candidate;
+      } catch (_) {
+        /* fall through */
+      }
+    }
+    return deps.home;
+  };
+
+  function run(main, text, cwd) {
+    return new Promise((resolve) => {
+      const args = ["-P", "-m", "agentgraph.sidechat", "ask", "--main", main, "--text-file", "-", "--json"];
+      if (deps.demo) args.push("--demo");
+      const env = Object.assign({}, deps.env, { PYTHONPATH: deps.home, PYTHONIOENCODING: "utf-8" });
+      const out = [];
+      const err = [];
+      let outBytes = 0;
+      let errBytes = 0;
+      let settled = false;
+      let reason = null;
+      let child;
+      let timer = null;
+      const fail = (message) => ({ error: oneLine(message) });
+      const finish = (outcome) => {
+        const stdout = Buffer.concat(out).toString("utf8");
+        const stderr = Buffer.concat(err).toString("utf8");
+        if (reason === "stopped") return fail("The plugin stopped.");
+        if (reason === "timeout") return fail("The side chat did not answer within " + Math.round(timeoutMs / 1000) + " s.");
+        if (reason === "overflow") return fail("The side chat's answer was larger than " + Math.round(SIDE_ASK_MAX_BYTES / 1024) + " KiB.");
+        if (outcome.error) {
+          if (outcome.error.code === "ENOENT") return fail("Python was not found at " + deps.python + ". Set options.python.");
+          return fail("Could not start Python: " + errorMessage(outcome.error));
+        }
+        const parsed = safeParse(lastLine(stdout) || "");
+        if (isPlainObject(parsed) && typeof parsed.error === "string" && parsed.error.trim()) return fail(parsed.error);
+        if (outcome.code === 0) {
+          if (isPlainObject(parsed) && typeof parsed.answer === "string") return parsed;
+          return fail("The side chat printed no answer.");
+        }
+        if (/No module named ['"]?agentgraph\.sidechat/.test(stderr)) return fail("This agentgraph has no side chat yet; update the orchestration folder.");
+        const status = typeof outcome.code === "number" ? "exited with status " + outcome.code : outcome.signal ? "was terminated by " + outcome.signal : "failed";
+        return fail(lastLine(stderr) ? lastLine(stderr) : "The side chat " + status + ".");
+      };
+      const done = (outcome) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (child) children.delete(child);
+        let result;
+        try {
+          result = finish(outcome);
+        } catch (failure) {
+          result = fail(errorMessage(failure));
+        }
+        resolve(result);
+      };
+      const kill = (why) => {
+        if (!reason) reason = why;
+        try {
+          child.kill("SIGKILL");
+        } catch (_) {
+          /* already gone */
+        }
+        // a grandchild may still hold the pipes open: the answer is over now, not when they close
+        const grace = setTimeout(() => done({ code: null, signal: "SIGKILL" }), 300);
+        if (typeof grace.unref === "function") grace.unref();
+      };
+      killNow = kill;
+      try {
+        if (typeof deps.onSpawn === "function") deps.onSpawn([deps.python, ...args]);
+        child = deps.spawn(deps.python, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, shell: false });
+      } catch (error) {
+        done({ error });
+        return;
+      }
+      children.add(child);
+      timer = setTimeout(() => kill("timeout"), timeoutMs);
+      const collect = (chunks, add) => (chunk) => {
+        if (add(chunk.length) > SIDE_ASK_MAX_BYTES) kill("overflow");
+        else chunks.push(chunk);
+      };
+      if (child.stdout) child.stdout.on("data", collect(out, (n) => (outBytes += n)));
+      if (child.stderr) child.stderr.on("data", collect(err, (n) => (errBytes += n)));
+      child.on("error", (error) => done({ error }));
+      child.on("close", (code, signal) => done({ code, signal }));
+      if (child.stdin) {
+        child.stdin.on("error", () => {
+          /* the command stopped reading: its exit status says why */
+        });
+        child.stdin.end(text, "utf8");
+      }
+      if (stopped) kill("stopped");
+    });
+  }
+
+  return {
+    // input: { main, text, directory }
+    async ask(input) {
+      const fail = (message, extra) => Object.assign({ error: oneLine(message) }, extra);
+      if (typeof deps.python !== "string" || !deps.path.isAbsolute(deps.python)) {
+        return fail("options.python must be an absolute path to Python 3.11 or newer: " + String(deps.python));
+      }
+      const main = input && input.main;
+      if (typeof main !== "string" || !SESSION_ID.test(main)) return fail("There is no orchestrator session to ask about.");
+      const text = input && typeof input.text === "string" ? input.text.trim() : "";
+      if (!text) return fail("The question is empty.");
+      if ([...text].length > SIDE_QUESTION_LIMIT) return fail("The question is longer than " + SIDE_QUESTION_LIMIT + " characters.");
+      if (running) return fail("A question is already being answered.", { busy: true });
+      running = true;
+      try {
+        return await run(main, text, directoryFor(input.directory));
+      } catch (error) {
+        return fail(errorMessage(error));
+      } finally {
+        running = false;
+        killNow = null;
+      }
+    },
+    stop() {
+      stopped = true;
+      if (killNow) killNow("stopped");
+    },
+    running: () => running,
+  };
+}

@@ -103,6 +103,7 @@ view, the list opens as a session panel:
 | `s` | stop the selected working agent: asks `ui.dialog.confirm`, then `client.session.interrupt`; the result is a toast |
 | `m` | message the selected working agent: `ui.dialog.prompt`, then `client.session.prompt` with `delivery: "steer"` into its running session; the result is a toast |
 | `r` | run a drawn path (only when the snapshot has one): the host's chooser (`ui.dialog.select`, widened with `ui.dialog.set({ size: "large" })`; skipped with one path) lists `name  a → b → a` (the id when unnamed), most recently run first, with `3 runs · $1.20 avg · 2.0 rounds` from its stats (a dash for a null field, nothing without stats); then `ui.dialog.prompt` for the goal (required, at most 4,000 characters, refused with a toast); then the run message from `agentgraph flow prompt ID --goal-file -` (below); then `client.session.prompt({ sessionID, text })`, a normal user message, to the orchestrator's session (the snapshot's root session, never a child). A toast says sent, or the back end's or the host's error. `r` is off from the press until it is sent or given up, so nothing is sent twice, and `r run` leaves the key line for that time. The `r` layer is registered while the snapshot has a path and unregistered when the paths go. The selected row does not matter: a busy child selected still sends to the root. When the snapshot gives the path a `rev`, it goes along as `--expect REV`: path ids are reused (a removed and redrawn path can get the same id), and a path that changed since the chooser showed it is refused by the back end ("changed since you opened it"); then nothing is sent, both views refresh at once, a warning toast says `<name> changed since you opened it: nothing was sent. Press r again.`, and the next goal prompt for that id starts with the goal typed (not another path's prompt: the goal waits for its own path). Without `rev` (an older back end) no `--expect` is passed |
+| `a` | ask the side chat (only while the side chat's row is selected; listed in the key line only then): `ui.dialog.prompt` ("Ask the side chat"), then `agentgraph sidechat ask` (below). An empty question is refused with a toast and nothing is run; so is one over 4,000 characters (the toast says how long it was). One question is in flight at a time: while it waits the row shows `answering` with a spinner, `a` is off and leaves the key line. The result is a toast (`Side chat answered`, or `Side chat: ` and one short error line) and the chat is read at once |
 | `c` | the chat of the selected row, in place of the lower part of the list when it does not fit beside it (opens it where it shows already beside the list: nothing; `c` again or `Esc` closes it) |
 | `Esc` | close the chat opened with `c` |
 | `PgUp` `PgDn` | scroll the chat back and forward; while the chat is open in place, `↑` `↓` scroll it too (they move the cursor otherwise) |
@@ -125,6 +126,30 @@ view, the list opens as a session panel:
   input or output), `· note`, `(cut)` and `… older chat left out` are quiet marks. Every string is cleaned again
   before it is drawn: no control or escape sequences, tabs as spaces, wide characters measured by display width. A
   working agent also gets one line under its row: the tool it runs, or the first words it thinks or says.
+- The side chat (the snapshot's `sidechat`, WEB_API.md). Only when `sidechat.installed` is true:
+  - One more row after the orchestrator's: `◌ side chat  MODEL`, selectable like the others. Its chat is the side session
+    (`sidechat.session`, read through the same chat reader as every other row), headed `transcript · side chat`; with
+    no session yet it shows one quiet line (`No session yet`). `s` and `m` do nothing on it (there is nothing of yours to
+    stop or steer) and `Enter` opens its session. The row spins while `sidechat.busy` or while a question of yours is
+    out. It is not an agent: it is not counted as working or idle, has no needs and no arrows.
+  - On the orbit, in 2D and 3D, the side chat is its own moon of the hub (the same moon drawing, on an orbit plane of
+    its own in 3D), named `side chat` where names fit. It goes round only while `sidechat.busy` (and, with reduced
+    motion, stays still); the ring of the team stays round and nothing else moves because of it.
+  - `a` (above) runs `<python> -P -m agentgraph.sidechat ask --main <the snapshot's root session> --text-file - --json`
+    (`--demo` added with `AGENTGRAPH_TUI_DEMO`) through the same runner rules (no shell, `PYTHONPATH=<home>`, the
+    project folder as the working directory, capped output). **The question goes on the command's standard input, never
+    in its arguments.** 150 s timeout (SIGKILL), one in flight. The toast only says it answered: the
+    answer itself is in the side session and shows in the row's chat after the refresh.
+  - Not installed (or `installed` anything but `true`): no row, no moon, no key, no word.
+- The spend line. The snapshot's `spend` (`{ limit, warn, rate, chat, workers }`, dollars; `rate` in dollars an hour):
+  every part may be absent or null and is then not shown (a snapshot without `spend` draws exactly what it drew before).
+  With a `limit` the amount reads `$7.65 / $50`; from `warn` the amount takes the attention tone (the existing one, no
+  new colour); at or over the limit it says so in the same place (`$50.00 / $50 at limit`, `$51.20 / $50 over limit`).
+  Where there is width the rate (`$22/h`) and the split (`chat $3.10 · workers $4.55`) follow; they go in this order as
+  the line narrows: the rate first, then the split, the limit last.
+- The preset name. `setup.preset` shows as one quiet word at the right end of the spend line where there is width
+  (`normal`); with `setup.override` set it reads `normal (overridden)` (`normal*` where that does not fit). It is
+  display only: the panel does not switch presets (the host has its own command for that).
 - Reads for the chat: `<python> -P -m agentgraph.chatfeed --session <its newest session> --json --limit 40`
   (what `agentgraph chat --session ID --json` runs; `--demo` added with `AGENTGRAPH_TUI_DEMO`), through the same
   runner rules as the snapshot (no shell, `PYTHONPATH=<home>`, 20 s SIGKILL, capped output, every failure becomes one
@@ -280,7 +305,7 @@ the real host the debug log showed `panel size: 71x39`, then `120x40` after `f` 
 
 **Demo.** `AGENTGRAPH_TUI_DEMO=1` in the TUI's environment makes the plugin draw `test/fixtures/demo.json` instead
 of running the snapshot process (nothing is spawned), with a growing context history and moving costs, polled every
-2 s at most. `AGENTGRAPH_TUI_DEMO=paths` draws the same team at rest (nobody works, no task graph) with three sample
+2 s at most. `AGENTGRAPH_TUI_DEMO=side` draws the moving demo with a side chat (`ses_demoside`, its row and moon), a spend limit of $50 with the rate and the chat/workers split, and the preset name `normal`; `a` there runs `agentgraph sidechat ask --demo`. `AGENTGRAPH_TUI_DEMO=paths` draws the same team at rest (nobody works, no task graph) with three sample
 paths, so the paths row and `r` can be seen; in the demo `r` goes as far as the goal and then says
 `Demo: impl-loop is not sent.`: no back end runs and nothing is sent.
 
@@ -460,7 +485,7 @@ folder.``
   is a saved `agentgraph.snapshot_json --demo` document. Its stub `setProp` refuses an `fg` that is neither a string
   nor an RGBA, as the real host does.
 - `test/real-host.py`: drives the real terminal app in a pseudo-terminal (`--size 160x45`, `--size 90x40`,
-  `--no-graph`, `--binary`, `--demo`, `--fullscreen`, `--expect-scene`, `--view3d`, `--chat` with `--demo`), types `/graph`, captures the screen with `pyte` and exits 0 only when the view is on
+  `--no-graph`, `--binary`, `--demo`, `--fullscreen`, `--expect-scene`, `--view3d`, `--chat` and `--side` with `--demo`), types `/graph`, captures the screen with `pyte` and exits 0 only when the view is on
   it; see its docstring for the scratch folder, the throwaway session and `pyte`. It always runs the app with
   `--standalone`.
 - Debugging: `AGENTGRAPH_TUI_DEBUG=<file>` in the TUI's environment appends every error the plugin swallows to that

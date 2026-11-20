@@ -7,6 +7,7 @@
  * and drops at each summary, so the context chart has something to draw. With the clock given, every timestamp is moved
  * so the document was generated now (the list shows how long each agent has been at its step). Nothing else changes.
  *
+ * AGENTGRAPH_TUI_DEMO=side: the moving demo with a side chat, a spend limit, a rate and a preset name. sideDocument().
  * AGENTGRAPH_TUI_DEMO=paths: the same team at rest (nobody works, no task graph) with sample drawn paths
  * (`structure.flows`, one run 2 h ago), so the list shows its paths row and `r` opens the chooser. pathsDocument().
  */
@@ -120,7 +121,18 @@ export function pathsDocument(base, elapsedMs, nowMs) {
 }
 
 // The runner the plugin uses in demo mode: the same interface as createSnapshotRunner, and it never rejects.
-export function createDemoRunner({ fs, file, now, paths = false }) {
+// The moving demo with the web snapshot's `sidechat`, `setup` and `spend` (AGENTGRAPH_TUI_DEMO=side): the side chat's row and
+// moon, the limit, the rate and the split, the preset name. Fixed samples (agentgraph/demo.py); nothing is read or called.
+export function sideDocument(base, elapsedMs, nowMs) {
+  const doc = demoDocument(base, elapsedMs, nowMs);
+  const spent = isObject(doc.totals) && typeof doc.totals.cost === "number" ? doc.totals.cost : 0;
+  doc.sidechat = { installed: true, session: "ses_demoside", model: "openai/gpt-6-luna", busy: false, spent: 0.0042 };
+  doc.setup = { preset: "normal", presets: ["ultra-fast-frontier", "ultra-fast", "fast", "normal"], override: null, saved: true, undo: null };
+  doc.spend = { limit: 50, warn: 40, rate: 22, chat: 0.0042, workers: spent };
+  return doc;
+}
+
+export function createDemoRunner({ fs, file, now, paths = false, side = false }) {
   const clock = typeof now === "function" ? now : Date.now;
   const start = clock();
   let base = null;
@@ -131,7 +143,7 @@ export function createDemoRunner({ fs, file, now, paths = false }) {
       try {
         if (!base) base = JSON.parse(fs.readFileSync(file, "utf8"));
         const at = clock();
-        return (paths ? pathsDocument : demoDocument)(base, at - start, at);
+        return (paths ? pathsDocument : side ? sideDocument : demoDocument)(base, at - start, at);
       } catch (error) {
         return errorDocument("The demo document could not be read: " + errorMessage(error));
       }

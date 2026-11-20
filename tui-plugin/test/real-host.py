@@ -1502,6 +1502,7 @@ def main():
     parser.add_argument("--dialog", action="store_true", help="with --demo: s, then down and Enter in the confirm; nothing leaks")
     parser.add_argument("--open", action="store_true", help="without --demo: Enter on the hub row opens its session")
     parser.add_argument("--paths", action="store_true", help="the demo at rest with sample paths: r, the chooser, the goal prompt, Escape; nothing sent")
+    parser.add_argument("--side", action="store_true", help="with --demo: AGENTGRAPH_TUI_DEMO=side, the demo with the side chat's row and moon, the spend limit, rate and split, the preset name")
     parser.add_argument("--chat", action="store_true", help="with --demo: the chat of the selected agent (open it with c where it does not fit), the orchestrator's transcript")
     parser.add_argument("--live-paths", action="store_true", help="a scratch orchestration folder with two named paths: the live chooser and flow prompt; nothing sent")
     parser.add_argument("--orbit", action="store_true", help="with --demo --fullscreen --view3d: the arrow keys, 0, a click and a drag on the 3D orbit")
@@ -1518,6 +1519,8 @@ def main():
         why = "--live-paths types a goal: only in this script's throwaway session, not with --session"
     if not why and args.chat and (not args.demo or args.dialog or args.open or args.paths or args.live_paths or args.gcheck or args.fullscreen or args.view3d or args.orbit):
         why = "--chat needs --demo and runs without --dialog, --open, --paths, --live-paths, --gcheck, --fullscreen, --view3d or --orbit"
+    if not why and args.side and (not args.demo or args.chat):
+        why = "--side needs --demo and runs without --chat (the chat run presses down twice and expects the designer; the side chat's row is in the way)"
     if not why and args.orbit and not (args.demo and args.fullscreen and args.view3d):
         why = "--orbit needs --demo --fullscreen --view3d"
     if not why and args.plugin and not os.path.isfile(os.path.join(args.plugin, "src", "tui.js")):
@@ -1529,7 +1532,7 @@ def main():
         print("pyte is missing: pip install --target <folder> pyte, then set PYTEPATH=<folder>", file=sys.stderr)
         return 2
     global DEMO, DEBUG_LOG
-    DEMO = "paths" if args.paths else "1" if args.demo else ""
+    DEMO = "paths" if args.paths else "side" if args.demo and args.side else "1" if args.demo else ""
     if args.gcheck and not DEBUG_LOG:
         DEBUG_LOG = os.path.join(SCRATCH, "gcheck-debug.log")
     if (args.dialog or args.open or args.paths or args.live_paths) and not DEBUG_LOG:
@@ -1553,7 +1556,7 @@ def main():
         EXTRA_ENV.update({"AGENTGRAPH_TUI_HOME": args.live_root, "AGENTGRAPH_TUI_NOSEND": "1"})
 
     args.orbit_result = None
-    label = f"{cols}x{rows}{'-nograph' if args.no_graph else ''}{'-orbit' if args.orbit else ''}{'-demo' if args.demo else ''}{'-dialog' if args.dialog else ''}{'-open' if args.open else ''}{'-paths' if args.paths else ''}{'-chat' if args.chat else ''}{'-livepaths' if args.live_paths else ''}{'-full' if args.fullscreen else ''}{'-3d' if args.view3d else ''}{'-g' + args.pre if args.gcheck else ''}"
+    label = f"{cols}x{rows}{'-nograph' if args.no_graph else ''}{'-orbit' if args.orbit else ''}{'-demo' if args.demo else ''}{'-side' if args.side else ''}{'-dialog' if args.dialog else ''}{'-open' if args.open else ''}{'-paths' if args.paths else ''}{'-chat' if args.chat else ''}{'-livepaths' if args.live_paths else ''}{'-full' if args.fullscreen else ''}{'-3d' if args.view3d else ''}{'-g' + args.pre if args.gcheck else ''}"
     term = None
     try:
         term = Term([args.binary, "--standalone", "-s", session, proj], proj, cols, rows, os.path.join(SCRATCH, f"raw-{label}.bin"))
