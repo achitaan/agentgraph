@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote
 
-from . import agentfiles, flowcommands, flowrun, outputs, roster, skillfiles, skillset, structure, teams
+from . import agentfiles, flowcommands, flowrun, mcpview, outputs, roster, skillfiles, skillset, structure, teams
 from .demo import demo_snapshot
 from .snapshot_json import ledger_home, learning_document, load_structure, skills_document, snapshot_document
 from .sources import DB_PATH, ORCHESTRATION_GRAPH_DIR, build_snapshot, find_graph_dir
@@ -519,6 +519,8 @@ def make_server(
                     document["skills"] = skills_document(skills_dir=skills_dir)
                     skillset.annotate(document, config=paths["config"], profiles=paths["profiles"],
                                       agents_dir=agents_dir or roster.AGENTS_DIR, skills_dir=skills_dir)
+                    mcpview.annotate(document, config=paths["config"],
+                                     opencode=Path(opencode_dir) / "opencode.json" if opencode_dir is not None else None)
                     roster.annotate(document, config=paths["config"], map_path=paths["map_path"],
                                     agents_dir=agents_dir or roster.AGENTS_DIR, structure=structure_root)
                     skillfiles.annotate(document, skills=skills_dir or skillfiles.SKILLS, bundled=skills_bundled)

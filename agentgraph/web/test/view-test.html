@@ -8072,6 +8072,184 @@
       });
     }
     // ---- orbit lane (n105) ----
+    // ==== MCP lane (n126): start (MCP servers, read only: a row in an agent's details and the list of all of them from a plug button beside the menu button) ====
+    const mcpServer = (name, extra = {}) => ({ name, source: 'opencode', kind: 'remote', enabled: true, state: 'on', reason: '', live: false, agents: [], ...extra });
+    function mcpFixture() {
+      const data = fixture();
+      data.mcp = [mcpServer('docs', { source: 'plugin', agents: ['orchestrator', 'impl-openai', 'impl-claude'] }), mcpServer('gh_grep', { source: 'plugin', agents: ['orchestrator'] }),
+        mcpServer('local-tool', { kind: 'local', agents: [] }), mcpServer('off1', { kind: 'local', enabled: false, state: 'off', agents: ['impl-claude'] })];
+      const lists = { orchestrator: ['docs', 'gh_grep'], 'impl-openai': ['docs'], 'impl-claude': ['docs', 'off1'], 'impl-hard': [], reviewer: [], council: null };
+      data.agents.forEach(item => { if (Object.hasOwn(lists, item.name)) item.mcps = lists[item.name]; });
+      return data;
+    }
+    const mcpSpies = () => { const calls = []; const spy = name => async request => { calls.push(name + ':' + JSON.stringify(request)); throw new Error('no write expected'); }; return { calls, actions: { flow: spy('flow'), skills: spy('skills'), roster: spy('roster'), skillfile: spy('skillfile'), team: spy('team'), output: spy('output') } }; };
+    const mcpSectionOf = root => [...root.querySelectorAll('.ag-detail-section')].find(item => /^MCP/.test(item.querySelector('h3').textContent));
+    const mcpChips = root => [...root.querySelectorAll('.ag-detail-scroll .ag-mcp-chip')].map(chip => chip.dataset.mcp + ':' + chip.querySelector('.ag-mcp-state').textContent);
+    const mcpRows = root => [...root.querySelectorAll('.ag-mcp-panel .ag-mcp-row')];
+    const mcpUntil = async (condition, ms = 3000) => { const end = performance.now() + ms; while (!condition() && performance.now() < end) await sleep(15); return condition(); };
+    async function mcpOpenList(root) {
+      const button = root.querySelector('.ag-mcp-toggle'); assert(button && !button.hidden, 'there is no MCP button');
+      if (button.getAttribute('aria-expanded') !== 'true') { button.click(); await settle(); }
+      const panel = root.querySelector('.ag-mcp-panel'); assert(panel && !panel.hidden, 'the MCP button did not open the list');
+      return panel;
+    }
+    const mcpGreen = value => {
+      const m = /rgba?\((\d+), (\d+), (\d+)(?:, ([\d.]+))?\)/.exec(value); if (!m || (m[4] !== undefined && Number(m[4]) === 0)) return false;
+      const [r, g, b] = [m[1], m[2], m[3]].map(n => Number(n) / 255), hi = Math.max(r, g, b), lo = Math.min(r, g, b), d = hi - lo;
+      if (d < .08 || hi === 0) return false;
+      const hue = hi === r ? ((g - b) / d + 6) % 6 * 60 : hi === g ? ((b - r) / d + 2) * 60 : ((r - g) / d + 4) * 60;
+      return hue > 75 && hue < 170 && d / hi > .15;
+    };
+    await test('mcp: an agent\'s details have a row MCP with its servers by name, "none" when it has none, and no row when the plugin does not manage it; each name carries its state (settings: on or off)', async () => {
+      const data = mcpFixture(), spies = mcpSpies();
+      await using(data, async root => {
+        open(root, 'impl-claude'); await settle();
+        assert(mcpSectionOf(root).querySelector('h3').textContent === 'MCP · 2', 'the MCP row has no count: ' + mcpSectionOf(root)?.textContent);
+        assert(JSON.stringify(mcpChips(root)) === JSON.stringify(['docs:on', 'off1:off']), 'wrong chips: ' + mcpChips(root));
+        assert([...root.querySelectorAll('.ag-mcp-chip')].every(chip => chip.tagName === 'SPAN' && !chip.querySelector('button, input')), 'a chip is not read-only');
+        open(root, 'reviewer'); await settle();
+        const none = mcpSectionOf(root);
+        assert(none.querySelector('h3').textContent === 'MCP' && none.querySelector('.ag-mcp-none').textContent === 'none' && !mcpChips(root).length, 'an agent with no server does not say none');
+        open(root, 'council'); await settle();
+        assert(!mcpSectionOf(root), 'an agent outside the plugin got an MCP row');
+        open(root, 'orchestrator'); await settle();
+        assert(JSON.stringify(mcpChips(root)) === JSON.stringify(['docs:on', 'gh_grep:on']), 'the hub\'s chips: ' + mcpChips(root));
+        assert(!spies.calls.length, 'a write was asked: ' + spies.calls);
+      }, { actions: spies.actions });
+    });
+    await test('mcp: a snapshot without `mcp` (an older back end, the demo) shows no MCP row and no list, and nothing breaks', async () => {
+      const data = fixture();
+      await using(data, async (root, app) => {
+        open(root, 'impl-claude'); await settle();
+        assert(!mcpSectionOf(root), 'a row without data');
+        data.agents.find(item => item.name === 'impl-claude').mcps = ['docs', 'tool']; await app.refresh(); await settle();
+        assert(JSON.stringify(mcpChips(root)) === JSON.stringify(['docs:on', 'tool:on']), 'an agent\'s list without the servers\' own list is not drawn, as settings say: ' + mcpChips(root));
+        data.agents.find(item => item.name === 'impl-claude').mcps = undefined; await app.refresh(); await settle();
+        const button = root.querySelector('.ag-mcp-toggle');
+        assert(button.hidden && root.querySelector('.ag-mcp-panel').hidden && !foldOf(root, 'mcp'), 'a button or list without data');
+        assert(root.dataset.state !== 'error', 'the view broke');
+      });
+    });
+    await test('mcp: the list of all servers opens from the plug button beside the menu button: name, state, where declared, and the agents that may use each; choosing an agent there picks it as a click would, and nothing is written', async () => {
+      const data = mcpFixture(), spies = mcpSpies();
+      await using(data, async root => {
+        await mcpOpenList(root);
+        assert(!foldOf(root, 'mcp'), 'the run details still list the servers');
+        assert(JSON.stringify(mcpRows(root).map(row => row.dataset.mcp + ':' + row.querySelector('.ag-mcp-state').textContent)) === JSON.stringify(['docs:on', 'gh_grep:on', 'local-tool:on', 'off1:off']), 'rows: ' + mcpRows(root).map(row => row.dataset.mcp));
+        const docs = mcpRows(root)[0], local = mcpRows(root)[2];
+        assert(docs.textContent.includes('from the plugin') && docs.textContent.includes('remote'), 'a built-in does not say where it is declared: ' + docs.textContent);
+        assert(local.textContent.includes("from OpenCode's settings") && local.textContent.includes('local'), 'an OpenCode server does not say where it is declared: ' + local.textContent);
+        assert([...docs.querySelectorAll('.ag-family-link')].map(item => item.textContent).join() === 'orchestrator,impl-openai,impl-claude', 'the agents of docs: ' + docs.textContent);
+        assert(local.querySelector('.ag-mcp-agents').textContent === '—' && !local.querySelector('button'), 'a server nobody uses is not marked so');
+        docs.querySelector('[data-flow-peer="impl-claude"]').click(); await settle();
+        assert(root.querySelector('.ag-detail-title').textContent === 'impl-claude' && JSON.stringify(mcpChips(root)) === JSON.stringify(['docs:on', 'off1:off']), 'choosing the agent did not pick it');
+        assert(root.querySelector('.ag-mcp-panel').hidden, 'the list stayed open over the details');
+        assert(!spies.calls.length, 'a write was asked: ' + spies.calls);
+      }, { actions: spies.actions });
+    });
+    await test('mcp: a live state (the Desktop app\'s) shows on every name: connected, failed, needs sign-in, off; the host\'s reason is text, one line, cut at 200, shown for failed and needs sign-in only; a state the view does not know is taken as settings say', async () => {
+      const data = mcpFixture(), long = '<img src=x onerror=alert(1)>\n<b>second</b>\r\n' + 'x'.repeat(300);
+      data.mcp = [mcpServer('a', { state: 'connected', live: true }), mcpServer('b', { state: 'failed', live: true, reason: long }), mcpServer('c', { state: 'needs sign-in', live: true, reason: '<u>sign in</u>' }),
+        mcpServer('d', { state: 'off', enabled: false, live: true, reason: 'hidden reason' }), mcpServer('e', { state: 'bogus<x>', reason: 'ignored' }), mcpServer('f', { state: 'connected', reason: 'a reason on a good server' })];
+      data.agents.find(item => item.name === 'impl-claude').mcps = ['a', 'b', 'c', 'd', 'e', 'f', 'missing'];
+      await using(data, async root => {
+        open(root, 'impl-claude'); await settle();
+        assert(JSON.stringify(mcpChips(root)) === JSON.stringify(['a:connected', 'b:failed', 'c:needs sign-in', 'd:off', 'e:on', 'f:connected', 'missing:on']), 'chips: ' + mcpChips(root));
+        const lines = [...root.querySelectorAll('.ag-detail-scroll .ag-mcp-reason')];
+        assert(lines.length === 2 && lines[0].textContent.startsWith('b · <img src=x onerror=alert(1)> <b>second</b> xxx') && lines[1].textContent === 'c · <u>sign in</u>', 'reason lines: ' + lines.map(item => item.textContent.slice(0, 60)));
+        assert(lines[0].textContent.length === 'b · '.length + 200 && !/[\r\n]/.test(lines[0].textContent), 'the reason is not one line cut at 200: ' + lines[0].textContent.length);
+        assert(!root.querySelector('.ag-detail img, .ag-detail b, .ag-detail u'), 'a reason became markup');
+        const probe = color => { const item = document.createElement('i'); item.style.color = color; root.querySelector('.ag-detail').append(item); const value = getComputedStyle(item).color; item.remove(); return value; };
+        const stateColor = name => getComputedStyle(root.querySelector('.ag-detail-scroll .ag-mcp-chip[data-mcp="' + name + '"] .ag-mcp-state')).color;
+        assert(stateColor('b') === probe('var(--ag-danger)') && stateColor('a') === probe('var(--ag-ink)') && stateColor('d') === probe('var(--ag-muted)'), 'failed is not the danger colour, connected the ink, off the muted one');
+        const fold = await mcpOpenList(root);
+        const rowB = mcpRows(root).find(row => row.dataset.mcp === 'b'), reason = rowB.querySelector('.ag-mcp-reason');
+        assert(reason.textContent.length === 200 && !/[\r\n]/.test(reason.textContent) && reason.textContent.startsWith('<img src=x'), 'the list\'s reason: ' + reason.textContent.length);
+        assert(!fold.querySelector('img, b, u') && !mcpRows(root).find(row => row.dataset.mcp === 'd').querySelector('.ag-mcp-reason') && !mcpRows(root).find(row => row.dataset.mcp === 'f').querySelector('.ag-mcp-reason'), 'markup, or a reason for a state that has none');
+        assert(mcpRows(root).find(row => row.dataset.mcp === 'e').querySelector('.ag-mcp-state').textContent === 'on', 'an unknown state was shown as it came');
+      });
+    });
+    await test('mcp: light and dark, at 1400, 620 and 420 px wide: the row and the list read in the details, text never under 11 px and monospace, nothing green, nothing clipped sideways', async () => {
+      const data = mcpFixture();
+      data.mcp[1] = mcpServer('b-fails-with-a-long-name-so-it-must-wrap-somewhere-1234567890', { state: 'failed', live: true, reason: 'The server said no, at length: ' + 'y'.repeat(150), agents: ['orchestrator'] });
+      data.mcp[2] = mcpServer('c', { state: 'needs sign-in', live: true });
+      data.agents.find(item => item.name === 'orchestrator').mcps = ['docs', data.mcp[1].name, 'c', 'off1'];
+      for (const scheme of ['light', 'dark']) for (const width of [1400, 620, 420]) {
+        await using(data, async root => {
+          await resizeTo(root, width, 800);
+          open(root, 'orchestrator'); await settle();
+          const check = (what, detail = root.querySelector('.ag-detail'), scroll = root.querySelector('.ag-detail-scroll')) => {
+            const box = detail.getBoundingClientRect();
+            const items = [...detail.querySelectorAll('[class*="ag-mcp"]')];
+            assert(items.length > 4, what + ': the MCP parts are not drawn at ' + scheme + ' ' + width);
+            items.forEach(item => {
+              const style = getComputedStyle(item);
+              assert(parseFloat(style.fontSize) >= 11, what + ' ' + item.className + ' under 11 px at ' + scheme + ' ' + width + ': ' + style.fontSize);
+              assert(/monospace/.test(style.fontFamily), what + ' ' + item.className + ' is not monospace');
+              ['color', 'backgroundColor', 'borderTopColor', 'borderBottomColor'].forEach(key => assert(!mcpGreen(style[key]), what + ' ' + item.className + ' is green (' + key + ' ' + style[key] + ') at ' + scheme + ' ' + width));
+              if (item.getClientRects().length) { const r = item.getBoundingClientRect(); assert(r.left >= box.left - 1 && r.right <= box.right + 1, what + ' ' + item.className + ' is clipped sideways at ' + scheme + ' ' + width); }
+            });
+            assert(scroll.scrollWidth <= scroll.clientWidth + 1, what + ' scrolls sideways at ' + scheme + ' ' + width);
+          };
+          check('the row');
+          root.querySelector('.ag-close').click(); await settle();
+          const panel = await mcpOpenList(root); check('the list', panel, panel);
+          assert(mcpRows(root).length === 4, 'the list lost a row at ' + scheme + ' ' + width);
+          const network = root.querySelector('.ag-network').getBoundingClientRect(), shown = panel.getBoundingClientRect(), cluster = root.querySelector('.ag-controls').getBoundingClientRect();
+          assert(shown.left >= network.left - 1 && shown.right <= network.right + 1 && shown.top >= network.top - 1 && shown.bottom <= cluster.top + 1, 'the list does not fit the canvas or covers the buttons at ' + scheme + ' ' + width);
+        }, { scheme });
+      }
+    });
+    await test('mcp: reading works in 3D too: the row and the list show while 3D does, an agent chosen in the list is picked, and no write is asked', async () => {
+      const data = mcpFixture(), spies = mcpSpies();
+      await using(data, async root => {
+        open(root, 'impl-claude'); await settle();
+        viewportOf(root).focus({ preventScroll: true }); press(viewportOf(root), 'd');
+        assert(await mcpUntil(() => root.dataset.agView === '3d' && root.dataset.agBlend === '1'), '3D did not show');
+        await settled();
+        assert(JSON.stringify(mcpChips(root)) === JSON.stringify(['docs:on', 'off1:off']), 'the row is gone in 3D: ' + mcpChips(root));
+        await mcpOpenList(root);
+        assert(mcpRows(root).length === 4, 'the list is not drawn in 3D');
+        mcpRows(root)[1].querySelector('[data-flow-peer="orchestrator"]').click(); await settle();
+        assert(root.querySelector('.ag-detail-title').textContent === 'orchestrator' && mcpChips(root).length === 2 && root.dataset.agView === '3d', 'choosing an agent in 3D did not pick it');
+        assert(!spies.calls.length, 'a write was asked in 3D: ' + spies.calls);
+      }, { actions: spies.actions });
+    });
+    await test('mcp: the MCP button sits beside the menu button in the bottom-right cluster (adjacent, same row, no overlap, inside the canvas at 1400, 620 and 420 px), has a name for assistive tech and no words, opens and closes the list by click, keyboard, Escape and a click outside, and the list does not cover the cluster', async () => {
+      const data = mcpFixture(), spies = mcpSpies();
+      for (const width of [1400, 620, 420]) {
+        await using(data, async root => {
+          await resizeTo(root, width, 800);
+          const button = root.querySelector('.ag-mcp-toggle'), menu = root.querySelector('.ag-run-button'), cluster = root.querySelector('.ag-controls'), panel = root.querySelector('.ag-mcp-panel');
+          assert(button && !button.hidden && button.parentElement === cluster, 'no MCP button in the cluster at ' + width);
+          assert(button.nextElementSibling === menu, 'the MCP button is not directly beside the menu button at ' + width);
+          assert(button.getAttribute('aria-label') === 'MCP servers' && button.title === 'MCP servers' && button.textContent === '' && button.querySelector('svg[aria-hidden="true"]'), 'the MCP button has no name, or has words');
+          assert(button.tabIndex === 0 && (button.compareDocumentPosition(menu) & Node.DOCUMENT_POSITION_FOLLOWING), 'the MCP button is not in the tab order before the menu button');
+          const network = root.querySelector('.ag-network').getBoundingClientRect(), a = button.getBoundingClientRect(), b = menu.getBoundingClientRect();
+          assert(Math.abs(a.top - b.top) < 1.5 && Math.abs(a.width - b.width) < .5 && Math.abs(a.height - b.height) < .5, 'the MCP button is not the menu button\'s size and row at ' + width);
+          const buttons = [...cluster.querySelectorAll('button')].filter(item => item.getClientRects().length).map(item => item.getBoundingClientRect());
+          buttons.forEach((one, i) => buttons.forEach((two, j) => { if (i < j) assert(one.right <= two.left + .5 || two.right <= one.left + .5, 'two cluster buttons overlap at ' + width); }));
+          buttons.forEach(one => assert(one.left >= network.left && one.right <= network.right && one.top >= network.top && one.bottom <= network.bottom, 'a cluster button is outside the canvas at ' + width));
+          assert(panel.hidden && button.getAttribute('aria-expanded') === 'false', 'the list starts open');
+          button.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })); await settle();
+          assert(!panel.hidden && button.getAttribute('aria-expanded') === 'true' && button.getAttribute('aria-controls') === panel.id, 'a click did not open the list');
+          assert(document.activeElement !== panel, 'a mouse click moved focus into the list');
+          const shown = panel.getBoundingClientRect(), cb = cluster.getBoundingClientRect();
+          assert(shown.bottom <= cb.top + 1 && shown.left >= network.left - 1 && shown.right <= network.right + 1 && shown.top >= network.top - 1, 'the list covers the cluster or leaves the canvas at ' + width);
+          button.click(); await settle();
+          assert(panel.hidden && button.getAttribute('aria-expanded') === 'false', 'a second click did not close the list');
+          button.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 0 })); await settle();
+          assert(!panel.hidden && (panel.contains(document.activeElement) || document.activeElement === panel), 'opening by keyboard did not move focus into the list');
+          press(document.activeElement, 'Escape'); await settle();
+          assert(panel.hidden && document.activeElement === button, 'Escape did not close the list and return to the button');
+          button.click(); await settle();
+          root.querySelector('.ag-viewport').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: 5, clientY: 5 })); await settle();
+          assert(panel.hidden && button.getAttribute('aria-expanded') === 'false', 'a click outside did not close the list');
+          assert(!spies.calls.length, 'a write was asked: ' + spies.calls);
+        }, { actions: spies.actions });
+      }
+    });
+    // ==== MCP lane (n126): end ====
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
   })().catch(error => { document.getElementById('results').textContent = 'RESULT: FAIL ' + error.stack; });
 </script>

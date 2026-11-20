@@ -37,6 +37,14 @@
   }
   function text(value) { return value == null ? '' : typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value); }
   function cost(value) { return '$' + (Number(value) || 0).toFixed(2); }
+  // MCP servers (read only): what the snapshot says of each, as text. A state outside this list is not trusted; a host's
+  // reason is untrusted text: one line, cut at 200 characters, drawn with textContent only.
+  const MCP_STATES = ['on', 'off', 'connected', 'failed', 'needs sign-in'];
+  function mcpState(row) { return MCP_STATES.includes(row?.state) ? row.state : row?.enabled === false ? 'off' : 'on'; }
+  function mcpReason(row) {
+    if (typeof row?.reason !== 'string' || !['failed', 'needs sign-in'].includes(mcpState(row))) return '';
+    return Array.from(row.reason.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim()).slice(0, 200).join('');
+  }
   // How full and how worn the root session is, from `root.wear`; null when the snapshot has none.
   function wearOf(root) {
     const wear = root && root.wear;
@@ -233,7 +241,18 @@
     plus.setAttribute('aria-haspopup', 'menu'); plus.setAttribute('aria-expanded', 'false'); plus.setAttribute('aria-keyshortcuts', 'N');
     const addMenu = el('div', 'ag-add-menu');
     addMenu.hidden = true; addMenu.setAttribute('role', 'menu'); addMenu.setAttribute('aria-label', 'Add an agent');
-    controls.append(plus, fit, runDetails);
+    // The MCP button, right beside the menu button: a plug (no words), opening the list of all MCP servers over the graph.
+    const mcpButton = el('button', 'ag-control ag-mcp-toggle');
+    mcpButton.type = 'button'; mcpButton.hidden = true; mcpButton.setAttribute('aria-label', 'MCP servers'); mcpButton.title = 'MCP servers';
+    mcpButton.setAttribute('aria-haspopup', 'true'); mcpButton.setAttribute('aria-expanded', 'false');
+    const mcpIcon = svg('svg', { viewBox: '0 0 16 16', 'aria-hidden': 'true', focusable: 'false' });
+    // Lines and a polyline only: the view's own checks keep every path in the picture for a loop's edge.
+    mcpIcon.append(svg('line', { x1: 6, y1: 2, x2: 6, y2: 5 }), svg('line', { x1: 10, y1: 2, x2: 10, y2: 5 }), svg('polyline', { points: '4.5,5 11.5,5 11.5,8 10.4,10.3 8,11.2 5.6,10.3 4.5,8 4.5,5' }), svg('line', { x1: 8, y1: 11.2, x2: 8, y2: 14.5 }));
+    mcpButton.append(mcpIcon);
+    const mcpPanel = el('div', 'ag-mcp-panel');
+    mcpPanel.hidden = true; mcpPanel.tabIndex = -1; mcpPanel.setAttribute('role', 'region'); mcpPanel.setAttribute('aria-label', 'MCP servers');
+    mcpButton.setAttribute('aria-controls', 'ag-mcp-panel-' + uid); mcpPanel.id = 'ag-mcp-panel-' + uid;
+    controls.append(plus, fit, mcpButton, runDetails);
     const status = el('div', 'ag-status');
     const attention = el('button', 'ag-attention');
     attention.type = 'button'; attention.hidden = true; attention.setAttribute('aria-label', 'Needs attention');
@@ -261,7 +280,7 @@
     // The pending path, for assistive technology only: nothing is written in the graph area.
     const trailStatus = el('div', 'ag-sr-only');
     trailStatus.setAttribute('role', 'status'); trailStatus.setAttribute('aria-live', 'polite');
-    network.append(status, usage, viewport, controls, addMenu, trailStatus);
+    network.append(status, usage, viewport, controls, addMenu, mcpPanel, trailStatus);
     const detail = el('aside', 'ag-detail');
     detail.hidden = true; detail.setAttribute('aria-label', 'Details');
     const detailHeader = el('div', 'ag-detail-header');
@@ -2132,6 +2151,26 @@
         if (error) later(() => error.isConnected && error.scrollIntoView({ block: 'nearest' }), 0);
       }
     }
+    // The MCP servers an agent may use, by name, each with its state (settings alone: on or off; the Desktop app adds what
+    // the host knows). Read only. An agent the plugin does not manage has no list (`mcps` null): no row.
+    function mcpSection(agent) {
+      if (!Array.isArray(agent.mcps)) return;
+      const known = new Map((Array.isArray(snapshot.mcp) ? snapshot.mcp : []).filter(row => row && typeof row.name === 'string').map(row => [row.name, row]));
+      const names = agent.mcps.filter(name => typeof name === 'string');
+      const holder = section(detailScroll, 'MCP' + (names.length ? ' · ' + names.length : '')); holder.classList.add('ag-mcp-section');
+      if (!names.length) { holder.append(el('p', 'ag-mcp-none', 'none')); return; }
+      const chips = el('div', 'ag-mcp-chips'); holder.append(chips);
+      const failed = [];
+      appendList(holder, names, name => {
+        const row = known.get(name), state = mcpState(row), reason = mcpReason(row);
+        const chip = el('span', 'ag-mcp-chip'); chip.dataset.mcp = name; chip.dataset.state = state;
+        chip.append(el('span', 'ag-mcp-name', name), el('span', 'ag-mcp-state', state));
+        chip.title = name + ' · ' + state + (reason ? ' · ' + reason : '');
+        chips.append(chip);
+        if (reason) failed.push({ name, reason, state });
+      });
+      failed.forEach(item => { const line = el('p', 'ag-mcp-reason', item.name + ' · ' + item.reason); line.dataset.state = item.state; holder.append(line); });
+    }
     function redrawDetail() {
       if (!selected || selected.type !== 'agent') return;
       const key = document.activeElement?.closest?.('[data-skill-key]')?.dataset.skillKey;
@@ -2922,6 +2961,52 @@
       };
       lazySteps.set(row, fill); if (row.open) fill(); detailScroll.append(row);
     }
+    // One server in the list of all of them: its name and state, where it is declared, why it failed (the host's words, as
+    // text), and the agents that may use it; an agent's name picks that agent as a click on it would.
+    function mcpRow(server) {
+      const state = mcpState(server), reason = mcpReason(server);
+      const row = el('div', 'ag-mcp-row'); row.dataset.mcp = server.name; row.dataset.state = state;
+      const head = el('div', 'ag-mcp-head'); head.dataset.state = state; head.append(el('span', 'ag-mcp-name', server.name), el('span', 'ag-mcp-state', state)); row.append(head);
+      const meta = [server.kind === 'local' || server.kind === 'remote' ? server.kind : '', server.source === 'opencode' ? 'from OpenCode\'s settings' : server.source === 'plugin' ? 'from the plugin' : ''].filter(Boolean).join(' · ');
+      if (meta) row.append(el('span', 'ag-mcp-meta', meta));
+      if (reason) { const line = el('span', 'ag-mcp-reason', reason); line.dataset.state = state; row.append(line); }
+      const users = (Array.isArray(server.agents) ? server.agents : []).filter(name => typeof name === 'string');
+      const agents = el('div', 'ag-mcp-agents');
+      if (!users.length) agents.append(el('span', 'ag-mcp-none', '—'));
+      users.slice(0, LIST_LIMIT).forEach(name => {
+        if (agentsByName.has(name)) { const link = el('button', 'ag-family-link', name); link.type = 'button'; link.dataset.flowPeer = name; agents.append(link); }
+        else agents.append(el('span', 'ag-mcp-agent', name));
+      });
+      row.append(agents);
+      row.title = server.name + ' · ' + state + (reason ? ' · ' + reason : '');
+      return row;
+    }
+    // The list of all servers, opened from the plug beside the menu button. Reading only: a click on an agent's name picks it.
+    function mcpServers() { return Array.isArray(snapshot.mcp) ? snapshot.mcp.filter(row => row && typeof row.name === 'string') : []; }
+    function drawMcpPanel() {
+      const servers = mcpServers(), top = mcpPanel.scrollTop, parts = [];
+      if (!servers.length) parts.push(el('p', 'ag-run-empty', 'None'));
+      const holder = el('div', 'ag-mcp-list');
+      appendList(holder, servers, server => holder.append(mcpRow(server)));
+      parts.push(holder);
+      mcpPanel.replaceChildren(...parts); mcpPanel.scrollTop = top;
+    }
+    function openMcpPanel(fromKey) {
+      if (!Array.isArray(snapshot.mcp)) return;
+      closeAddMenu(false);
+      drawMcpPanel(); mcpPanel.hidden = false; mcpButton.setAttribute('aria-expanded', 'true');
+      if (fromKey) mcpPanel.focus({ preventScroll: true });
+    }
+    function closeMcpPanel(refocus) {
+      if (mcpPanel.hidden) return;
+      mcpPanel.hidden = true; mcpButton.setAttribute('aria-expanded', 'false');
+      if (refocus) mcpButton.focus({ preventScroll: true });
+    }
+    function updateMcp() {
+      const has = Array.isArray(snapshot.mcp);
+      mcpButton.hidden = !has;
+      if (!has) closeMcpPanel(false); else if (!mcpPanel.hidden) drawMcpPanel();
+    }
     function renderRunDetail(graph) {
       eyebrow.textContent = '';
       detailScroll.append(el('h2', 'ag-detail-title ag-run-title', 'Run'));
@@ -3496,6 +3581,7 @@
         agentActions(agent);
         agentTextSection(agent);
         skillSection(agent);
+        mcpSection(agent);
         teamSection(agent);
         if (sessionToOpen(agent)) { const opener = el('button', 'ag-open-session', 'Open session'); opener.type = 'button'; opener.dataset.openSession = agent.name; detailScroll.append(opener); }
         const record = snapshot.learning?.agents && Object.hasOwn(snapshot.learning.agents, agent.name) ? snapshot.learning.agents[agent.name] : null;
@@ -5083,7 +5169,21 @@
     orbitMark();
     // ---- orbit lane (n105) ----
 
-    listen(plus, 'click', event => { if (addMenu.hidden) openAddMenu(event.detail === 0); else closeAddMenu(false); });
+    listen(plus, 'click', event => { if (addMenu.hidden) { closeMcpPanel(false); openAddMenu(event.detail === 0); } else closeAddMenu(false); });
+    listen(mcpButton, 'click', event => { if (mcpPanel.hidden) openMcpPanel(event.detail === 0); else closeMcpPanel(false); });
+    listen(mcpPanel, 'click', event => {
+      const link = event.target.closest('[data-flow-peer]');
+      if (!link) return;
+      closeMcpPanel(false);
+      select('agent', link.dataset.flowPeer, nodes.get(link.dataset.flowPeer)); detailScroll.scrollTop = 0;
+    });
+    listen(document, 'keydown', event => {
+      if (event.key !== 'Escape' || mcpPanel.hidden) return;
+      const inside = mcpPanel.contains(document.activeElement) || document.activeElement === mcpButton;
+      if (inside) { event.preventDefault(); event.stopPropagation(); }
+      closeMcpPanel(inside);
+    }, true);
+    listen(document, 'pointerdown', event => { if (!mcpPanel.hidden && !mcpPanel.contains(event.target) && !mcpButton.contains(event.target)) closeMcpPanel(false); }, true);
     // A press on a starting point takes the new circle at once: drag it out and release to drop it, or click and
     // then click where it goes.
     listen(addMenu, 'pointerdown', event => {
@@ -5576,7 +5676,7 @@
     function render(data) {
       const previousTeam = activeTeam;
       snapshot = { ...data, agents: prepareRoster(data) };
-      const stamp = JSON.stringify([data.agents, data.graph, data.warnings, data.totals, data.escalation, data.root?.wear, data.structure, data.skill_warnings, data.skills, data.roster]);
+      const stamp = JSON.stringify([data.agents, data.graph, data.warnings, data.totals, data.escalation, data.root?.wear, data.structure, data.skill_warnings, data.skills, data.roster, data.mcp]);
       if (stamp !== renderStamp) { renderStamp = stamp; renderRevision++; }
       // The host's answer stands for an agent's skills only until a snapshot shows the same list.
       skillOverride.forEach((list, name) => { const agent = (data.agents || []).find(item => item?.name === name); if (!agent || JSON.stringify(agent.skills) === JSON.stringify(list)) skillOverride.delete(name); });
@@ -5585,7 +5685,7 @@
       if (trail.some(name => !shownAgents.has(name))) dropTrail();
       const graph = data.graph;
       runDetails.dataset.notices = String(data.warnings.length + (graph ? graph.problems.length : 0) > 0 || !!data.learning?.due);
-      renderActivity(); updatePlus();
+      renderActivity(); updatePlus(); updateMcp();
       orbitRuns();
       const previousLayout = layoutSignature;
       if (root.clientWidth > 0 && viewport.clientWidth > 0) {

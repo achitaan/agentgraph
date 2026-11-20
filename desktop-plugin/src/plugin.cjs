@@ -51,6 +51,7 @@ const SESSION_ID = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$/;
 const AGENT_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
 const FLOW_ID = /^[a-z0-9][a-z0-9-]{0,79}$/;
 const SKILL_NAME = /^[a-z][a-z0-9-]{0,63}$/;
+const MCP_NAME = /^[A-Za-z0-9_.-]{1,64}$/;
 const VARIANT_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/; // a model's variant: not a name the toolkit defines
 // A thing's `rev` (agentfiles.rev: 16 hex digits). A change from the view sends the rev it was showing as `expect`;
 // the command refuses it, changing nothing, when the thing changed since (the answer is { error, rev }).
@@ -121,6 +122,66 @@ function errorDocument(message) {
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// --- MCP servers: the live state the host knows (read only) -------------------------------------------------------------
+// The snapshot (from Python) carries each server's name and its state from the settings (on or off); nothing else of an
+// MCP entry ever leaves the settings. In the window, the Desktop host's own client may know more: its MCP status call
+// (`client.mcp.status`, GET /mcp: an object of server name -> { status: "connected" | "disabled" | "failed" |
+// "needs_auth" | "needs_client_registration", error? }). Only the state and the reason are taken from it, and only for a
+// name the snapshot already lists; the reason is the host's untrusted text, cut to one line of at most 200 characters.
+const MCP_STATE = { connected: "connected", failed: "failed", needs_auth: "needs sign-in", needs_client_registration: "needs sign-in", disabled: "off" };
+const MCP_REASON_MAX_CHARS = 200;
+const MCP_TIMEOUT_MS = 4000;
+
+function mcpReason(value) {
+  if (typeof value !== "string") return "";
+  return Array.from(value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim())
+    .slice(0, MCP_REASON_MAX_CHARS)
+    .join("");
+}
+
+// The call's answer as the status object: { data } (the SDK's wrapper), or the object itself; an error gives none.
+function mcpStatusObject(result) {
+  if (!isPlainObject(result)) return null;
+  const wrapped = isPlainObject(result.data) && typeof result.data.status !== "string";
+  const map = wrapped ? result.data : result.error ? null : result;
+  return isPlainObject(map) ? map : null;
+}
+
+// Put the host's state on the snapshot's own servers, in place. Nothing is added to the document but `state`, `live` and
+// `reason` of a server it already lists by a plain name.
+function applyMcpStatus(doc, map) {
+  if (!isPlainObject(doc) || !Array.isArray(doc.mcp) || !isPlainObject(map)) return doc;
+  for (const row of doc.mcp) {
+    if (!isPlainObject(row) || typeof row.name !== "string" || !MCP_NAME.test(row.name) || !Object.hasOwn(map, row.name)) continue;
+    const entry = map[row.name];
+    const status = isPlainObject(entry) && typeof entry.status === "string" ? entry.status : "";
+    if (!Object.hasOwn(MCP_STATE, status)) continue;
+    row.state = MCP_STATE[status];
+    row.live = true;
+    row.reason = row.state === "failed" || row.state === "needs sign-in" ? mcpReason(entry.error) : "";
+  }
+  return doc;
+}
+
+// Ask the host. Never rejects and never says why it could not: a host without the call, a failure or a slow answer
+// leaves the settings' own state. No text from the host is logged.
+async function hostMcpStatus(session) {
+  let timer;
+  try {
+    const client = session && session.server && session.server.client;
+    const status = client && client.mcp && client.mcp.status;
+    if (typeof status !== "function") return null;
+    const directory = typeof session.directory === "string" ? session.directory : undefined;
+    const answer = Promise.resolve(status.call(client.mcp, directory ? { directory } : {}));
+    const result = await Promise.race([answer, new Promise((resolve) => { timer = setTimeout(() => resolve(null), MCP_TIMEOUT_MS); })]);
+    return mcpStatusObject(result);
+  } catch (_) {
+    return null;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 // The snapshot document as text -> an object with version 1, else an error document.
@@ -906,6 +967,8 @@ function renderPanel(ctx, solid, props) {
       const request = sessionRequest();
       if (!request || !request.directory) return errorDocument("No session is open.");
       const doc = await ask(request);
+      if (!alive) return errorDocument("The panel is closed.");
+      if (Array.isArray(doc.mcp) && doc.mcp.length) applyMcpStatus(doc, await hostMcpStatus(props.session));
       if (!alive) return errorDocument("The panel is closed.");
       // Reset/remount already fetches the new session; don't repeat it from an obsolete request.
       const now = sessionRequest();

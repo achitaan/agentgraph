@@ -670,7 +670,7 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
     document = snapshot_document(snapshot, source, task, session=session,
                                  structure=load_structure() if source == "live" else None)
     if source == "live":
-        from . import roster, skillfiles, skillset  # each imports this module
+        from . import mcpview, roster, skillfiles, skillset  # each imports this module
         document["learning"] = _json_safe(learning_document())
         from . import flowrun  # flowrun imports this module
         from .sources import DB_PATH
@@ -678,6 +678,7 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
                          graph_paths=[graph.path for graph in snapshot.graphs], db_path=DB_PATH)
         document["skills"] = skills_document()
         skillset.annotate(document)
+        mcpview.annotate(document)  # the MCP servers' names and states, and which agent may use which
         # The folder every writer uses by default: an agent's rev covers its structure file (the Desktop app's
         # writers pass no --structure either), and removable reads the flow files as the removal does.
         roster.annotate(document, structure=STRUCTURE_DIR)
