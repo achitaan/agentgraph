@@ -1,6 +1,6 @@
 ---
 name: supabase
-description: "Use when doing ANY task involving Supabase. Triggers: Supabase products (Database, Auth, Edge Functions, Realtime, Storage, Vectors, Cron, Queues); client libraries and SSR integrations (supabase-js, @supabase/ssr) in Next.js, React, SvelteKit, Astro, Remix; auth issues (login, logout, sessions, JWT, cookies, getSession, getUser, getClaims, RLS); Supabase CLI or MCP server; schema changes, migrations, declarative schemas, security audits, Postgres extensions (pg_graphql, pg_cron, pg_vector); debugging and troubleshooting errors or unexpected behavior on Supabase projects (HTTP errors, Postgres errors, RLS surprises, permission denied, schema cache issues, timeouts, Edge Function crashes, Realtime drops, Storage failures) and reading or querying logs (Logs Explorer, ClickHouse)."
+description: "Use for ANY Supabase task: Database, Auth, Edge Functions, Realtime, Storage, Vectors, Cron, Queues; supabase-js and @supabase/ssr in Next.js, React, SvelteKit, Astro, Remix; auth issues (sessions, JWT, cookies, getClaims, RLS); Supabase CLI or MCP; migrations, declarative schemas, security audits, Postgres extensions; debugging errors (HTTP and Postgres errors, RLS surprises, permission denied, schema cache, timeouts, Edge Function, Realtime and Storage failures) and reading logs."
 metadata:
   author: supabase
   version: "0.1.2"

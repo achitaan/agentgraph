@@ -1,17 +1,6 @@
 ---
 name: performance-speedup
-description: >
-  Audit and speed up a slow module, code path, query, batch job, pipeline, or request handler.
-  Trigger when the user asks to speed up or optimize performance, reports that something is slow,
-  shares logs, traces, timings, or profiles showing high latency or low throughput, or when the current coding task
-  clearly depends on fixing a runtime bottleneck.
-  Diagnose before changing code: identify the hot path, classify the bottleneck
-  (algorithmic, CPU, I/O, database, network, memory, serialization, contention, logging, or redundant work),
-  propose ranked optimizations, apply the highest-confidence improvements, and remeasure.
-  Use profiling, query plans, logs, benchmarks, and suitable tools such as vectorization, batching, caching,
-  indexing, concurrency, DuckDB, or Polars when justified by evidence.
-  Do not use for generic bug fixing, correctness-only debugging, build or install speed, infra provisioning,
-  or vague optimize requests with no performance signal.
+description: "Audit and speed up a slow module, code path, query, batch job, pipeline or handler. Use when asked to speed up or optimize, when something is reported slow, or when logs, traces, timings or profiles show high latency or low throughput. Diagnose first: find the hot path, classify the bottleneck, rank fixes, apply the best, remeasure."
 ---
 
 # Performance Speedup

@@ -1,6 +1,6 @@
 ---
 name: exa-research
-description: Find and verify public web sources for research briefs, comparisons, and current findings using Exa search and page retrieval. Use for source discovery; Research Summarizer handles supplied documents and Context7 handles library API documentation.
+description: Find and verify public web sources for research briefs, comparisons, and current findings using Exa search and page retrieval. Use for source discovery; Context7 handles library API documentation.
 ---
 
 # Exa research
@@ -20,9 +20,7 @@ web-search tool and state the fallback; do not install another integration.
 4. Verify key claims against fetched content, dates, and independent evidence
    where appropriate. Preserve disagreement and uncertainty. Distinguish source
    findings from inference and recommend nothing based solely on a snippet.
-5. Give concise findings, limitations, and links to supporting sources. Use
-   Research Summarizer for a requested structured brief and writing skills for
-   editing without changing the evidence.
+5. Give concise findings, limitations, and links to supporting sources.
 
 This is a search-and-synthesis workflow performed in the current session. It does not invoke
 Exa `agent_run`, start a second orchestrator, or create background research jobs.

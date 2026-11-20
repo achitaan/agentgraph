@@ -1,15 +1,6 @@
 ---
 name: open-ralph-wiggum
-description: >
-  Use this skill whenever a user wants to run, install, configure, or understand open-ralph-wiggum (ralph).
-  This skill can be used by any AI assistant or IDE agent (GitHub Copilot, Claude Code, Cursor, Windsurf, etc.).
-  Triggers on: "ralph", "ralph wiggum", "agentic loop", "iterative AI loop", "autonomous coding loop",
-  "how to install ralph", "how to use ralph with Claude Code / Codex / Copilot / Cursor Agent / Qwen Code / OpenCode",
-  "ralph --agent", "ralph --tasks", "ralph --status", "--max-iterations", "--rotation",
-  "how do I run ralph in VS Code / Cursor / JetBrains / Neovim",
-  or any question about looping an AI coding agent until a task is done.
-  Even if the user doesn't say "ralph" explicitly — if they want to run an AI agent in a loop
-  until a promise tag appears in its output, use this skill.
+description: "Use when the user wants to run, install, configure or understand open-ralph-wiggum (ralph): \"ralph\", \"agentic loop\", \"autonomous coding loop\", ralph --agent/--tasks/--status/--max-iterations/--rotation, running ralph with Claude Code, Codex, Copilot, Cursor, Qwen Code or OpenCode, or looping an AI agent until a promise tag appears in its output."
 ---
 
 # Open Ralph Wiggum
