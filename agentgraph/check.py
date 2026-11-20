@@ -334,6 +334,105 @@ def flow_chains(graph: TaskGraph, flow: dict, hubs=frozenset(), seats=None) -> l
     return [] if problems else chains
 
 
+def _stands_for(agent: str, seats) -> str:
+    prefixes = {lead: prefix for lead, prefix in (seats or {}).items() if isinstance(prefix, str) and prefix}
+    return next((lead for lead, prefix in prefixes.items() if agent != lead and agent.startswith(prefix)), agent)
+
+
+def _widest(ids: list[str], reaches: dict[str, set[str]]) -> list[str]:
+    """The largest set of `ids` no two of which are ordered (neither reaches the other through depends_on): a
+    maximum antichain, by Dilworth's theorem from a maximum matching (Kuhn) and König's cover."""
+    after = {u: [v for v in ids if v != u and v in reaches[u]] for u in ids}
+    match_right: dict[str, str] = {}
+
+    def augment(u: str, seen: set[str]) -> bool:
+        for v in after[u]:
+            if v in seen:
+                continue
+            seen.add(v)
+            if v not in match_right or augment(match_right[v], seen):
+                match_right[v] = u
+                return True
+        return False
+
+    for u in ids:
+        augment(u, set())
+    match_left = {u: v for v, u in match_right.items()}
+    # König: from each unmatched left vertex, alternate along free then matched edges; Z is what is reached.
+    left_z = [u for u in ids if u not in match_left]
+    left_seen, right_seen = set(left_z), set()
+    while left_z:
+        u = left_z.pop()
+        for v in after[u]:
+            if v not in right_seen and match_left.get(u) != v:
+                right_seen.add(v)
+                w = match_right.get(v)
+                if w is not None and w not in left_seen:
+                    left_seen.add(w)
+                    left_z.append(w)
+    return [x for x in ids if x in left_seen and x not in right_seen]
+
+
+def pool_problems(graph: TaskGraph, pools: dict, seats=None) -> list[str]:
+    """For each agent with a `pool` in the structure folder, the nodes it runs that could all run at once (none
+    depends on another, directly or through other nodes) when there are more of them than its pool: one message
+    per agent. Node statuses do not matter: this is the graph's shape."""
+    by_agent: dict[str, list[str]] = {}
+    for node in graph.nodes:
+        by_agent.setdefault(_stands_for(node.agent, seats), []).append(node.id)
+    wanted = {agent: ids for agent, ids in by_agent.items()
+              if isinstance(pools.get(agent), int) and len(dict.fromkeys(ids)) > pools[agent]}
+    if not wanted:
+        return []
+    followers: dict[str, list[str]] = {}
+    for node in graph.nodes:
+        for target in dict.fromkeys(node.depends_on):
+            followers.setdefault(target, []).append(node.id)
+    found = []
+    for agent, ids in wanted.items():
+        ids = list(dict.fromkeys(ids))
+        reaches = {}
+        for start in ids:
+            seen, stack = set(), list(followers.get(start, ()))
+            while stack:
+                current = stack.pop()
+                if current not in seen:
+                    seen.add(current)
+                    stack.extend(followers.get(current, ()))
+            reaches[start] = seen
+        widest = _widest(ids, reaches)
+        if len(widest) > pools[agent]:
+            shown = ", ".join(widest[:8]) + (f" and {len(widest) - 8} more" if len(widest) > 8 else "")
+            found.append(f"{len(widest)} nodes of {agent} can run at once ({shown}), more than its pool of {pools[agent]} "
+                         "(structure folder)")
+    return found
+
+
+def escalation_problems(graph: TaskGraph, escalation, seats=None) -> list[str]:
+    """Nodes whose `tiers` move from an agent with `escalates_to` in the structure folder to an agent other than
+    that one: one message per such move. An agent without the setting may move anywhere; the same agent twice in a
+    row is a resumed session, not an escalation."""
+    up: dict[str, str] = {}
+    for source, target in escalation or ():
+        up.setdefault(source, target)
+    found = []
+    for node in graph.nodes:
+        tiers = [_stands_for(agent, seats) for agent in node.tiers if isinstance(agent, str)]
+        for before, after in zip(tiers, tiers[1:]):
+            if before != after and before in up and after != up[before]:
+                found.append(f"{node.id} was escalated from {before} to {after}; {before} escalates to "
+                             f"{up[before]} (structure folder)")
+    return found
+
+
+def folder_warnings(graph: TaskGraph, pools=None, seats=None) -> list[str]:
+    """What the structure folder's `pool` says that the graph does not follow: warnings, never problems. A graph on
+    disk that `check` passed has more parallel nodes of one agent than its pool, and the orchestration's own policy
+    starts more instances when there are more independent lanes than slots. (`escalates_to` is a problem:
+    escalation_problems; no graph on disk breaks it.)"""
+    return pool_problems(graph, pools or {}, seats)
+
+
 def print_flows(flows) -> None:
     """The user's standing instructions, after the result; never part of it."""
     if not flows:
@@ -346,12 +445,13 @@ def print_flows(flows) -> None:
 
 
 def _graph_and_issues(raw: dict, path: Path, flows=(), hubs=frozenset(), seats=None,
-                      teams=()) -> tuple[TaskGraph, list[str]]:
+                      teams=(), escalation=()) -> tuple[TaskGraph, list[str]]:
     issues = _raw_issues(raw)
     graph = graph_from_raw(raw, path)
     if issues:
         return graph, issues
-    issues = validate(graph) + flow_problems(graph, flows, hubs, seats) + team_problems(teams, graph, seats or {})
+    issues = (validate(graph) + flow_problems(graph, flows, hubs, seats) + team_problems(teams, graph, seats or {})
+              + escalation_problems(graph, escalation, seats))
     for node in graph.nodes:
         if node.type not in NODE_TYPES:
             issues.append(f"{node.id} has unknown type {node.type!r}")
@@ -385,6 +485,8 @@ def main(argv: list[str] | None = None) -> int:
     hubs = hub_names(shape)
     seats = shape["seats"] if shape else {}
     teams = shape.get("teams", []) if shape else []  # the groups: agents that report to one lead
+    escalation = shape["escalation"] if shape else []  # escalates_to: a problem when a node's tiers break it
+    pools = shape["pool"] if shape else {}  # pool: a warning when more nodes of one agent can run at once
 
     discovery_warnings: list[str] = []
     try:
@@ -415,7 +517,7 @@ def main(argv: list[str] | None = None) -> int:
         if raw is not None:
             if args.task is not None and raw.get("task") != args.task:
                 continue  # Another task's graph: never validated, so it cannot slow this check.
-            graph, issues = _graph_and_issues(raw, path, flows, hubs, seats, teams)
+            graph, issues = _graph_and_issues(raw, path, flows, hubs, seats, teams, escalation)
         if graph is None:
             # A non-object is readable JSON with a schema problem; preserve
             # the CLI's distinction between it and a read or decode failure.
@@ -453,6 +555,8 @@ def main(argv: list[str] | None = None) -> int:
         if graph is not None:
             for advice in shape_advice(graph):
                 _print(f"advice: {advice}")
+            for warning in folder_warnings(graph, pools, seats):
+                _print(f"warning: {warning}")
         failed = failed or bool(issues)
 
     print_flows(flows)
