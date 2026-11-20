@@ -461,7 +461,7 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   the canvas.
 // Refit: opening or closing the details refits the graph into the space left (every circle and name clear of the
 //   sheet, the figures and the controls; names at 11 px or more, past that it pans), unless the user has panned or
-//   zoomed since the last fit: then their view stays. A change of the pane's own size or of arrangement refits.
+//   zoomed since the last fit: then their view stays (in compact, as it was on screen; see Narrow canvas). A change of the pane's own size or of arrangement refits.
 //   A change of layout (a loop drawn or removed, an agent added or removed, a keyboard nudge) never discards the
 //   user's pan or zoom; an automatic view stays put too when nothing but a loop's agents or a new agent moved (it
 //   pans only to bring them into view), else it is fitted again. A wide canvas the details leave taller than wide
@@ -479,6 +479,19 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   a host's background token, so a host's panel shows what the plain page shows.
 // Zoom floor: wheel, Ctrl+wheel, pinch, the - key and Fit all stop where names are 11 px on screen (12 px names
 //   at scale 11/12). The background pans, like an agent drags, only once the pointer has moved more than 5 px.
+//   A plain wheel zooms about the pointer at every width, the compact arrangement included (one gesture, one
+//   meaning); a drag on empty canvas pans whenever anything lies outside the canvas, at any zoom.
+// Narrow canvas (n114): the fit and the pan limits count loop rings as well as agents (no ring is left cut by the
+//   edge when a pan-free placement exists). With the trial's loop sets and the details open at 620 px every circle,
+//   name and ring is in the canvas; at 420 px what is outside comes into view with one drag. Every ring keeps at
+//   least 8 drawing px clear of every circle and name not on it, the orchestrator's name included (the aim is 12);
+//   where the canvas has no room for that the ring keeps clear and lies outside, a pan away. Two loops through one
+//   agent leave it side by side, nearly touching at its centre, so a click a few px off one picks that one.
+//   After the user zoomed or panned in compact, opening the sheet keeps the drawing where it is on screen (the
+//   canvas moves down under the figures; the opened agent alone is panned into view, as far as it takes), closing
+//   it puts the view back where it was (unless the user panned or zoomed meanwhile), and a loop drawn or an agent
+//   placed or added from the + does not pull the view to the picture's new edges. An agent the user placed is left
+//   out of where loops are fitted, so dropping one moves no loop. Text in the details is 11 px or more.
 // A refused path keeps the reason as the tooltip of its first agent and of the newest agent (which shakes and
 //   shows it in its details).
 // A blank agent is asked for as { op: "add", name, template: "blank" } with no model, so the back end's default
