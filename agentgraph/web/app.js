@@ -5,6 +5,8 @@
   const EDGE = 12, SLOT = 104, GROUP_GAP = 34, SEAT_DISTANCE = 68, MEMBER_DISTANCE = 96, MEMBER_REACH = 40;
   // A full loop's agents sit on a circle of their own: neighbours RING_GAP apart, the circle never under RING_MIN.
   const RING_GAP = 124, RING_MIN = 82, RING_MS = 240;
+  // Out of the canvas counts against a place, but less than running into a circle or a name (n103).
+  const RING_OUT = .25;
   const DETAIL_WIDTH = 340; // the details panel beside a wide graph (style.css: .ag-details-open .ag-network margin)
   const READABLE = 11 / 12; // agent names are 12 px: the automatic view never shows them under 11 px; it pans instead
   let instance = 0;
@@ -739,7 +741,7 @@
             for (const s of shapes) if (!skip.has(s.name)) bad += insideOf(s, nx, ny, next.radius);
             for (const s of list) if (!next.names.includes(s.name)) bad += insideOf(s, nx, ny, next.radius);
             bands.forEach(band => { if (!band.names.some(name => next.names.includes(name))) bad += Math.max(0, next.radius + band.r + RING_APART - Math.hypot(nx - band.x, ny - band.y)); });
-            bad += Math.max(0, centre - half - (nx - next.radius)) + Math.max(0, nx + next.radius - centre - half) + Math.max(0, middle - halfY - (ny - next.radius)) + Math.max(0, ny + next.radius - middle - halfY);
+            bad += RING_OUT * (Math.max(0, centre - half - (nx - next.radius)) + Math.max(0, nx + next.radius - centre - half) + Math.max(0, middle - halfY - (ny - next.radius)) + Math.max(0, ny + next.radius - middle - halfY));
             if (best && bad > best.bad + 1e-6) return;
           }
           // A, B, C, B: the circle stays near A, so the step into it is short and both come into view together.
@@ -757,7 +759,7 @@
           // The canvas has no room to spare: a circle out of it would refit the view, which moves everything on
           // screen, so it counts as running into something.
           const over = Math.max(0, centre - half - e.left) + Math.max(0, e.right - centre - half) + Math.max(0, middle - halfY - e.top) + Math.max(0, e.bottom - middle - halfY);
-          if (over > 0) { bad += over; if (best && bad > best.bad + 1e-6) return; }
+          if (over > 0) { bad += RING_OUT * over; if (best && bad > best.bad + 1e-6) return; }
           const cost = moved + 3 * grown + 1000 * (Math.max(0, centre - half - e.left) + Math.max(0, e.right - centre - half) + Math.max(0, middle - halfY - e.top) + Math.max(0, e.bottom - middle - halfY));
           if (!best || bad < best.bad - 1e-6 || cost < best.cost) best = { bad, cost, x, y, start, dir, made, over };
         };
@@ -822,7 +824,7 @@
       const blocked = result => clashes(result) || result.over > 1;
       // The earlier loop is then placed after every other loop (so it keeps clear of them too) and just before the loops
       // it makes room for; only when no other loop goes through its agents.
-      const first = pass(new Map()), looking = new Map(), worse = list => rings.filter((ring, index) => blocked(list[index])).length, before = worse(first);
+      const first = pass(new Map()), looking = new Map(), worse = list => [clashes, blocked].map(test => rings.filter((ring, index) => test(list[index])).length), before = worse(first);
       rings.forEach((ring, k) => {
         if (!clashes(first[k])) return;
         const fixedOn = ring.names.filter(name => !ring.movable.includes(name));
@@ -839,7 +841,9 @@
       saved.forEach(({ body, x, y, still, ring }) => Object.assign(body, { x, y, still, ring }));
       shapes.splice(0, shapes.length, ...shapes0); bands.length = 0;
       const second = pass(looking, order);
-      if (worse(second) < before) return;
+      // The second pass stays when fewer loops run into something, or as many and fewer leave the canvas.
+      const after = worse(second);
+      if (after[0] < before[0] || (after[0] === before[0] && after[1] < before[1])) return;
       keep.bodies.forEach(({ body, x, y, still, ring }) => Object.assign(body, { x, y, still, ring }));
       shapes.splice(0, shapes.length, ...keep.shapes); bands.splice(0, bands.length, ...keep.bands);
     }

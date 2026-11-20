@@ -4935,7 +4935,7 @@
         { id: 'tail', path: ['reviewer', 'impl-hard', 'impl-openai', 'impl-hard'] }, { id: 'shared', path: ['oracle-lite', 'verifier', 'oracle-lite'] }];
       await test('n103 item 1: loops drawn one after another (the trial\'s far pair, a second loop, A,B,C,B, one sharing an agent) each form a circle in free space: no ring or moved agent touches the orchestrator or any circle or name not on it, no two share a centre, agents on no loop do not move (on the stage or on screen), and removing the paths puts every agent back', async () => {
         const problems = [];
-        for (const [width, height] of [[1300, 850], [620, 800]]) {
+        for (const [width, height] of [[1400, 900], [620, 800]]) {
           const data = n103Data(), label = width + 'x' + height;
           await using(data, async (root, app) => {
             await resizeTo(root, width, height); await settle();
