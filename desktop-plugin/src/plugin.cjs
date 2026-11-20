@@ -137,6 +137,11 @@ function snapshotIpc(pluginId) {
   let token = ipcTokens.get(pluginId);
   if (!token) {
     const Schema = effect.Schema;
+    // `expect`: the rev the view was showing, on every method whose ops take one (all but the snapshot). It must be
+    // declared: the host decodes each input with its schema (Effect Schema.Struct), which drops keys it does not
+    // declare, so an undeclared `expect` would never reach main. Optional: absent means no check (an add, a read, a
+    // restore, an old view); when present it is a string, and main and the view accept only a rev (REV).
+    const expect = (Schema.optionalKey || Schema.optional)(Schema.String);
     token = gui.Ipc.define({
       id: pluginId + "." + IPC_SUFFIX,
       methods: {
@@ -154,14 +159,14 @@ function snapshotIpc(pluginId) {
         // prompt (on stdin), "" for remove. Output: JSON text, {"flow"?, "flows": [...], "notes"?, "applies"?,
         // "live"?} afterwards, {"text"} for prompt, or {"error": "..."}.
         flow: {
-          input: Schema.Struct({ op: Schema.String, id: Schema.String, path: Schema.String, text: Schema.String }),
+          input: Schema.Struct({ op: Schema.String, id: Schema.String, path: Schema.String, text: Schema.String, expect }),
           output: Schema.String,
         },
         // Change one agent's skills in the plugin's preset file. Input: op ("add", "remove" or "all"), agent, and
         // skill ("" for all). Output: JSON text, {"agent", "skills": [...], "warnings": [...], "changed", "message"},
         // or {"error": "..."}.
         skills: {
-          input: Schema.Struct({ op: Schema.String, agent: Schema.String, skill: Schema.String }),
+          input: Schema.Struct({ op: Schema.String, agent: Schema.String, skill: Schema.String, expect }),
           output: Schema.String,
         },
         // Add an agent (an agent file, live at once: from a template, a copy or the fields given), read or replace
@@ -176,7 +181,7 @@ function snapshotIpc(pluginId) {
           input: Schema.Struct({
             op: Schema.String, name: Schema.String, record: Schema.String, model: Schema.String, variant: Schema.String,
             description: Schema.String, prompt: Schema.String, skills: Schema.String, read_only: Schema.String,
-            copy_of: Schema.String, template: Schema.String, to: Schema.String,
+            copy_of: Schema.String, template: Schema.String, to: Schema.String, expect,
           }),
           output: Schema.String,
         },
@@ -186,7 +191,7 @@ function snapshotIpc(pluginId) {
         skillfile: {
           input: Schema.Struct({
             op: Schema.String, id: Schema.String, record: Schema.String, description: Schema.String, text: Schema.String,
-            assign: Schema.String,
+            assign: Schema.String, expect,
           }),
           output: Schema.String,
         },
@@ -194,7 +199,7 @@ function snapshotIpc(pluginId) {
         // op ("add", "members", "text" or "remove"), id ("" for add), lead (add only), members (separated by single
         // spaces) and text (on stdin). Output: JSON text, {"team"?, "teams": [...], "notes"?} or {"error": "..."}.
         team: {
-          input: Schema.Struct({ op: Schema.String, id: Schema.String, lead: Schema.String, members: Schema.String, text: Schema.String }),
+          input: Schema.Struct({ op: Schema.String, id: Schema.String, lead: Schema.String, members: Schema.String, text: Schema.String, expect }),
           output: Schema.String,
         },
       },
@@ -855,11 +860,12 @@ function renderPanel(ctx, solid, props) {
   // so it gets no flow action and the view only shows the flows. The requests are the loopback endpoint's
   // (/api/structure/flow): {op: "add", path, text?, name?, command?}, {op: "text", id, text}, {op: "name", id, name},
   // {op: "command", id, on}, {op: "prompt", id, goal} (answers {text}) and {op: "remove", id}.
-  // A change may carry the `rev` the view was showing as `expect` (text, not empty: anything else is refused here); main
-  // checks it as a rev. A refusal because the thing changed since comes back as an Error whose `rev` is the current one.
+  // A change may carry the `rev` the view was showing as `expect` (a rev, REV: anything else is refused here, as main
+  // and the commands refuse it). A refusal because the thing changed since comes back as an Error whose `rev` is the
+  // current one.
   const carryExpect = (request, input, bad) => {
     if (request.expect === undefined) return input;
-    if (typeof request.expect !== "string" || request.expect === "") throw new Error(bad);
+    if (typeof request.expect !== "string" || !REV.test(request.expect)) throw new Error(bad);
     return Object.assign(input, { expect: request.expect });
   };
   const refusal = (doc, fallback) => {

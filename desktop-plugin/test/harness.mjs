@@ -69,6 +69,8 @@ function effectStub() {
     Boolean: { _tag: "Boolean" },
     Unknown: { _tag: "Unknown" },
     Struct: (fields) => ({ _tag: "Struct", fields }),
+    // The host's Effect Schema has optionalKey (a key that may be absent; when present, of that schema).
+    optionalKey: (schema) => ({ _tag: "optionalKey", schema }),
   };
   return { Schema };
 }
@@ -477,20 +479,24 @@ await check("main registers exactly one Ipc (<id>.snapshot) with snapshot, flow,
   assert.deepEqual(Object.keys(token.spec.methods), ["snapshot", "flow", "skills", "roster", "skillfile", "team"]);
   // Round 3: roster, skillfile and team, each with string fields only.
   // n96: "to" (the new name of a rename) joined the roster's fields.
-  assert.deepEqual(Object.keys(token.spec.methods.roster.input.fields), ["op", "name", "record", "model", "variant", "description", "prompt", "skills", "read_only", "copy_of", "template", "to"]);
-  assert.deepEqual(Object.keys(token.spec.methods.skillfile.input.fields), ["op", "id", "record", "description", "text", "assign"]);
-  assert.deepEqual(Object.keys(token.spec.methods.team.input.fields), ["op", "id", "lead", "members", "text"]);
+  // n99 r4: "expect" (the view's rev) is declared, optional, on every method whose ops take one: the host's decoding
+  // drops undeclared keys. Every other field is a required string.
+  const stringsAndExpect = (fields) => Object.entries(fields).every(([key, field]) => key === "expect"
+    ? field._tag === "optionalKey" && field.schema._tag === "String" : field._tag === "String");
+  assert.deepEqual(Object.keys(token.spec.methods.roster.input.fields), ["op", "name", "record", "model", "variant", "description", "prompt", "skills", "read_only", "copy_of", "template", "to", "expect"]);
+  assert.deepEqual(Object.keys(token.spec.methods.skillfile.input.fields), ["op", "id", "record", "description", "text", "assign", "expect"]);
+  assert.deepEqual(Object.keys(token.spec.methods.team.input.fields), ["op", "id", "lead", "members", "text", "expect"]);
   for (const method of ["roster", "skillfile", "team"]) {
-    assert.ok(Object.values(token.spec.methods[method].input.fields).every((field) => field._tag === "String"), method);
+    assert.ok(stringsAndExpect(token.spec.methods[method].input.fields), method);
     assert.equal(token.spec.methods[method].output._tag, "String");
     assert.ok(typeof impl[method] === "function", method);
   }
-  assert.deepEqual(Object.keys(token.spec.methods.skills.input.fields), ["op", "agent", "skill"]);
-  assert.ok(Object.values(token.spec.methods.skills.input.fields).every((field) => field._tag === "String"));
+  assert.deepEqual(Object.keys(token.spec.methods.skills.input.fields), ["op", "agent", "skill", "expect"]);
+  assert.ok(stringsAndExpect(token.spec.methods.skills.input.fields));
   assert.equal(token.spec.methods.skills.output._tag, "String");
   assert.ok(typeof impl.skills === "function");
-  assert.deepEqual(Object.keys(token.spec.methods.flow.input.fields), ["op", "id", "path", "text"]);
-  assert.ok(Object.values(token.spec.methods.flow.input.fields).every((field) => field._tag === "String"));
+  assert.deepEqual(Object.keys(token.spec.methods.flow.input.fields), ["op", "id", "path", "text", "expect"]);
+  assert.ok(stringsAndExpect(token.spec.methods.flow.input.fields));
   assert.equal(token.spec.methods.flow.output._tag, "String");
   assert.ok(typeof impl.flow === "function");
   assert.equal(token.spec.methods.snapshot.input._tag, "Struct");
@@ -1482,7 +1488,10 @@ esac
     [impl.skillfile, { op: "delete", id: "s", record: "", description: "", text: "", assign: "", expect: "" }], [impl.flow, { ...flowBlank, op: "remove", id: "f", expect: null }],
     [impl.roster, { ...blank, op: "read", name: "checker", expect: rev }], [impl.roster, { ...blank, op: "restore", record: "/r.json", expect: rev }],
     [impl.roster, { ...blank, op: "add", name: "x", template: "verifier", expect: rev }], [impl.skillfile, { op: "read", id: "s", record: "", description: "", text: "", assign: "", expect: rev }],
-    [impl.team, { op: "add", id: "", lead: "r", members: "a", text: "", expect: rev }]])
+    [impl.team, { op: "add", id: "", lead: "r", members: "a", text: "", expect: rev }],
+    // Review n8 r5, note: a blank or short rev is bad input here as on the endpoints and the commands.
+    [impl.roster, { ...blank, op: "remove", name: "checker", expect: " " }], [impl.skills, { op: "add", agent: "impl-openai", skill: "code-assurance", expect: " " }],
+    [impl.flow, { ...flowBlank, op: "remove", id: "f", expect: "0".repeat(15) }], [impl.skillfile, { op: "delete", id: "s", record: "", description: "", text: "", assign: "", expect: " " }]])
     assert.equal(typeof JSON.parse(await method(input)).error, "string", JSON.stringify(input));
   assert.equal(log.length, 0, "a bad or misplaced rev spawned a command");
 });
@@ -1520,7 +1529,10 @@ await check("panel render: every action passes `expect` to main as it is, and a 
   for (const [action, request, message] of [[flow, { op: "remove", id: "f", expect: 5 }, "Bad flow request."], [team, { op: "remove", id: "r", expect: [] }, "Bad group request."],
     [flow, { op: "remove", id: "f", expect: "" }, "Bad flow request."], [skills, { agent: "impl-openai", skill: "alpha", on: false, expect: "" }, "Bad skills request."],
     [roster, { op: "remove", name: "checker", expect: "" }, "Bad roster request."], [skillfile, { op: "delete", id: "s", expect: "" }, "Bad skill request."],
-    [team, { op: "remove", id: "r", expect: "" }, "Bad group request."], [flow, { op: "remove", id: "f", expect: null }, "Bad flow request."]]) {
+    [team, { op: "remove", id: "r", expect: "" }, "Bad group request."], [flow, { op: "remove", id: "f", expect: null }, "Bad flow request."],
+    // Review n8 r5, note: the view refuses what main refuses: a blank, short or capital rev never reaches it.
+    [roster, { op: "remove", name: "checker", expect: " " }, "Bad roster request."], [team, { op: "remove", id: "r", expect: "0".repeat(15) }, "Bad group request."],
+    [skills, { agent: "impl-openai", skill: "alpha", on: false, expect: "ABCDEF0123456789" }, "Bad skills request."]]) {
     let text = "";
     try {
       await action(request);
@@ -1531,6 +1543,176 @@ await check("panel render: every action passes `expect` to main as it is, and a 
   }
   assert.equal(w.calls.length, count, "a bad expect reached main");
   rendered.dispose();
+});
+
+// The host decodes each Ipc input with its schema, as Effect's Schema.Struct does by default: a declared field must
+// have its type (an optionalKey may be absent), and a key the schema does not declare is dropped.
+function hostDecode(schema, input) {
+  assert.equal(schema._tag, "Struct");
+  const out = {};
+  for (const [key, field] of Object.entries(schema.fields)) {
+    const optional = field._tag === "optionalKey";
+    const type = optional ? field.schema : field;
+    if (optional && (!Object.prototype.hasOwnProperty.call(input, key) || input[key] === undefined)) continue;
+    assert.equal(type._tag, "String", key);
+    if (typeof input[key] !== "string") throw new Error(`input: ${key} is not a string`);
+    out[key] = input[key];
+  }
+  return out;
+}
+
+// n99 r4 (from the documentation lane): `expect` must cross the host's bridge. Each op that takes a rev, sent by the
+// panel's own action, goes through the window's Ipc token, hostDecode and the real main, and the command line main
+// runs ends with `--expect REV --json`.
+await check("renderer to command line through the host's schema decoding: every op that takes a rev arrives as --expect REV", async () => {
+  const python = path.join(TMP, "fake-bridge-python");
+  fs.writeFileSync(python, `#!/bin/sh
+cat > /dev/null
+case "$3" in
+  agentgraph.structure) case "$*" in *" prompt "*) printf '{"text": "run it"}\\n';; *) printf '{"flows": []}\\n';; esac;;
+  agentgraph.skillset) printf '{"agent": "impl-openai", "skills": []}\\n';;
+  agentgraph.roster) printf '{"agent": "checker", "action": "x"}\\n';;
+  agentgraph.skillfiles) printf '{"id": "s"}\\n';;
+  agentgraph.teams) printf '{"teams": []}\\n';;
+esac
+`, { mode: 0o700 });
+  const log = [];
+  const loaded = loadMain(CODE, log);
+  const m = mainContext({ home: ORCHESTRATION, python });
+  resolveDefault(loaded.module.exports).main(m.ctx);
+  const impl = m.provided[0].impl;
+
+  const definition = windowLoad.gui.defined[0];
+  const session = { key: "srv\nses_a", id: "ses_a", directory: ORCHESTRATION };
+  const props = { get session() { return session; }, screen: {} };
+  const w = windowContext(definition, { session });
+  const decoded = [];
+  w.ctx.main = (token) => Object.fromEntries(Object.keys(token.spec.methods).map((method) => [method, async (input) => {
+    const value = hostDecode(token.spec.methods[method].input, input);
+    decoded.push({ method, value });
+    return impl[method](value, { window: 1, signal: new AbortController().signal });
+  }]));
+  definition.setup(w.ctx);
+  const rendered = windowLoad.solid.runWithOwner(() => value(w.added[1].item).render(props));
+  const { flow, skills, roster, skillfile, team } = mountCalls[mountCalls.length - 1].options.actions;
+  const rev = "0123456789abcdef";
+  const ops = [
+    ["flow text", flow, { op: "text", id: "f", text: "T" }],
+    ["flow name", flow, { op: "name", id: "f", name: "nm" }],
+    ["flow command", flow, { op: "command", id: "f", on: true }],
+    ["flow prompt", flow, { op: "prompt", id: "f", goal: "a goal" }],
+    ["flow remove", flow, { op: "remove", id: "f" }],
+    ["skills add", skills, { agent: "impl-openai", skill: "code-assurance", on: true }],
+    ["skills remove", skills, { agent: "impl-openai", skill: "code-assurance", on: false }],
+    ["skills all", skills, { agent: "impl-openai", all: true }],
+    ["agent text", roster, { op: "text", name: "checker", text: "New." }],
+    ["agent rename", roster, { op: "rename", name: "checker", to: "auditor" }],
+    ["agent remove", roster, { op: "remove", name: "checker" }],
+    ["skill write", skillfile, { op: "write", id: "s", text: "New." }],
+    ["skill delete", skillfile, { op: "delete", id: "s" }],
+    ["group members", team, { op: "members", id: "r", members: ["a", "b"] }],
+    ["group text", team, { op: "text", id: "r", text: "New." }],
+    ["group remove", team, { op: "remove", id: "r" }],
+  ];
+  for (const [what, action, request] of ops) {
+    log.length = 0;
+    await action({ ...request, expect: rev });
+    assert.equal(log.length, 1, what);
+    assert.deepEqual(log[0].args.slice(-3), ["--expect", rev, "--json"], `${what}: ${log[0].args.join(" ")}`);
+    log.length = 0;
+    await action(request);
+    assert.equal(log[0].args.includes("--expect"), false, `${what} without a rev runs as before`);
+  }
+  assert.equal(decoded.length, ops.length * 2);
+  rendered.dispose();
+  // The decoding is the host's: an undeclared key is dropped, so without the declaration the rev would be lost.
+  const undeclared = { _tag: "Struct", fields: { op: { _tag: "String" } } };
+  assert.deepEqual(hostDecode(undeclared, { op: "remove", expect: rev }), { op: "remove" });
+});
+
+// Review n8 r5 (major): the server path was tested, the Desktop path was not. Here the plugin's own main runs its
+// exact command lines against a scratch copy of the orchestration (options.home) with HOME in scratch, so every
+// default folder (agents, commands, backups, skills, the preset file, structure/, SKILLS.md) is a scratch one: the
+// snapshot runs in the session's folder, each writer in home, and a rev the snapshot shows must be the one each
+// writer checks, for every kind (agent text, skills, rename, remove; flow text; group text; skill text).
+await check("real Python on scratch folders: one write per kind with the snapshot's rev is accepted, an older rev is refused with the current one", async () => {
+  const scratch = path.join(fs.realpathSync(TMP), "desktop-paths"); // the writers refuse a folder through a symlink (/var)
+  const orch = path.join(scratch, "orchestration");
+  const home = path.join(scratch, "home");
+  const config = path.join(home, ".config", "opencode");
+  const project = path.join(scratch, "project");
+  fs.cpSync(path.join(ORCHESTRATION, "agentgraph"), path.join(orch, "agentgraph"), {
+    recursive: true,
+    filter: (source) => !/(^|\/)(__pycache__|web)$/.test(source),
+  });
+  fs.cpSync(path.join(ORCHESTRATION, "structure"), path.join(orch, "structure"), { recursive: true });
+  fs.copyFileSync(path.join(ORCHESTRATION, "SKILLS.md"), path.join(orch, "SKILLS.md"));
+  for (const folder of ["agents", "commands", "backups", "skills/code-assurance"]) fs.mkdirSync(path.join(config, folder), { recursive: true });
+  fs.writeFileSync(path.join(config, "skills/code-assurance/SKILL.md"), "---\nname: code-assurance\ndescription: a skill\n---\nBody\n");
+  // The preset file is copied (never read into this script, never written, never printed).
+  fs.copyFileSync(path.join(os.homedir(), ".config/opencode/oh-my-opencode-slim.json"), path.join(config, "oh-my-opencode-slim.json"));
+  fs.mkdirSync(project);
+
+  const definition = resolveDefault(mainLoad.module.exports);
+  const m = mainContext({ home: orch });
+  await definition.main(m.ctx);
+  const impl = m.provided[0].impl;
+  const realHome = process.env.HOME;
+  const OLD = "0123456789abcdef";
+  const caller = { window: 1, signal: new AbortController().signal };
+  const blank = { op: "", name: "", record: "", model: "", variant: "", description: "", prompt: "", skills: "", read_only: "", copy_of: "", template: "", to: "" };
+  const call = async (method, input) => JSON.parse(await impl[method](input, caller));
+  const snapshot = () => call("snapshot", { directory: project, session: "" });
+  const rev = async (pick) => {
+    const document = await snapshot();
+    assert.equal(document.error, undefined, String(document.error));
+    const found = pick(document);
+    assert.ok(found && /^[0-9a-f]{16}$/.test(found.rev || ""), "the snapshot shows a rev");
+    return found.rev;
+  };
+  const accepted = (answer, what) => assert.equal(answer.error, undefined, `${what}: ${answer.error}`);
+  const refused = (answer, what) => {
+    assert.match(answer.error || "", /reload and try again/, `${what}: ${JSON.stringify(answer)}`);
+    assert.match(answer.rev || "", /^[0-9a-f]{16}$/, `${what}: ${JSON.stringify(answer)}`);
+  };
+  // Each kind: an older rev is refused, the snapshot's rev goes ahead.
+  const both = async (what, method, input, revOf) => {
+    const current = await rev(revOf);
+    refused(await call(method, { ...input, expect: OLD }), what);
+    accepted(await call(method, { ...input, expect: current }), what);
+  };
+  const agent = (name) => (document) => document.agents.find((item) => item.name === name);
+  const spawned = spawns.length;
+  process.env.HOME = home;
+  try {
+    accepted(await call("roster", { ...blank, op: "add", name: "xavier", template: "verifier" }), "add");
+    await both("agent text", "roster", { ...blank, op: "text", name: "xavier", prompt: "Mine." }, agent("xavier"));
+    await both("added agent's skills", "skills", { op: "add", agent: "xavier", skill: "code-assurance" }, agent("xavier"));
+    await both("preset agent's skills", "skills", { op: "add", agent: "impl-claude", skill: "code-assurance" }, agent("impl-claude"));
+    await both("rename", "roster", { ...blank, op: "rename", name: "xavier", to: "yusuf" }, agent("xavier"));
+    await both("remove", "roster", { ...blank, op: "remove", name: "yusuf" }, agent("yusuf"));
+    await both("preset agent's remove", "roster", { ...blank, op: "remove", name: "impl-hard" }, agent("impl-hard"));
+    const flow = await call("flow", { op: "add", id: "", path: "impl-openai reviewer", text: "" });
+    accepted(flow, "flow add");
+    const flowId = (await snapshot()).structure.flows.find((item) => item.path.join(" ") === "impl-openai reviewer").id;
+    await both("flow text", "flow", { op: "text", id: flowId, path: "", text: "Mine." },
+      (document) => document.structure.flows.find((item) => item.id === flowId));
+    accepted(await call("team", { op: "add", id: "", lead: "reviewer", members: "impl-openai", text: "" }), "group add");
+    const teamId = (await snapshot()).structure.teams.find((item) => item.lead === "reviewer").id;
+    await both("group text", "team", { op: "text", id: teamId, lead: "", members: "", text: "Mine." },
+      (document) => document.structure.teams.find((item) => item.id === teamId));
+    await both("skill text", "skillfile", { op: "write", id: "code-assurance", record: "", description: "", text: "Mine.\n", assign: "" },
+      (document) => document.skills.find((item) => item.name === "code-assurance"));
+  } finally {
+    process.env.HOME = realHome;
+  }
+  const ran = spawns.slice(spawned);
+  assert.ok(ran.length > 20, "the plugin's own command lines ran");
+  for (const entry of ran) {
+    assert.equal(entry.cwd, entry.args.includes("agentgraph.snapshot_json") ? project : orch, entry.args.join(" "));
+    assert.equal(entry.args.some((arg) => /^--(structure|agents|config|map|backups|commands|skills)\b/.test(arg)), false,
+      "the plugin passes no folder: " + entry.args.join(" "));
+  }
 });
 
 await check("the name patterns are agentgraph/names.py's own: AGENT_NAME, FLOW_ID, FLOW_NAME and SKILL_NAME equal them", () => {
