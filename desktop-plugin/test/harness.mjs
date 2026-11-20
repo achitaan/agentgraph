@@ -1707,6 +1707,53 @@ esac
   assert.deepEqual([lost.message, lost.rev, lost.status], ["m", undefined, undefined]);
 });
 
+// Review n8 r6 (minor 3): a stale refusal needs both an error and a rev. Main forwards a rev only with an error
+// (runCommand), but the window does not lean on that: an answer from main with no error, in a shape the action does
+// not expect, that carries a rev (a success answer of another version, say) is refused as a broken answer: no stale,
+// no status, no rev. An error with a rev is still stale.
+await check("an answer that carries a rev but no error is not a stale refusal", async () => {
+  const current = "fedcba9876543210";
+  const definition = windowLoad.gui.defined[0];
+  const session = { key: "srv\nses_a", id: "ses_a", directory: ORCHESTRATION };
+  const props = { get session() { return session; }, screen: {} };
+  const w = windowContext(definition, { session });
+  let answer = "";
+  w.ctx.main = (token) => Object.fromEntries(Object.keys(token.spec.methods).map((method) =>
+    [method, async () => answer]));
+  definition.setup(w.ctx);
+  const rendered = windowLoad.solid.runWithOwner(() => value(w.added[1].item).render(props));
+  const { flow, skills, roster, skillfile, team } = mountCalls[mountCalls.length - 1].options.actions;
+  const ops = [
+    ["flow text", flow, { op: "text", id: "f", text: "T" }],
+    ["skills add", skills, { agent: "impl-openai", skill: "code-assurance", on: true }],
+    ["agent text", roster, { op: "text", name: "checker", text: "New." }],
+    ["skill write", skillfile, { op: "write", id: "s", text: "New." }],
+    ["group text", team, { op: "text", id: "r", text: "New." }],
+  ];
+  const refusalOf = async (promise) => {
+    try {
+      await promise;
+    } catch (error) {
+      return error;
+    }
+    assert.fail("not refused");
+  };
+  for (const [what, action, request] of ops) {
+    for (const doc of [{ rev: current, unexpected: true }, { error: "", rev: current }, { error: null, rev: current }]) {
+      answer = JSON.stringify(doc);
+      const refused = await refusalOf(action({ ...request, expect: "0123456789abcdef" }));
+      assert.equal(Object.prototype.toString.call(refused), "[object Error]", what);
+      assert.deepEqual([("stale" in refused), refused.status, refused.rev], [false, undefined, undefined],
+        `${what} ${answer}: ${refused.message}`);
+    }
+    answer = JSON.stringify({ error: "it was changed since you opened it", rev: current });
+    const stale = await refusalOf(action({ ...request, expect: "0123456789abcdef" }));
+    assert.deepEqual([stale.message, stale.status, stale.stale, stale.rev],
+      ["it was changed since you opened it", 409, true, current], what);
+  }
+  rendered.dispose();
+});
+
 // Review n8 r5 (major): the server path was tested, the Desktop path was not. Here the plugin's own main runs its
 // exact command lines against a scratch copy of the orchestration (options.home) with HOME in scratch, so every
 // default folder (agents, commands, backups, skills, the preset file, structure/, SKILLS.md) is a scratch one: the

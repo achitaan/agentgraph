@@ -2910,6 +2910,8 @@ test("paths: the chooser's rows: `name  a → b → a` (the id when unnamed), mo
   assert.equal(R.flowStatsText({ runs: null, rounds: null, cost: null }), "– runs · – avg · – rounds");
 });
 
+// Revs here are 16 lowercase hex digits, the back end's shape (review n8 r6, minor 4: until then "3f9a2c1d", "r1"
+// and "r2" stood in, which the panel no longer takes as revs).
 const flowLog = path.join(tmp, "flow-calls.log");
 const pathsPython = fakePython("paths-python", `
 echo "$PYTHONPATH" > "${path.join(tmp, "paths-home.log")}"
@@ -2919,8 +2921,8 @@ if [ "$3" = "agentgraph.structure" ]; then
   expect=""
   prev=""
   for a in "$@"; do [ "$prev" = "--expect" ] && expect="$a"; prev="$a"; done
-  if [ "$6" = "stale" ] && [ -n "$expect" ] && [ "$expect" != "r2" ]; then
-    echo "agentgraph structure: flow stale changed since you opened it; reload and try again (rev now r2)" >&2; exit 1
+  if [ "$6" = "stale" ] && [ -n "$expect" ] && [ "$expect" != "2222222222222222" ]; then
+    echo "agentgraph structure: flow stale changed since you opened it; reload and try again (rev now 2222222222222222)" >&2; exit 1
   fi
   case "$6" in
     broken) echo "agentgraph structure: no flow broken" >&2; exit 1;;
@@ -2944,11 +2946,11 @@ case "$sid" in
   ses_pnomod) flows="$(flow nomod null null)";;
   ses_pslow) flows="$(flow slow null null)";;
   ses_pbusy) flows="$(flow solo null null)";;
-  ses_prev) flows="$(flow solo null null 3f9a2c1d)";;
+  ses_prev) flows="$(flow solo null null 3f9a2c1d4e5b6a70)";;
   ses_prev16) flows="$(flow solo null null 9b3f17e5dc59312d),$(flow other null null)";;
   ses_pbadrev) flows="$(flow solo null null -x)";;
-  ses_ptwo) flows="$(flow stale null null r1),$(flow solo '"other"' null)";;
-  ses_pstale) echo x >> "${path.join(tmp, "stale-snapshots.log")}"; flows="$(flow stale null null r1)";;
+  ses_ptwo) flows="$(flow stale null null 1111111111111111),$(flow solo '"other"' null)";;
+  ses_pstale) echo x >> "${path.join(tmp, "stale-snapshots.log")}"; flows="$(flow stale null null 1111111111111111)";;
   ses_pflip) if [ -f "${path.join(tmp, "paths-gone.flag")}" ]; then flows=""; else flows="$(flow solo null null)"; fi;;
   *) flows="$(flow aaa null null),$(flow bbb '"impl-loop"' '{"runs":3,"passed":2,"rounds":{"avg":2,"max":3},"cost":{"total":3.6,"avg":1.2},"last":1795000000}'),$(flow ccc '"old"' '{"runs":1,"passed":1,"rounds":{"avg":null,"max":null},"cost":{"total":null,"avg":null},"last":1700000000}')";;
 esac
@@ -3191,7 +3193,7 @@ test("paths: the chosen path's rev from the snapshot is passed as --expect REV t
     await waitFor(() => p.key("r"), 2000, "r key");
     p.key("r").run();
     await waitFor(() => sends(p.calls).length === 1, 5000, "sent");
-    assert.deepEqual(p.flowCalls(), ["-P -m agentgraph.structure flow prompt solo --goal-file - --expect 3f9a2c1d|a goal"]);
+    assert.deepEqual(p.flowCalls(), ["-P -m agentgraph.structure flow prompt solo --goal-file - --expect 3f9a2c1d4e5b6a70|a goal"]);
   } finally {
     p.done();
   }
@@ -3244,6 +3246,25 @@ test("paths: a snapshot without rev (or with a rev that is not a plain token) pa
   }
 });
 
+// Review n8 r6 (minor 4): one rev pattern everywhere, the back end's: exactly 16 lowercase hex digits. Any other
+// token is no rev: the snapshot's path gets rev null and `flow prompt` gets no --expect.
+test("paths: a rev is exactly 16 lowercase hex digits; any other token is no rev and passes no --expect", async () => {
+  const good = "9b3f17e5dc59312d";
+  const bad = ["3f9a2c1d", "r1", "9B3F17E5DC59312D", good + "0", good.slice(1), "9b3f17e5dc59312g", "a.b:c-d", good + "\n"];
+  assert.equal(R.FLOW_REV.test(good), true);
+  for (const rev of bad) assert.equal(R.FLOW_REV.test(rev), false, JSON.stringify(rev));
+  const flows = R.flowsOf(restDoc([good, ...bad].map((rev, i) => ({ ...FLOW("p" + i, ["a", "b"]), rev }))));
+  assert.deepEqual(flows.map((f) => f.rev), [good, ...bad.map(() => null)]);
+  for (const rev of [good, ...bad]) {
+    let argv = null;
+    const answer = await RUNNER.runFlowPrompt({ spawn, path, env: process.env, home: tmp, python: pathsPython,
+      onSpawn: (line) => { argv = line; } }, "solo", "g", rev);
+    assert.equal(answer.error, undefined, JSON.stringify(rev));
+    assert.deepEqual(argv.slice(1), ["-P", "-m", "agentgraph.structure", "flow", "prompt", "solo", "--goal-file", "-",
+      ...(rev === good ? ["--expect", good] : [])], JSON.stringify(rev));
+  }
+});
+
 test("paths: the path changed since the chooser showed it (--expect refused): nothing sent, a refresh, a toast to press r again, the goal kept", async () => {
   const counts = path.join(tmp, "stale-snapshots.log");
   fs.writeFileSync(counts, "");
@@ -3255,7 +3276,7 @@ test("paths: the path changed since the chooser showed it (--expect refused): no
     const before = fs.readFileSync(counts, "utf8").split("\n").filter(Boolean).length;
     p.key("r").run();
     await waitFor(() => p.toasts.length > 0, 5000, "toast");
-    assert.deepEqual(p.flowCalls(), ["-P -m agentgraph.structure flow prompt stale --goal-file - --expect r1|the goal I typed"]);
+    assert.deepEqual(p.flowCalls(), ["-P -m agentgraph.structure flow prompt stale --goal-file - --expect 1111111111111111|the goal I typed"]);
     assert.deepEqual(p.toasts.at(-1), { message: "stale changed since you opened it: nothing was sent. Press r again.", variant: "warning" });
     assert.deepEqual(sends(p.calls), []);
     await waitFor(() => fs.readFileSync(counts, "utf8").split("\n").filter(Boolean).length > before, 1500, "a refresh at once, not at the next poll (4 s)");

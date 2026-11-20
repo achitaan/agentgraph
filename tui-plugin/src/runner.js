@@ -216,7 +216,7 @@ export const FLOW_PROMPT_TIMEOUT_MS = 20000;
 export const FLOW_PROMPT_MAX_BYTES = 256 * 1024;
 export const GOAL_LIMIT = 4000; // characters (the back end's flowrun.GOAL_LIMIT)
 const FLOW_ID = /^[a-z0-9][a-z0-9-]{0,79}$/;
-const FLOW_REV = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/; // render.js FLOW_REV
+const FLOW_REV = /^[0-9a-f]{16}$/; // render.js FLOW_REV: the back end's rev, 16 lowercase hex digits
 const STALE = /changed since you opened it/;
 
 // deps: { spawn, path, env, home, python, timeoutMs?, structure? } (structure: a structure folder, for tests)

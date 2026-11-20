@@ -870,9 +870,10 @@ function renderPanel(ctx, solid, props) {
     if (typeof request.expect !== "string" || !REV.test(request.expect)) throw new Error(bad);
     return Object.assign(input, { expect: request.expect });
   };
+  // Stale needs both: an error, and a rev. An answer with no error is never a stale refusal (review n8 r6).
   const refusal = (doc, fallback) => {
     const error = new Error(oneLine(isPlainObject(doc) && doc.error ? doc.error : fallback));
-    if (isPlainObject(doc) && typeof doc.rev === "string" && REV.test(doc.rev))
+    if (isPlainObject(doc) && typeof doc.error === "string" && doc.error && typeof doc.rev === "string" && REV.test(doc.rev))
       Object.assign(error, { status: 409, stale: true, rev: doc.rev });
     return error;
   };
