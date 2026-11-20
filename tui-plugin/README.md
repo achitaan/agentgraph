@@ -103,6 +103,7 @@ view, the list opens as a session panel:
 | `q` | close the panel |
 | `g` | orbit or list (remembered while the app runs) |
 | `d` | the orbit's 2D or 3D view |
+| `←` `→` `↑` `↓`, `0` | on the 3D orbit: turn the view, change the elevation, reset (below) |
 
   `s` and `m` act only on agents that work (never on the hub, which is your own session). A stop or message sent from
   here goes round the orchestrator: it does not know you did it, and a stopped agent's step stays as it was until
@@ -124,7 +125,15 @@ least 12 rows), then three instruments: a. the context chart of `root.wear` with
 c. the spend bars. They take 6 rows from 30 rows up (else 4), sit side by side from 100 columns, and when rows run
 short they are dropped in the order c, b, a. No titles, hints or legends.
 
-Keys: `g`, `d`, `f` and `q` as in the table above; the list keys do nothing while the orbit shows.
+Keys: `g`, `d`, `f` and `q` as in the table above; the list keys do nothing while the orbit shows. On the 3D view
+`←`/`→` turn it by 15°, `↑`/`↓` raise and lower the camera by 7.5° (from flat to overhead), and `0` resets; the
+self-turn waits 3 s after the last turn and goes on from there. The bottom canvas row says `←→↑↓ turn  0 reset`.
+
+Mouse: a click on the orbit switches 2D and 3D, as `d` does; a drag on the 3D view turns it (6° a column, 12° of
+elevation a row) and switches nothing. The list ignores the mouse, and its text stays selectable; orbit text is
+not selectable. Each orbit row is one node that stays while the orbit shows (a redraw swaps its spans), so a click
+during the morph or an animation always lands: the host drops a press whose target was replaced since its last
+paint.
 
 `g` always changes what the panel shows. The side panel of an ordinary terminal is about 56 columns wide, too
 narrow for the orbit, so it opens on the list; there `g` goes full screen and shows the orbit, and `g` again returns
@@ -147,8 +156,17 @@ glyph and name; near names are at full strength, far ones muted, and the nearer 
 works, `0`/`1` digits stream along its spoke from the hub out to it in its group colour; on a loop's arc they stream
 toward whoever has the work. A stuck agent blinks in the danger colour.
 
-**The change**: `d` tilts the camera from overhead to the 3D angle (and back) over 0.7 s, drawn in the depth
-characters, and ends exactly on the target view's steady frame.
+**The change**: `d` (or a click) morphs between the views over 0.7 s: each agent travels on screen from its 2D place
+to its 3D place (and back) while the rings tilt, drawn in the depth characters, ending exactly on the target view's
+steady frame.
+
+**The sky** (3D only): sparse dim stars (`'` and `+`, about 1.4 % of the cells, never on or next to a figure cell
+or a name) from a fixed seed, so the sky is the same every time. It shifts at about a third of the figure's turn and
+with the elevation, and fades in and out with the morph. Each passed run of a drawn path (`stats.passed`) adds a
+warmer `*` star, at most 200 (past that, no new star and no streak). A run that finishes while the 3D view shows
+flies a short diagonal streak (0.9 s) to its star; none on opening or switching to 3D, several spaced 0.7 s apart.
+While the orchestrator works the hub and its ring are drawn in the accent tone. Option `reducedMotion: true`: no
+streak (the star just appears) and no fade.
 
 Frames: 10 a second while work moves or the camera moves; when idle 4 a second in 2D and 6 in 3D. A frame equal to
 the last one drawn is not pushed to the host, and rows whose text and colours are unchanged keep their nodes. A
@@ -310,6 +328,7 @@ Restart the TUI. Options go in the `[path, options]` form:
 | `intervalMs` | `4000`                                                                | Refresh period; minimum 1000. |
 | `python`     | `/Users/achita.anantachina/.local/state/tec/toolchain/base_profile/bin/python3` | Absolute path to Python 3.11+ (`/usr/bin/python3` is 3.9 and has no `-P`). `~/` is expanded. |
 | `home`       | `~/.config/opencode/orchestration`                                   | The folder that contains `agentgraph/` (used as `PYTHONPATH`). |
+| `reducedMotion` | `false`                                                            | The 3D sky without shooting stars or fades. |
 
 To keep the built-in sections, use `"mode": "prepend"`.
 
@@ -352,7 +371,8 @@ folder.``
 - `src/render.js`: pure rendering, `render(snapshot, { width, frame, now })` → lines of `{ text, tone }` spans.
 - `src/scene.js`: the orbit, pure: `scene(snapshot, { width, height, frame, now, previous, view, change, colors })`
   → exactly `height` lines of exactly `width` cells, spans `{ text, tone, color? }` (`color` a `#rrggbb` group
-  colour). `view` is `"2d"` or `"3d"`, `change` `{ from, at }` the camera's move, `colors` `{ dark, muted }`.
+  colour). `view` is `"2d"` or `"3d"`, `change` `{ from, at }` the camera's move, `colors` `{ dark, muted }`; also
+  `orbit` `{ turn, elevation, resume }`, `streaks` `[{ flow, run, at }]`, `motion: "reduced"` and `sky: false`.
 - `src/demo.js`: the demo runner for `AGENTGRAPH_TUI_DEMO`.
 - `src/runner.js`: the snapshot process runner, and `runFlowPrompt` (the run message of a path).
 - `test/run.mjs`: `node tui-plugin/test/run.mjs` (plain node, exits non-zero on failure). `test/fixtures/demo.json`
@@ -419,6 +439,9 @@ python3 tui-plugin/test/real-host.py --size 160x45 --demo --gcheck [--pre f|g|gd
 - `--view3d`: after the 2D captures presses `d`, waits 1 s and captures the 3D view, then again 1 s later. With
   `--demo` it requires at least 8 names, `@`, `0` and `1` inside the canvas rows and no braille there, at least 3
   group colours and none green or teal, and the two 3D captures to differ.
+- `--orbit` (with `--demo --fullscreen --view3d`): six `←`, three `↑` and `0` on the 3D view, then a click (2D), a
+  second click (3D) and a drag of 8 columns; fails unless each is logged by the plugin and changes the screen.
+- `--plugin DIR`: loads only the terminal plugin in `DIR` (a scratch config folder), for testing a checkout.
 - `--gcheck`: presses `g`, captures, presses `g` again, captures; fails unless the first press changed between orbit
   and list and the second changed it back. It prints the panel size the plugin measured (from its debug log; sizes
   come in order, so `56x44, 160x45` is a side panel and then full screen). `--pre KEYS` presses keys first: `f`, `d`,
