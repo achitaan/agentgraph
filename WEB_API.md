@@ -432,6 +432,14 @@ Every file written for an added agent starts with `* * deny` and ends with `suba
 //   or closing it never moves an agent), so everything fits above the sheet at 11 px or more where it can; where it
 //   cannot, the opened agent comes into view with the agents its paths join it to (a loop entered from A, as in
 //   A, B, C, B, forms near A so they fit in one view).
+//   The compact sheet has a grab handle on its top edge (a focusable separator named "Details height"): dragging
+//   it, or its Arrow, Page, Home and End keys, resizes the sheet from 120 px up to leaving the figures row and
+//   100 px of graph, and does nothing else (no pan, pick, move or close). The height is kept as a share of the
+//   pane for the page and, where localStorage works, under `<positionsKey>.sheet`; it is clamped to the pane
+//   whenever the pane changes. The graph refits above the sheet as when the details open (the user's own pan and
+//   zoom stay). The wide side panel is full height and keeps its fixed width.
+//   The root paints its own warm canvas (`--ag-canvas-bg`, light or dark by the host's or system scheme), never
+//   a host's background token, so a host's panel shows what the plain page shows.
 // Zoom floor: wheel, Ctrl+wheel, pinch, the - key and Fit all stop where names are 11 px on screen (12 px names
 //   at scale 11/12). The background pans, like an agent drags, only once the pointer has moved more than 5 px.
 // A refused path keeps the reason as the tooltip of its first agent and of the newest agent (which shakes and

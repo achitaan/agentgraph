@@ -3612,7 +3612,8 @@
     listen(sheetHandle, 'pointerdown', event => {
       event.stopPropagation();
       if (event.button !== 0 || !root.classList.contains('ag-compact')) return;
-      event.preventDefault();
+      // Pressed, it takes the keys (preventing the default would otherwise keep focus where it was).
+      event.preventDefault(); sheetHandle.focus({ preventScroll: true });
       try { sheetHandle.setPointerCapture(event.pointerId); } catch (_) { /* a synthetic pointer */ }
       sheetDrag = { id: event.pointerId, y: event.clientY, from: sheetHeight() };
     });
