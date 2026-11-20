@@ -3160,10 +3160,10 @@
       const saved = (Array.isArray(setup.saved) ? setup.saved : []).filter(item => item && typeof item.name === 'string' && item.name).slice(0, LIST_LIMIT);
       const list = el('ul', 'ag-setup-list'); block.append(list);
       saved.forEach(item => {
-        const row = el('li', 'ag-setup-row ag-saved-row'); row.dataset.savedSetup = item.name; row.dataset.damaged = String(item.damaged === true);
+        const row = el('li', 'ag-setup-row ag-saved-row'); row.dataset.savedSetup = item.name; const damaged = item.damaged === true || (typeof item.damaged === 'string' && item.damaged !== ''); row.dataset.damaged = String(damaged);
         const when = typeof item.saved === 'string' ? item.saved.slice(0, 10) : '';
         row.append(el('span', 'ag-setup-name', item.name), el('span', 'ag-setup-meta', [when, item.preset ? 'preset ' + item.preset : ''].filter(Boolean).join(' · ')));
-        if (item.damaged === true) row.append(el('span', 'ag-setup-tag ag-setup-damaged', 'damaged: cannot be restored'));
+        if (damaged) row.append(el('span', 'ag-setup-tag ag-setup-damaged', 'damaged: cannot be restored'));
         if (setupAction) {
           const ownAsk = setupAsking.endsWith(':' + item.name) ? setupAsking.split(':')[0] : '';
           if (ownAsk === 'restore' || ownAsk === 'remove') {
@@ -3178,7 +3178,7 @@
             row.append(buttons);
           } else {
             const buttons = el('span', 'ag-form-buttons');
-            if (item.damaged !== true) buttons.append(setupButton('Restore', { setupRestore: item.name }, () => { if (!setupBusy.size) setupOpenAsk('restore:' + item.name); }));
+            if (!damaged) buttons.append(setupButton('Restore', { setupRestore: item.name }, () => { if (!setupBusy.size) setupOpenAsk('restore:' + item.name); }));
             buttons.append(setupButton('Remove', { setupRemove: item.name }, () => { if (!setupBusy.size) setupOpenAsk('remove:' + item.name); }));
             row.append(buttons);
           }
