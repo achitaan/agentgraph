@@ -114,6 +114,8 @@
     // Presses since the last drag that moved something: a double-click counts only when its two clicks were clean.
     let cleanPresses = Infinity;
     const flowErrors = new Map(), flowHistory = [], routeViews = new Map(), freshRoutes = new Set(), timers = new Set();
+    // Whether the details were open at the last resize, and the automatic view from before they opened (n103).
+    let detailsWere = false, closedView = null;
     let layoutSignature = '', layoutFrame = null, resizeFrame = null, generation = 0, renderStamp = '', layoutChange = { changed: [], steady: false };
     let arrangement = root.clientWidth > 0 && root.clientWidth <= 650 ? 'compact' : 'wide';
     let agentsByName = new Map(), stepsByAgent = new Map(), stepsById = new Map(), nodeOwners = new Map(), shownAgents = new Map();
@@ -1097,6 +1099,8 @@
         positions.set(target.name, Object.assign(point, { x: target.x, y: target.y, r: target.r, reach: target.reach, group: target.group, parent: target.parent, dx: target.dx, dy: target.dy, fixed: target.pinned, ring: target.ring || '' }));
       });
       layoutChange = { changed, steady: steady && before.size > 0 };
+      // A re-laid-out picture (not only a loop or a new agent) has no view to go back to when the details close.
+      if (!layoutChange.steady && changed.length) closedView = null;
       if (glide) glideFrom(before);
     }
     function reducedMotion() { return root.dataset.agMotion === 'none' || !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches; }
@@ -1793,6 +1797,7 @@
       if (agent && agent.team !== activeTeam) switchTeam(agent.team);
       selected = { type, key }; selectedOrigin = origin || selectedOrigin; highlightedStep = step || '';
       if (step) openSteps.add(step);
+      if (detail.hidden) rememberClosedView();
       detailSignature = ''; detail.hidden = false; root.classList.add('ag-details-open'); renderDetail(); updateEdges(); scheduleResize();
       reveal();
       close.focus({ preventScroll: true });
@@ -4111,8 +4116,23 @@
         // The user's own pan and zoom survive anything that did not change the space.
         // When the details open or close the graph refits into the space left, unless the user panned or zoomed since
         // (then their view stays). A change of the pane's own size, or of arrangement, refits as before.
-        if ((resized || !camera.initialized) && !(camera.own && camera.initialized && !switched && !paneResized)) { fitView(false); reveal(); } else { clampPan(); transform(); }
+        // Closing the details puts an automatic view back where it was before they opened (n103: a loop drawn while
+        // they were open moves nothing else on screen); only what moved meanwhile is panned into view.
+        const shown = !detail.hidden, before = closedView;
+        if (!shown || paneResized || switched) closedView = null;
+        const back = !shown && detailsWere && before && before.pane === root.clientWidth + 'x' + root.clientHeight && before.arrangement === arrangement && resized && !camera.own && !switched && !paneResized;
+        detailsWere = shown;
+        if (back) {
+          Object.assign(camera, { x: before.x, y: before.y, scale: before.scale, width: rect.width, height: rect.height });
+          const moved = visibleAgents.map(a => a.name).filter(name => before.at.get(name) !== JSON.stringify(finalOf(name) && [finalOf(name).x, finalOf(name).y]));
+          if (moved.length) revealNames(moved);
+          clampPan(true); transform();
+        } else if ((resized || !camera.initialized) && !(camera.own && camera.initialized && !switched && !paneResized)) { fitView(false); reveal(); } else { clampPan(); transform(); }
       });
+    }
+    // The automatic view as the details open (before anything pans for them), to go back to when they close.
+    function rememberClosedView() {
+      closedView = camera.initialized && !camera.own ? { x: camera.x, y: camera.y, scale: camera.scale, pane: root.clientWidth + 'x' + root.clientHeight, arrangement, at: new Map(visibleAgents.map(a => [a.name, JSON.stringify(finalOf(a.name) && [finalOf(a.name).x, finalOf(a.name).y])])) } : null;
     }
     const resize = new ResizeObserver(scheduleResize);
     root.classList.toggle('ag-compact', root.clientWidth > 0 && root.clientWidth <= 650);

@@ -5108,6 +5108,24 @@
         }, { actions: host.actions });
         assert(!problems.length, problems.length + ' problems: ' + problems.slice(0, 6).join('; '));
       });
+      // Item 1 as drawn in the trial: the path's details open while the loop forms; closing them puts the automatic view
+      // back, so no agent off the loop has moved on screen.
+      await test('n103 item 1 (details): a loop formed while the details are open, then the details closed: agents on no loop are where they were on screen', async () => {
+        const data = n103Data(), problems = [];
+        await using(data, async (root, app) => {
+          await resizeTo(root, 1400, 900); await settle();
+          const screen0 = screenOf(root);
+          open(root, 'explorer'); await settleSheet(root);
+          data.structure.flows.push({ id: 'far', path: ['explorer', 'oracle-lite', 'explorer'], text: 'far', source: 'drawn' }); await app.refresh(); await settled();
+          root.querySelector('.ag-close').click(); await settleSheet(root);
+          const screen1 = screenOf(root);
+          Object.keys(screen0).filter(name => !['explorer', 'oracle-lite'].includes(name)).forEach(name => {
+            const d = Math.hypot(screen1[name].x - screen0[name].x, screen1[name].y - screen0[name].y);
+            if (d > .5) problems.push(name + ' moved ' + d.toFixed(1) + ' px on screen');
+          });
+        });
+        assert(!problems.length, problems.slice(0, 6).join('; '));
+      });
       // Item 7 (the user: "i want the afent info thing to be able to be dragable higher"): the narrow pane's details sheet
       // has a grab handle on its top edge. Dragging it (or its keys) only resizes the sheet, between a small minimum and
       // leaving the figures row and a 100 px strip of graph; the graph refits above it (the open agent in view, names
