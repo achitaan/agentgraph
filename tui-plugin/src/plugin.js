@@ -29,6 +29,7 @@
 import { render, layout, isAnimated, truncate as truncateText, flowLabel, flowName, flowStatsText } from "./render.js";
 import {
   scene, sceneFits, frameInterval, changeAt, orbitTurned, orbitReset, TURN_STEP, ELEVATION_STEP, DRAG_TURN_PER_CELL, DRAG_ELEVATION_PER_ROW,
+  finishedRuns, STREAK_MS, STREAK_GAP_MS,
 } from "./scene.js";
 import { createSnapshotRunner, errorDocument, errorMessage, oneLine, runFlowPrompt, GOAL_LIMIT } from "./runner.js";
 import { createDemoRunner, DEMO_INTERVAL_MS } from "./demo.js";
@@ -67,7 +68,8 @@ export function resolveOptions(raw, { os, path }) {
   const requested = Number(options.intervalMs);
   const intervalMs = Number.isFinite(requested) && requested > 0 ? Math.max(MIN_INTERVAL_MS, Math.floor(requested)) : DEFAULT_INTERVAL_MS;
   const mode = options.mode === "prepend" ? "prepend" : "replace";
-  return { home, python, intervalMs, mode, demo: options.demo === true };
+  // reducedMotion: the 3D sky without shooting stars or fades (scene.js `motion: "reduced"`)
+  return { home, python, intervalMs, mode, demo: options.demo === true, reducedMotion: options.reducedMotion === true };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -945,13 +947,48 @@ export function createPlugin(host) {
       let drawn = null; // the key of the last frame drawn
       let prepared = null; // a frame the tick computed, for the view to use as it is
       let colors = sceneColors(ctx.theme, null);
+      // The 3D sky's shooting stars: one per run that finishes (a path's stats.passed grows) between two snapshots
+      // both drawn while the 3D view showed, spaced STREAK_GAP_MS apart. None for the first snapshot drawn (opening
+      // the orbit), for runs that finished while the list or the 2D view showed, or with reduced motion.
+      let seen = null; // { doc, runs: Map(flow -> passed), in3d }: the runs of the last snapshot drawn
+      let streaks = [];
+      const noteRuns = (snap) => {
+        const now = clock();
+        const live = streaks.filter((st) => now < st.at + STREAK_MS);
+        if (live.length !== streaks.length) streaks = live;
+        const in3d = dimension().view === "3d";
+        if (seen && seen.doc === snap.doc) {
+          if (in3d) seen.in3d = true;
+          return;
+        }
+        const runs = new Map(finishedRuns(snap.doc).map((r) => [r.flow, r.passed]));
+        if (seen && seen.in3d && in3d && snap.previous === seen.doc && !options.reducedMotion) {
+          const added = [];
+          let at = Math.max(now, ...streaks.map((st) => st.at + STREAK_GAP_MS));
+          for (const [flow, passed] of runs) {
+            const before = seen.runs.has(flow) ? seen.runs.get(flow) : passed;
+            for (let run = before + 1; run <= passed && added.length < 8; run += 1) {
+              added.push({ flow, run, at });
+              at += STREAK_GAP_MS;
+            }
+          }
+          if (added.length) {
+            streaks = streaks.concat(added);
+            report("sky", `streaks ${added.map((st) => st.flow + "#" + st.run).join(" ")}`); // debug log only
+          }
+        }
+        seen = { doc: snap.doc, runs, in3d };
+      };
       const viewOptions = () => {
         const d = dimension();
         const o = orbit();
-        return Object.assign({ view: d.view, change: d.change, colors }, o ? { orbit: o } : {}, orbitKeysOn ? { keys: ORBIT_KEYS } : {});
+        return Object.assign({ view: d.view, change: d.change, colors }, o ? { orbit: o } : {}, orbitKeysOn ? { keys: ORBIT_KEYS } : {},
+          streaks.length ? { streaks } : {}, options.reducedMotion ? { motion: "reduced" } : {});
       };
-      const compute = (snap, size) =>
-        scene(snap.doc, Object.assign(viewOptions(), { width: size.width, height: size.height, now: clock(), previous: snap.previous ? { doc: snap.previous, at: snap.at } : undefined }));
+      const compute = (snap, size) => {
+        noteRuns(snap);
+        return scene(snap.doc, Object.assign(viewOptions(), { width: size.width, height: size.height, now: clock(), previous: snap.previous ? { doc: snap.previous, at: snap.at } : undefined }));
+      };
       watcher.sceneInterval = (doc) => frameInterval(doc, viewOptions(), clock());
       let lastSize = null;
       watcher.beforeTick = () => {
@@ -961,7 +998,7 @@ export function createPlugin(host) {
         const lines = compute(snap, lastSize);
         const key = lines.map(lineKey).join("\n");
         if (key === drawn) return false;
-        prepared = { doc: snap.doc, width: lastSize.width, height: lastSize.height, lines, dimension: dimension(), orbit: orbit() };
+        prepared = { doc: snap.doc, width: lastSize.width, height: lastSize.height, lines, dimension: dimension(), orbit: orbit(), streaks };
         return true;
       };
       return {
@@ -970,7 +1007,7 @@ export function createPlugin(host) {
           colors = sceneColors(ctx.theme, tones);
           let lines;
           const same = prepared && prepared.doc === snap.doc && prepared.width === size.width && prepared.height === size.height;
-          if (same && prepared.dimension === dimension() && prepared.orbit === orbit()) lines = prepared.lines;
+          if (same && prepared.dimension === dimension() && prepared.orbit === orbit() && prepared.streaks === streaks) lines = prepared.lines;
           else lines = compute(snap, size);
           prepared = null;
           const keys = lines.map(lineKey);
@@ -984,6 +1021,8 @@ export function createPlugin(host) {
           drawn = null;
           prepared = null;
           lastSize = null;
+          seen = null;
+          streaks = [];
         },
         setTones() {
           rows = [];
