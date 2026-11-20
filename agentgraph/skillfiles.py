@@ -312,8 +312,10 @@ def _prune(backup_dir, kind):
     mine = sorted((p for p in backup_dir.parent.glob(f"{kind}-*") if p.is_dir() and not p.is_symlink()),
                   key=lambda p: p.lstat().st_mtime_ns)
     for old in mine[:max(len(mine) - skillset.MAX_BACKUPS, 0)]:
-        if [child.name for child in old.iterdir()] == ["SKILL.md"]:  # only what this module wrote
-            (old / "SKILL.md").unlink()
+        names = sorted(child.name for child in old.iterdir())
+        if names in (["SKILL.md"], ["SKILL.md", "record.json"]):  # only what this module wrote
+            for name in names:
+                (old / name).unlink()
             old.rmdir()
 
 
@@ -325,6 +327,7 @@ def write(id, body=None, description=None, *, skills=SKILLS, backups=BACKUPS):
     if description is not None:
         _text(description, "description", 1024, single=True)
     with _operation(skills, backups=backups) as root:
+        _refuse_read_only(id, root)
         text, mode, parsed, others = _load(root, id)
         fields, old_body, span, body_start, newline = parsed
         kind = _write_backup_kind(root, id)
@@ -345,31 +348,58 @@ def write(id, body=None, description=None, *, skills=SKILLS, backups=BACKUPS):
         result = _result(id, new_parsed, others)
         if updated == text:
             return {**result, "changed": False, "message": "No change needed."}
-        path = root / id / "SKILL.md"
-        _unchanged(path, text)
-        backup_dir = _backup_folder(backups, kind)
-        backup = backup_dir / "SKILL.md"
-        with skillset._staged(backup, text, mode) as staged:
-            os.replace(staged, backup)
-        _sync(backup_dir)
-        with skillset._staged(path, updated, mode) as staged:
-            _unchanged(path, text)  # again, right before the replace
-            os.replace(staged, path)
-        _sync(path.parent)
-        _prune(backup_dir, kind)
-        return {**result, "changed": True, "backup": str(backup)}
+        backup, record = _replace_text(root, id, text, updated, mode, kind, backups)
+        return {**result, "changed": True, "backup": backup, "record": record}
 
 
-def delete(id, *, skills=SKILLS, backups=BACKUPS, config=CONFIG, force=False):
-    """Move a skill to backups, checking references in every plugin preset."""
+def _replace_text(root, id, text, updated, mode, kind, backups):
+    """Replace SKILL.md (still `text`) with `updated`, after saving `text` and an undo record (`restore` puts
+    `text` back while the file is still `updated`). Returns (backup path, record path)."""
+    path = root / id / "SKILL.md"
+    _unchanged(path, text)
+    backup_dir = _backup_folder(backups, kind)
+    backup = backup_dir / "SKILL.md"
+    with skillset._staged(backup, text, mode) as staged:
+        os.replace(staged, backup)
+    record = backup_dir / "record.json"
+    data = {"version": 1, "op": "write", "id": id, "skills": str(root), "after": _digest(updated)}
+    with skillset._staged(record, json.dumps(data) + "\n", 0o600) as staged:
+        os.replace(staged, record)
+    _sync(backup_dir)
+    with skillset._staged(path, updated, mode) as staged:
+        _unchanged(path, text)  # again, right before the replace
+        os.replace(staged, path)
+    _sync(path.parent)
+    _prune(backup_dir, kind)
+    return str(backup), str(record)
+
+
+def _digest(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def delete(id, *, skills=SKILLS, backups=BACKUPS, config=CONFIG, force=False, wildcards_hold=True,
+           agents_dir=skillset.AGENTS_DIR):
+    """Move a skill to backups, checking references in every plugin preset and in every agent file in
+    `agents_dir` (added ones by their rules, hand-written ones when their frontmatter names the skill). An agent
+    with every skill ('*') holds it too, unless `wildcards_hold` is False: then it is only named in a warning (it
+    loses this one)."""
     _id(id)
+    from . import agentfiles  # agentfiles imports skillset, as this module does
     with _operation(skills, config=config, backups=backups) as root:
+        _refuse_read_only(id, root)
         _load(root, id)  # Refuse unreadable frontmatter and unsafe ancillary files.
         obj = skillset._parse(skillset._read(Path(config), "config")[0])
+        held, every_file = agentfiles.holders(id, agents_dir) if agents_dir is not None else ([], [])
+        holding = {id, "*"} if wildcards_hold else {id}
         agents = sorted({agent for entries in obj["presets"].values() for agent, spec in entries.items()
-                         if {id, "*"}.intersection(spec.get("skills", []))})
+                         if holding.intersection(spec.get("skills", []))}
+                        | set(held) | (set(every_file) if wildcards_hold else set()))
+        every = sorted(({agent for entries in obj["presets"].values() for agent, spec in entries.items()
+                         if "*" in spec.get("skills", [])} | set(every_file)) - set(agents))
         if agents and not force:
-            raise SkillfilesError(f"skill {id!r} is still used by agents: {', '.join(agents)}; use force to delete")
+            raise SkillfilesError(f"skill {id!r} is still used by agents: {', '.join(agents)}; "
+                                  + ("use force to delete" if wildcards_hold else "take it from them first"))
         container = _backup_folder(backups, "delete-" + id)
         record = container / "record.json"
         data = {"version": 1, "id": id, "skills": str(root)}
@@ -384,6 +414,9 @@ def delete(id, *, skills=SKILLS, backups=BACKUPS, config=CONFIG, force=False):
         _sync(container)
         _sync(root)
         warnings = [f"Deleted skill is still listed by agents: {', '.join(agents)}. Presets were not changed."] if agents else []
+        if every and not wildcards_hold:
+            warnings.append(f"{', '.join(every)} {'has' if len(every) == 1 else 'have'} every skill and will no longer "
+                            f"have {id}.")
         return {"id": id, "changed": True, "record": str(record), "warnings": warnings}
 
 
@@ -394,13 +427,15 @@ def restore(record, *, skills=SKILLS, backups=BACKUPS):
         path = Path(os.path.abspath(record))
         if (path.name != "record.json" or path.parent.parent.parent != backup_root
                 or not re.fullmatch(r"\d{4}-\d{2}-\d{2}-skill-files", path.parent.parent.name)
-                or not path.parent.name.startswith("delete-")):
-            raise SkillfilesError("undo record must be a delete record inside the backups folder")
+                or not path.parent.name.startswith(("delete-", "write-"))):
+            raise SkillfilesError("undo record must be a delete or write record inside the backups folder")
         _directory(path.parent)
         try:
             data = json.loads(skillset._read(path, "undo record")[0], object_pairs_hook=skillset._unique)
         except ValueError as exc:
             raise SkillfilesError(f"undo record is not parseable JSON: {exc}") from exc
+        if path.parent.name.startswith("write-"):
+            return _restore_write(path, data, root, backups)
         if (not isinstance(data, dict) or set(data) != {"version", "id", "skills"}
                 or data["version"] != 1 or data["skills"] != str(root)):
             raise SkillfilesError("undo record does not match this skills folder")
@@ -416,13 +451,270 @@ def restore(record, *, skills=SKILLS, backups=BACKUPS):
         return {"id": id, "changed": True, "record": str(path)}
 
 
+def _restore_write(path, data, root, backups):
+    """Put back the text a write replaced, while SKILL.md is still what that write left. Returns a record that
+    undoes this in turn."""
+    if (not isinstance(data, dict) or set(data) != {"version", "op", "id", "skills", "after"} or data["version"] != 1
+            or data["op"] != "write" or data["skills"] != str(root) or not isinstance(data["after"], str)):
+        raise SkillfilesError("undo record does not match this skills folder")
+    id = data["id"]
+    _id(id)
+    kind = _write_backup_kind(root, id)
+    if not path.parent.name.startswith(kind + "-"):
+        raise SkillfilesError("undo record does not match this skills folder")
+    _refuse_read_only(id, root)
+    text, mode, _, others = _load(root, id)
+    if _digest(text) != data["after"]:
+        raise SkillfilesError(f"skill {id!r} was changed after that edit; nothing was restored")
+    previous, _ = skillset._read(path.parent / "SKILL.md", "backup")
+    parsed = _parse(previous)
+    backup, record = _replace_text(root, id, text, previous, mode, kind, backups)
+    return {**_result(id, parsed, others), "changed": True, "backup": backup, "record": record}
+
+
+# --- what may be edited ---------------------------------------------------------------------------
+
+# Skills kept in step with a copy owned by someone else: readable here, never written.
+LOCKED = {"shopify-ruby": "shopify-ruby is kept in step with Shopify's own copy; edit it there, not here."}
+
+
+def bundled_roots():
+    """The folders where installed plugins keep the skills they bundle (read only)."""
+    cache = Path.home() / ".cache" / "opencode"
+    return sorted({*cache.glob("packages/*/node_modules/*/src/skills"), *cache.glob("npm/*/node_modules/*/src/skills")})
+
+
+def _plugin_of(target, bundled):
+    """The plugin a path belongs to, or "" when it is not inside one."""
+    target = Path(target)
+    for base in bundled:
+        base = Path(os.path.abspath(base))
+        if target == base or base in target.parents:
+            return base.parent.parent.name
+    parts = target.parts
+    if "node_modules" in parts:
+        index = len(parts) - 1 - parts[::-1].index("node_modules")
+        return parts[index + 1] if index + 1 < len(parts) else "a plugin"
+    return ""
+
+
+def access(id, *, skills=SKILLS, bundled=None):
+    """(editable, why) for a skill: read-only when it is bundled with a plugin, lives outside the skills folder
+    (a link), or is one of LOCKED. SkillfilesError when there is no such skill."""
+    _id(id)
+    bundled = bundled_roots() if bundled is None else [Path(b) for b in bundled]
+    root = Path(os.path.abspath(skills))
+    entry = root / id
+    try:
+        info = entry.lstat()
+    except FileNotFoundError:
+        for base in bundled:
+            if (Path(base) / id / "SKILL.md").is_file():
+                return False, f"{id} is bundled with the {_plugin_of(Path(base) / id, bundled)} plugin; it is " \
+                              "replaced when the plugin updates, so it is read-only here."
+        raise SkillfilesError(f"there is no skill {id!r}") from None
+    except OSError as exc:
+        raise SkillfilesError(f"skill {id!r} cannot be read: {exc.strerror}") from exc
+    if stat.S_ISLNK(info.st_mode):
+        target = os.path.realpath(entry)
+        plugin = _plugin_of(target, bundled)
+        if plugin:
+            return False, f"{id} is bundled with the {plugin} plugin; it is replaced when the plugin updates, " \
+                          "so it is read-only here."
+        return False, f"{id} lives outside the skills folder (a symlink to {target}); edit it where it lives."
+    if not stat.S_ISDIR(info.st_mode):
+        return False, f"{id} is not a folder in the skills folder."
+    if id in LOCKED:
+        return False, LOCKED[id]
+    try:
+        inner = (entry / "SKILL.md").lstat()
+    except FileNotFoundError:
+        return False, f"{id} has no SKILL.md."
+    if stat.S_ISLNK(inner.st_mode):
+        return False, f"{id}'s SKILL.md lives outside the skills folder (a symlink); edit it where it lives."
+    return True, ""
+
+
+def _refuse_read_only(id, root):
+    editable, why = access(id, skills=root, bundled=())
+    if not editable:
+        raise SkillfilesError(why)
+
+
+def show(id, *, skills=SKILLS, bundled=None):
+    """{"id", "description", "text" (the body without frontmatter), "editable", "why" when not}. A read-only
+    skill is read where it lives."""
+    editable, why = access(id, skills=skills, bundled=bundled)
+    if editable:
+        result = read(id, skills=skills)
+        description, text = result["frontmatter"]["description"], result["body"]
+    else:
+        entry = Path(os.path.abspath(skills)) / id
+        if not os.path.lexists(entry):
+            bundled = bundled_roots() if bundled is None else bundled
+            entry = next(Path(base) / id for base in bundled if (Path(base) / id / "SKILL.md").is_file())
+        raw, _ = skillset._read(Path(os.path.realpath(entry)) / "SKILL.md", "SKILL.md")
+        try:
+            fields, text = _parse(raw)[:2]
+            description = fields["description"]
+        except SkillfilesError:
+            description, text = "", raw
+    return {"id": id, "description": description, "text": text, "editable": editable, **({"why": why} if why else {})}
+
+
+def annotate(document, *, skills=SKILLS, bundled=None):
+    """Add `editable` (and `why` when false) to each installed skill in a snapshot document. Never raises."""
+    try:
+        bundled = bundled_roots() if bundled is None else bundled
+    except OSError:
+        bundled = []
+    for row in document.get("skills") or []:
+        try:
+            editable, why = access(row.get("name"), skills=skills, bundled=bundled)
+        except (SkillfilesError, OSError, TypeError) as exc:
+            editable, why = False, str(exc)
+        row["editable"] = editable
+        if why:
+            row["why"] = why
+    return document
+
+
+def create_skill(id, description, body, assign=None, *, skills=SKILLS, config=CONFIG, map_path=skillset.MAP,
+                 backups=BACKUPS, profiles=skillset.PROFILES, agents_dir=skillset.AGENTS_DIR):
+    """Create a skill and, with `assign`, give it to that agent (as `skillset.add` does; an added agent's file in
+    `agents_dir`) in the same step: if the agent cannot have it, the new skill is taken away again and nothing is
+    left."""
+    if assign is not None:
+        skillset._agent_name(assign)
+        shown = skillset.show(assign, config=config, agents_dir=agents_dir)
+        if not shown["editable"]:
+            raise SkillfilesError(shown.get("reason") or f"{assign}'s skills cannot be set here")
+    result = create(id, description, body, skills=skills)
+    if assign is None:
+        return result
+    try:
+        given = skillset.add(assign, id, config=config, map_path=map_path, backups=backups, profiles=profiles,
+                             skills_dir=skills, agents_dir=agents_dir)
+    except BaseException:
+        _discard(id, skills, result)
+        raise
+    return {**result, "assigned": {"agent": given["agent"], "skills": given["skills"]},
+            "warnings": given.get("warnings", []), "message": given.get("message", "")}
+
+
+def _discard(id, skills, created):
+    """Take away a skill `create` just made, only while it is still exactly that."""
+    with _operation(skills) as root:
+        folder = root / id
+        try:
+            if sorted(child.name for child in folder.iterdir()) != ["SKILL.md"]:
+                return
+            fields, body = _parse(skillset._read(folder / "SKILL.md", "SKILL.md")[0])[:2]
+        except (OSError, SkillfilesError):
+            return
+        if (fields.get("description"), body) == (created["frontmatter"]["description"], created["body"]):
+            (folder / "SKILL.md").unlink()
+            folder.rmdir()
+            _sync(root)
+
+
+# --- the `skill` command --------------------------------------------------------------------------
+
+
+def _read_body(source):
+    if source == "-":
+        body = sys.stdin.read(200_001)
+        _text(body, "text", 200_000)
+        return body
+    path = Path(source)
+    _directory(path.parent)
+    return skillset._read(path, "text file")[0]
+
+
+def skill_main(argv=None):
+    """`agentgraph skill show|create|write|delete|restore`: exits 0 on success, 1 when refused, 2 on a usage error."""
+    parser = argparse.ArgumentParser(prog="agentgraph skill", description="Read or edit a skill's text.",
+                                     allow_abbrev=False)
+    commands = parser.add_subparsers(dest="op", required=True)
+
+    def options(target, prefix):
+        for name, help in (("skills", "the skills folder"), ("backups", "where backups and undo records go"),
+                           ("config", "the plugin's preset file"), ("map", "SKILLS.md"), ("profiles", "task profiles"),
+                           ("agents", "OpenCode's agents folder")):
+            target.add_argument("--" + name, type=Path, dest=prefix + name, help=help)
+        target.add_argument("--json", action="store_true", dest=prefix + "json")
+
+    options(parser, "root_")
+    for op in ("show", "create", "write", "delete", "restore"):
+        sub = commands.add_parser(op, allow_abbrev=False)
+        options(sub, "")
+        sub.add_argument("record" if op == "restore" else "id")
+        if op in {"create", "write"}:
+            sub.add_argument("--description", required=op == "create")
+            sub.add_argument("--text-file", required=True, help="a file, or - for stdin")
+        if op == "create":
+            sub.add_argument("--assign", metavar="AGENT", help="also give the new skill to this agent")
+    args = parser.parse_args(argv)
+    pick = lambda key, default: getattr(args, key) or getattr(args, "root_" + key) or default
+    as_json = args.json or args.root_json
+    where = {"skills": pick("skills", SKILLS), "backups": pick("backups", BACKUPS)}
+    try:
+        if args.op == "show":
+            result = show(args.id, skills=where["skills"])
+        elif args.op == "create":
+            created = create_skill(args.id, args.description, _read_body(args.text_file), args.assign,
+                                   skills=where["skills"], config=pick("config", CONFIG),
+                                   map_path=pick("map", skillset.MAP), backups=where["backups"],
+                                   profiles=pick("profiles", skillset.PROFILES),
+                                   agents_dir=pick("agents", skillset.AGENTS_DIR))
+            result = {"id": args.id, "description": created["frontmatter"]["description"], "text": created["body"],
+                      "changed": True, **{key: created[key] for key in ("assigned", "warnings", "message") if key in created}}
+        elif args.op == "write":
+            written = write(args.id, body=_read_body(args.text_file), description=args.description, **where)
+            result = {"id": args.id, "description": written["frontmatter"]["description"], "text": written["body"],
+                      "changed": written["changed"],
+                      **{key: written[key] for key in ("record", "message") if key in written}}
+        elif args.op == "delete":
+            result = delete(args.id, config=pick("config", CONFIG), wildcards_hold=False,
+                            agents_dir=pick("agents", skillset.AGENTS_DIR), **where)
+        else:
+            restored = restore(str(args.record), **where)
+            result = {"id": restored["id"], "changed": True, **({"record": restored["record"]}
+                                                                if "frontmatter" in restored else {})}
+    except (SkillfilesError, OSError, UnicodeError) as exc:
+        if as_json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"agentgraph skill: {exc}", file=sys.stderr)
+        return 1
+    if as_json:
+        print(json.dumps(result, ensure_ascii=False))
+    elif args.op == "show":
+        print(f"{result['id']}: {result['description']}")
+        if not result["editable"]:
+            print(f"(read-only: {result['why']})")
+        print(result["text"], end="" if result["text"].endswith("\n") else "\n")
+    else:
+        print(f"{args.op}: {result['id']}" + ("" if result.get("changed", True) else " (no change needed)"))
+        if result.get("assigned"):
+            print(f"Given to {result['assigned']['agent']}. {result.get('message', '')}".rstrip())
+        if result.get("record"):
+            print("Undo record: " + result["record"])
+        for warning in result.get("warnings", []):
+            print("Warning: " + warning)
+    return 0
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["skill"]:
+        return skill_main(argv[1:])
     parser = argparse.ArgumentParser(prog="python3 -m agentgraph.skillfiles", description=__doc__,
                                      allow_abbrev=False)
     commands = parser.add_subparsers(dest="op", required=True)
 
     def options(target, prefix):
-        for name in ("skills", "backups", "config"):
+        for name in ("skills", "backups", "config", "agents"):
             target.add_argument("--" + name, type=Path, dest=prefix + name)
         target.add_argument("--json", action="store_true", dest=prefix + "json")
 
@@ -459,7 +751,8 @@ def main(argv=None):
         elif args.op == "show":
             result = read(args.id, skills=locations["skills"])
         elif args.op == "delete":
-            result = delete(args.id, force=args.force, **locations)
+            result = delete(args.id, force=args.force,
+                            agents_dir=args.agents or args.root_agents or skillset.AGENTS_DIR, **locations)
         else:
             result = restore(args.record, skills=locations["skills"], backups=locations["backups"])
     except (SkillfilesError, OSError, UnicodeError) as exc:

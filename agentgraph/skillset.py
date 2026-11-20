@@ -23,6 +23,7 @@ CONFIG = sources.CONFIG_DIR / "oh-my-opencode-slim.json"
 MAP = Path(__file__).resolve().parent.parent / "SKILLS.md"
 BACKUPS = sources.CONFIG_DIR / "backups"
 PROFILES = sources.CONFIG_DIR / "skills/personal-orchestrator/references/task-profiles.md"
+AGENTS_DIR = sources.CONFIG_DIR / "agents"  # OpenCode's agents folder: added agents keep their skills in their file
 RESTART = "OpenCode reads this file when it starts; the change applies after a restart."
 SEAT_REASON = ("Council seats are model calls defined in the council's own table; "
                "the plugin does not read skills for them.")
@@ -142,33 +143,57 @@ def _description(obj, agent, selected, *, native=False):
     return result
 
 
-def _roster(obj, config):
+def _roster(obj, config, agents_dir=None):
     # The roster reader supports optional native agent files, but only for the
     # canonical config basename. For arbitrary --config names, use its model
     # rules on the already safely read document instead.
-    if config.name == CONFIG.name:
-        agents, _, _ = sources._load_roster(config.parent)
+    if config.name == CONFIG.name or agents_dir is not None:
+        agents, _, _ = sources._load_roster(config.parent, config_path=config, agents_dir=agents_dir)
         return [agent.name for agent in agents if agent.name != "user"]
     disabled = set(sources._disabled_agents(obj, [])) | {"user"}
     return [name for name in [*obj["presets"][obj["preset"]], *sorted(_seat_names(obj, active_only=True))]
             if name not in disabled]
 
 
-def show(agent, *, config=CONFIG, presets=None):
-    """Report the active list and presets that differ, without writing."""
+def _file_agent(obj, agent, agents_dir):
+    """The agents-folder entry for an agent that is not in any preset ({"added", "editable", "why", "parsed"}),
+    or None."""
+    if agents_dir is None or any(agent in entries for entries in obj["presets"].values()) or agent in _seat_names(obj):
+        return None
+    from . import agentfiles  # agentfiles imports this module
+    return agentfiles.listing(agents_dir).get(agent)
+
+
+def _file_description(agent, info):
+    from . import agentfiles
+    result = {"agent": agent, "preset": "agent file", "differing_presets": [],
+              "skills": agentfiles.skills_of(info["parsed"]["permissions"]) if info["parsed"] else [],
+              "editable": bool(info["added"] and info["parsed"])}
+    if not result["editable"]:
+        result["reason"] = info["why"]
+    return result
+
+
+def show(agent, *, config=CONFIG, presets=None, agents_dir=AGENTS_DIR):
+    """Report the active list and presets that differ, without writing. An added agent's skills come from its
+    agent file in `agents_dir`."""
     _agent_name(agent)
     config = Path(config)
     obj = _parse(_read(config, "config")[0])
+    info = _file_agent(obj, agent, agents_dir)
+    if info is not None:
+        return _file_description(agent, info)
     selected = _selected(obj, presets)
     known = any(agent in entries for entries in obj["presets"].values()) or agent in _seat_names(obj)
     return _description(obj, agent, selected, native=not known and agent in _roster(obj, config))
 
 
-def show_all(*, config=CONFIG):
-    """Report editability and skills for every configured agent in the active snapshot roster."""
+def show_all(*, config=CONFIG, agents_dir=None):
+    """Report editability and skills for every configured agent in the active snapshot roster (agent files read
+    from `agents_dir`, default the config's own folder)."""
     config = Path(config)
     obj = _parse(_read(config, "config")[0])
-    return [_description(obj, agent, obj["presets"], native=True) for agent in _roster(obj, config)]
+    return [_description(obj, agent, obj["presets"], native=True) for agent in _roster(obj, config, agents_dir)]
 
 
 _PROFILE_ROW = re.compile(r"^[-*|]\s*`([a-z0-9-]+)`\s*[:|]\s*(.+)$", re.M)
@@ -203,15 +228,17 @@ def _warnings(mismatches, profiles):
             for (agent, skill), names in grouped.items()]
 
 
-def _catalogue():
-    return list(dict.fromkeys(row["name"] for row in skills_document()))
+def _catalogue(skills_dir=None):
+    """The installed skill names (in `skills_dir`, default the real skills folder)."""
+    return list(dict.fromkeys(row["name"] for row in skills_document(skills_dir=skills_dir)))
 
 
-def profile_mismatches(*, config=CONFIG, profiles=PROFILES, presets=None):
-    """Warnings for profile references missing from the active (or named) presets."""
+def profile_mismatches(*, config=CONFIG, profiles=PROFILES, presets=None, skills_dir=None):
+    """Warnings for profile references missing from the active (or named) presets (installed skills: those in
+    `skills_dir`, default the real skills folder)."""
     obj = _parse(_read(Path(config), "config")[0])
     names = [obj["preset"]] if presets is None else _selected(obj, presets)
-    refs = _profile_refs(profiles, set(_catalogue()) | {"ui-ux-pro-max"})
+    refs = _profile_refs(profiles, set(_catalogue(skills_dir)) | {"ui-ux-pro-max"})
     return _warnings(_mismatches(obj, names, refs), profiles)
 
 
@@ -546,11 +573,36 @@ def _commit(files, dir_fds, prepare):
         return backup
 
 
-def _change(op, agent, skill, *, config, presets, map_path, backups, profiles):
+def _file_change(op, agent, skill, info, *, agents_dir, backups, skills_dir):
+    """Change an added agent's skills in its agent file (live at once)."""
+    from . import agentfiles
+    if not info["added"] or not info["parsed"]:
+        raise SkillsetError(info["why"])
+    catalogue = _catalogue(skills_dir) if op != "all" else []
+    if op != "all" and (skill == "*" or skill not in catalogue):
+        raise SkillsetError(f"skill {skill!r} is not installed")
+    old = agentfiles.skills_of(info["parsed"]["permissions"])
+    if op == "all":
+        new = ["*"]
+    elif op == "add":
+        new = old if "*" in old or skill in old else [*old, skill]
+    else:
+        new = [name for name in (catalogue if "*" in old else old) if name != skill]
+    shown, record, changed = agentfiles.set_skills(agent, new, agents_dir=agents_dir, backups=backups)
+    return {"agent": agent, "preset": "agent file", "skills": shown["skills"], "editable": True,
+            "differing_presets": [], "changed": changed, "changed_presets": [], "warnings": [],
+            **({"record": record} if record else {}), "message": agentfiles.LIVE if changed else "No change needed."}
+
+
+def _change(op, agent, skill, *, config, presets, map_path, backups, profiles, skills_dir=None,
+            agents_dir=AGENTS_DIR):
     _agent_name(agent)
     if op != "all":
         _name(skill, "skill")
     config, map_path, backups = Path(config), Path(map_path), Path(backups)
+    info = _file_agent(_parse(_read(config, "config")[0]), agent, agents_dir)
+    if info is not None:
+        return _file_change(op, agent, skill, info, agents_dir=agents_dir, backups=backups, skills_dir=skills_dir)
     with _locked(config, map_path) as dirs:
         text, mode = _read(config, "config")
         obj = _parse(text)
@@ -558,7 +610,7 @@ def _change(op, agent, skill, *, config, presets, map_path, backups, profiles):
             raise SkillsetError(SEAT_REASON)
         selected = _selected(obj, presets)
         _description(obj, agent, selected)
-        catalogue = _catalogue() if op != "all" else []
+        catalogue = _catalogue(skills_dir) if op != "all" else []
         if op != "all" and (skill == "*" or skill not in catalogue):
             raise SkillsetError(f"skill {skill!r} is not installed")
         changes = {}
@@ -594,35 +646,45 @@ def _change(op, agent, skill, *, config, presets, map_path, backups, profiles):
                 "backup": backup["backup"], "previous": backup["previous"], "message": RESTART}
 
 
-def add(agent, skill, *, config=CONFIG, presets=None, map_path=MAP, backups=BACKUPS, profiles=PROFILES):
-    """Add one installed skill to the selected presets."""
+def add(agent, skill, *, config=CONFIG, presets=None, map_path=MAP, backups=BACKUPS, profiles=PROFILES,
+        skills_dir=None, agents_dir=AGENTS_DIR):
+    """Add one installed skill (one in `skills_dir`, default the real skills folder) to the selected presets, or
+    to an added agent's file in `agents_dir`."""
     return _change("add", agent, skill, config=config, presets=presets, map_path=map_path,
-                   backups=backups, profiles=profiles)
+                   backups=backups, profiles=profiles, skills_dir=skills_dir, agents_dir=agents_dir)
 
 
-def remove(agent, skill, *, config=CONFIG, presets=None, map_path=MAP, backups=BACKUPS, profiles=PROFILES):
+def remove(agent, skill, *, config=CONFIG, presets=None, map_path=MAP, backups=BACKUPS, profiles=PROFILES,
+           skills_dir=None, agents_dir=AGENTS_DIR):
     """Remove one installed skill, expanding a wildcard if needed."""
     return _change("remove", agent, skill, config=config, presets=presets, map_path=map_path,
-                   backups=backups, profiles=profiles)
+                   backups=backups, profiles=profiles, skills_dir=skills_dir, agents_dir=agents_dir)
 
 
-def set_all(agent, *, config=CONFIG, presets=None, map_path=MAP, backups=BACKUPS, profiles=PROFILES):
-    """Set the selected presets to the wildcard skill list."""
+def set_all(agent, *, config=CONFIG, presets=None, map_path=MAP, backups=BACKUPS, profiles=PROFILES,
+            skills_dir=None, agents_dir=AGENTS_DIR):
+    """Set the selected presets (or an added agent's file) to the wildcard skill list."""
     return _change("all", agent, None, config=config, presets=presets, map_path=map_path,
-                   backups=backups, profiles=profiles)
+                   backups=backups, profiles=profiles, skills_dir=skills_dir, agents_dir=agents_dir)
 
 
 OUTSIDE_REASON = ("This agent is not in the plugin's roster (one of OpenCode's own agents); "
                   "its skills cannot be set here.")
 
 
-def annotate(document, *, config=CONFIG, profiles=PROFILES):
+def annotate(document, *, config=CONFIG, profiles=PROFILES, agents_dir=AGENTS_DIR, skills_dir=None):
     """Add to a snapshot document, in place, whether each agent's skills can be edited here
     (`agents[].skills_editable`, `agents[].skills_reason` when not) and `skill_warnings` (task
     profiles that name a skill their agent no longer has). Reads only; never raises."""
     try:
-        access = {row["agent"]: row for row in show_all(config=config)}
-        warnings = profile_mismatches(config=config, profiles=profiles)
+        access = {row["agent"]: row for row in show_all(config=config, agents_dir=agents_dir)}
+        warnings = profile_mismatches(config=config, profiles=profiles, skills_dir=skills_dir)
+        obj = _parse(_read(Path(config), "config")[0])
+        for agent in document.get("agents", []):
+            name = agent.get("name")
+            info = _file_agent(obj, name, agents_dir) if isinstance(name, str) else None
+            if info is not None:
+                access[name] = _file_description(name, info)
     except (SkillsetError, OSError, ValueError, KeyError, TypeError) as exc:
         access, warnings = None, []
         failure = f"The plugin's config could not be read: {exc}"
@@ -646,6 +708,8 @@ def main(argv=None):
         target.add_argument("--config", type=Path, dest=prefix + "config")
         target.add_argument("--map", type=Path, dest=prefix + "map_path")
         target.add_argument("--backups", type=Path, dest=prefix + "backups")
+        target.add_argument("--agents", type=Path, dest=prefix + "agents", help="OpenCode's agents folder")
+        target.add_argument("--skills-dir", type=Path, dest=prefix + "skills_dir", help="the skills folder")
         target.add_argument("--json", action="store_true", dest=prefix + "json")
 
     options(parser, "root_")
@@ -659,12 +723,14 @@ def main(argv=None):
     output_json = args.json or args.root_json
     kw = {"config": args.config or args.root_config or CONFIG,
           "presets": (args.root_presets or []) + (args.presets or []) or None}
+    kw["agents_dir"] = args.agents or args.root_agents or AGENTS_DIR
     try:
         if args.op == "show":
             result = show(args.agent, **kw)
         else:
             kw.update(map_path=args.map_path or args.root_map_path or MAP,
-                      backups=args.backups or args.root_backups or BACKUPS)
+                      backups=args.backups or args.root_backups or BACKUPS,
+                      skills_dir=args.skills_dir or args.root_skills_dir)
             if args.op == "all":
                 result = set_all(args.agent, **kw)
             else:

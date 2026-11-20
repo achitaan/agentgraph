@@ -86,13 +86,17 @@ def _disabled_agents(config: dict, warnings: list[str]) -> list[str]:
     return [name for name in value if isinstance(name, str)]
 
 
-def _load_roster(config_dir: Path) -> tuple[list[Agent], list[str], list[str]]:
+def _load_roster(config_dir: Path, *, config_path: Path | None = None,
+                 agents_dir: Path | None = None) -> tuple[list[Agent], list[str], list[str]]:
     """(roster, the config's disabled_agents, warnings). A disabled name is
-    never in the roster, whichever preset or agent file lists it."""
+    never in the roster, whichever preset or agent file lists it. The preset
+    file is `config_path` and the agent files are in `agents_dir` (default:
+    `oh-my-opencode-slim.json` and `agents/` in `config_dir`)."""
     agents: list[Agent] = []
     warnings: list[str] = []
     config_dir = Path(config_dir)
-    cfg_path = config_dir / "oh-my-opencode-slim.json"
+    cfg_path = Path(config_path) if config_path is not None else config_dir / "oh-my-opencode-slim.json"
+    folder = Path(agents_dir) if agents_dir is not None else config_dir / "agents"
     try:
         config = json.loads(cfg_path.read_text())
         if not isinstance(config, dict):
@@ -129,7 +133,7 @@ def _load_roster(config_dir: Path) -> tuple[list[Agent], list[str], list[str]]:
 
     # Older configs define the reviewer as a native agent file instead of a
     # preset entry. The file is optional, and the preset entry wins.
-    reviewer_path = config_dir / "agents" / "reviewer.md"
+    reviewer_path = folder / "reviewer.md"
     if not any(agent.name == "reviewer" for agent in agents):
         try:
             text = reviewer_path.read_text()
@@ -151,7 +155,7 @@ def _load_roster(config_dir: Path) -> tuple[list[Agent], list[str], list[str]]:
     # as "provider/model#variant".
     known = {agent.name for agent in agents}
     try:
-        native = sorted((config_dir / "agents").glob("*.md"))
+        native = sorted(folder.glob("*.md"))
     except OSError:
         native = []
     for path in native:
@@ -832,17 +836,21 @@ def build_snapshot(
     now: float | None = None,
     session_graph_dir: Path | None = None,
     models_cache: Path | None = None,
+    roster_config: Path | None = None,
+    agents_dir: Path | None = None,
 ) -> Snapshot:
     """`session_graph_dir` is a second folder searched only for graphs that
     belong to the requested session or one of its ancestors. The root session's
     `wear` reads `opencode.json` from `config_dir`, and the models catalogue from
     `models_cache` (by default the user's OpenCode cache, but only for the real
-    config folder, so a snapshot built from a test folder never reads it)."""
+    config folder, so a snapshot built from a test folder never reads it).
+    The roster comes from `roster_config` (the preset file) and `agents_dir`
+    when given, else from `config_dir`."""
     cwd = Path(cwd) if cwd else Path.cwd()
     discovery_warnings: list[str] = []
     if graph_dir is None:
         graph_dir = find_graph_dir(cwd, warnings=discovery_warnings)
-    roster, disabled, w1 = _load_roster(config_dir)
+    roster, disabled, w1 = _load_roster(config_dir, config_path=roster_config, agents_dir=agents_dir)
     graphs, w2 = load_graphs(graph_dir)
 
     candidates: list[str] = []
