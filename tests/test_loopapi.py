@@ -3,6 +3,7 @@ the scripted executor. No test starts OpenCode; runs are started with `wait` sem
 import hashlib
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -43,7 +44,7 @@ class ListingTests(Base):
         self.assertEqual((doc["project"], doc["scratch"], doc["orphans"], doc["runs"]), (str(self.project), False, [], []))
         self.assertEqual([item["flow"] for item in doc["loops"]], ["pair", "self"])  # the order of the structure's flows
         pair, own = doc["loops"]
-        self.assertEqual(set(own), {"flow", "name", "path", "agent", "runnable", "reason", "settings", "problem", "rev"})
+        self.assertEqual(set(own), {"flow", "name", "path", "agent", "runnable", "reason", "settings", "problem", "rev", "versions"})  # release 3: the kept earlier versions
         self.assertEqual((own["path"], own["agent"], own["runnable"], own["reason"], own["settings"], own["problem"], own["rev"]),
                          (["worker", "worker"], "worker", True, "", None, "", ""))
         self.assertEqual((pair["runnable"], pair["reason"], pair["settings"], pair["agent"]), (True, "", None, "worker"))  # release 2: a path that loops back runs
@@ -253,11 +254,137 @@ class StartCancelTests(Base):
         folder = looprun.run_dir(self.project, run)
         state = looprun.read_run(folder)
         (folder / "run.json").write_text(json.dumps({**state, "status": "running"}))
-        self.assertIn("already interrupted", self.refused(lambda: loopapi.cancel(self.project, run), 409).message)  # no controller holds it
         from unittest.mock import patch
         with patch.object(looprun, "_held", return_value=True):
             self.assertEqual(loopapi.cancel(self.project, run), {"run": run})
         self.assertTrue((folder / "cancel").is_file())
+        (folder / "cancel").unlink()
+        # release 3 (R4): no controller holds it, so it is cancelled directly instead of refused as interrupted
+        self.assertEqual(loopapi.cancel(self.project, run), {"run": run, "result": "cancelled"})
+        self.assertEqual(looprun.read_run(folder)["status"], "cancelled")
+
+
+class Kill(BaseException):
+    """A controller that dies on the spot (not an Exception): the record is left as a SIGKILL would leave it."""
+
+
+class Release3Tests(Base):
+    def refused(self, call, status):
+        with self.assertRaises(loopapi.ApiError) as caught:
+            call()
+        self.assertEqual(caught.exception.status, status)
+        return caught.exception
+
+    def until_final(self, run, seconds=30):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end and looprun.read_run(looprun.run_dir(self.project, run))["status"] not in (*looprun.FINAL, "paused"):
+            time.sleep(0.05)
+
+    def interrupted(self):
+        """A run whose controller was killed in the middle of its second turn, with the executor spec the API would resume it with."""
+        looprun.save_settings(self.structure, "self", {"version": 1, "flow": "self", "limits": {"attempts": 5}, "check": {"command": CHECK_SECOND, "timeout": 20}})
+        def hook(count, call):
+            if count == 2:
+                raise Kill()
+        before = set(looprun.list_runs(self.project))
+        with self.assertRaises(Kill):
+            looprun.start(self.project, "self", structure=self.structure, goal="Make it pass.", wait=True,
+                          executor=looprun.ScriptedExecutor([{}, {}], hook=hook, reconcile=self.tmp / "none.json"))
+        run, = set(looprun.list_runs(self.project)) - before
+        return run
+
+    def test_a_listed_run_carries_trial_settings_sha256_passed_by_and_waiting(self):
+        run = self.finished()
+        row = next(r for r in loopapi.listing(self.structure, self.project, None)["runs"] if r["run"] == run)
+        self.assertEqual((row["trial"], row["passed_by"], row["waiting"]), (False, "check", None))
+        self.assertEqual(row["settings_sha256"], looprun.read_run(looprun.run_dir(self.project, run))["settings_sha256"])
+        self.assertEqual(len(row["settings_sha256"]), 64)
+
+    def test_versions_are_listed_per_loop_newest_first(self):
+        self.assertEqual(self.entry()["versions"], [])
+        for check in ("true", "false", "echo 3"):
+            looprun.save_settings(self.structure, "self", {"version": 1, "flow": "self", "limits": {"attempts": 2}, "check": {"command": check}})
+        versions = self.entry()["versions"]
+        self.assertEqual(len(versions), 2)
+        self.assertGreaterEqual(versions[0]["version"], versions[1]["version"])
+        self.assertEqual(set(versions[0]), {"version", "time", "sha256"})
+
+    def test_the_page_save_and_remove_keep_history_and_restore_needs_the_current_rev(self):
+        first = loopapi.save(self.structure, "self", {"version": 1, "flow": "self", **GOOD}, "")
+        second = loopapi.save(self.structure, "self", {"version": 1, "flow": "self", "check": {"command": "false"}, "limits": {"attempts": 2}}, first["rev"])
+        version = self.entry()["versions"][0]["version"]
+        self.refused(lambda: loopapi.restore(self.structure, "self", version, first["rev"]), 409)  # a stale rev
+        self.refused(lambda: loopapi.restore(self.structure, "self", "../../x", second["rev"]), 400)
+        self.refused(lambda: loopapi.restore(self.structure, "self", "20000101T000000.000000Z-00000000", second["rev"]), 400)
+        self.refused(lambda: loopapi.restore(self.structure, "self", 7, second["rev"]), 400)
+        done = loopapi.restore(self.structure, "self", version, second["rev"])
+        self.assertEqual((done["rev"], done["before"]["check"]["command"], done["settings"]["check"]["command"]), (first["rev"], "false", "true"))
+        removed = loopapi.remove(self.structure, "self", done["rev"])
+        self.assertEqual(len(self.entry()["versions"]), 3)  # the first save wrote none; the replacement, the restore and the removal each kept one
+        self.assertEqual(removed["before"]["check"]["command"], "true")
+
+    def test_a_trial_run_pins_the_given_settings_and_leaves_the_saved_loop(self):
+        looprun.save_settings(self.structure, "self", {"version": 1, "flow": "self", **GOOD})
+        saved = looprun.settings_path(self.structure, "self").read_bytes()
+        answer = loopapi.start(self.structure, self.project, "self", "Try it.", None, executor_spec={"kind": "scripted", "attempts": [{}] * 3},
+                               settings={"check": {"command": "true"}, "limits": {"attempts": 1}})
+        self.until_final(answer["run"])
+        row = loopapi.listing(self.structure, self.project, None)["runs"][0]
+        self.assertEqual((row["run"], row["trial"], row["status"], row["limit"]), (answer["run"], True, "passed", 1))
+        self.assertEqual(looprun.settings_path(self.structure, "self").read_bytes(), saved)
+        self.refused(lambda: loopapi.start(self.structure, self.project, "self", "g", None, settings={"check": {"command": "true"}, "x": 1}), 400)
+        self.refused(lambda: loopapi.start(self.structure, self.project, "self", "g", None, settings=[1]), 400)
+        self.assertEqual(len(looprun.list_runs(self.project)), 1)
+
+    def test_pause_resume_answer_refuse_with_the_right_status(self):
+        run = self.finished()
+        for call in (lambda r: loopapi.pause(self.project, r), lambda r: loopapi.resume(self.project, r), lambda r: loopapi.answer_run(self.project, r, "approve")):
+            self.refused(lambda: call("20261121-043755-90a7"), 404)
+            self.refused(lambda: call("../x"), 400)
+            self.assertIn("passed", self.refused(lambda: call(run), 409).message)
+        self.refused(lambda: loopapi.resume(self.project, run, "maybe"), 400)
+        self.refused(lambda: loopapi.answer_run(self.project, run, "maybe"), 400)
+
+    def test_resume_of_an_interrupted_run_goes_on_and_pause_of_it_is_409(self):
+        run = self.interrupted()
+        self.assertEqual(looprun.shown_status(looprun.run_dir(self.project, run), looprun.read_run(looprun.run_dir(self.project, run))), "interrupted")
+        self.assertIn("interrupted", self.refused(lambda: loopapi.pause(self.project, run), 409).message)
+        self.assertEqual(loopapi.resume(self.project, run), {"run": run, "status": "running"})
+        self.until_final(run)
+        record = looprun.read_run(looprun.run_dir(self.project, run))
+        self.assertEqual(record["status"], "paused")  # the scripted reconcile has no file: it cannot tell, so it sends nothing and waits for the person
+        self.assertIn("nothing was sent", record["reason"])
+        self.refused(lambda: loopapi.resume(self.project, run, "maybe"), 400)
+        self.assertEqual(loopapi.resume(self.project, run, "redo"), {"run": run, "status": "running"})
+        end = time.monotonic() + 30
+        while time.monotonic() < end and looprun.read_run(looprun.run_dir(self.project, run))["status"] not in looprun.FINAL:
+            time.sleep(0.05)
+        self.assertEqual(looprun.read_run(looprun.run_dir(self.project, run))["status"], "passed")
+
+    def test_cancel_of_an_interrupted_run_marks_it_cancelled(self):
+        run = self.interrupted()
+        self.assertEqual(loopapi.cancel(self.project, run), {"run": run, "result": "cancelled"})
+        self.refused(lambda: loopapi.cancel(self.project, run), 409)
+
+    def test_the_run_detail_has_per_step_message_reply_and_findings_texts_capped(self):
+        run = self.finished()
+        folder = looprun.run_dir(self.project, run)
+        entry = looprun.read_run(folder)["attempts"][0]["steps"][0]
+        (folder / entry["reply"]).write_text("a" * 5000 + "b" * loopapi.STEP_TEXT_CHARS, encoding="utf-8")
+        step = loopapi.run_detail(self.project, run)["attempts"][0]["steps"][0]
+        self.assertEqual(set(step), {"step", "try", "message", "reply", "findings"})
+        self.assertEqual(step["reply"], "b" * loopapi.STEP_TEXT_CHARS)
+        self.assertIn("Make it pass.", step["message"])
+        self.assertEqual(step["findings"], "")
+
+    def test_shape_ok_knows_the_new_ops(self):
+        good = [{"op": "pause", "run": "r"}, {"op": "resume", "run": "r"}, {"op": "resume", "run": "r", "choice": "redo"},
+                {"op": "answer", "run": "r", "answer": "approve"}, {"op": "answer", "run": "r", "answer": "reject", "note": "n"},
+                {"op": "restore", "flow": "f", "version": "v", "rev": ""}, {"op": "start", "flow": "f", "settings": {}}]
+        bad = [{"op": "pause"}, {"op": "resume", "run": "r", "choice": 1}, {"op": "answer", "run": "r"}, {"op": "restore", "flow": "f", "version": "v"},
+               {"op": "start", "flow": "f", "settings": "x"}, {"op": "pause", "run": "r", "x": "y"}]
+        self.assertEqual([loopapi.shape_ok(r) for r in good], [True] * len(good))
+        self.assertEqual([loopapi.shape_ok(r) for r in bad], [False] * len(bad))
 
 
 if __name__ == "__main__":

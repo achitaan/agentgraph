@@ -173,10 +173,11 @@ class AlsoTests(Base):
         self.assertIn("cost", record["reason"])
         self.assertAlmostEqual(record["totals"]["cost"], 2.0)
 
-    def test_unknown_cost_does_not_stop_the_run_and_is_not_zero(self):
+    def test_unknown_cost_is_not_zero_and_with_a_cost_limit_ends_the_run(self):  # release 3 (R6) replaced "an unknown cost does not stop the run": the limit cannot be checked, so no further turn starts
         self.save(check="exit 1", attempts=3, cost=1.0)
         run, record, ex = self.go([{"cost": None}] * 3)
-        self.assertEqual((record["status"], len(record["attempts"])), ("failed", 3))
+        self.assertEqual((record["status"], len(record["attempts"])), ("limit", 1))
+        self.assertIn("unknown", record["reason"])
         self.assertIsNone(record["totals"]["cost"])
         self.assertIsNone(record["attempts"][0]["agent"]["cost"])
 

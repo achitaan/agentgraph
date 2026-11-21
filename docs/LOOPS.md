@@ -15,7 +15,7 @@ judge's verdict line do.
 
 Each agent appears once in the loop. Anything else is refused before a run exists: a path that does not return to its first agent
 ("this path does not loop back to its first agent"), an agent drawn twice, an agent that is not in the structure, a loop with neither
-a check command nor a judge. Parallel branches, resume, pause and trials are not built yet.
+a check command nor a judge. Parallel branches are not built.
 
 A flow without a saved loop behaves exactly as before.
 
@@ -122,7 +122,13 @@ agentgraph loop start my-flow --goal-file goal.md --workdir ~/project/app       
 agentgraph loop start my-flow --goal-file goal.md --wait                            # runs here and prints the result
 agentgraph loop status                  # the newest run; or: status RUN [--json]
 agentgraph loop list
-agentgraph loop cancel RUN
+agentgraph loop cancel RUN              # a live controller is asked; with none (interrupted, paused, waiting) the run is marked cancelled
+agentgraph loop pause RUN               # after the step it is on (never cuts a turn short); the run then says paused
+agentgraph loop resume RUN [--redo | --accept] [--wait]
+agentgraph loop answer RUN approve|reject|stop [--note T]   # also for a waiting run that has no controller; resume picks the answer up
+agentgraph loop start my-flow --goal-file goal.md --settings-file trial.json   # a trial: these settings for this run only
+agentgraph loop versions my-flow        # the kept earlier versions of the saved loop, newest first
+agentgraph loop restore my-flow VERSION # put one back (what it replaces is kept too)
 ```
 
 `--project DIR` is where the record lives (default: the current folder); `--workdir` is where the agent and the check run
@@ -132,6 +138,49 @@ config, make a scratch copy with `agentgraph bench scratch-config --to DIR` and 
 A run is its own process: closing the page or the terminal does not stop it. The goal is sent in full with every attempt
 (it must survive the session's compaction); after a failed check the message also holds the exit code and the last 60 lines
 of the output.
+
+## Resume, pause, cancel, answer
+
+A controller can die (SIGKILL, a reboot, a crash). The run then says `interrupted`, `agentgraph loop status RUN` says what to do, and
+`agentgraph loop resume RUN` starts a new controller that goes on **from the cursor** in `run.json` using the pinned `definition.json`
+(never the saved loop, which may have changed). The cursor is written before a message is sent (`phase: started`, with the session and
+the sha256 of the message) and after the step is recorded (`phase: done`, with the route taken). Nothing that is recorded runs again.
+
+- A step whose cursor is `done` continues at its route. A check step whose cursor is `started` runs the check again (see below).
+- An agent step whose cursor is `started` may or may not have been sent. `resume` asks the executor to **reconcile** and acts on one of three answers:
+  - `not_sent`: the session does not exist or holds no user message with exactly this text. The message is sent.
+  - `finished`: the message is in the session and the session is idle after a reply (an idle row that says `succeeded` after an assistant reply, no live
+    process for the session, every sub-session idle). The reply is adopted as the step's result (`recovered: true`, cost read from the session) and the walk goes on.
+  - `unknown`: anything else (still busy, a live process, the database unreadable, no idle row). The run becomes `paused` with the reason and **nothing is sent**.
+- A paused step is the person's to decide: `resume --redo` sends the message again, `resume --accept` takes the step as returned and goes to the check.
+  Both are refused (and change nothing) for a step that may not have run, a judge's turn cannot be accepted (no verdict to read), and any other
+  word is refused. Each decision is in `run.json` `recoveries[]` (`answer`, `action`: `adopt`, `redo`, `accept`, `pause`, `send`).
+- `resume` is refused (nothing written) for a final run, a queued run (it has not started) and a run whose controller is alive.
+- `pause` is for a run a controller is running: it writes a `pause` file and the controller stops after the step it is on (the run says `paused`,
+  `resume` goes on at the next step). `cancel` and `answer` act on a paused, waiting or interrupted run with no controller, under the run's lock.
+- `list` and `status` say it in words: `interrupted (the controller is gone; agentgraph loop resume RUN)`, `paused`, `waiting`, `trial`.
+
+## Cost, history and trial runs
+
+- Each turn has a `cost` (null when it cannot be read). `run.session_costs` is the cost per session (null if any turn of that session is unpriced),
+  `totals.cost` the sum of the known costs (null when none is known) and `totals.cost_unknown_steps` how many agent turns have no known cost.
+  With `limits.cost` set, an unpriced earlier turn means the spend is unknown, so no further agent turn starts: the run ends `limit` with
+  "the spend of attempt N is unknown, so the spend limit cannot be checked". Without `limits.cost` an unknown cost stops nothing.
+- Every save that replaces a saved loop, and every remove, first keeps the old file as `<structure>/.loops/.history/<flow>/<UTC time>-<sha8>.json`
+  (at most 50, the oldest go first). `loop versions` lists them, `loop restore` puts one back byte for byte and keeps what it replaced. A bad or traversing version id is refused.
+- `loop start --settings-file F` (or `{"op": "start", "settings": {...}}`) is a trial run: the settings (checked like a saved loop) are pinned in the run, the saved loop is neither read
+  nor changed, and `run.json` says `trial: true`. Every run, trial or not, records `settings_sha256` (the sha256 of the pinned settings as JSON).
+
+## What this does and does not guarantee
+
+- The spend limit is an **admission** limit, not a billing cap: it is checked before a turn starts. A run can end above the limit by one turn.
+- A **check may run twice** after a restart: a check whose cursor is `started` is run again (a check is meant to be repeatable), and a kill between the check
+  finishing and its record being written loses that record.
+- There is **no exactly-once**. The agent turn is protected by reconcile (a turn that cannot be told apart from one still running is never sent again unless you say `--redo`),
+  but a message can still have run in a session that reconcile could not see; a person's `--redo` can run a turn twice, a `--accept` can take a turn that did not finish.
+- Reconcile reads OpenCode 2.3.2's database and processes. A different OpenCode may store things differently; then the answer is `unknown` and the run pauses.
+- A real **compaction was not provoked** in tests: whether a resumed session that was compacted after the kill still holds the goal is not proven. The goal is sent in full
+  with every message, so the message itself is complete.
 
 ## The record
 
@@ -150,7 +199,7 @@ Each run keeps a folder `<project>/.opencode/loops/<run id>/`:
   reply, verdict, findings, error), `artifacts[]` (`name`, `revision`, `sha256`, `bytes`), `escalated_to` and `feedback_from` (`check`, a judge's name,
   `artifacts` or `human`); and per run `handoffs[]` (`attempt`, `from`, `to`, `kind` findings/artifact/report/check, `file`, `sha256`), `passed_by`,
   `waiting` and `answers[]`. `attempt.agent` is the worker's last try and `attempt.check` the check, as in `A -> A`.
-- `run.log` (the detached process), `lock`, and `cancel` when you asked for one.
+- `run.log` (the detached process), `lock`, `cancel` or `pause` when you asked for one, and `answer.json` for an answer not yet taken.
 
 ## What the statuses mean
 
@@ -164,21 +213,22 @@ Each run keeps a folder `<project>/.opencode/loops/<run id>/`:
 - `check_error`: the check command could not run (not found, not executable, killed by a signal).
 - `inconclusive`: the check exited with one of your `inconclusive_codes` or timed out, or a judge gave no verdict line after its retries. The run stops; it does not guess.
 - `waiting`: a person must answer (`agentgraph loop answer`). Not final.
+- `paused`: the run stopped on request (`loop pause`) or because a step's fate could not be told after a restart (the reason says which). Not final; `loop resume`.
 - `invalid`: refused before any attempt (no check command, no goal, unreadable settings, no OpenCode).
 - `cancelled`: you asked it to stop (or answered `stop`). A cancel file stops it before the next turn, or stops a running turn at once.
-- `interrupted` (shown, not stored): the record says `running` but the process is gone. There is no resume yet.
+- `interrupted` (shown, not stored): the record says `running` but the process is gone. `agentgraph loop resume RUN` goes on from the cursor.
 
 ## The spend limit: what it does and does not promise
 
 The limit is checked before each agent turn (a judge's too), against the cost the turns so far are known to have billed (read from the
 OpenCode database, including any subagents the agent started). It stops the **next** turn. It does **not** cap one running
 turn: an attempt that starts under the limit can bill more than what is left, up to what `attempt_seconds` allows. When a
-cost cannot be read it is shown as unknown and is not counted as zero or as spent, so with no readable cost only the attempt
-and time limits protect you.
+cost cannot be read it is shown as unknown and is not counted as zero or as spent; with a cost limit set, an unknown spend ends the run (no
+turn starts when the limit cannot be checked), and without one only the attempt and time limits apply.
 
 ## Known limits
 
-- Loops are `A -> A` or `A -> J1 -> ... -> Jk -> A`; no parallel branches, no cursor or step-by-step control, no trial runs.
+- Loops are `A -> A` or `A -> J1 -> ... -> Jk -> A`; no parallel branches.
 - A judge is a model. A `VERDICT: PASS` means the model said so after looking, not that the work is right; the saved check is the only
   part that is a program. A weak or lenient judge passes weak work. Use a check for what can be checked and judges for the rest.
 - A fresh judge does not see the worker's session, but it works in the same folder and can read everything there, including notes the
@@ -186,7 +236,7 @@ and time limits protect you.
 - `no_artifact` only proves that a file exists inside the work folder after the turn, not that it is right; the copies are the files as
   they were then, and the hash says so.
 - Approval is a person's answer; `approve` over a failed judge is that person's override and is recorded (`passed_by` has `+approval`).
-- No resume after a crash or reboot, and no pause.
+- Resume goes on from the cursor, not from inside a turn: see "What this does and does not guarantee".
 - Each attempt starts a private OpenCode server (about 3 seconds).
 - A turn that is stopped leaves its killed command in the session's memory; the next message says so, but the agent may try
   the same command again.

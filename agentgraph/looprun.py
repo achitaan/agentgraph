@@ -47,7 +47,7 @@ exited 0 ever gives `passed`; the agent's own "PASS" text is never read.
 work folder, executor), `run.json` (atomic after every transition), `events.jsonl` (append-only), `attempt-N/message.md` and
 `attempt-N/check.out` (capped at 1 MB), `lock` (held by the running controller, so a second process cannot run the folder),
 `cancel` (a request), `run.log` (the detached process's output), and for loops between agents `attempt-N/<step>.message.md`, `.reply.md`, `.findings.md`
-(a second try adds `.t2`), `attempt-N/artifacts/`, `attempt-N/answer-K.json`. Only `queued` runs are started; there is no resume yet.
+(a second try adds `.t2`), `attempt-N/artifacts/`, `attempt-N/answer-K.json`. `pause` and `answer.json` (requests), and the run's `cursor`. Only `queued` runs are started; `resume` goes on with a run that was started, from its cursor.
 
     agentgraph loop set FLOW --check CMD --attempts N [--goal T | --goal-file F] [--check-timeout S] [--inconclusive C ...]
                              [--session reuse|fresh] [--attempt-seconds S] [--seconds S] [--cost D] [--allow-asks | --no-allow-asks]
@@ -62,6 +62,7 @@ Exit codes: 0 done, 1 the run did not pass or the request found nothing to do, 2
 from __future__ import annotations
 
 import argparse
+import calendar
 import fcntl
 import hashlib
 import json
@@ -76,11 +77,15 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import closing
 from pathlib import Path
 
 from . import bench, paths, sidechat, snapshot_json, sources
+from . import cost as costmod
 
 VERSION = 1
+HISTORY_KEEP = 50
+VERSION_ID = re.compile(r"\d{8}T\d{6}\.\d{6}Z-[0-9a-f]{8}")
 OUTPUT_CAP = 1_000_000
 TAIL_LINES = 60
 TAIL_CHARS = 6000
@@ -343,12 +348,36 @@ def load_settings(structure, flow_id: str) -> dict | None:
     return out
 
 
+def _history(path: Path) -> Path:
+    return path.parent / ".history" / path.stem
+
+
+def _keep(path: Path) -> None:
+    """Called under the lock, before a saved loop is replaced or removed: its bytes go to `.loops/.history/<flow>/<UTC time>-<sha8>.json`
+    (at most HISTORY_KEEP, the oldest go first). Nothing to keep when there is no file."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return
+    now = time.time()
+    stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(now)) + f".{int((now % 1) * 1_000_000):06d}Z"
+    folder = _history(path)
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / f"{stamp}-{hashlib.sha256(data).hexdigest()[:8]}.json"
+    if not target.exists():
+        _write_atomic(target, data)
+    kept = sorted(p for p in folder.iterdir() if VERSION_ID.fullmatch(p.stem) and p.suffix == ".json")
+    for old in kept[:-HISTORY_KEEP]:
+        old.unlink(missing_ok=True)
+
+
 def save_settings(structure, flow_id: str, settings: dict) -> Path:
     path = settings_path(structure, flow_id)
     clean = validate(settings, path)
     if clean["flow"] != flow_id:
         raise LoopError(f"{path}: the settings are for flow {clean['flow']!r}")
     with _Locked(path.parent):
+        _keep(path)
         _write_atomic(path, (json.dumps(clean, indent=2, sort_keys=True) + "\n").encode("utf-8"))
     return path
 
@@ -358,11 +387,58 @@ def remove_settings(structure, flow_id: str) -> bool:
     if not path.parent.is_dir():
         return False
     with _Locked(path.parent):
+        if not path.exists():
+            return False
+        _keep(path)
         try:
             path.unlink()
         except FileNotFoundError:
             return False
     return True
+
+
+def versions(structure, flow_id: str) -> list[dict]:
+    """The kept earlier versions of a flow's saved loop, newest first: {version, time (epoch seconds), sha256 of the file}."""
+    folder = _history(settings_path(structure, flow_id))
+    out = []
+    try:
+        names = sorted((p for p in folder.iterdir() if VERSION_ID.fullmatch(p.stem) and p.suffix == ".json"), reverse=True)
+    except OSError:
+        return []
+    for p in names:
+        try:
+            data = p.read_bytes()
+            when = calendar.timegm(time.strptime(p.stem[:15], "%Y%m%dT%H%M%S")) + float("0." + p.stem[16:22])
+        except (OSError, ValueError):
+            continue
+        out.append({"version": p.stem, "time": round(when, 6), "sha256": hashlib.sha256(data).hexdigest()})
+    return out
+
+
+def restore(structure, flow_id: str, version: str, check=None) -> Path:
+    """Put a kept version back as the saved loop, byte for byte (what it replaces is kept too, so a restore can be undone). LoopError when
+    the version is not a version id, not there, or no longer a loop this release accepts. `check(current bytes or None)` runs under the lock
+    first and may raise (the page's stale-`rev` refusal)."""
+    path = settings_path(structure, flow_id)
+    if not isinstance(version, str) or not VERSION_ID.fullmatch(version):
+        raise LoopError(f"not a version of the loop of flow {flow_id}: {str(version)[:60]!r} (see: agentgraph loop versions {flow_id})")
+    source = _history(path) / f"{version}.json"
+    try:
+        data = source.read_bytes()
+    except OSError:
+        raise LoopError(f"flow {flow_id} has no kept version {version}") from None
+    try:
+        clean = validate(json.loads(data.decode("utf-8")), source)
+    except ValueError:
+        raise LoopError(f"{source}: not valid JSON") from None
+    if clean["flow"] != flow_id:
+        raise LoopError(f"{source}: the version is for flow {clean['flow']!r}")
+    with _Locked(path.parent):
+        if check is not None:
+            check(path.read_bytes() if path.exists() else None)
+        _keep(path)
+        _write_atomic(path, data)
+    return path
 
 
 def read_flow_of(structure, flow_id: str) -> tuple[list[str], dict]:
@@ -630,8 +706,9 @@ def build_judge_message(goal: str, n: int, limit: int, agent: str, command, chec
     return "\n".join(lines) + "\n"
 
 
-def admit(used: int, limits: dict, elapsed: float, cost, cancelled: bool, passing: str = "a passing check"):
-    """None to start another attempt, else (final status, reason). A cancel request comes first; an unknown cost is not counted."""
+def admit(used: int, limits: dict, elapsed: float, cost, cancelled: bool, passing: str = "a passing check", unknown: str | None = None):
+    """None to start another attempt, else (final status, reason). A cancel request comes first. A known cost is compared with the
+    limit; a turn whose cost is unknown (`unknown` is the reason) ends admission when a cost limit is set, and is not counted otherwise."""
     if cancelled:
         return "cancelled", "cancel requested"
     if used >= limits["attempts"]:
@@ -640,6 +717,8 @@ def admit(used: int, limits: dict, elapsed: float, cost, cancelled: bool, passin
         return "limit", f"seconds limit ({limits['seconds']:g}) reached after {elapsed:.0f} seconds"
     if limits.get("cost") is not None and cost is not None and cost >= limits["cost"]:
         return "limit", f"cost limit (${limits['cost']:g}) reached: ${cost:.4f} spent by the attempts so far"
+    if limits.get("cost") is not None and unknown:
+        return "limit", unknown
     return None
 
 
@@ -708,12 +787,16 @@ class ScriptedExecutor:
     """For tests. `attempts` is a list (each call takes the next item, whoever is asked) or a dict {agent: list} (each agent's turns are
     scripted on their own; an agent with no item left gets an empty reply). Keys of an item: `sleep` seconds, `hang` (wait for the time
     limit or a cancel), `error`, `text`, `cost`, `tokens`, `sessions`, `exit`. `calls` holds every call (agent, session, first, message,
-    cwd, ...) in order, `by_agent(agent)` and `sessions(agent)` read it back; `hook(n, call)` runs first."""
+    cwd, ...) in order, `by_agent(agent)` and `sessions(agent)` read it back; `hook(n, call)` runs first. `reconcile` is a file the
+    tests write: JSON {"answer": "not_sent" | "finished" | "unknown", "text", "cost", "sessions", "reason"}; no file, or one that cannot
+    be read, answers `unknown`. `reconciles` holds every (session, message_sha256) asked about."""
 
-    def __init__(self, attempts, hook=None):
+    def __init__(self, attempts, hook=None, reconcile=None):
         self.script = dict(attempts) if isinstance(attempts, dict) else list(attempts)
         self.hook = hook
         self.calls: list[dict] = []
+        self.reconcile_file = Path(reconcile) if reconcile else None
+        self.reconciles: list[tuple] = []
 
     def by_agent(self, agent) -> list[dict]:
         return [c for c in self.calls if c["agent"] == agent]
@@ -722,7 +805,17 @@ class ScriptedExecutor:
         return [c["session"] for c in self.by_agent(agent)]
 
     def spec(self) -> dict:
-        return {"kind": "scripted", "attempts": self.script}
+        return {"kind": "scripted", "attempts": self.script, **({"reconcile": str(self.reconcile_file)} if self.reconcile_file else {})}
+
+    def reconcile(self, session: str, message_sha256: str) -> dict:
+        self.reconciles.append((session, message_sha256))
+        try:
+            answer = json.loads(self.reconcile_file.read_text(encoding="utf-8")) if self.reconcile_file else None
+        except (OSError, ValueError):
+            answer = None
+        if not isinstance(answer, dict) or answer.get("answer") not in ("not_sent", "finished", "unknown"):
+            return {"answer": "unknown", "reason": "the scripted executor was given no answer"}
+        return answer
 
     def _item(self, agent) -> dict:
         if isinstance(self.script, dict):
@@ -790,6 +883,12 @@ class OpenCodeExecutor:
 
     def attempt(self, *, agent, session, first, title, message, timeout, env, cwd, auto, poll) -> dict:
         cmd = self.command(agent, session, first, title, auto)
+        if not first and session not in self._seen:  # a controller that was restarted: what the session already cost is not this turn's
+            try:
+                before = bench.read_tree(self.db_path, session)
+                self._seen[session] = {"cost": before["cost"], "tokens": dict(before["tokens"])}
+            except (sqlite3.Error, OSError):
+                pass
         started = time.monotonic()
         try:
             proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -833,6 +932,88 @@ class OpenCodeExecutor:
                 "sessions": tree["sessions"] if tree is not None else None, "seconds": time.monotonic() - started, "error": error,
                 "text": text}
 
+    def _alive(self, session) -> list[int] | None:
+        """The pids of processes whose command line names this session (`opencode run ... --session ID`); None when they cannot be listed."""
+        try:
+            out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=15, check=True).stdout
+        except (OSError, subprocess.SubprocessError):
+            return None
+        pids = []
+        for line in out.splitlines():
+            head, _, rest = line.strip().partition(" ")
+            if head.isdigit() and int(head) != os.getpid() and f"--session {session}" in rest:
+                pids.append(int(head))
+        return pids
+
+    def reconcile(self, session: str, message_sha256: str) -> dict:
+        """What became of a message that may have been sent to `session` (read-only; never sends). `not_sent`: no process of this session
+        is alive and the session is missing or holds no user message with this text. `finished`: that message is there, an idle row with
+        outcome `succeeded` follows an assistant reply, and nothing of this turn is still busy; `text` and `cost` are read from the turn's own
+        rows. Anything else, including a process still alive and a database that cannot be read, is `unknown` with the reason."""
+        unknown = lambda why: {"answer": "unknown", "reason": why}  # noqa: E731
+        if not bench.SESSION.fullmatch(session or ""):
+            return unknown("the session id is not valid")
+        pids = self._alive(session)
+        if pids is None:
+            return unknown("the running processes cannot be listed, so a turn still in progress cannot be ruled out")
+        if pids:
+            return unknown(f"an opencode process for this session is still running (pid {pids[0]})")
+        try:
+            with closing(costmod._connect(self.db_path)) as db:
+                return self._reconcile_rows(db, session, message_sha256, unknown)
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            return unknown(f"the opencode database cannot be read: {type(exc).__name__}: {exc}"[:200])
+
+    @staticmethod
+    def _reconcile_rows(db, session: str, sha: str, unknown) -> dict:
+        if db.execute("SELECT 1 FROM session_v2 WHERE id=?", (session,)).fetchone() is None:
+            return {"answer": "not_sent", "reason": "the session does not exist"}
+        users = [(seq, created, text) for seq, created, text in db.execute(
+            "SELECT seq, time_created, CASE WHEN json_valid(data) THEN json_extract(data, '$.text') END FROM session_message WHERE session_id=? AND type='user' ORDER BY seq", (session,))]
+        mine = [(seq, created) for seq, created, text in users if isinstance(text, str) and hashlib.sha256(text.encode("utf-8")).hexdigest() == sha]
+        if not mine:
+            return {"answer": "not_sent", "reason": "the session holds no user message with this text"}
+        seq, created = mine[-1]
+        later = [u[0] for u in users if u[0] > seq]
+        end = later[0] if later else None
+        window = "seq > ?" + (" AND seq < ?" if end is not None else "")
+        args = (session, seq) + ((end,) if end is not None else ())
+        idle = db.execute(f"SELECT seq, CASE WHEN json_valid(data) THEN json_extract(data, '$.outcome') END FROM session_message WHERE session_id=? AND type='idle' AND {window} ORDER BY seq", args).fetchall()
+        replies = db.execute(f"SELECT seq, data FROM session_message WHERE session_id=? AND type='assistant' AND {window} ORDER BY seq", args).fetchall()
+        if not replies:
+            return unknown("the message is in the session but no reply follows it")
+        if not idle:
+            return unknown("the message is in the session and a reply began, but the session never went idle after it (still busy, or cut off)")
+        if idle[-1][1] != "succeeded":
+            return unknown(f"the turn ended with outcome {idle[-1][1]!r}, not a finished reply")
+        if idle[-1][0] < replies[-1][0]:
+            return unknown("an assistant message follows the last idle mark of the turn")
+        costs, texts = [], []
+        for _seq, raw in replies:
+            try:
+                data = json.loads(raw)
+            except (TypeError, ValueError):
+                return unknown("an assistant message of the turn cannot be read")
+            cost = data.get("cost") if isinstance(data, dict) else None
+            costs.append(float(cost) if _number(cost) else None)
+            for part in (data.get("content") or []) if isinstance(data, dict) and isinstance(data.get("content"), list) else []:
+                if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+                    texts.append(part["text"])
+        found, queue, seen = 0.0, [session], {session}
+        children = 0
+        while queue:
+            for sid, cost, idle_at, made in db.execute("SELECT id, cost, time_idle, time_created FROM session_v2 WHERE parent_id=?", (queue.pop(0),)).fetchall():
+                if sid in seen or made < created:
+                    continue
+                seen.add(sid)
+                queue.append(sid)
+                children += 1
+                if idle_at is None:
+                    return unknown(f"a session this turn started ({sid}) is not idle")
+                found += float(cost) if _number(cost) else 0.0
+        total = None if any(c is None for c in costs) else round(sum(costs) + found, 8)
+        return {"answer": "finished", "text": "".join(texts), "cost": total, "sessions": 1 + children}
+
     def _tree(self, session, expect: bool):
         for attempt in range(6 if expect else 1):
             try:
@@ -848,7 +1029,7 @@ class OpenCodeExecutor:
 def make_executor(spec: dict):
     kind = (spec or {}).get("kind")
     if kind == "scripted":
-        return ScriptedExecutor(spec.get("attempts", {}) if isinstance(spec.get("attempts"), dict) else spec.get("attempts", []))
+        return ScriptedExecutor(spec.get("attempts", {}) if isinstance(spec.get("attempts"), dict) else spec.get("attempts", []), reconcile=spec.get("reconcile"))
     if kind == "opencode":
         scratch = bench.open_scratch(spec["scratch"]) if spec.get("scratch") else None
         db = spec.get("db") or (scratch["dir"] / "home" / ".local" / "share" / "opencode" / "opencode.db" if scratch else None)
@@ -922,10 +1103,23 @@ def _held(folder: Path) -> bool:
 
 
 def shown_status(folder, state: dict) -> str:
-    """The status to show: a run that says `running` but whose controller is gone shows `interrupted` (the files are not changed)."""
-    if state.get("status") in ("running", "waiting") and not _held(Path(folder)):
+    """The status to show: a run that says `running` but whose controller is gone shows `interrupted` (the files are not changed). A
+    `waiting` run shows `waiting` with or without a controller: it makes no model call either way, and `answer` then `resume` goes on."""
+    if state.get("status") == "running" and not _held(Path(folder)):
         return "interrupted"
     return state.get("status", "unknown")
+
+
+def hint(folder, state: dict) -> str:
+    """One line saying what to do with a run that is not running: empty for any other."""
+    run, shown = state.get("run", Path(folder).name), shown_status(folder, state)
+    if shown == "interrupted":
+        return f"  no controller is running this run: agentgraph loop resume {run}  (or: agentgraph loop cancel {run})"
+    if shown == "paused":
+        return f"  paused: {state.get('reason') or 'on request'}\n  agentgraph loop resume {run} [--redo | --accept]  (or: agentgraph loop cancel {run})"
+    if shown == "waiting" and not _held(Path(folder)):
+        return f"  no controller is running this run: answer it, then agentgraph loop resume {run}  (or: agentgraph loop cancel {run})"
+    return ""
 
 
 def describe(folder, state: dict) -> str:
@@ -938,6 +1132,11 @@ def describe(folder, state: dict) -> str:
     parts = [state.get("run", Path(folder).name), shown_status(folder, state), f"attempts {len(attempts)}" + (f"/{limit}" if limit else ""),
              f"check exit {last['exit']}" if last and last.get("exit") is not None else ("check none" if not last else f"check {last['outcome']}"),
              f"cost ${cost:.4f}" if cost is not None else "cost unknown", f"{seconds:.0f}s", f"flow {state.get('flow')}"]
+    unpriced = totals.get("cost_unknown_steps") or 0
+    if unpriced:
+        parts.insert(5, f"{unpriced} turn{'s' if unpriced != 1 else ''} unpriced")
+    if state.get("trial"):
+        parts.append("trial")
     if state.get("passed_by"):
         parts.append(f"by {state['passed_by']}")
     if state.get("waiting"):
@@ -960,6 +1159,8 @@ def describe_steps(state: dict) -> list[str]:
                 extra += f"  exit {entry['exit']}"
             if entry.get("answer"):
                 extra += f"  answered {entry['answer']}"
+            if entry.get("recovered"):
+                extra += "  recovered" + (" (accepted)" if entry.get("accepted") else "")
             rows.append(f"  attempt {attempt['n']}  {entry['step']:<18} {who:<18} {entry.get('outcome') or '?':<12} -> {entry.get('route') or '-'}{extra}")
     return rows
 
@@ -972,6 +1173,22 @@ class _End(Exception):
     def __init__(self, status: str, reason: str, step_id: str):
         super().__init__(reason)
         self.status, self.reason, self.step_id = status, reason, step_id
+
+
+class _Paused(Exception):
+    """Raised inside a resumed step when what became of it cannot be told: the run is paused with the reason, nothing is sent."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _text_sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+CHOICES = ("redo", "accept")
+VERDICT_AGAIN = ("Your reply did not end with a verdict line (`VERDICT: PASS` or `VERDICT: FAIL`, alone on the last line). Answer again, with the line.\n\n")
 
 
 def _sha(path: Path) -> str:
@@ -1008,17 +1225,45 @@ class Controller:
         self.confirmed: set[str] = set()
         self.roots: dict[str, int] = {}
         self.kinds = {"agent": self._agent, "check": self._check}
-        for key, empty in (("waiting", None), ("passed_by", None), ("handoffs", []), ("answers", [])):
+        self.entered = False
+        for key, empty in (("waiting", None), ("passed_by", None), ("handoffs", []), ("answers", []), ("recoveries", []), ("cursor", None),
+                           ("session_costs", {})):
             self.state.setdefault(key, empty)
 
     # state
+    def _turns(self):
+        """Every agent turn whose result is recorded, in order."""
+        return [t for a in self.state["attempts"] for t in a["steps"] if t.get("kind") == "agent" and t.get("outcome") is not None]
+
+    @staticmethod
+    def _priced(turn) -> bool:
+        return turn.get("cost") is not None
+
     def totals(self) -> dict:
         costs = [t["cost"] for a in self.state["attempts"] for t in a["steps"] if t.get("cost") is not None]
         return {"cost": round(sum(costs), 8) if costs else None, "seconds": round(time.monotonic() - self.began, 1),
-                "sessions": sum(self.roots.values()) if self.roots else None, "attempts": len(self.state["attempts"])}
+                "sessions": sum(self.roots.values()) if self.roots else None, "attempts": len(self.state["attempts"]),
+                "cost_unknown_steps": sum(1 for t in self._turns() if not self._priced(t))}
+
+    def session_costs(self) -> dict:
+        """{session: what its turns cost, or None when any of its turns is unpriced}."""
+        out: dict = {}
+        for turn in self._turns():
+            sid = turn["session"]
+            out[sid] = None if (not self._priced(turn) or out.get(sid, 0.0) is None) else round(out.get(sid, 0.0) + turn["cost"], 8)
+        return out
+
+    def unknown_cost(self) -> str | None:
+        """Why the spend cannot be known (the first agent turn that was not priced), or None."""
+        for attempt in self.state["attempts"]:
+            for turn in attempt["steps"]:
+                if turn.get("kind") == "agent" and turn.get("outcome") is not None and not self._priced(turn):
+                    return f"the spend of attempt {attempt['n']} is unknown, so the spend limit cannot be checked"
+        return None
 
     def save(self) -> None:
         self.state["totals"] = self.totals()
+        self.state["session_costs"] = self.session_costs()
         self.state["heartbeat"] = round(time.time(), 3)
         _write_atomic(self.folder / "run.json", _json(self.state))
         self.last_save = time.monotonic()
@@ -1038,37 +1283,183 @@ class Controller:
         return "a passing check" if self.check_step else "every judge passing"
 
     # the walk
-    def run(self) -> str:
-        self.state.update(status="running", pid=os.getpid(), started=round(time.time(), 3))
+    def run(self, where: tuple | None = None) -> str:
+        """Walk the steps until the run ends or is paused. `where` is None for a queued run, else what `resume_point` returned for a run that
+        was started before: the walk goes on from its cursor and nothing that finished is run again."""
+        resumed = where is not None
+        step_id, mode, extra = where if resumed else (self.head, "fresh", None)
+        self.entered = True
+        if resumed:
+            self.state.update(status="running", pid=os.getpid(), reason=None, resumed=round(time.time(), 3))
+            (self.folder / "pause").unlink(missing_ok=True)
+        else:
+            self.state.update(status="running", pid=os.getpid(), started=round(time.time(), 3))
         self.save()
-        _event(self.folder, attempt=0, step="-", outcome="started", route=self.head)
-        step_id = self.head
+        _event(self.folder, attempt=len(self.state["attempts"]), step="-", outcome="resumed" if resumed else "started", route=step_id if resumed else self.head)
         try:
             while True:
                 step = self.steps[step_id]
-                if step_id == self.head:
-                    refusal = admit(len(self.state["attempts"]), self.limits, time.monotonic() - self.began, self.known_cost(), self.cancelled(), self.passing())
-                    if refusal:
-                        status, reason = refusal
-                        if status == "failed" and self.last_agent == "stalled":
-                            status, reason = "stalled", f"attempt limit reached; the last turn was stopped at the time limit and no check passed"
-                        return self.finish(status, reason, step_id)
-                    self._begin()
-                outcome = self._start_step(step)
-                step_id = self._record(step, outcome)
-                if step_id in ("done", "stop"):
-                    return self.finish_done(step) if step_id == "done" else self.finish(status_of(outcome), f"{step['id']}: {outcome}", step["id"])
-                if step_id not in self.steps:
-                    return self.finish("invalid", f"the definition routes to an unknown step {step_id!r}", step["id"])
+                if mode == "route":  # the step is recorded; follow the route it had
+                    outcome = self.attempt["steps"][-1]["outcome"]
+                    nxt = self._follow(step, outcome, extra, again=True)
+                else:
+                    if mode == "fresh" and step_id == self.head:
+                        refusal = admit(len(self.state["attempts"]), self.limits, time.monotonic() - self.began, self.known_cost(), self.cancelled(), self.passing(),
+                                        self.unknown_cost())
+                        if refusal:
+                            status, reason = refusal
+                            if status == "failed" and self.last_agent == "stalled":
+                                status, reason = "stalled", f"attempt limit reached; the last turn was stopped at the time limit and no check passed"
+                            return self.finish(status, reason, step_id)
+                        self._begin()
+                    carried = self._reconcile(step, extra) if mode == "started" else ({"entry": self.attempt["steps"][-1], "state": "done"} if mode == "recorded" else None)
+                    outcome = self._start_step(step, carried)
+                    nxt = self._record(step, outcome)
+                mode, extra = "fresh", None
+                if nxt in ("done", "stop"):
+                    return self.finish_done(step) if nxt == "done" else self.finish(status_of(outcome), f"{step['id']}: {outcome}", step["id"])
+                if nxt not in self.steps:
+                    return self.finish("invalid", f"the definition routes to an unknown step {nxt!r}", step["id"])
+                if (self.folder / "pause").exists():
+                    return self._pause(f"paused on request after {step['id']} of attempt {self.attempt['n']}; the run goes on at {nxt}")
+                step_id = nxt
         except _End as end:
             return self.finish(end.status, end.reason, end.step_id)
+        except _Paused as paused:
+            return self._pause(paused.reason)
 
-    def _start_step(self, step) -> str:
-        """The one place a step starts: an agent turn is admitted (cancel, seconds, cost) before it is dispatched, judges included."""
-        return self.kinds[step["kind"]](step)
+    def _pause(self, reason: str) -> str:
+        (self.folder / "pause").unlink(missing_ok=True)
+        self.state.update(status="paused", reason=reason, waiting=None)
+        self.save()
+        _event(self.folder, attempt=len(self.state["attempts"]), step=(self.state.get("cursor") or {}).get("step", "-"), outcome="paused", route="-", reason=reason)
+        return "paused"
+
+    # going on after a restart
+    def resume_point(self, choice) -> tuple[str, str, object]:
+        """(step id, mode, extra) to go on from, after rebuilding in memory what the controller kept in its head. LoopError, with nothing
+        written, when the choice does not fit. Modes: `fresh` (start the step), `route` (the step is recorded; follow `extra`), `started` (an
+        agent step that may have run: reconcile, `extra` is the choice), `recorded` (an agent turn's result is in, its step is not routed)."""
+        while self.state["attempts"] and not self.state["attempts"][-1]["steps"]:
+            self.state["attempts"].pop()  # an attempt that was opened and killed before its first step was written: `_begin` opens it again
+        if choice not in ("", None, *CHOICES):
+            raise LoopError(f"the choice must be one of {', '.join(CHOICES)} (or none), not {str(choice)[:40]!r}")
+        self._rebuild()
+        cursor = self.state.get("cursor")
+
+        def only_started():
+            if choice:
+                raise LoopError(f"--{choice} is for a step that was sent and whose result is not known; this run is at {cursor['step']} ({cursor['phase']}), where nothing is in doubt")
+        if not cursor:
+            if self.state["attempts"]:
+                raise LoopError("this run has no cursor (it was made before runs could be resumed): it cannot be resumed")
+            if choice:
+                raise LoopError(f"--{choice} is for a step that was sent and whose result is not known; this run has not started a step")
+            return self.head, "fresh", None
+        step = self.steps.get(cursor.get("step"))
+        if step is None or not self.attempt or self.attempt["n"] != cursor.get("attempt"):
+            raise LoopError("the cursor of this run does not match its record: it cannot be resumed")
+        nxt = cursor.get("next")
+        if cursor.get("phase") == "done" and nxt:
+            if nxt not in self.steps and nxt not in ("done", "stop", "human"):
+                raise LoopError(f"the cursor routes to an unknown step {nxt!r}")
+            only_started()
+            return step["id"], "route", nxt
+        if step["kind"] == "check":
+            only_started()
+            return step["id"], "fresh", None
+        last = self.attempt["steps"][-1] if self.attempt["steps"] else None
+        if last is None or last.get("step") != step["id"]:
+            raise LoopError("the cursor names a turn that the record does not hold: it cannot be resumed")
+        if last.get("outcome") is not None:
+            only_started()
+            return step["id"], "recorded", None
+        if choice == "accept" and step.get("role") == "judge":
+            raise LoopError(f"--accept cannot take a judge's turn as returned: there is no verdict to read; use --redo to ask {step['agent']} again")
+        return step["id"], "started", choice
+
+    def _rebuild(self) -> None:
+        """What `run` keeps in memory, rebuilt from the record and its files: the sessions, the attempt in progress, the last check and agent
+        result, the pending feedback, the files that were missing, the time already used."""
+        attempts = self.state["attempts"]
+        self.attempt = attempts[-1] if attempts else None
+        for attempt in attempts:
+            for entry in attempt["steps"]:
+                if entry.get("kind") == "agent" and entry.get("session"):
+                    self.sessions[entry["agent"]] = entry["session"]
+                    if entry.get("outcome") in ("returned", "pass", "fail", "inconclusive", "no_artifact") or entry.get("sessions"):
+                        self.confirmed.add(entry["session"])
+                    if entry.get("sessions"):
+                        self.roots[entry["session"]] = int(entry["sessions"])
+                if entry.get("role") == "work" and str(entry.get("error") or "").startswith("missing: "):
+                    self.missing = str(entry["error"])[len("missing: "):].split(", ")
+            if attempt.get("check"):
+                check = attempt["check"]
+                try:
+                    tail = tail_of((self.folder / check["output"]).read_bytes().decode("utf-8", "replace"))
+                except OSError:
+                    tail = ""
+                self.last_check = {"exit": check.get("exit"), "outcome": check.get("outcome"), "tail": tail}
+            if attempt.get("agent"):
+                self.last_agent = attempt["agent"].get("outcome")
+        self.began = time.monotonic() - float((self.state.get("totals") or {}).get("seconds") or 0)
+        answers = self.state.get("answers") or []
+        if answers and not (self.folder / answers[-1]["file"]).exists() and (self.folder / "answer.json").exists():
+            os.replace(self.folder / "answer.json", self.folder / answers[-1]["file"])  # an answer that was taken into the record but not yet filed away
+
+    def _reconcile(self, step, choice) -> dict:
+        """For an agent step that was started and whose result is not recorded: what the executor says became of its message, or the person's
+        choice. Returns the step to carry on (`result` None means send the message again) or raises `_Paused`; the choice and the answer are
+        written to `recoveries` first. Nothing is sent here."""
+        cursor, entry = self.state["cursor"], self.attempt["steps"][-1]
+        sha = cursor.get("message_sha256")
+        try:
+            text = (self.folder / entry["message"]).read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError, TypeError):
+            text = None
+        record = {"time": round(time.time(), 3), "attempt": self.attempt["n"], "step": step["id"], "try": cursor.get("try"), "session": cursor.get("session"),
+                  "message_sha256": sha, "choice": choice or None}
+        result, why = None, ""
+        if text is None or _text_sha(text) != sha:
+            record.update(answer="unknown", action="pause", reason="the message file of this step is missing or changed")
+            why = record["reason"]
+        elif choice == "redo":
+            record.update(answer=None, action="redo", reason=None)
+        elif choice == "accept":
+            result = {"exit": 0, "outcome": "returned", "session": cursor.get("session"), "cost": None, "tokens": None, "sessions": None, "seconds": 0.0,
+                      "error": None, "text": "", "recovered": True, "accepted": True}
+            record.update(answer=None, action="accept", reason=None)
+        else:
+            try:
+                answer = self.executor.reconcile(cursor.get("session"), sha)
+            except Exception as exc:  # anything that goes wrong is "cannot tell"
+                answer = {"answer": "unknown", "reason": f"reconcile failed: {type(exc).__name__}: {exc}"[:200]}
+            name = answer.get("answer") if isinstance(answer, dict) else None
+            if name == "not_sent":
+                record.update(answer="not_sent", action="send", reason=str(answer.get("reason") or "")[:300] or None)
+            elif name == "finished":
+                cost, sessions = answer.get("cost"), answer.get("sessions")
+                result = {"exit": 0, "outcome": "returned", "session": cursor.get("session"), "tokens": None, "seconds": 0.0, "error": None, "recovered": True,
+                          "cost": float(cost) if _number(cost) else None, "sessions": int(sessions) if _number(sessions) and sessions > 0 else None,
+                          "text": answer.get("text") if isinstance(answer.get("text"), str) else ""}
+                record.update(answer="finished", action="adopt", reason=None)
+            else:
+                why = str(answer.get("reason") or "no reason was given")[:300] if isinstance(answer, dict) else "no usable answer"
+                record.update(answer="unknown", action="pause", reason=why)
+        self.state["recoveries"].append(record)
+        _event(self.folder, attempt=record["attempt"], step=step["id"], outcome=f"recovery:{record['action']}", route="-", reason=record.get("reason"))
+        self.save()
+        if record["action"] == "pause":
+            raise _Paused(f"cannot tell whether {step['id']} of attempt {record['attempt']} ran: {why}; nothing was sent. Resume with --redo to send it again, or --accept to take it as returned and go on")
+        return {"entry": entry, "state": "started", "message": text, "result": result, "exists": bool(answer.get("exists")) if record["action"] == "send" else False}
+
+    def _start_step(self, step, carried: dict | None = None) -> str:
+        """The one place a step starts: an agent turn is admitted (cancel, seconds, cost) before it is dispatched, judges included.
+        `carried` is a turn picked up after a restart (see `_agent`)."""
+        return self.kinds[step["kind"]](step, carried) if carried else self.kinds[step["kind"]](step)
 
     def _turn_admission(self, step) -> None:
-        refusal = admit(0, self.limits, time.monotonic() - self.began, self.known_cost(), self.cancelled(), self.passing())
+        refusal = admit(0, self.limits, time.monotonic() - self.began, self.known_cost(), self.cancelled(), self.passing(), self.unknown_cost())
         if refusal:
             raise _End(refusal[0], refusal[1], step["id"])
 
@@ -1082,13 +1473,27 @@ class Controller:
         entry["route"] = route
         n = self.attempt["n"]
         _event(self.folder, attempt=n, step=step["id"], outcome=outcome, route=route)
+        self.state["cursor"] = {**(self.state.get("cursor") or {}), "attempt": n, "step": step["id"], "phase": "done", "next": route, "approval": asked_for_approval}
         self.save()
+        return self._follow(step, outcome, route)
+
+    def _follow(self, step, outcome: str, route: str, again: bool = False) -> str:
+        """What follows a recorded step: a person is asked first when the route is `human`; a route back to the head ends the attempt and keeps
+        what the next worker is told. Also how a resumed run re-enters a step whose result was already recorded."""
+        entry = self.attempt["steps"][-1]
         if route == "human":
-            route = self._ask(step, outcome, entry, asked_for_approval)
+            route = self._ask(step, outcome, entry, bool((self.state.get("cursor") or {}).get("approval")))
+            self.state["cursor"]["next"] = route
+            self.save()
         if route == self.head:
-            self.attempt["ended"] = round(time.time(), 3)
+            if not (again and self.attempt.get("ended")):
+                self.attempt["ended"] = round(time.time(), 3)
             if self.feedback is None:
-                self.feedback = self._feedback_of(step, outcome, entry)
+                answers = self.state.get("answers") or []
+                if entry.get("answer") == "reject" and answers:
+                    self.feedback = {"from": "human", "kind": "findings", "text": answers[-1].get("note", ""), "file": answers[-1].get("file")}
+                else:
+                    self.feedback = self._feedback_of(step, outcome, entry)
         return route
 
     def _begin(self) -> None:
@@ -1229,33 +1634,59 @@ class Controller:
             self.sessions[agent] = new_session_id()
         return self.sessions[agent]
 
-    def _agent(self, step) -> str:
+    def _agent(self, step, carried: dict | None = None) -> str:
+        """An agent step. `carried` is a turn picked up after a restart: {entry, state: "started" | "done", message, result, exists}; the turn
+        is not built again (its message and entry are in the record), only sent again, adopted from `result`, or, when its result is already
+        recorded, not run at all."""
         n = self.attempt["n"]
-        role, agent = step.get("role", "work"), step["agent"]
-        escalate = step.get("escalate")
-        taking_over = None
-        if role == "work" and escalate and n > escalate["after"]:
-            taking_over, agent = agent, escalate["to"]
-            self.attempt["escalated_to"] = agent
-        fresh = step.get("session") == "fresh"
-        session = self._session_for(agent, fresh)
+        tries = step.get("retries", 0)
         slug = _slug(step["id"])
-        title = f"agentgraph-loop: {self.state['flow']} {self.state['run']}" + (f" {agent}" if role == "judge" or taking_over else "") + (f" a{n}" if fresh else "")
-        if role == "judge":
-            message = self._judge_message(step, agent, n)
-        elif self.own:
-            message = build_message(self.definition["goal"], self.check_step["command"], n, self.limits["attempts"], self.last_check, self.last_agent,
-                                    self.limits.get("attempt_seconds"))
+        if carried:
+            first_entry = carried["entry"]
+            role, agent, session, first_try, fresh = first_entry["role"], first_entry["agent"], first_entry["session"], first_entry["try"], bool(first_entry["fresh"])
+            taking_over = first_entry["agent"] if role == "work" and first_entry["agent"] != step["agent"] else None
+            message = (carried.get("message") or "").removeprefix(VERDICT_AGAIN)
+            if not carried.get("message"):
+                try:
+                    message = (self.folder / first_entry["message"]).read_text(encoding="utf-8").removeprefix(VERDICT_AGAIN)
+                except OSError:
+                    message = ""
         else:
-            message = self._work_message(step, n, taking_over)
+            role, agent = step.get("role", "work"), step["agent"]
+            escalate = step.get("escalate")
+            taking_over = None
+            if role == "work" and escalate and n > escalate["after"]:
+                taking_over, agent = agent, escalate["to"]
+                self.attempt["escalated_to"] = agent
+            fresh = step.get("session") == "fresh"
+            session = self._session_for(agent, fresh)
+            first_try = 1
+        title = f"agentgraph-loop: {self.state['flow']} {self.state['run']}" + (f" {agent}" if role == "judge" or taking_over else "") + (f" a{n}" if fresh else "")
+        if not carried:
+            if role == "judge":
+                message = self._judge_message(step, agent, n)
+            elif self.own:
+                message = build_message(self.definition["goal"], self.check_step["command"], n, self.limits["attempts"], self.last_check, self.last_agent,
+                                        self.limits.get("attempt_seconds"))
+            else:
+                message = self._work_message(step, n, taking_over)
         if session not in self.state["sessions"]:
             self.state["sessions"].append(session)  # in the record before the process starts, so a crash cannot orphan it
-        tries, entry, outcome = step.get("retries", 0), None, "agent_error"
-        for attempt_try in range(1, tries + 2):
-            self._turn_admission(step)
-            sent = message if attempt_try == 1 or entry["outcome"] != "inconclusive" else (
-                "Your reply did not end with a verdict line (`VERDICT: PASS` or `VERDICT: FAIL`, alone on the last line). Answer again, with the line.\n\n" + message)
-            entry = self._turn(step, agent, session, title, sent, attempt_try, slug, role)
+        entry, outcome = None, "agent_error"
+        for attempt_try in range(first_try, tries + 2):
+            resumed = carried if carried and attempt_try == first_try else None
+            if resumed and resumed["state"] == "done":
+                entry = resumed["entry"]
+            else:
+                adopted = resumed.get("result") if resumed else None
+                if adopted is None:
+                    self._turn_admission(step)  # a resend is admitted like any turn: a cancel or a limit stops it; adopting a reply sends nothing
+                if resumed:
+                    sent = resumed["message"]
+                else:
+                    sent = message if attempt_try == 1 or entry["outcome"] != "inconclusive" else VERDICT_AGAIN + message
+                entry = self._turn(step, agent, session, title, sent, attempt_try, slug, role, entry=resumed["entry"] if resumed else None, result=adopted,
+                                   exists=bool(resumed and resumed.get("exists")))
             outcome = entry["outcome"]
             if attempt_try <= tries and (outcome == "agent_error" or (role == "judge" and outcome == "inconclusive")):
                 entry["route"] = "retry"
@@ -1270,26 +1701,33 @@ class Controller:
                 entry["error"] = "missing: " + ", ".join(self.missing)
         return outcome
 
-    def _turn(self, step, agent: str, session: str, title: str, message: str, attempt_try: int, slug: str, role: str) -> dict:
+    def _turn(self, step, agent: str, session: str, title: str, message: str, attempt_try: int, slug: str, role: str, entry: dict | None = None,
+              result: dict | None = None, exists: bool = False) -> dict:
+        """One turn. `entry` and `result` are given for a turn that was picked up after a restart: with a `result` (the reply that was found,
+        or the person's `--accept`) nothing is sent; with only the `entry` the same message is sent again into the same session."""
         n = self.attempt["n"]
         folder = self.folder / f"attempt-{n}"
         stem = f"{slug}.t{attempt_try}" if attempt_try > 1 else slug
-        message_file = (f"message.t{attempt_try}.md" if attempt_try > 1 else "message.md") if role == "work" else f"{stem}.message.md"
-        (folder / message_file).write_text(message, encoding="utf-8")
-        entry = {"step": step["id"], "kind": "agent", "role": role, "agent": agent, "session": session, "fresh": step.get("session") == "fresh", "try": attempt_try,
-                 "seconds": None, "cost": None, "tokens": None, "sessions": None, "exit": None, "outcome": None, "route": None,
-                 "message": f"attempt-{n}/{message_file}", "reply": None, "verdict": None, "findings": None, "error": None}
-        self.attempt["steps"].append(entry)
+        if entry is None:
+            message_file = (f"message.t{attempt_try}.md" if attempt_try > 1 else "message.md") if role == "work" else f"{stem}.message.md"
+            (folder / message_file).write_text(message, encoding="utf-8")
+            entry = {"step": step["id"], "kind": "agent", "role": role, "agent": agent, "session": session, "fresh": step.get("session") == "fresh", "try": attempt_try,
+                     "seconds": None, "cost": None, "tokens": None, "sessions": None, "exit": None, "outcome": None, "route": None,
+                     "message": f"attempt-{n}/{message_file}", "reply": None, "verdict": None, "findings": None, "error": None}
+            self.attempt["steps"].append(entry)
         if role == "work":
             self.attempt["message"] = f"attempt-{n}/message.md"
-        first = session not in self.confirmed
+        first = session not in self.confirmed and not exists
+        self.state["cursor"] = {"attempt": n, "step": step["id"], "phase": "started", "try": attempt_try, "session": session, "message_sha256": _text_sha(message),
+                                "next": None}
         self.save()
-        try:
-            result = self.executor.attempt(agent=agent, session=session, first=first, title=title, message=message, timeout=self.limits.get("attempt_seconds"),
-                                           env=self.env, cwd=self.workdir, auto=bool(self.definition["settings"].get("allow_asks")), poll=self.poll)
-        except Exception as exc:  # an executor that fails is an agent failure, never a pass
-            result = {"exit": None, "outcome": "agent_error", "session": session, "cost": None, "tokens": None, "sessions": None,
-                      "seconds": 0.0, "error": f"{type(exc).__name__}: {exc}"[:200], "text": ""}
+        if result is None:
+            try:
+                result = self.executor.attempt(agent=agent, session=session, first=first, title=title, message=message, timeout=self.limits.get("attempt_seconds"),
+                                               env=self.env, cwd=self.workdir, auto=bool(self.definition["settings"].get("allow_asks")), poll=self.poll)
+            except Exception as exc:  # an executor that fails is an agent failure, never a pass
+                result = {"exit": None, "outcome": "agent_error", "session": session, "cost": None, "tokens": None, "sessions": None,
+                          "seconds": 0.0, "error": f"{type(exc).__name__}: {exc}"[:200], "text": ""}
         outcome = result["outcome"]
         if outcome == "returned" or result.get("sessions"):
             self.confirmed.add(session)
@@ -1300,6 +1738,10 @@ class Controller:
         (self.folder / reply_file).write_text(text, encoding="utf-8")
         entry.update(seconds=round(result.get("seconds") or 0, 2), cost=result.get("cost"), tokens=result.get("tokens"), sessions=result.get("sessions"),
                      exit=result.get("exit"), error=result.get("error"), reply=reply_file)
+        if result.get("recovered"):
+            entry["recovered"] = True
+            if result.get("accepted"):
+                entry["accepted"] = True
         if role == "judge" and outcome == "returned":
             outcome, findings = read_verdict(text)
             entry["verdict"] = outcome
@@ -1366,6 +1808,8 @@ class Controller:
     def _check(self, step) -> str:
         n = self.attempt["n"]
         path = self.folder / f"attempt-{n}" / "check.out"
+        self.state["cursor"] = {"attempt": n, "step": step["id"], "phase": "started", "try": 1, "session": None, "message_sha256": None, "next": None}
+        self.save()
         result = run_check(step["command"], step.get("timeout"), self.workdir, self.env, path, self.poll)
         outcome = check_outcome(result["exit"], result["timed_out"], step.get("inconclusive_codes", []))
         data = path.read_bytes()
@@ -1396,24 +1840,30 @@ def _new_run_folder(project) -> tuple[str, Path]:
 
 
 def start(project, flow_id: str, *, structure=None, goal: str | None = None, workdir=None, wait: bool = False, executor=None,
-          executor_spec: dict | None = None, scratch=None, executable=None, db=None) -> str:
+          executor_spec: dict | None = None, scratch=None, executable=None, db=None, settings: dict | None = None) -> str:
     """Write the run folder and start the run: detached (default) or, with `wait`, in this process. Returns the run id.
     LoopError (nothing written) when the flow is not there or is not a self-loop or has no saved loop; a loop that cannot run
-    (no check, no goal, unreadable settings, no opencode) is written as a run with the status `invalid` and no attempt."""
+    (no check, no goal, unreadable settings, no opencode) is written as a run with the status `invalid` and no attempt. `settings` makes a
+    trial run: these settings (checked like a saved loop, `version` and `flow` filled in) are pinned in the run instead of the saved loop,
+    which is neither read nor changed; the record says `trial: true`."""
     project = Path(project).absolute()
     path, shape = read_flow_of(structure, flow_id)
     refusal = path_refusal(path)
     if refusal:
         raise LoopError(refusal)
-    problem, settings = None, None
-    try:
-        settings = load_settings(structure, flow_id)
+    problem, trial = None, settings is not None
+    if trial:
+        if not isinstance(settings, dict):
+            raise LoopError("the trial settings must be a JSON object")
+        settings = validate({"version": VERSION, "flow": flow_id, **settings}, f"the trial settings of flow {flow_id}")
+        if settings["flow"] != flow_id:
+            raise LoopError(f"the trial settings are for flow {settings['flow']!r}, not {flow_id!r}")
+    else:
+        settings = load_settings(structure, flow_id)  # a loop that cannot be read or is refused makes no run folder at all
         if settings is None:
             raise LoopError(f"no loop is saved for flow {flow_id}; save one with `agentgraph loop set {flow_id} --check CMD --attempts N`")
-    except LoopError:
-        raise  # a loop that cannot be read or is refused makes no run folder at all
     work = Path(workdir).absolute() if workdir else project
-    goal = goal if goal is not None else (settings or {}).get("goal")
+    goal = goal if goal is not None else settings.get("goal")
     steps: list[dict] = []
     if problem is None:
         if path[0] not in shape["group_of"]:
@@ -1452,12 +1902,13 @@ def start(project, flow_id: str, *, structure=None, goal: str | None = None, wor
     now = round(time.time(), 3)
     definition = {"version": VERSION, "run": run_id, "created": now, "flow": flow_id, "path": path, "structure": str(structure_dir(structure)),
                   "settings": settings, "steps": steps, "steps_sha256": steps_hash(steps), "goal": goal, "workdir": str(work),
-                  "project": str(project), "executor": spec}
+                  "project": str(project), "executor": spec, "trial": trial, "settings_sha256": hashlib.sha256(_json(settings)).hexdigest()}
     with open(folder / "definition.json", "xb") as stream:
         stream.write(_json(definition))
     state = {"version": VERSION, "run": run_id, "flow": flow_id, "status": "queued", "reason": None, "goal": goal, "workdir": str(work),
              "pid": None, "heartbeat": now, "created": now, "sessions": [], "attempts": [],
-             "limits": (settings or {}).get("limits"), "totals": {"cost": None, "seconds": 0, "sessions": None, "attempts": 0}}
+             "limits": settings.get("limits"), "totals": {"cost": None, "seconds": 0, "sessions": None, "attempts": 0, "cost_unknown_steps": 0},
+             "trial": trial, "settings_sha256": definition["settings_sha256"], "cursor": None, "recoveries": [], "session_costs": {}}
     if problem is not None:
         state.update(status="invalid", reason=problem, ended=now)
         _write_atomic(folder / "run.json", _json(state))
@@ -1479,9 +1930,11 @@ def start(project, flow_id: str, *, structure=None, goal: str | None = None, wor
     return run_id
 
 
-def execute(folder, executor=None) -> str:
-    """Run a queued run folder in this process and return its final status. Refused when another process holds the folder or
-    the run is not `queued`."""
+def execute(folder, executor=None, resume: str | None = None, check_only: bool = False) -> str | None:
+    """Run a run folder in this process and return its final status (or `paused`). With `resume` None the run must be `queued`; with `resume`
+    ("", "redo" or "accept") it is a run that was started before (`running` with no controller, `paused` or `waiting`) and goes on from its
+    cursor. Refused (Busy, nothing written) when another process holds the folder or the run is final or queued; LoopError, nothing written,
+    when the choice does not fit the step. `check_only` stops after those refusals."""
     folder = Path(folder)
     definition = read_definition(folder)
     lock = open(folder / "lock", "a+")
@@ -1489,20 +1942,26 @@ def execute(folder, executor=None) -> str:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            raise Busy(f"run {folder.name} is already running in another process") from None
+            raise Busy(f"run {folder.name} is already running in another process: its controller is alive") from None
         state = read_run(folder)
-        if state.get("status") != "queued":
-            raise Busy(f"run {folder.name} is already {state.get('status')}; only a queued run can be started")
-        if executor is None:
+        status = state.get("status")
+        if resume is None:
+            if status != "queued":
+                raise Busy(f"run {folder.name} is already {status}; only a queued run can be started")
+        elif status in FINAL or status == "queued" or status not in ("running", "paused", "waiting"):
+            raise Busy(f"run {folder.name} is {status}: " + ("it is over and cannot be resumed" if status in FINAL else "it has not started; nothing to resume"))
+        if executor is None and not check_only:
             executor = make_executor(definition["executor"])
-        env = executor.env(definition["workdir"])
-        controller = Controller(folder, definition, state, executor, env)
+        controller = Controller(folder, definition, state, executor, executor.env(definition["workdir"]) if executor is not None else {})
+        where = controller.resume_point(resume) if resume is not None else None  # refusals come before anything is written
+        if check_only:
+            return None
         previous = None
         if threading.current_thread() is threading.main_thread():
             previous = signal.signal(signal.SIGTERM, lambda *_: setattr(controller, "terminated", True))
         try:
-            return controller.run()
-        except BaseException as exc:  # leave a final record rather than a run that says `running`
+            return controller.run(where)
+        except Exception as exc:  # leave a final record rather than a run that says `running`; a kill (BaseException) leaves it as it is, to be resumed
             if state.get("status") == "running":
                 state.update(status="agent_error", reason=f"the controller failed: {type(exc).__name__}: {exc}"[:200], ended=round(time.time(), 3))
                 _write_atomic(folder / "run.json", _json(state))
@@ -1510,6 +1969,77 @@ def execute(folder, executor=None) -> str:
         finally:
             if previous is not None:
                 signal.signal(signal.SIGTERM, previous)
+    finally:
+        lock.close()
+
+
+def resume(folder, choice: str | None = None, wait: bool = False, executor=None) -> str | None:
+    """Go on with a run whose controller is gone (`interrupted`), `paused` or `waiting`, from its cursor and its pinned definition.
+    `choice` is for a paused step whose fate is not known: `redo` sends it again, `accept` takes it as returned. Detached by default (returns
+    None once the new controller is started); with `wait`, in this process (returns the status). Refusals are checked first and write nothing."""
+    folder = Path(folder)
+    if choice not in (None, "", *CHOICES):
+        raise LoopError(f"the choice must be one of {', '.join(CHOICES)}, not {str(choice)[:40]!r}")
+    if wait:
+        return execute(folder, executor, resume=choice or "")
+    execute(folder, resume=choice or "", check_only=True)
+    log = open(folder / "run.log", "ab")
+    try:
+        proc = subprocess.Popen([sys.executable, "-P", "-m", "agentgraph.looprun", "run", "--run-dir", str(folder), "--resume", choice or ""],
+                                cwd=read_definition(folder)["project"], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+                                env={**os.environ, "PYTHONPATH": str(paths.REPO)})
+        threading.Thread(target=proc.wait, daemon=True).start()
+    finally:
+        log.close()
+    return None
+
+
+def pause(folder) -> None:
+    """Ask the controller to stop after the step it is running (that step is finished, not cut short): the run then says `paused` and
+    `resume` goes on from the next step. Busy unless a controller holds a running run."""
+    folder = Path(folder)
+    state = read_run(folder)
+    shown = shown_status(folder, state)
+    if shown != "running" or not _held(folder):
+        raise Busy(f"run {folder.name} is {shown}: only a run that a controller is running can be paused" + (" (cancel it, or resume it)" if shown == "interrupted" else ""))
+    (folder / "pause").write_text(f"{time.time()}\n", encoding="utf-8")
+
+
+def cancel(folder) -> str:
+    """Stop a run. A controller that is alive (or about to start a queued run) is asked through the `cancel` file and stops itself
+    (returns "requested"). With no controller (interrupted, paused or waiting) the run is marked `cancelled` here, under its lock
+    (returns "cancelled"). Busy for a run that is over."""
+    folder = Path(folder)
+    state = read_run(folder)
+    status = state.get("status")
+    if status in FINAL:
+        raise Busy(f"run {folder.name} is already {status}")
+    if status == "queued":
+        request_cancel(folder)
+        return "requested"
+    if _held(folder):
+        request_cancel(folder)
+        return "requested"
+    lock = open(folder / "lock", "a+")
+    try:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            request_cancel(folder)
+            return "requested"
+        state = read_run(folder)
+        if state.get("status") in FINAL:
+            raise Busy(f"run {folder.name} is already {state.get('status')}")
+        now = round(time.time(), 3)
+        attempts = state.get("attempts") or []
+        if attempts and attempts[-1].get("ended") is None:
+            attempts[-1]["ended"] = now
+        state.update(status="cancelled", reason=f"cancelled by a person while no controller was running it (it was {state.get('status')})", ended=now, waiting=None)
+        _write_atomic(folder / "run.json", _json(state))
+        _event(folder, attempt=len(attempts), step=(state.get("cursor") or {}).get("step", "-"), outcome="cancelled", route="end", reason=state["reason"])
+        for name in ("pause", "cancel"):
+            (folder / name).unlink(missing_ok=True)
+        return "cancelled"
     finally:
         lock.close()
 
@@ -1590,9 +2120,29 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--scratch", metavar="DIR", help="run the agent on this scratch config (agentgraph bench scratch-config)")
     p.add_argument("--executable", metavar="F", help="the opencode CLI (default: OPENCODE_CLI or the app's)")
     p.add_argument("--db", metavar="F", help="the opencode database to read cost from")
+    p.add_argument("--settings-file", metavar="F", help="a trial run: JSON settings used for this run only, instead of the saved loop (which is not read or changed)")
     common(p, True)
-    p = sub.add_parser("run", help="(internal) run a queued run folder")
+    p = sub.add_parser("run", help="(internal) run a queued run folder, or with --resume go on with one")
     p.add_argument("--run-dir", required=True, metavar="D")
+    p.add_argument("--resume", nargs="?", const="", choices=("", *CHOICES))
+    p = sub.add_parser("resume", help="go on with an interrupted, paused or waiting run, from where it stopped")
+    p.add_argument("run")
+    choice = p.add_mutually_exclusive_group()
+    choice.add_argument("--redo", action="store_true", help="a paused step whose fate is unknown: send it again")
+    choice.add_argument("--accept", action="store_true", help="a paused step whose fate is unknown: take it as returned and go to the check")
+    p.add_argument("--wait", action="store_true", help="run in the foreground and print the result")
+    common(p, True)
+    p = sub.add_parser("pause", help="stop a running run after the step it is on; resume goes on")
+    p.add_argument("run")
+    common(p, True)
+    p = sub.add_parser("versions", help="the kept earlier versions of a flow's saved loop")
+    p.add_argument("flow")
+    p.add_argument("--json", action="store_true")
+    common(p)
+    p = sub.add_parser("restore", help="put a kept version back as the saved loop")
+    p.add_argument("flow")
+    p.add_argument("version")
+    common(p)
     p = sub.add_parser("status", help="one run (default: the newest)")
     p.add_argument("run", nargs="?")
     p.add_argument("--json", action="store_true")
@@ -1675,8 +2225,14 @@ def _line(settings: dict) -> str:
 
 
 def _start(args) -> int:
+    trial = None
+    if args.settings_file:
+        try:
+            trial = json.loads(Path(args.settings_file).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise LoopError(f"cannot read the settings file: {exc}") from None
     run_id = start(args.project, args.flow, structure=args.structure, goal=_read_goal(args), workdir=args.workdir, wait=args.wait,
-                   scratch=args.scratch, executable=args.executable, db=args.db)
+                   scratch=args.scratch, executable=args.executable, db=args.db, settings=trial)
     folder = run_dir(Path(args.project).absolute(), run_id)
     state = read_run(folder)
     if state["status"] == "invalid" or args.wait:
@@ -1684,6 +2240,14 @@ def _start(args) -> int:
         return 0 if state["status"] == "passed" else 1
     print(f"run {run_id} started: agentgraph loop status {run_id}")
     return 0
+
+
+def _run_folder(args) -> Path:
+    project = Path(args.project).absolute()
+    folder = run_dir(project, args.run)
+    if not folder.is_dir():
+        raise LoopError(f"no run {args.run} in {loops_folder(project)}")
+    return folder
 
 
 def _find_run(args) -> tuple[Path, dict]:
@@ -1717,13 +2281,13 @@ def main(argv: list[str] | None = None) -> int:
             return _start(args)
         if args.command == "run":
             folder = Path(args.run_dir)
-            status = execute(folder)
+            status = execute(folder, resume=args.resume)
             print(describe(folder, read_run(folder)))
             return 0 if status == "passed" else 1
         if args.command == "status":
             folder, state = _find_run(args)
             state = {**state, "status": shown_status(folder, state)} if args.json else state
-            print(json.dumps(state, indent=2, sort_keys=True) if args.json else "\n".join([describe(folder, state), *describe_steps(state)]))
+            print(json.dumps(state, indent=2, sort_keys=True) if args.json else "\n".join([line for line in (describe(folder, state), hint(folder, state), *describe_steps(state)) if line]))
             return 0
         if args.command == "list":
             project = Path(args.project).absolute()
@@ -1743,15 +2307,39 @@ def main(argv: list[str] | None = None) -> int:
             print(f"answered {args.answer} for run {args.run}")
             return 0
         if args.command == "cancel":
-            project = Path(args.project).absolute()
-            folder = run_dir(project, args.run)
-            if not folder.is_dir():
-                raise LoopError(f"no run {args.run} in {loops_folder(project)}")
-            state = read_run(folder)
-            if state.get("status") not in ("queued", "running", "waiting"):
-                raise Busy(f"run {args.run} is already {state.get('status')}")
-            request_cancel(folder)
-            print(f"cancel requested for run {args.run}: it stops before the next attempt, or now if an agent turn is running")
+            folder = _run_folder(args)
+            if cancel(folder) == "requested":
+                print(f"cancel requested for run {args.run}: it stops before the next attempt, or now if an agent turn is running")
+            else:
+                print(f"run {args.run} cancelled: no controller was running it")
+            return 0
+        if args.command == "pause":
+            pause(_run_folder(args))
+            print(f"pause requested for run {args.run}: it stops after the step it is on; agentgraph loop resume {args.run} goes on")
+            return 0
+        if args.command == "resume":
+            folder = _run_folder(args)
+            choice = "redo" if args.redo else "accept" if args.accept else None
+            if args.wait:
+                status = resume(folder, choice, wait=True)
+                print(describe(folder, read_run(folder)))
+                return 0 if status == "passed" else 1
+            resume(folder, choice)
+            print(f"run {args.run} resumed: agentgraph loop status {args.run}")
+            return 0
+        if args.command == "versions":
+            rows = versions(args.structure, args.flow)
+            if args.json:
+                print(json.dumps(rows, sort_keys=True))
+            else:
+                for row in rows:
+                    print(f"{row['version']}  {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(row['time']))}  sha256 {row['sha256'][:12]}")
+                if not rows:
+                    print(f"no earlier versions of the loop of flow {args.flow}")
+            return 0
+        if args.command == "restore":
+            restore(args.structure, args.flow, args.version)
+            print(f"restored version {args.version} as the loop of flow {args.flow}; the one it replaced is kept")
             return 0
     except LoopError as exc:
         print(f"agentgraph loop: {exc}", file=sys.stderr)

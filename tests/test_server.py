@@ -355,6 +355,44 @@ class LoopEndpointTests(unittest.TestCase):
         self.assertEqual(self.wait(run, "cancelled")["attempts"], 1)
         self.assertEqual(self.post("cancel", expect=409, run=run)["error"].count("already cancelled"), 1)
 
+    def settle(self, run, *final, seconds=30):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            detail = self.call("GET", f"/api/loop/run?id={run}")[1]
+            if detail["run"]["status"] in final:
+                return detail
+            time.sleep(0.05)
+        self.fail(f"run {run} did not reach {final}")
+
+    def test_release_3_listing_run_detail_and_ops_over_http(self):
+        first = self.save()
+        self.save(first["rev"], goal="Second.")
+        self.assertEqual(len(self.entry()["versions"]), 1)
+        version = self.entry()["versions"][0]["version"]
+        rev = self.entry()["rev"]
+        self.assertEqual(self.post("restore", expect=409, flow="self", version=version, rev="ff")["rev"], rev)
+        self.assertIn("not a version", self.post("restore", expect=400, flow="self", version="../x", rev=rev)["error"])
+        restored = self.post("restore", flow="self", version=version, rev=rev)
+        self.assertEqual((restored["rev"], restored["before"]["goal"]), (first["rev"], "Second."))
+        trial = self.post("start", flow="self", goal="g", workdir=str(self.work), settings={"check": {"command": "true", "timeout": 20}, "limits": {"attempts": 1}})["run"]
+        detail = self.settle(trial, "passed")
+        row = next(r for r in self.loops()["runs"] if r["run"] == trial)
+        self.assertEqual((row["trial"], row["passed_by"], row["waiting"], len(row["settings_sha256"])), (True, "check", None, 64))
+        step = detail["attempts"][0]["steps"][0]
+        self.assertEqual(set(step), {"step", "try", "message", "reply", "findings"})
+        self.assertIn("g", step["message"])
+        self.assertEqual(self.entry()["rev"], first["rev"])  # the saved loop is the restored one; the trial changed nothing
+        self.assertEqual(self.post("pause", expect=409, run=trial)["error"].count("passed"), 1)
+        self.assertEqual(self.post("resume", expect=409, run=trial)["error"].count("passed"), 1)
+        self.assertEqual(self.post("resume", expect=400, run=trial, choice="maybe")["error"].count("choice"), 1)
+        self.assertEqual(self.post("answer", expect=409, run=trial, answer="approve")["error"].count("passed"), 1)
+        self.assertEqual(self.post("pause", expect=404, run="20261121-043755-90a7")["error"].count("no run"), 1)
+        for body in ({"op": "pause"}, {"op": "resume", "run": "r", "choice": 1}, {"op": "answer", "run": "r"}, {"op": "restore", "flow": "self"}):
+            self.assertEqual(self.call("POST", "/api/loop", body)[0], 400)
+        demo = self.serve(demo=True)
+        for body in ({"op": "pause", "run": trial}, {"op": "restore", "flow": "self", "version": version, "rev": ""}):
+            self.assertEqual(self.call("POST", "/api/loop", body, httpd=demo)[0], 403)
+
     def test_run_ids_are_validated(self):
         for bad in ("..%2Fx", "x", "", "20261121-043755-90AZ"):
             with self.subTest(bad=bad):

@@ -650,7 +650,7 @@ def make_server(
             self._reply(200, "application/json", body)
 
         def _loop_post(self):
-            # Save or remove a flow's loop (with the rev the page read), start a run, cancel one (agentgraph.loopapi). A refusal
+            # Save, remove or restore a flow's loop (with the rev the page read), start a run (or a trial), cancel, pause, resume or answer one (agentgraph.loopapi). A refusal
             # carries the controller's message (400), a stale rev answers 409 with the current one, an unknown run 404.
             request = self._json_body("the loops", _LOOP_BODY_LIMIT)
             if request is None:

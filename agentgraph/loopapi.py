@@ -20,12 +20,19 @@ from .snapshot_json import load_structure
 OUTPUT_CHARS = 20_000
 RUNS_SHOWN = 50
 GOAL_SHOWN = 200
+STEP_TEXT_CHARS = 20_000
 OPS = {"save": ({"op", "flow", "settings", "rev"}, {"op", "flow", "settings", "rev"}),
        "remove": ({"op", "flow", "rev"}, {"op", "flow", "rev"}),
-       "start": ({"op", "flow"}, {"op", "flow", "goal", "workdir"}),
-       "cancel": ({"op", "run"}, {"op", "run"})}
+       "start": ({"op", "flow"}, {"op", "flow", "goal", "workdir", "settings"}),
+       "cancel": ({"op", "run"}, {"op", "run"}),
+       "pause": ({"op", "run"}, {"op", "run"}),
+       "resume": ({"op", "run"}, {"op", "run", "choice"}),
+       "answer": ({"op", "run", "answer"}, {"op", "run", "answer", "note"}),
+       "restore": ({"op", "flow", "version", "rev"}, {"op", "flow", "version", "rev"})}
 SHAPES = ('{"op": "save", "flow": id, "settings": {...}, "rev": text}, {"op": "remove", "flow": id, "rev": text}, '
-          '{"op": "start", "flow": id, "goal"?: text, "workdir"?: absolute folder} or {"op": "cancel", "run": id}')
+          '{"op": "start", "flow": id, "goal"?: text, "workdir"?: absolute folder, "settings"?: {...} (a trial run)}, {"op": "cancel", "run": id}, '
+          '{"op": "pause", "run": id}, {"op": "resume", "run": id, "choice"?: "redo"|"accept"}, '
+          '{"op": "answer", "run": id, "answer": "approve"|"reject"|"stop", "note"?: text} or {"op": "restore", "flow": id, "version": id, "rev": text}')
 
 
 class ApiError(Exception):
@@ -105,6 +112,13 @@ def _orphans(structure, known: set[str]) -> list[str]:
     return sorted(name for name in names if looprun.FLOW_ID.fullmatch(name) and name not in known)
 
 
+def _versions(structure, flow: str) -> list[dict]:
+    try:
+        return looprun.versions(structure, flow)
+    except looprun.LoopError:
+        return []
+
+
 def _summary(project, run_id: str) -> dict | None:
     folder = looprun.run_dir(project, run_id)
     try:
@@ -120,7 +134,8 @@ def _summary(project, run_id: str) -> dict | None:
             "cost": totals.get("cost"), "seconds": totals.get("seconds") or 0, "created": state.get("created"), "ended": state.get("ended"),
             "goal": (state.get("goal") or "")[:GOAL_SHOWN], "check": command,
             "last_check": {"outcome": checks[-1].get("outcome"), "exit": checks[-1].get("exit")} if checks else None,
-            "passed_by": state.get("passed_by"), "waiting": state.get("waiting")}
+            "passed_by": state.get("passed_by"), "waiting": state.get("waiting"), "trial": bool(state.get("trial")),
+            "settings_sha256": state.get("settings_sha256")}
 
 
 def listing(structure_dir, project, scratch) -> dict:
@@ -134,7 +149,7 @@ def listing(structure_dir, project, scratch) -> dict:
         settings, problem = _settings_of(structure_dir, flow["id"])
         loops.append({"flow": flow["id"], "name": flow.get("name") or "", "path": list(flow["path"]), "agent": flow["path"][0],
                       "runnable": runnable, "reason": reason, "settings": settings, "problem": problem,
-                      "rev": rev_of(_read(structure_dir, flow["id"]))})
+                      "rev": rev_of(_read(structure_dir, flow["id"])), "versions": _versions(structure_dir, flow["id"])})
     known.update(flow["id"] for flow in (shape["unreadable_flows"] if shape else []))
     runs = [row for row in (_summary(project, run_id) for run_id in looprun.list_runs(project)[:RUNS_SHOWN]) if row is not None]
     return {"project": str(project), "scratch": bool(scratch), "loops": loops, "orphans": _orphans(structure_dir, known), "runs": runs}
@@ -146,6 +161,18 @@ def _output(path: Path) -> tuple[str, bool]:
     except OSError:
         return "", False
     return text[-OUTPUT_CHARS:], len(text) > OUTPUT_CHARS
+
+
+def _text(folder: Path, relative) -> str:
+    """The last STEP_TEXT_CHARS characters of a file the record names (a plain file inside the run folder), "" when there is none."""
+    if not isinstance(relative, str) or not relative:
+        return ""
+    path = folder / relative
+    try:
+        inside = path.resolve(strict=True).is_relative_to(folder.resolve()) and not path.is_symlink()
+        return path.read_bytes().decode("utf-8", "replace")[-STEP_TEXT_CHARS:] if inside and path.is_file() else ""
+    except OSError:
+        return ""
 
 
 def run_detail(project, run_id) -> dict:
@@ -162,7 +189,9 @@ def run_detail(project, run_id) -> dict:
         except OSError:
             sent = ""
         output, truncated = _output(folder / f"attempt-{n}" / "check.out")
-        attempts.append({"n": n, "message": sent, "check_output": output, "check_output_truncated": truncated})
+        steps = [{"step": entry.get("step"), "try": entry.get("try"), "message": _text(folder, entry.get("message")), "reply": _text(folder, entry.get("reply")),
+                  "findings": _text(folder, entry.get("findings"))} for entry in attempt.get("steps") or [] if isinstance(entry, dict)]
+        attempts.append({"n": n, "message": sent, "check_output": output, "check_output_truncated": truncated, "steps": steps})
     keys = ("settings", "path", "steps", "steps_sha256", "goal", "workdir", "created")
     return {"run": {**state, "status": looprun.shown_status(folder, state), "live": looprun._held(folder)},
             "definition": {key: definition.get(key) for key in keys}, "attempts": attempts}
@@ -202,6 +231,7 @@ def save(structure_dir, flow, settings, rev) -> dict:
         old = _read(structure_dir, flow)
         _check_rev(rev, rev_of(old))
         before = _settings_of(structure_dir, flow)[0] if old is not None else None
+        looprun._keep(target)
         looprun._write_atomic(target, data)
     return {"settings": clean, "rev": rev_of(data), "before": before}
 
@@ -219,13 +249,31 @@ def remove(structure_dir, flow, rev) -> dict:
         if old is None:
             raise ApiError(400, f"no loop is saved for flow {flow}")
         before = _settings_of(structure_dir, flow)[0]
+        looprun._keep(target)
         target.unlink(missing_ok=True)
     return {"before": before}
 
 
-def start(structure_dir, project, flow, goal=None, workdir=None, *, scratch=None, executor_spec=None) -> dict:
-    """Write the run folder and start it detached. `{"run", "status": "running" | "invalid", "reason"}`."""
+def restore(structure_dir, flow, version, rev) -> dict:
+    """Put a kept version back as the saved loop if `rev` is current. `{"settings", "rev", "before"}` like `save`; what it replaced is kept."""
     flow = _flow_id(flow)
+    if not isinstance(version, str):
+        raise ApiError(400, "the version must be text")
+    before = _settings_of(structure_dir, flow)[0]
+    try:
+        looprun.restore(structure_dir, flow, version, check=lambda old: _check_rev(rev, rev_of(old)))
+    except looprun.LoopError as exc:
+        raise ApiError(400, str(exc)) from None
+    data = _read(structure_dir, flow)
+    return {"settings": _settings_of(structure_dir, flow)[0], "rev": rev_of(data), "before": before}
+
+
+def start(structure_dir, project, flow, goal=None, workdir=None, *, scratch=None, executor_spec=None, settings=None) -> dict:
+    """Write the run folder and start it detached. `{"run", "status": "running" | "invalid", "reason"}`. `settings` makes a trial run (the
+    saved loop is not read or changed)."""
+    flow = _flow_id(flow)
+    if settings is not None and not isinstance(settings, dict):
+        raise ApiError(400, "the settings must be a JSON object")
     if goal is not None and not isinstance(goal, str):
         raise ApiError(400, "the goal must be text")
     if workdir is not None:
@@ -237,7 +285,7 @@ def start(structure_dir, project, flow, goal=None, workdir=None, *, scratch=None
         raise ApiError(400, f"the project folder {project} does not exist")
     try:
         run_id = looprun.start(project, flow, structure=structure_dir, goal=goal if goal and goal.strip() else None, workdir=workdir,
-                               scratch=scratch, executor_spec=executor_spec)
+                               scratch=scratch, executor_spec=executor_spec, settings=settings)
     except looprun.Busy as exc:
         raise ApiError(409, str(exc)) from None
     except looprun.LoopError as exc:
@@ -248,13 +296,59 @@ def start(structure_dir, project, flow, goal=None, workdir=None, *, scratch=None
 
 
 def cancel(project, run_id) -> dict:
-    """Ask a running or queued run to stop (before the next attempt, or now if an agent turn is running)."""
+    """Stop a run: a live controller is asked (before the next attempt, or now if an agent turn is running; the reply is `{"run"}`, as in release 1); with no
+    controller (interrupted, paused, waiting) the run is marked cancelled here (`{"run", "result": "cancelled"}`). 409 for a run that is over."""
     folder = _run_folder(project, run_id)
-    state = _state(folder)
-    shown = looprun.shown_status(folder, state)
-    if state.get("status") not in ("queued", "running", "waiting") or shown == "interrupted":
-        raise ApiError(409, f"run {run_id} is already {shown}")
-    looprun.request_cancel(folder)
+    _state(folder)
+    try:
+        result = looprun.cancel(folder)
+    except looprun.Busy as exc:
+        raise ApiError(409, str(exc)) from None
+    except looprun.LoopError as exc:
+        raise ApiError(400, str(exc)) from None
+    return {"run": run_id} if result == "requested" else {"run": run_id, "result": result}  # a live controller is asked: the reply is the one of release 1
+
+
+def pause(project, run_id) -> dict:
+    """Ask a running run to stop after the step it is on (that step is finished). 409 unless a controller is running it."""
+    folder = _run_folder(project, run_id)
+    _state(folder)
+    try:
+        looprun.pause(folder)
+    except looprun.Busy as exc:
+        raise ApiError(409, str(exc)) from None
+    except looprun.LoopError as exc:
+        raise ApiError(400, str(exc)) from None
+    return {"run": run_id}
+
+
+def resume(project, run_id, choice=None) -> dict:
+    """Start a controller on an interrupted, paused or waiting run, from its cursor and pinned definition. `choice` is `redo` or `accept`
+    for a paused step whose fate is unknown. 409 for a run that is over, queued or has a live controller; 400 for a choice that does not fit."""
+    folder = _run_folder(project, run_id)
+    _state(folder)
+    if choice is not None and choice not in looprun.CHOICES:
+        raise ApiError(400, f"the choice must be one of {', '.join(looprun.CHOICES)}")
+    try:
+        looprun.resume(folder, choice)
+    except looprun.Busy as exc:
+        raise ApiError(409, str(exc)) from None
+    except looprun.LoopError as exc:
+        raise ApiError(400, str(exc)) from None
+    return {"run": run_id, "status": "running"}
+
+
+def answer_run(project, run_id, word, note="") -> dict:
+    """A person's answer (`approve`, `reject`, `stop`) to a run that waits for one: the controller takes it (a live one at once, or the next
+    `resume`). 409 when the run is not waiting or already has an answer; 400 for a word or note that is not usable."""
+    folder = _run_folder(project, run_id)
+    _state(folder)
+    try:
+        looprun.answer(folder, word, note)
+    except looprun.Busy as exc:
+        raise ApiError(409, str(exc)) from None
+    except looprun.LoopError as exc:
+        raise ApiError(400, str(exc)) from None
     return {"run": run_id}
 
 
@@ -267,7 +361,15 @@ def post(request, structure_dir, project, *, scratch=None, executor_spec=None) -
         answer = remove(structure_dir, request["flow"], request["rev"])
     elif op == "start":
         answer = start(structure_dir, project, request["flow"], request.get("goal"), request.get("workdir"), scratch=scratch,
-                       executor_spec=executor_spec)
+                       executor_spec=executor_spec, settings=request.get("settings"))
+    elif op == "restore":
+        answer = restore(structure_dir, request["flow"], request["version"], request["rev"])
+    elif op == "pause":
+        answer = pause(project, request["run"])
+    elif op == "resume":
+        answer = resume(project, request["run"], request.get("choice"))
+    elif op == "answer":
+        answer = answer_run(project, request["run"], request["answer"], request.get("note", ""))
     else:
         answer = cancel(project, request["run"])
     return {"ok": True, **answer}
