@@ -1,0 +1,7 @@
+{
+  "agent": "orchestrator",
+  "prompt": "Two independent functions in this project are stubs that raise NotImplementedError: `slugify` in app/slug.py and `parse_duration` in app/units.py. Implement both exactly as their docstrings describe, using only the standard library, and add a small unit test file for each in tests/ (tests/test_slug.py, tests/test_units.py). Run the tests with `python3 -m unittest discover -s tests -t . -q` when done.",
+  "check": "python3 -m unittest discover -s tests -t . -q",
+  "timeout": 900,
+  "check_timeout": 60
+}

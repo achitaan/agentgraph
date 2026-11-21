@@ -1,0 +1,7 @@
+{
+  "agent": "orchestrator",
+  "prompt": "The tests in this project fail. Find the bug in the textstats package, fix it, and run the tests with `python3 -m unittest discover -s tests -t . -q` to confirm they pass. Keep the change small.",
+  "check": "python3 -m unittest discover -s tests -t . -q",
+  "timeout": 600,
+  "check_timeout": 60
+}
