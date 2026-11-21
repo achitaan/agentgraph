@@ -3510,7 +3510,10 @@
     const LC_SLOW_MS = LC_POLL_MS * 15, LC_QUIET = ['waiting', 'paused', 'interrupted'];
     let lcOpen = '', lcCancelAsk = '', lcTimer = null, lcTimerMs = 0, lcWanted = '', lcLate = false;
     let lcWrites = 0, lcKeepAsk = '', lcHintSync = null; // v7 r3: writes finished so far (a list read that began before one is stale); the trial whose Keep is being confirmed; redraws the hint beside Run while typing
-    const lcAnswered = new Set(); // runs with no controller whose answer was saved but whose resume was refused
+    // v7 r4: only for a server that sends no `answered`: run -> the question (step, attempt, since) whose answer the server said it already holds (a 409), so Resume is offered and not a dead end.
+    // With the field the record decides. An entry goes when the run is not waiting any more, and it belongs to its question only.
+    const lcAnswered = new Map();
+    const lcQuestion = (run, info, wait) => [wait.step, wait.since, (Array.isArray(info.attempts) ? info.attempts : []).length].join('|');
     let lcAnswer = null, lcInspect = null; // the answer being confirmed ({ run, kind, note }); the step whose history is open ({ run, step })
     const lcCompare = { mode: '', runs: [], run: '', attempts: [] }, lcBoxes = new Set(); // what is picked to compare; the <details> left open (by flow)
     const LC_STATUS = { queued: 'Queued', waiting: 'Waiting for an answer', paused: 'Paused', running: 'Running', passed: 'Passed', failed: 'Failed', limit: 'Stopped at a limit', invalid: 'Not started', check_error: 'Check could not run', inconclusive: 'Check inconclusive', stalled: 'Stalled', agent_error: 'Agent error', cancelled: 'Cancelled', interrupted: 'Interrupted' };
@@ -3569,7 +3572,7 @@
       lc.loading = true;
       const before = JSON.stringify([lc.data, lc.error]), stamp = lcWrites;
       let stale = false; // v7 r3: a write finished while this read was out, so its answer may be from before the write: it is dropped and the loops are read again
-      return ask(lcAction, { op: 'read' }).then(reply => { if (!alive) return; if (stamp !== lcWrites) { stale = true; return; } lc.data = lcClean(reply); lc.error = ''; },
+      return ask(lcAction, { op: 'read' }).then(reply => { if (!alive) return; if (stamp !== lcWrites) { stale = true; return; } lc.data = lcClean(reply); lc.error = ''; lcAnswered.forEach((key, id) => { const row = lc.data.runs.find(one => one.run === id); if (!row || row.status !== 'waiting') lcAnswered.delete(id); }); },
         error => { if (!alive) return; if (stamp !== lcWrites) { stale = true; return; } lc.error = sentence(text(error?.message) || 'The loops could not be read'); }).then(() => {
         lc.loading = false;
         if (!alive) return;
@@ -3586,7 +3589,7 @@
     function lcSyncOpen() {
       if (!lcOpen) return;
       const row = (lc.data?.runs || []).find(run => run.run === lcOpen), full = lcRuns.get(lcOpen);
-      if (row && (!full || row.live || full.run?.status !== row.status || (typeof row.reason === 'string' && text(full.run?.reason) !== row.reason) || (full.run?.attempts || []).length !== row.attempts)) lcReadRun(lcOpen);
+      if (row && (!full || row.live || full.run?.status !== row.status || (typeof row.reason === 'string' && text(full.run?.reason) !== row.reason) || (typeof row.answered === 'boolean' && full.run?.answered !== row.answered) || (full.run?.attempts || []).length !== row.attempts)) lcReadRun(lcOpen);
     }
     function lcReadRun(id) {
       if (!lcAction || lcReading.has(id)) return;
@@ -4066,9 +4069,13 @@
       const who = wait.step ? lcStepName(wait.step, path) + ' ' + lcStepOutcome({ step: wait.step, outcome: wait.outcome, role: String(wait.step).startsWith('judge:') ? 'judge' : '', kind: wait.step === 'check' ? 'check' : 'agent' }) : 'The run';
       box.append(el('p', 'ag-loop-waiting-q', who + (wait.outcome === 'pass' ? '. Nothing counts as passed until you answer.' : '. The run is waiting for you.')));
       // v7 r3: a run that says it waits but has no controller reads no answer: the page says so, and an answer is followed by a resume.
-      const alone = (typeof info.live === 'boolean' ? info.live : run.live) === false, saved = alone && lcAnswered.has(id);
+      // `answered` is the run record's: an answer is saved and not taken yet. Without it (an older server) only a 409 from an answer tells.
+      const alone = (typeof info.live === 'boolean' ? info.live : run.live) === false, key = lcQuestion(run, info, wait);
+      if (lcAnswered.has(id) && lcAnswered.get(id) !== key) lcAnswered.delete(id);
+      const field = typeof info.answered === 'boolean' ? info.answered : typeof run.answered === 'boolean' ? run.answered : null;
+      const saved = alone && (field !== null ? field : lcAnswered.has(id));
       if (alone) {
-        const gone = el('p', 'ag-loop-waiting-alone', 'The run is waiting for your answer, but nothing is running it.' + (saved ? ' Your answer is saved. Resume starts the run again so it can read it.' : ' Your answer is saved and the run is started again with it.')); gone.dataset.loopAlone = '';
+        const gone = el('p', 'ag-loop-waiting-alone', (saved ? 'Your answer is saved. Nothing is running the run. Resume starts it so it can read the answer.' : 'The run is waiting for your answer, but nothing is running it.') + (saved ? '' : ' Your answer is saved and the run is started again with it.')); gone.dataset.loopAlone = '';
         box.append(gone);
       }
       if (saved) {
@@ -4082,7 +4089,7 @@
         const note = answer === 'reject' ? text(lcAnswer?.note).trim() : '';
         lcAnswer = null;
         const request = { op: 'answer', run: id, answer, ...(note ? { note } : {}) };
-        if (alone) lcAnswerAlone(run, request, 'c:' + answer + ':' + id); else lcRunOp(run, request, said, 'c:' + answer + ':' + id);
+        if (alone) lcAnswerAlone(run, request, 'c:' + answer + ':' + id, key); else lcRunOp(run, request, said, 'c:' + answer + ':' + id);
       };
       if (lcAnswer?.run === id) {
         const kind = lcAnswer.kind, dialog = el('div', 'ag-loop-ask'); dialog.dataset.loopAsk = kind; dialog.setAttribute('role', 'group'); dialog.setAttribute('aria-label', 'Confirm your answer');
@@ -4131,7 +4138,7 @@
     }
     // An answer to a run nothing is running: it is written, then the run is resumed so it reads it (one confirm, two posts under one busy hold).
     // When the resume is refused the answer stays saved: the page says so and offers Resume alone.
-    function lcAnswerAlone(run, request, wanted) {
+    function lcAnswerAlone(run, request, wanted, key) {
       const flow = run.flow;
       if (!lcAction || lcBusy.has(flow)) return;
       lcBusy.add(flow); lcNotes.delete(flow); lcRedraw(wanted);
@@ -4146,10 +4153,17 @@
           lcResumed.set(run.run, { flow, at: Date.now(), from: lcSaid(run) });
         }, error => {
           if (!alive) return;
-          lcWrites++; lcAnswered.add(run.run);
+          lcWrites++; lcAnswered.set(run.run, key);
           lcNotes.set(flow, { kind: 'error', text: 'Your answer is saved, but the run was not started: ' + refused(error) + ' Press Resume to try again.', run: run.run });
         });
-      }, error => { if (alive) { lcWrites++; lcNotes.set(flow, { kind: 'error', text: sentence(plainWords(text(error?.message))) || 'Not changed.', run: run.run }); } })
+      }, error => {
+        if (!alive) return;
+        lcWrites++;
+        // v7 r4: "already has an answer" means one is saved and nothing took it: Resume is the way on, so it is offered (never a dead end).
+        const held = /already has an answer/i.test(text(error?.message));
+        if (held) lcAnswered.set(run.run, key);
+        lcNotes.set(flow, { kind: 'error', text: (sentence(plainWords(text(error?.message))) || 'Not changed.') + (held ? ' Nothing is running the run: press Resume so it can read that answer.' : ''), run: run.run });
+      })
         .then(() => { lcBusy.delete(flow); if (alive) { lcRedraw(wanted); lcLoad(true); } });
     }
     // ---- compare ----
@@ -4203,9 +4217,10 @@
       const titleRow = el('div', 'ag-loop-cmp-row ag-loop-cmp-head'); titleRow.append(el('span', 'ag-loop-cmp-label', ''), el('span', 'ag-loop-cmp-value', titles[0]), el('span', 'ag-loop-cmp-value', titles[1]));
       panel.append(head, titleRow);
       rows.forEach(([label, a, b]) => {
-        const differs = a !== b, row = el('div', 'ag-loop-cmp-row'); row.dataset.compareRow = label; row.dataset.differs = String(differs);
+        // An unknown cost or time on either side is not a match and not a difference: the page cannot tell.
+        const unknown = ['Cost', 'Time'].includes(label) && [a, b].some(value => !value || value === '\u2014' || /unknown/i.test(value)), differs = a !== b, row = el('div', 'ag-loop-cmp-row'); row.dataset.compareRow = label; row.dataset.differs = unknown ? 'unknown' : String(differs);
         const one = el('span', 'ag-loop-cmp-value', a || '—'), two = el('span', 'ag-loop-cmp-value', b || '—'); one.dataset.compareValue = ''; two.dataset.compareValue = '';
-        row.append(el('span', 'ag-loop-cmp-label', label), one, two, el('span', 'ag-loop-cmp-mark', differs ? 'differs' : 'same'));
+        row.append(el('span', 'ag-loop-cmp-label', label), one, two, el('span', 'ag-loop-cmp-mark', unknown ? 'can\'t tell: a value is not known' : differs ? 'differs' : 'same'));
         panel.append(row);
       });
       return panel;

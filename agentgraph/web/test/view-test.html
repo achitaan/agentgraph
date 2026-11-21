@@ -9583,9 +9583,10 @@
       }
       if (options.team) teamRuns(now).filter(item => options.team === true || options.team.includes(item.run.run)).forEach(add);
       if (options.extra) options.extra(now).forEach(add);
+      (options.answered || []).forEach(id => { details.get(id).answered = true; }); // v7 r4: runs whose answer is saved and not taken yet
       (options.dead || []).forEach(id => { details.get(id).run.live = false; }); // v7 r3: a run that says waiting (or running) with no controller
       if (options.queued) add(loopDetail('20261121-052000-0004', 'fix-loop', 'queued', { created: now - 5, reason: '', cost: null, attempts: [] }));
-      const listed = () => order.map(id => details.get(id).run).sort((a, b) => b.created - a.created).map(run => ({ run: run.run, flow: run.flow, status: run.status, reason: run.reason, live: run.live, attempts: run.attempts.length, limit: run.limits.attempts, cost: run.totals.cost, seconds: run.totals.seconds, created: run.created, ended: run.ended, goal: run.goal, check: 'sh check.sh', last_check: run.attempts.length ? run.attempts.at(-1).check || null : null, passed_by: run.passed_by ?? null, waiting: run.waiting ?? null, trial: !!run.trial, settings_sha256: run.settings_sha256 ?? null }));
+      const listed = () => order.map(id => details.get(id).run).sort((a, b) => b.created - a.created).map(run => ({ run: run.run, flow: run.flow, status: run.status, reason: run.reason, live: run.live, attempts: run.attempts.length, limit: run.limits.attempts, cost: run.totals.cost, seconds: run.totals.seconds, created: run.created, ended: run.ended, goal: run.goal, check: 'sh check.sh', last_check: run.attempts.length ? run.attempts.at(-1).check || null : null, passed_by: run.passed_by ?? null, waiting: run.waiting ?? null, trial: !!run.trial, settings_sha256: run.settings_sha256 ?? null, ...(options.answeredField ? { answered: !!details.get(run.run).answered } : {}) }));
       const fail = (message, status = 400, extra = {}) => { throw Object.assign(new Error(message), { status, ...extra }); };
       let readsFailed = 0, listReads = 0;
       const loops = async request => {
@@ -9593,7 +9594,7 @@
         if (options.hold) await options.hold(request);
         if (options.readFail && request.op === 'read' && (!options.readFailTimes || readsFailed++ < options.readFailTimes)) fail(options.readFail, 500);
         if (request.op === 'read') {
-          if (request.run) { const found = details.get(request.run); if (!found) fail('no such run', 404); return JSON.parse(JSON.stringify(found)); }
+          if (request.run) { const found = details.get(request.run); if (!found) fail('no such run', 404); if (options.answeredField) found.run.answered = !!found.answered; return JSON.parse(JSON.stringify(found)); }
           const first = listReads++ === 0 && options.missingFirst;
           const rows = listed().filter(row => !(lag.get(row.run) > 0));
           lag.forEach((left, id) => { if (left > 0) lag.set(id, left - 1); });
@@ -9624,8 +9625,8 @@
           return { ok: true, run: id, status: 'running', reason: '' };
         }
         if (request.op === 'pause') { const found = details.get(request.run); if (!found) fail('no such run', 404); return { ok: true, run: request.run }; }
-        if (request.op === 'resume') { const found = details.get(request.run); if (!found) fail('no such run', 404); const flip = () => { found.run.status = options.resumeTo || 'running'; found.run.live = (options.resumeTo || 'running') === 'running'; found.run.reason = options.resumeReason ?? ''; if (found.run.status !== 'waiting') found.run.waiting = null; }; if (options.resumeLate) setTimeout(flip, options.resumeLate); else flip(); return { ok: true, run: request.run, status: 'running' }; }
-        if (request.op === 'answer') { const found = details.get(request.run); if (!found) fail('no such run', 404); if (found.run.live === false) { found.answered = true; return { ok: true, run: request.run }; } found.run.status = 'running'; found.run.waiting = null; return { ok: true, run: request.run }; } // no controller: the answer is only written; the next resume takes it
+        if (request.op === 'resume') { const found = details.get(request.run); if (!found) fail('no such run', 404); const flip = () => { found.answered = false; found.run.status = options.resumeTo || 'running'; found.run.live = (options.resumeTo || 'running') === 'running'; found.run.reason = options.resumeReason ?? ''; if (found.run.status !== 'waiting') found.run.waiting = null; }; if (options.resumeLate) setTimeout(flip, options.resumeLate); else flip(); return { ok: true, run: request.run, status: 'running' }; }
+        if (request.op === 'answer') { const found = details.get(request.run); if (!found) fail('no such run', 404); if (found.run.live === false) { if (found.answered) fail('run ' + request.run + ' already has an answer that was not taken yet', 409); found.answered = true; return { ok: true, run: request.run }; } found.run.status = 'running'; found.run.waiting = null; return { ok: true, run: request.run }; } // no controller: the answer is only written; the next resume takes it
         if (request.op === 'restore') {
           if (!found) fail('unknown flow ' + request.flow);
           if (request.rev !== found.rev) fail('the settings changed since you read them', 409, { rev: found.rev });
@@ -10602,22 +10603,143 @@
       window.shotReady = true;
       await new Promise(() => {});
     }
+    // ==== v7 round 4 (findings 1, 2, 6 of the second independent review, and the "still being made" line) ====
+    const R4_ERR = 'run 20261121-070100-2222 is already running in another process: a controller holds its lock';
+    const r4box = root => trow(root, TEAM_WAIT)?.querySelector('[data-loop-waiting]');
+    const r4has = (root, kind) => !!r4box(root)?.querySelector('[data-loop-control="' + kind + ':' + TEAM_WAIT + '"]');
+    const r4three = root => ['approve', 'reject', 'stop'].every(kind => r4has(root, kind));
+    const r4none = root => ['approve', 'reject', 'stop'].every(kind => !r4has(root, kind));
+    const r4approve = async root => { await tclick(root, 'approve:' + TEAM_WAIT); await tclick(root, 'confirm-approve:' + TEAM_WAIT); };
+
+    await test('v7 r4 finding 1: whether a waiting run with no controller was answered comes from the run record (`answered`), not from memory: a fresh page on an answered run offers Resume and Cancel run and no answers, an unanswered one offers the three answers; a resume that was refused leaves Resume offered (and it works on the next click), also after the flow is left and reopened; a server without the field is covered by the 409 on a second answer', async () => {
+      await tmount({ team: [TEAM_WAIT], dead: [TEAM_WAIT], answered: [TEAM_WAIT], answeredField: true }, async (root, fakes) => {
+        await topen(root, TEAM_WAIT);
+        const box = r4box(root);
+        assert(/Your answer is saved\. Nothing is running the run\./.test(box.textContent), 'the notice: ' + box.textContent);
+        assert(r4has(root, 'resume') && r4none(root), 'a fresh page on an answered run: Resume and no answers: ' + box.textContent);
+        assert(trow(root, TEAM_WAIT).querySelector('[data-loop-control="cancel-run:' + TEAM_WAIT + '"]'), 'no Cancel run');
+        await tclick(root, 'resume:' + TEAM_WAIT);
+        assert(r3ops(fakes, 'answer', 'resume').join() === 'resume:' && fakes.calls.filter(call => call.op === 'resume').length === 1, 'posts: ' + canon(fakes.calls.filter(call => call.op !== 'read')));
+        assert(await loopUntil(() => trow(root, TEAM_WAIT)?.dataset.status === 'running'), 'not running after Resume');
+      });
+      await tmount({ team: [TEAM_WAIT], dead: [TEAM_WAIT], answeredField: true }, async root => {
+        await topen(root, TEAM_WAIT);
+        assert(r4three(root) && !r4has(root, 'resume') && /nothing is running it/.test(r4box(root).textContent), 'answered:false shows the three answers: ' + r4box(root).textContent);
+      });
+      for (const field of [true, false]) {
+        const refuse = { resume: [R4_ERR, 409] };
+        await tmount({ team: [TEAM_WAIT], dead: [TEAM_WAIT], refuseOp: refuse, ...(field ? { answeredField: true } : {}) }, async (root, fakes) => {
+          await topen(root, TEAM_WAIT); await r4approve(root);
+          assert(/controller holds its lock/.test(r3lines(root)) && r4has(root, 'resume') && r4none(root), (field ? 'field' : 'no field') + ': after a refused resume: ' + r3lines(root) + ' / ' + r4box(root)?.textContent);
+          delete refuse.resume;
+          await tclick(root, 'resume:' + TEAM_WAIT);
+          assert(r3ops(fakes, 'answer', 'resume').join() === 'answer:approve,resume:,resume:', (field ? 'field' : 'no field') + ' posts ' + r3ops(fakes, 'answer', 'resume'));
+          assert(await loopUntil(() => trow(root, TEAM_WAIT)?.dataset.status === 'running'), 'not running after the second resume');
+        });
+        const again = { resume: [R4_ERR, 409] };
+        await tmount({ team: [TEAM_WAIT], dead: [TEAM_WAIT], refuseOp: again, ...(field ? { answeredField: true } : {}) }, async (root, fakes) => {
+          await topen(root, TEAM_WAIT); await r4approve(root);
+          openStep(root, 'fix-loop'); await settle(); openStep(root, TF); await settle();
+          assert(await loopUntil(() => tsec(root)?.querySelector('[data-loop-form]')), 'the flow did not come back');
+          await topen(root, TEAM_WAIT);
+          assert(r4has(root, 'resume') && r4none(root), (field ? 'field' : 'no field') + ': after leaving and reopening the flow: ' + r4box(root)?.textContent);
+        });
+      }
+      await tmount({ team: [TEAM_WAIT], dead: [TEAM_WAIT], answered: [TEAM_WAIT] }, async (root, fakes) => {
+        await topen(root, TEAM_WAIT);
+        assert(r4three(root), 'a server without the field cannot tell, so the answers are shown first');
+        await r4approve(root);
+        const said = r3lines(root);
+        assert(/already has an answer/.test(said) && /Resume/.test(said) && !/Your answer was sent/.test(said), 'the 409 in words: ' + said);
+        assert(r4has(root, 'resume') && r4none(root), 'the 409 is a dead end: ' + r4box(root)?.textContent);
+        await tclick(root, 'resume:' + TEAM_WAIT);
+        assert(fakes.calls.filter(call => call.op === 'resume').length === 1 && await loopUntil(() => trow(root, TEAM_WAIT)?.dataset.status === 'running'), 'Resume did not post or the run did not go on');
+      });
+    });
+
+    await test('v7 r4 finding 2: nothing kept about an earlier answer hides the answers for a later question of the same run (a later wait with another step or attempt, or after the run went on and waits again) once the record says answered:false, or when the server sends no field', async () => {
+      const wait = (found, since) => { found.run.status = 'waiting'; found.run.live = false; found.run.waiting = { ...found.run.waiting, since }; };
+      for (const field of [false, true]) {
+        const label = field ? 'with the field' : 'without the field';
+        // a later question (more attempts, a new `since`), seen without the run being seen going on in between
+        const refuse = { resume: [R4_ERR, 409] };
+        await tmount({ team: [TEAM_WAIT], dead: [TEAM_WAIT], refuseOp: refuse, ...(field ? { answeredField: true } : {}) }, async (root, fakes) => {
+          await topen(root, TEAM_WAIT); await r4approve(root); assert(r4has(root, 'resume') && r4none(root), label + ': Resume not offered first');
+          const found = fakes.details.get(TEAM_WAIT); found.answered = false; found.run.attempts.push({ n: 2, steps: [], agent: null, check: null }); found.run.totals.attempts = 2; wait(found, Date.now() / 1000);
+          assert(await loopUntil(() => r4three(root), 3000), label + ': a later question of the run shows no answers: ' + r4box(root)?.textContent);
+          assert(!/Nothing is running the run/.test(r4box(root).textContent) && !r4has(root, 'resume'), label + ': it still says the answer is saved and offers Resume');
+        });
+        // the run went on (a controller took the answer), then waits again with no controller at the same step and attempt
+        const refuse2 = { resume: [R4_ERR, 409] };
+        await tmount({ team: [TEAM_WAIT], dead: [TEAM_WAIT], refuseOp: refuse2, ...(field ? { answeredField: true } : {}) }, async (root, fakes) => {
+          await topen(root, TEAM_WAIT); await r4approve(root);
+          const found = fakes.details.get(TEAM_WAIT), since = found.run.waiting.since; found.answered = false; found.run.status = 'running'; found.run.live = true; found.run.waiting = null;
+          assert(await loopUntil(() => trow(root, TEAM_WAIT)?.dataset.status === 'running'), label + ': the page did not see the run go on');
+          wait(found, since); found.run.waiting.since = since;
+          assert(await loopUntil(() => r4three(root), 3000), label + ': after it went on and waits again: ' + r4box(root)?.textContent);
+        });
+      }
+    });
+
+    await test('v7 r4 finding 6: in the compare view a value that is unknown on either side (cost, time) is marked "can\'t tell", never "same" and never "differs"; two known values still say same or differs', async () => {
+      const lost = (id, created) => now => teamRun(id, 'failed', { created: now - created, cost: null, seconds: null, attempts: [{ n: 1, steps: [['work', 'returned', 'check'], ['check', 'fail', 'work', { exit: 1 }]] }] });
+      const A = '20261121-080000-aaaa', B = '20261121-080100-bbbb';
+      await tmount({ extra: now => [lost(A, 60)(now), lost(B, 50)(now)] }, async (root) => {
+        await tclick(root, 'compare:' + A); await tclick(root, 'compare:' + B);
+        assert(await loopUntil(() => tsec(root).querySelector('[data-loop-compare]')), 'no run compare');
+        const panel = tsec(root).querySelector('[data-loop-compare]');
+        ['Cost', 'Time'].forEach(label => { const row = panel.querySelector('[data-compare-row="' + label + '"]'); assert(row && row.dataset.differs === 'unknown' && /can't tell/i.test(row.textContent) && !/\bsame\b|differs/.test(row.textContent), label + ' of two unknowns: ' + row?.textContent + ' ' + row?.dataset.differs); assert(getComputedStyle(row.querySelector('.ag-loop-cmp-mark')).display !== 'none', label + ' mark is hidden'); });
+        assert(panel.querySelector('[data-compare-row="Work"]')?.dataset.differs === 'false', 'a known same row lost its meaning');
+      });
+      await tmount({}, async root => {
+        await tclick(root, 'compare:' + TEAM_TRIAL); await tclick(root, 'compare:' + TEAM_FAILED);
+        assert(await loopUntil(() => tsec(root).querySelector('[data-loop-compare]')), 'no run compare');
+        const panel = tsec(root).querySelector('[data-loop-compare]');
+        assert(panel.querySelector('[data-compare-row="Cost"]')?.dataset.differs === 'unknown', 'unknown against $0.20: ' + panel.querySelector('[data-compare-row="Cost"]')?.textContent);
+        assert(panel.querySelector('[data-compare-row="Time"]')?.dataset.differs === 'true', 'two known times that differ: ' + panel.querySelector('[data-compare-row="Time"]')?.textContent);
+      });
+    });
+
+    await test('v7 r4 "A change is still being made": the line is gone once the write that caused it ends, whether that write succeeded, was refused or failed on the network (a run write and a save)', async () => {
+      const branches = [['ok', {}], ['refused', null], ['network', null]];
+      for (const [how] of branches) {
+        let release; const gate = new Promise(resolve => { release = resolve; });
+        const options = { team: [TEAM_LIVE], hold: async request => { if (request.op === 'pause') { await gate; if (how === 'network') throw new Error('Failed to fetch'); } }, ...(how === 'refused' ? { refuseOp: { pause: ['the run is not running', 409] } } : {}) };
+        await tmount(options, async (root, fakes) => {
+          await topen(root, TEAM_LIVE); await tclick(root, 'pause:' + TEAM_LIVE);
+          await tclick(root, 'cancel-run:' + TEAM_LIVE); await tclick(root, 'cancel-confirm:' + TEAM_LIVE);
+          assert(/still being made/i.test(r3lines(root)), how + ': the line was not shown');
+          release(); await sleep(200); await settled();
+          assert(!/still being made/i.test(r3lines(root)) && r3lines(root) !== '', how + ' (run write): the line stays after the write ended: ' + r3lines(root));
+        });
+        let free; const hold2 = new Promise(resolve => { free = resolve; });
+        await tmount({ hold: async request => { if (request.op === 'save') { await hold2; if (how === 'network') throw new Error('Failed to fetch'); } }, ...(how === 'refused' ? { refuseOp: { save: ['the settings changed since you read them', 409] } } : {}) }, async (root, fakes) => {
+          typeIn(tfield(root, 'attempts'), '5'); await tclick(root, 'save');
+          assert(tposts(fakes, 'save').length === 1, how + ': save not posted');
+          await tclick(root, 'remove');
+          assert(/still being made/i.test(r3lines(root)), how + ' (save): the line was not shown: ' + r3lines(root));
+          free(); await sleep(200); await settled();
+          assert(!/still being made/i.test(r3lines(root)), how + ' (save): the line stays after the write ended: ' + r3lines(root));
+        });
+      }
+    });
+
     // ==== v7: screenshots (not a check): `?shot=team-run|team-wait|team-paused|team-history|team-compare|team-versions&width=1400` ====
     if ((shardOf.get('shot') || '').startsWith('team-')) { try {
-      const kind = shardOf.get('shot').slice(5), width = Number(shardOf.get('width')) || 1400, fakes = loopFakes({ team: true, versions: TEAM_VERSIONS().map((version, i) => ({ ...version, changed: [['check.command', 'limits.attempts'], []][i] })).concat([{ version: '20261121T040000-000003', time: Date.now() / 1000 - 40000, sha256: 'cc33dd44cc33dd44', changed: ['goal', 'steps.verifier.session'] }]), dead: shardOf.get('shot') === 'team-wait-dead' ? [TEAM_WAIT] : [] }), data = selfLoopFixture(); // r3: `changed` on the versions, and a waiting run no controller holds
+      const kind = shardOf.get('shot').slice(5), width = Number(shardOf.get('width')) || 1400, fakes = loopFakes({ team: true, versions: TEAM_VERSIONS().map((version, i) => ({ ...version, changed: [['check.command', 'limits.attempts'], []][i] })).concat([{ version: '20261121T040000-000003', time: Date.now() / 1000 - 40000, sha256: 'cc33dd44cc33dd44', changed: ['goal', 'steps.verifier.session'] }]), dead: ['team-wait-dead', 'team-wait-saved'].includes(shardOf.get('shot')) ? [TEAM_WAIT] : [], ...(shardOf.get('shot') === 'team-wait-saved' ? { answered: [TEAM_WAIT], answeredField: true } : {}) }), data = selfLoopFixture(); // r3: `changed` on the versions, and a waiting run no controller holds
       clearPositions();
       const root = host(); root.style.width = width + 'px'; root.style.height = (Number(shardOf.get('height')) || 1300) + 'px';
       const app = AgentGraph.mount(root, { fetchSnapshot: async () => stampRevs(data), intervalMs: 60000, motion: 'none', actions: { loops: fakes.loops }, loopPollMs: 60000 });
       await app.refresh(); await settle();
       root.querySelector('[data-route="' + TF + '"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); await settle();
       assert(await loopUntil(() => tsec(root)?.querySelector('[data-loop-form]')), 'no form');
-      const open = { run: TEAM_ONE, history: TEAM_ONE, wait: TEAM_WAIT, 'wait-dead': TEAM_WAIT, paused: TEAM_AMBIG, compare: TEAM_TRIAL }[kind];
+      const open = { run: TEAM_ONE, history: TEAM_ONE, wait: TEAM_WAIT, 'wait-dead': TEAM_WAIT, 'wait-saved': TEAM_WAIT, paused: TEAM_AMBIG, compare: TEAM_TRIAL }[kind];
       if (open) await topen(root, open);
       if (kind === 'history') await tclick(root, 'inspect:' + TEAM_ONE + ':judge:verifier');
       if (kind === 'compare') { await tclick(root, 'compare-attempt:' + TEAM_TRIAL + ':1'); await tclick(root, 'compare-attempt:' + TEAM_TRIAL + ':2'); }
       if (kind === 'versions') { const box = tsec(root).querySelector('details[data-loop-versions]'); box.open = true; }
       await sleep(250);
-      const target = { run: '[data-loop-runs-label], .ag-loop-runs', history: '[data-loop-history]', wait: '[data-loop-waiting]', 'wait-dead': '[data-loop-waiting]', paused: '[data-loop-paused]', compare: '[data-loop-compare]', versions: 'details[data-loop-versions]' }[kind];
+      const target = { run: '[data-loop-runs-label], .ag-loop-runs', history: '[data-loop-history]', wait: '[data-loop-waiting]', 'wait-dead': '[data-loop-waiting]', 'wait-saved': '[data-loop-waiting]', paused: '[data-loop-paused]', compare: '[data-loop-compare]', versions: 'details[data-loop-versions]' }[kind];
       const scroller = root.querySelector('.ag-detail-scroll'), mark = target && tsec(root).querySelector(target);
       if (mark) scroller.scrollTop = Math.max(0, mark.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 90);
       window.shotReady = true;

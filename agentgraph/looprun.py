@@ -1203,6 +1203,44 @@ def _never_started(state: dict) -> bool:
     return state.get("status") == "queued" and time.time() - (state.get("created") or 0) > QUEUED_GRACE
 
 
+def _turns_of(state: dict) -> list:
+    """Every agent turn whose result is recorded, in order."""
+    return [t for a in state.get("attempts") or [] for t in a.get("steps") or [] if t.get("kind") == "agent" and t.get("outcome") is not None]
+
+
+def _totals(state: dict, seconds, sessions) -> dict:
+    """The record's `totals`, read from its attempts (the controller gives the seconds and the sessions it counted; a run ended with no
+    controller keeps the ones it had)."""
+    costs = [t["cost"] for a in state.get("attempts") or [] for t in a.get("steps") or [] if t.get("cost") is not None]
+    return {"cost": round(sum(costs), 8) if costs else None, "seconds": seconds, "sessions": sessions, "attempts": len(state.get("attempts") or []),
+            "cost_unknown_steps": sum(1 for t in _turns_of(state) if t.get("cost") is None)}
+
+
+def _session_costs(state: dict) -> dict:
+    """{session: what its turns cost, or None when any of its turns is unpriced}."""
+    out: dict = {}
+    for turn in _turns_of(state):
+        sid = turn["session"]
+        out[sid] = None if (turn.get("cost") is None or out.get(sid, 0.0) is None) else round(out.get(sid, 0.0) + turn["cost"], 8)
+    return out
+
+
+def _end_run(folder: Path, state: dict, status: str, reason: str, step_id: str, write) -> None:
+    """The one way a run ends (`Controller.finish` and the cancel of a run with no controller): the last open attempt is closed, the record gets
+    its final status, `ended` and no `waiting`, `write()` saves it (the controller's `save`, which also refreshes the totals) under the answer lock,
+    an answer nobody took, a `pause` and a `cancel` request are removed there (no request outlives the run), and the end is one event."""
+    attempts = state.get("attempts") or []
+    now = round(time.time(), 3)
+    if attempts and attempts[-1].get("ended") is None:
+        attempts[-1]["ended"] = now
+    state.update(status=status, reason=reason, ended=now, waiting=None)
+    with _answer_lock(folder, 5.0, strict=False):  # an answer being given right now is decided before the run ends; one that lost is removed
+        write()
+        for name in ("answer.json", "pause", "cancel"):
+            (folder / name).unlink(missing_ok=True)
+    _event(folder, attempt=len(attempts), step=step_id, outcome=status, route="end", reason=reason)
+
+
 def shown_status(folder, state: dict) -> str:
     """The status to show: a run that says `running` but whose controller is gone shows `interrupted` (the files are not changed). A
     `waiting` run shows `waiting` with or without a controller: it makes no model call either way, and `answer` then `resume` goes on. A `queued`
@@ -1212,6 +1250,13 @@ def shown_status(folder, state: dict) -> str:
     if _never_started(state) and not _held(Path(folder)):
         return "interrupted"
     return state.get("status", "unknown")
+
+
+def answer_pending(folder, state: dict) -> bool:
+    """Whether a waiting run holds a person's answer that no controller took yet (`answer.json` is there): the next `resume` takes it. False for a
+    run that is not waiting, whatever files it holds."""
+    folder = Path(folder)
+    return state.get("status") == "waiting" and bool(state.get("waiting")) and not folder.is_symlink() and (folder / "answer.json").is_file() and not (folder / "answer.json").is_symlink()
 
 
 def hint(folder, state: dict) -> str:
@@ -1346,18 +1391,10 @@ class Controller:
         return turn.get("cost") is not None
 
     def totals(self) -> dict:
-        costs = [t["cost"] for a in self.state["attempts"] for t in a["steps"] if t.get("cost") is not None]
-        return {"cost": round(sum(costs), 8) if costs else None, "seconds": round(time.monotonic() - self.began, 1),
-                "sessions": sum(self.roots.values()) if self.roots else None, "attempts": len(self.state["attempts"]),
-                "cost_unknown_steps": sum(1 for t in self._turns() if not self._priced(t))}
+        return _totals(self.state, round(time.monotonic() - self.began, 1), sum(self.roots.values()) if self.roots else None)
 
     def session_costs(self) -> dict:
-        """{session: what its turns cost, or None when any of its turns is unpriced}."""
-        out: dict = {}
-        for turn in self._turns():
-            sid = turn["session"]
-            out[sid] = None if (not self._priced(turn) or out.get(sid, 0.0) is None) else round(out.get(sid, 0.0) + turn["cost"], 8)
-        return out
+        return _session_costs(self.state)
 
     def unknown_cost(self) -> str | None:
         """Why the spend cannot be known (the first agent turn that was not priced), or None."""
@@ -1437,12 +1474,17 @@ class Controller:
             return self._pause(paused.reason)
 
     def _pause(self, reason: str) -> str:
-        if (self.folder / "cancel").exists():  # a cancel that was answered "requested" while the run paused comes true now
+        """The only writer of `paused`. A request to cancel is looked for and `paused` is written under the answer lock `cancel` writes its request
+        under: a request is either seen here (the run ends `cancelled`) or made after `paused` is on disk (and the cancel then sees `paused`)."""
+        with _answer_lock(self.folder, 5.0, strict=False):
+            cancel = (self.folder / "cancel").exists()
+            if not cancel:
+                (self.folder / "pause").unlink(missing_ok=True)
+                self.state.update(status="paused", reason=reason, waiting=None)
+                self.save()
+        if cancel:  # a cancel that was answered "requested" while the run paused comes true now
             (self.folder / "pause").unlink(missing_ok=True)
             return self.finish("cancelled", "cancel requested while the run was pausing", (self.state.get("cursor") or {}).get("step", "-"))
-        (self.folder / "pause").unlink(missing_ok=True)
-        self.state.update(status="paused", reason=reason, waiting=None)
-        self.save()
         _event(self.folder, attempt=len(self.state["attempts"]), step=(self.state.get("cursor") or {}).get("step", "-"), outcome="paused", route="-", reason=reason)
         return "paused"
 
@@ -1751,11 +1793,7 @@ class Controller:
             self.state["passed_by"] = None
         if self.attempt is not None and self.attempt.get("ended") is None:
             self.attempt["ended"] = round(time.time(), 3)
-        self.state.update(status=status, reason=reason, ended=round(time.time(), 3), waiting=None)
-        with _answer_lock(self.folder, 5.0, strict=False):  # an answer being given right now is decided before the run ends; one that lost is removed
-            self.save()
-            (self.folder / "answer.json").unlink(missing_ok=True)
-        _event(self.folder, attempt=len(self.state["attempts"]), step=step_id, outcome=status, route="end", reason=reason)
+        _end_run(self.folder, self.state, status, reason, step_id, self.save)
         return status
 
     def _pass_refusal(self) -> str:
@@ -2193,18 +2231,19 @@ def cancel(folder) -> str:
     waiting, or with a pause asked) waits up to `CANCEL_WAIT` seconds for the lock and, if the run then reads `paused`, marks it `cancelled`
     here and returns "cancelled" (no stale request is left). With no controller (queued and never taken, interrupted, paused or waiting) the
     run is marked `cancelled` here, under its lock (returns "cancelled"); a controller that starts late then finds a run that is over.
-    Busy for a run that is over."""
+    The request file is written under the answer lock and only for a run that is not over, and a run's end removes it: no final run holds
+    one. Busy ("already <status>") for a run that is over."""
     folder = Path(folder)
     state = read_run(folder)
     status = state.get("status")
     if status in FINAL:
         raise Busy(f"run {folder.name} is already {status}")
     if _held(folder):
-        return _requested(folder, status)
+        return _requested(folder)
     lock = open(folder / "lock", "a+")
     try:
         if not _flock(lock):
-            return _requested(folder, status)
+            return _requested(folder)
         state = read_run(folder)
         if state.get("status") in FINAL:
             raise Busy(f"run {folder.name} is already {state.get('status')}")
@@ -2213,10 +2252,21 @@ def cancel(folder) -> str:
         lock.close()
 
 
-def _requested(folder: Path, status) -> str:
+def _ask_cancel(folder: Path) -> str:
+    """Write the cancel request and return the status the record had when it was written (under the answer lock a controller writes `paused`
+    and ends the run under). Busy for a run that is over: nothing is written."""
+    with _answer_lock(folder, 5.0, strict=False):
+        status = read_run(folder).get("status")
+        if status in FINAL:
+            raise Busy(f"run {folder.name} is already {status}")
+        request_cancel(folder)
+    return status
+
+
+def _requested(folder: Path) -> str:
     """A controller owns the run: ask it. A run that is `paused`, waiting or being paused may have a controller on its way out that no longer
     looks at the request: wait for its lock and, if the run ended `paused`, end it here (the lock is held while it is decided)."""
-    request_cancel(folder)
+    status = _ask_cancel(folder)
     if status == "running" and not (folder / "pause").exists():
         return "requested"
     lock = open(folder / "lock", "a+")
@@ -2224,24 +2274,28 @@ def _requested(folder: Path, status) -> str:
         if not _flock(lock, CANCEL_WAIT):
             return "requested"
         state = read_run(folder)
-        return _end_cancelled(folder, state) if state.get("status") == "paused" else "requested"
+        if state.get("status") == "paused":
+            return _end_cancelled(folder, state)
+        if state.get("status") in FINAL and state["status"] != "cancelled":  # the controller ended the run meanwhile (and removed the request with it)
+            raise Busy(f"run {folder.name} is already {state['status']}")
+        return "requested"  # still running, or the controller honoured the request itself
     finally:
         lock.close()
 
 
 def _end_cancelled(folder: Path, state: dict) -> str:
-    """Mark a run cancelled by a person; the caller holds the run's lock and has read `state`."""
-    now = round(time.time(), 3)
-    attempts = state.get("attempts") or []
-    if attempts and attempts[-1].get("ended") is None:
-        attempts[-1]["ended"] = now
-    state.update(status="cancelled", reason=f"cancelled by a person while no controller was running it (it was {state.get('status')}" + (", and its controller never started)" if state.get("status") == "queued" else ")"), ended=now, waiting=None)
-    with _answer_lock(folder, 5.0, strict=False):  # an answer being given right now is decided before the run ends; one that lost is removed
+    """Mark a run cancelled by a person; the caller holds the run's lock and has read `state`. It ends like `Controller.finish`: `_end_run`, with
+    the totals and heartbeat refreshed from the record (no controller counts seconds, so the seconds and sessions it had are kept)."""
+    was = state.get("status")
+    reason = f"cancelled by a person while no controller was running it (it was {was}" + (", and its controller never started)" if was == "queued" else ")")
+
+    def write():
+        old = state.get("totals") or {}
+        state["totals"] = _totals(state, old.get("seconds") or 0, old.get("sessions"))
+        state["session_costs"] = _session_costs(state)
+        state["heartbeat"] = round(time.time(), 3)
         _write_atomic(folder / "run.json", _json(state))
-        (folder / "answer.json").unlink(missing_ok=True)
-    _event(folder, attempt=len(attempts), step=(state.get("cursor") or {}).get("step", "-"), outcome="cancelled", route="end", reason=state["reason"])
-    for name in ("pause", "cancel"):
-        (folder / name).unlink(missing_ok=True)
+    _end_run(folder, state, "cancelled", reason, (state.get("cursor") or {}).get("step", "-"), write)
     return "cancelled"
 
 

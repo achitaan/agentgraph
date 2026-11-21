@@ -547,6 +547,100 @@ class EntryPointTests(Base):
         self.assertEqual(self.call({"op": "read"}, env={"AGENTGRAPH_PERSONAL": str(elsewhere)})["loops"], [])
 
 
+class AnsweredTests(Base):
+    """`answered`: a waiting run whose answer is saved and was not taken yet (a controller takes it at the next `resume`)."""
+
+    REPO, call = EntryPointTests.REPO, EntryPointTests.call
+
+    def waiting(self):
+        looprun.save_settings(self.structure, "pair", {"version": 1, "flow": "pair", "limits": {"attempts": 3}, "check": {"command": "exit 0"}, "approval": "before_pass"})
+        executor = looprun.ScriptedExecutor({"worker": [{}], "reviewer": [{"text": "Fine.\nVERDICT: PASS"}]})
+
+        def answer_file(controller, path):
+            raise Kill()  # the controller dies while it waits
+        before = set(looprun.list_runs(self.project))
+        with mock.patch.object(looprun.Controller, "_answer_file", answer_file), self.assertRaises(Kill):
+            looprun.start(self.project, "pair", structure=self.structure, goal="Ship it.", wait=True, executor=executor)
+        run, = set(looprun.list_runs(self.project)) - before
+        return run, executor
+
+    def seen(self, run):
+        detail = loopapi.run_detail(self.project, run)["run"]
+        row = next(r for r in loopapi.listing(self.structure, self.project, None)["runs"] if r["run"] == run)
+        return detail["answered"], row["answered"], detail["status"]
+
+    def test_a_saved_answer_that_was_not_taken_says_answered_in_the_detail_and_the_rows_until_a_controller_takes_it(self):
+        run, executor = self.waiting()
+        self.assertEqual(self.seen(run), (False, False, "waiting"))
+        self.assertEqual(loopapi.answer_run(self.project, run, "approve", "go"), {"run": run})
+        self.assertEqual(self.seen(run), (True, True, "waiting"))
+        with self.assertRaises(loopapi.ApiError) as caught:  # the words of the refusal are the ones it always had
+            loopapi.answer_run(self.project, run, "reject")
+        self.assertEqual((caught.exception.status, str(caught.exception)), (409, f"run {run} already has an answer that was not taken yet"))
+        executor.hook = None
+        looprun.resume(looprun.run_dir(self.project, run), wait=True, executor=executor)
+        self.assertEqual(self.seen(run), (False, False, "passed"))
+
+    def test_a_run_that_is_not_waiting_is_never_answered(self):
+        run = self.finished()
+        self.assertEqual(self.seen(run), (False, False, "passed"))
+        (looprun.run_dir(self.project, run) / "answer.json").write_text("{}")  # a file left in a run that is over says nothing
+        self.assertEqual(self.seen(run)[:2], (False, False))
+
+    def test_the_entry_point_carries_answered_too(self):
+        run, _ = self.waiting()
+        loopapi.answer_run(self.project, run, "approve")
+        out = self.call({"op": "read", "run": run})  # the real interpreter, as the bridge runs it
+        self.assertIs(out["run"]["answered"], True)
+        listed = self.call({"op": "read"})
+        self.assertIs(next(r for r in listed["runs"] if r["run"] == run)["answered"], True)
+
+
+class FinalCancelTests(Base):
+    REPO, call = EntryPointTests.REPO, EntryPointTests.call
+
+    def test_v8b3_3_a_cancel_of_a_final_run_is_409_in_words_through_the_entry_point_and_leaves_no_request(self):
+        run = self.finished()
+        doc = self.call({"op": "cancel", "run": run}, expect_exit=1)
+        self.assertEqual((doc["status"], doc["error"]), (409, f"run {run} is already passed"))
+        self.assertFalse((looprun.run_dir(self.project, run) / "cancel").exists())
+
+
+class EntryPointFailureTests(Base):
+    """`main` maps a failure of the operation as the page server's `/api/loop` route does (`server.py`): `ValueError` 400 with its own words (a failed read: 500), `OSError` 500
+    ("could not make the change: ..." for a write, "could not read the loops: ..." for a read), `ApiError` as it is. No input makes the real `post` raise a
+    `ValueError` or an `OSError` (every bad value is refused as an `ApiError` first), so the mapping is tested by making `post`, `listing` and `run_detail` raise."""
+
+    def run_main(self, request, raises, target="post"):
+        import io
+        stdin, stdout = io.BytesIO((json.dumps(request) + "\n").encode()), io.StringIO()
+        with mock.patch.object(loopapi, target, side_effect=raises):
+            code = loopapi.main(["--project", str(self.project), "--structure", str(self.structure)], stdin=stdin, stdout=stdout)
+        lines = stdout.getvalue().split("\n")
+        self.assertEqual((len(lines), lines[-1]), (2, ""))
+        return code, json.loads(lines[0])
+
+    def test_a_value_error_is_400_with_its_own_words_as_the_page_says_it(self):
+        code, doc = self.run_main({"op": "cancel", "run": "20250101T000000-aaaaaaaa"}, ValueError("embedded null byte"))
+        self.assertEqual((code, doc), (1, {"error": "embedded null byte", "status": 400}))
+
+    def test_an_os_error_is_500_in_the_pages_words_for_a_write_and_for_a_read(self):
+        code, doc = self.run_main({"op": "pause", "run": "20250101T000000-aaaaaaaa"}, OSError(28, "No space left on device"))
+        self.assertEqual((code, doc["status"]), (1, 500))
+        self.assertEqual(doc["error"], "could not make the change: [Errno 28] No space left on device")
+        code, doc = self.run_main({"op": "read"}, OSError(13, "Permission denied"), "listing")
+        self.assertEqual((code, doc["status"], doc["error"]), (1, 500, "could not read the loops: [Errno 13] Permission denied"))
+        code, doc = self.run_main({"op": "read", "run": "20250101T000000-aaaaaaaa"}, ValueError("bad"), "run_detail")
+        self.assertEqual((code, doc), (1, {"error": "could not read the loops: bad", "status": 500}))  # a read that raised ValueError is 500 on the page too
+
+    def test_an_api_error_and_any_other_exception_keep_their_mapping(self):
+        code, doc = self.run_main({"op": "cancel", "run": "20250101T000000-aaaaaaaa"}, loopapi.ApiError(409, "nope", rev="a" * 64))
+        self.assertEqual((code, doc), (1, {"error": "nope", "rev": "a" * 64, "status": 409}))
+        code, doc = self.run_main({"op": "cancel", "run": "20250101T000000-aaaaaaaa"}, RuntimeError("boom"))
+        self.assertEqual((code, doc["status"]), (1, 500))
+        self.assertIn("RuntimeError: boom", doc["error"])
+
+
 class QueuedNeverStartedTests(Base):
     """A run whose detached controller never came (round 2): what the page API shows and does."""
 

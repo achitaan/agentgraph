@@ -152,7 +152,7 @@ the sha256 of the message) and after the step is recorded (`phase: done`, with t
     (the cursor records the count of user messages before the send, and the id and seq of the last one as the database has them; the clock decides nothing).
     A missing session that held messages before the send, a missing session when the cursor holds no count (the send had started: it may have held this message),
     a session with fewer messages than the count, a session whose user message at the counted place is not the one recorded (one removed and one added leaves the
-    count equal), and a cursor with no count when the session exists are `unknown`. A cursor written before the last message's id was recorded is judged by the count alone. The message is sent.
+    count equal), and a cursor with no count when the session exists are `unknown`. A cursor written before the last message's id was recorded (it has a `users` count and no `last_user`; only a run left by an earlier build has one) is judged by the count alone: the count of user messages and the text's hash are compared, the id and seq of the message the count ended on are not, so a session that lost one message and gained this send's still shows an equal count and the answer is `not_sent` (the pair is what tells those apart; it is checked whenever the cursor has it). Answering `unknown` for every such cursor would stop every old run for a person's choice, and the cost of the narrow miss is one message sent again, so the count alone stands. The message is sent.
     A new user message that does not have this text, or two new messages with it, is `unknown`: someone else wrote into the session, or two tries cannot be told apart.
     A retry of a turn is told from its earlier try by that count, so a finished reply of try 1 is never adopted for try 2.
   - `finished`: exactly one new user message has this text and the session is idle after a reply (an idle row that says `succeeded` after an assistant reply, no live
@@ -179,7 +179,13 @@ the sha256 of the message) and after the step is recorded (`phase: done`, with t
 - A `cancel` answered "requested" always comes true: a controller that is pausing when it is asked ends the run `cancelled` instead of `paused`. For a run that is not plainly
   running (paused, waiting, or with a `pause` asked) `cancel` waits up to 2 seconds for the controller's lock after it has written the request; if the run then reads `paused`
   it is marked `cancelled` there and the answer is `cancelled`, so no request is left behind. A `cancel` file that still reaches a run that paused (the lock stayed held)
-  ends its next `resume` `cancelled` before any step is sent.
+  ends its next `resume` `cancelled` before any step is sent. Every writer of `paused` (the controller pausing on `pause`, an unsure step, a step whose fate is `unknown`) is
+  `Controller._pause`: it looks for a `cancel` file and writes `paused` under the same lock `cancel` writes its request under, so no cancel is left in a paused run. A
+  `cancel` of a run that is over is refused ("already passed") and writes nothing. A run's end (`_end_run`, used by `Controller.finish` and by a `cancel` with no controller)
+  closes the open attempt, sets the final status, `ended` and no `waiting`, refreshes `totals`, `session_costs` and the heartbeat, removes `answer.json`, `pause` and `cancel`
+  under the answer lock and writes one event, so a run cancelled while paused has the same record keys as one cancelled while running (only the seconds and sessions it
+  already had are kept, since no controller counts them).
+- A waiting run that holds a saved answer no controller took yet is `answered` in the page API (`run.answered`, also on the listing's rows); `resume` takes it.
 - `pause` is for a run a controller is running: it writes a `pause` file and the controller stops after the step it is on (the run says `paused`,
   `resume` goes on at the next step). `cancel` and `answer` act on a paused, waiting or interrupted run with no controller, under the run's lock.
 - `list` and `status` say it in words: `interrupted (the controller is gone; agentgraph loop resume RUN)`, `paused`, `waiting`, `trial`.
@@ -199,7 +205,7 @@ the sha256 of the message) and after the step is recorded (`phase: done`, with t
 
 `python3 -P -m agentgraph.loopapi [--project DIR] [--structure DIR]` answers one request per process: one JSON line on stdin (`{"op": "read"}`, `{"op": "read", "run": id}`,
 or a `POST /api/loop` body such as `{"op": "cancel", "run": id}`), one JSON line on stdout. A failure is `{"error": text, "status": N}` (plus `rev` for a stale `save`) with exit code 1.
-The keys and replies are `WEB_API.md`'s; a `start` with no `--project` is refused in words.
+Failures map as the page server maps them (`ApiError` as it is, `ValueError` 400, `OSError` 500). The keys and replies are `WEB_API.md`'s; a `start` with no `--project` is refused in words.
 
 ## What this does and does not guarantee
 

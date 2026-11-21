@@ -898,6 +898,8 @@
 .agentgraph .ag-loopbox .ag-loop-cmp-row[data-differs="true"] { border-left: 3px solid var(--ag-ink); font-weight: 700; }
 .agentgraph .ag-loopbox .ag-loop-cmp-row[data-differs="true"] .ag-loop-cmp-mark { grid-column: 2 / -1; }
 .agentgraph .ag-loopbox .ag-loop-cmp-row[data-differs="false"] .ag-loop-cmp-mark { display: none; }
+.agentgraph .ag-loopbox .ag-loop-cmp-row[data-differs="unknown"] { border-left: 3px dotted var(--ag-ink); }
+.agentgraph .ag-loopbox .ag-loop-cmp-row[data-differs="unknown"] .ag-loop-cmp-mark { grid-column: 2 / -1; }
 .agentgraph .ag-loopbox .ag-loop-cmp-head { font-weight: 600; }
 .agentgraph .ag-loopbox .ag-loop-cmp-label { color: var(--ag-muted); }
 .agentgraph .ag-loopbox .ag-loop-version-list { margin: 4px 0; padding: 0; list-style: none; }
@@ -916,6 +918,6 @@
   .agentgraph .ag-loopbox .ag-loop-cmp-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .agentgraph .ag-loopbox .ag-loop-cmp-label { grid-column: 1 / -1; font-weight: 600; }
   .agentgraph .ag-loopbox .ag-loop-cmp-head .ag-loop-cmp-label { display: none; }
-  .agentgraph .ag-loopbox .ag-loop-cmp-row[data-differs="true"] .ag-loop-cmp-mark { grid-column: 1 / -1; }
+  .agentgraph .ag-loopbox .ag-loop-cmp-row[data-differs="true"] .ag-loop-cmp-mark, .agentgraph .ag-loopbox .ag-loop-cmp-row[data-differs="unknown"] .ag-loop-cmp-mark { grid-column: 1 / -1; }
 }
 .agentgraph .ag-loopbox button { max-width: 100%; }

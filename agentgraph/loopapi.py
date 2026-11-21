@@ -180,7 +180,7 @@ def _summary(project, run_id: str) -> dict | None:
             "cost": totals.get("cost"), "seconds": totals.get("seconds") or 0, "created": state.get("created"), "ended": state.get("ended"),
             "goal": (state.get("goal") or "")[:GOAL_SHOWN], "check": command,
             "last_check": {"outcome": checks[-1].get("outcome"), "exit": checks[-1].get("exit")} if checks else None,
-            "passed_by": state.get("passed_by"), "waiting": state.get("waiting"), "trial": bool(state.get("trial")),
+            "passed_by": state.get("passed_by"), "waiting": state.get("waiting"), "answered": looprun.answer_pending(folder, state), "trial": bool(state.get("trial")),
             "settings_sha256": state.get("settings_sha256")}
 
 
@@ -222,7 +222,7 @@ def _text(folder: Path, relative) -> str:
 
 
 def run_detail(project, run_id) -> dict:
-    """`GET /api/loop/run`: the run record (its status as shown, `live`), its definition and every attempt's message and check output."""
+    """`GET /api/loop/run`: the run record (its status as shown, `live`, `answered`: a waiting run holds an answer no controller took yet), its definition and every attempt's message and check output."""
     folder = _run_folder(project, run_id)
     state = _state(folder)
     definition = _definition(folder)
@@ -239,7 +239,7 @@ def run_detail(project, run_id) -> dict:
                   "findings": _text(folder, entry.get("findings"))} for entry in attempt.get("steps") or [] if isinstance(entry, dict)]
         attempts.append({"n": n, "message": sent, "check_output": output, "check_output_truncated": truncated, "steps": steps})
     keys = ("settings", "path", "steps", "steps_sha256", "goal", "workdir", "created")
-    return {"run": {**state, "status": looprun.shown_status(folder, state), "live": looprun._held(folder)},
+    return {"run": {**state, "status": looprun.shown_status(folder, state), "live": looprun._held(folder), "answered": looprun.answer_pending(folder, state)},
             "definition": {key: definition.get(key) for key in keys}, "attempts": attempts}
 
 
@@ -475,19 +475,26 @@ def answer_request(request, structure_dir, project, *, scratch=None, executor_sp
 
 def main(argv=None, stdin=None, stdout=None) -> int:
     """`python3 -P -m agentgraph.loopapi [--project DIR] [--structure DIR]`, the Desktop bridge's command: one JSON request on stdin, one line of JSON on
-    stdout (the page's answer; or `{"error", "status", "rev"?}` with exit 1), never a traceback. `--project` is the folder whose runs are listed and where
+    stdout (the page's answer; or `{"error", "status", "rev"?}` with exit 1, failures mapped as `server.py` maps them: `ApiError` as it is, `ValueError` 400 in its own words, `OSError` 500), never a traceback. `--project` is the folder whose runs are listed and where
     runs are made (none: no runs); the structure folder is the page server's default (`$AGENTGRAPH_PERSONAL`, else the checkout's) unless `--structure`."""
     out = stdout or sys.stdout
+    reading = False
     try:
         parser = argparse.ArgumentParser(prog="agentgraph.loopapi", add_help=False, exit_on_error=False)
         parser.add_argument("--project", type=Path)
         parser.add_argument("--structure", type=Path)
         args = parser.parse_args(argv)
         structure = args.structure if args.structure is not None else Path(STRUCTURE_DIR)
-        doc = answer_request(_request_line(stdin or sys.stdin.buffer), structure, args.project.absolute() if args.project is not None else None)
+        request = _request_line(stdin or sys.stdin.buffer)
+        reading = isinstance(request, dict) and request.get("op") == "read"
+        doc = answer_request(request, structure, args.project.absolute() if args.project is not None else None)
         text, code = json.dumps(doc, allow_nan=False), 0
     except ApiError as exc:
         text, code = json.dumps({**exc.body(), "status": exc.status}), 1
+    except ValueError as exc:  # as `server.py` maps it: a refused write is 400 in its own words; a read that failed is 500
+        text, code = json.dumps({"error": f"could not read the loops: {exc}", "status": 500} if reading else {"error": str(exc), "status": 400}), 1
+    except OSError as exc:
+        text, code = json.dumps({"error": f"could not read the loops: {exc}" if reading else f"could not make the change: {exc}", "status": 500}), 1
     except (argparse.ArgumentError, SystemExit):
         text, code = json.dumps({"error": "usage: python3 -m agentgraph.loopapi [--project DIR] [--structure DIR]", "status": 400}), 1
     except Exception as exc:  # the bridge reads one document: whatever went wrong is said in a line, not as a traceback

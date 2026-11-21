@@ -1583,6 +1583,89 @@ class CancelWhilePausingTests(Base):
         self.assertEqual(seen["result"], "requested")
         self.assertLess(seen["seconds"], 1.0)
 
+    def test_v8b3_2_a_cancel_asked_while_the_controller_pauses_itself_never_leaves_a_stale_request(self):  # an unsure step: no `pause` file, status `running` when read
+        self.save(check="exit 1", attempts=3)
+        executor = self.executor(hook=kill_at(2), answer="unknown", reason="cannot tell if it ran")
+        run = self.crash(executor)
+        box, original = {}, looprun.Controller.save
+
+        def save(controller):
+            if controller.state.get("status") == "paused" and "thread" not in box:  # the pause is being written; run.json still says `running`
+                box["thread"] = threading.Thread(target=lambda: box.update(result=looprun.cancel(controller.folder)))
+                box["thread"].start()
+                time.sleep(0.4)  # the cancel has read `running` and writes its request now (or waits for the lock it must take)
+            return original(controller)
+        with mock.patch.object(looprun.Controller, "save", save):
+            self.assertEqual(self.resume(run, executor), "paused")
+        box["thread"].join(10)
+        self.assertEqual(box["result"], "cancelled")
+        self.assertEqual(self.record(run)["status"], "cancelled")
+        self.assertFalse((self.folder(run) / "cancel").exists())
+
+    def test_v8b3_2_every_writer_of_paused_is_the_one_that_checks_for_a_cancel_under_the_lock(self):
+        source = Path(looprun.__file__).read_text(encoding="utf-8")
+        self.assertEqual(source.count('status="paused"'), 1)  # a second writer would need the same check
+        self.save(check="exit 1", attempts=3)
+        executor = self.executor(hook=kill_at(2), answer="unknown", reason="cannot tell")
+        run = self.crash(executor)
+        looprun.request_cancel(self.folder(run))  # asked before the controller reconciles: the unsure step ends cancelled, not paused
+        self.assertEqual(self.resume(run, executor), "cancelled")
+        self.assertFalse((self.folder(run) / "cancel").exists())
+
+    def test_v8b3_3_a_cancel_of_a_final_run_says_so_and_leaves_no_request_file(self):
+        self.save(check="exit 0", attempts=1)
+        run = self.start(self.executor())
+        self.assertEqual(self.record(run)["status"], "passed")
+        with self.assertRaises(looprun.Busy) as caught:
+            looprun.cancel(self.folder(run))
+        self.assertIn("already passed", str(caught.exception))
+        self.assertFalse((self.folder(run) / "cancel").exists())
+
+    def test_v8b3_3_a_request_that_races_the_end_of_the_run_never_survives_it(self):
+        self.save(check="exit 1", attempts=2)
+        box = {}
+
+        def hook(count, call):
+            if count == 1:
+                box["thread"] = threading.Thread(target=lambda: box.update(result=self.ask_cancel(box)))
+                box["thread"].start()
+                box["thread"].join(10)
+        self.ask_cancel = lambda box: looprun.cancel(self.folder(looprun.list_runs(self.project)[0]))
+        run = self.start(self.executor(hook=hook))
+        self.assertEqual(box["result"], "requested")
+        self.assertEqual(self.record(run)["status"], "cancelled")
+        self.assertFalse((self.folder(run) / "cancel").exists())  # the run ended and took its own request with it
+
+    def test_v8b3_6_a_run_cancelled_while_paused_has_the_keys_of_one_cancelled_while_running(self):
+        self.save(check="exit 1", attempts=3)
+        running = self.start(self.executor(hook=lambda count, call: looprun.request_cancel(self.folder(looprun.list_runs(self.project)[0]))))
+        self.save(check="exit 1", attempts=3)
+        executor = self.executor(hook=kill_at(2), answer="unknown", reason="cannot tell")
+        paused_run = self.crash(executor)
+        self.assertEqual(self.resume(paused_run, executor), "paused")
+        self.assertEqual(looprun.cancel(self.folder(paused_run)), "cancelled")
+        a, b = self.record(running), self.record(paused_run)
+        self.assertEqual((a["status"], b["status"]), ("cancelled", "cancelled"))
+        self.assertEqual(set(a) - {"pid", "resumed", "recoveries", "cursor"}, set(b) - {"pid", "resumed", "recoveries", "cursor"})
+        for key in ("totals", "session_costs", "heartbeat", "ended"):
+            self.assertIn(key, b)
+        self.assertGreaterEqual(b["heartbeat"], b["ended"])  # `finish` saves after it sets `ended`: the heartbeat is the end's, not the pause's
+        self.assertEqual(b["totals"]["attempts"], len(b["attempts"]))
+        self.assertEqual(set(a["totals"]), set(b["totals"]))
+        self.assertIsNone(b["waiting"])
+        events = [json.loads(line) for line in (self.folder(paused_run) / "events.jsonl").read_text().splitlines()]
+        self.assertEqual({k for k in events[-1]}, {k for k in [json.loads(line) for line in (self.folder(running) / "events.jsonl").read_text().splitlines()][-1]})
+        for name in ("cancel", "pause", "answer.json"):
+            self.assertFalse((self.folder(paused_run) / name).exists())
+
+    def test_v8b3_6_a_queued_run_cancelled_without_a_controller_carries_totals_too(self):
+        self.save()
+        run = queue(self)
+        self.assertEqual(looprun.cancel(self.folder(run)), "cancelled")
+        record = self.record(run)
+        self.assertEqual(set(record["totals"]), {"cost", "seconds", "sessions", "attempts", "cost_unknown_steps"})
+        self.assertEqual(record["session_costs"], {})
+
     def test_v8b7_a_cancel_left_behind_by_a_pausing_controller_ends_the_next_resume_without_running_a_step(self):
         run, executor, box = self.pausing(True)
         self.assertEqual(box["result"], "requested")

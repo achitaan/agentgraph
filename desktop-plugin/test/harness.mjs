@@ -3410,6 +3410,69 @@ await check("v7 r3 main (real python3): the bridge's loop command answers read, 
     httpd.kill("SIGKILL");
   }
 });
+// v7 r4: the waiting-run path through the bridge on the real interpreter: a run folder written by hand as `waiting` (no controller), an answer, the record
+// saying `answered`, and a second answer refused in the server's words.
+const LOOPS_WAIT_PY = LOOPS_WORLD_PY + `
+folder = looprun.run_dir(project, ids[0])
+state = looprun.read_run(folder)
+(folder / "run.json").write_text(json.dumps({**state, "status": "waiting", "ended": None, "waiting": {"step": "check", "outcome": "pass", "since": 1.0, "question": "check ended with pass. Answer approve to carry on."}}))
+print(json.dumps(ids[0]))
+`;
+await check("v7 r4 main (real python3): a run written as waiting with no controller: read says answered false, `answer` through the bridge, read says answered true (the controller lane's field), a second answer is the 409 in the server's words; each answer equals the page server's for the same request", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(TMP, "loops-wait-")));
+  const env = Object.assign({}, process.env, { PYTHONPATH: ORCHESTRATION, PYTHONIOENCODING: "utf-8" });
+  delete env.AGENTGRAPH_PERSONAL;
+  const a = path.join(root, "a"), b = path.join(root, "b");
+  fs.mkdirSync(a);
+  const made = childProcess.spawnSync("python3", ["-P", "-c", LOOPS_WAIT_PY, a], { cwd: ORCHESTRATION, env, encoding: "utf8" });
+  assert.equal(made.status, 0, "building the temp world failed: " + made.stderr.slice(-400));
+  const id = JSON.parse(made.stdout.trim().split("\n").pop());
+  fs.cpSync(a, b, { recursive: true });
+  const httpd = childProcess.spawn("python3", ["-P", "-c", LOOPS_SERVER_PY, b], { cwd: ORCHESTRATION, env, stdio: ["ignore", "pipe", "pipe"] });
+  const saved = process.env.AGENTGRAPH_PERSONAL;
+  try {
+    const port = await new Promise((resolve, reject) => {
+      let out = "";
+      httpd.stdout.on("data", (chunk) => { out += chunk; if (/\n/.test(out)) resolve(Number(out.trim())); });
+      httpd.on("exit", () => reject(new Error("the page server did not start")));
+      setTimeout(() => reject(new Error("the page server did not start in time")), 15000);
+    });
+    process.env.AGENTGRAPH_PERSONAL = path.join(a, "personal");
+    const m = mainContext({ home: ORCHESTRATION });
+    resolveDefault(loadMain(CODE, []).module.exports).main(m.ctx);
+    const impl = m.provided[0].impl;
+    const bridge = async (request) => JSON.parse(await impl.loops({ directory: path.join(a, "project"), request: JSON.stringify(request) }));
+    const page = async (request) => {
+      const read = request.op === "read";
+      const url = "http://127.0.0.1:" + port + (read ? (request.run ? "/api/loop/run?id=" + encodeURIComponent(request.run) : "/api/loops") : "/api/loop");
+      const response = await fetch(url, read ? { cache: "no-store" } : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) });
+      return { status: response.status, doc: await response.json() };
+    };
+    const plain = (doc) => JSON.parse(JSON.stringify(doc).split(a).join("ROOT").split(b).join("ROOT"));
+    const same = async (request, what) => { const x = await bridge(request), y = await page(request); assert.deepEqual(Object.keys(x).sort(), Object.keys(y.doc).sort(), what + ": keys"); assert.deepEqual(plain(x), plain(y.doc), what + ": differs from the page's"); return { bridge: x, status: y.status }; };
+    // 1. read: waiting, no controller, nothing answered
+    const before = (await same({ op: "read", run: id }, "read before")).bridge;
+    assert.equal(before.run.status, "waiting");
+    assert.equal(before.run.live, false, "no controller");
+    // 2. answer through the bridge (the same on the page's server)
+    const request = { op: "answer", run: id, answer: "approve" };
+    const answered = await same(request, "answer");
+    assert.equal(answered.bridge.ok, true, JSON.stringify(answered.bridge));
+    // 3. the record: answered true now (the controller lane's field: red until it lands)
+    const after = (await same({ op: "read", run: id }, "read after")).bridge;
+    assert.equal(before.run.answered, false, "the run record says answered false before an answer");
+    assert.equal(after.run.answered, true, "the run record says answered true once an answer is saved");
+    const row = (await bridge({ op: "read" })).runs.find((one) => one.run === id);
+    assert.equal(row.answered, true, "the listing row says it too");
+    // 4. a second answer: refused with 409 in the server's words
+    const twice = await same(request, "second answer");
+    assert.equal(twice.status, 409);
+    assert.match(twice.bridge.error, /already has an answer that was not taken yet/);
+  } finally {
+    if (saved === undefined) delete process.env.AGENTGRAPH_PERSONAL; else process.env.AGENTGRAPH_PERSONAL = saved;
+    httpd.kill("SIGKILL");
+  }
+});
 
 await check("the harness replaces an existing temporary bundle before reading it", () => {
   // build.mjs writes atomically, so even an identical rebuild replaces the existing file.
