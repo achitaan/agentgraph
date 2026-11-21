@@ -6,7 +6,8 @@
  *   Rows, most actionable first, no blank lines: what needs the user (requests, human gates, stuck or stalled
  *   agents), the hub with the idle count, who works now, the task's progress in one row, spend and context in one
  *   row, and (panel only) one dim row of keys. Empty sections are left out. Improvement proposals waiting or applied
- *   (`learning.proposals`) are up to 3 rows after the needs list, then the commands that decide them.
+ *   (`learning.proposals`) are up to 3 rows after the needs list, then the commands that decide them; loop runs (`loops`,
+ *   added by the plugin from `agentgraph loop list --json`) are up to 3 rows after those, then their commands.
  *   Line = Span[], Span = { text, tone }
  *   tone is one of TONES. No line is wider than `width` display columns.
  *
@@ -737,6 +738,41 @@ function proposalRows(doc, width) {
   return out;
 }
 
+// Loop runs (`doc.loops`: what `agentgraph loop list --json` prints, one state per run, newest first; the plugin adds it
+// to the snapshot): the live ones first, then the rest, at most LOOPS_MAX rows, each "<mark> <flow> <status> <n>/<limit>
+// <cost>  <run id>", then one row with the commands. Only a passed run is marked as a pass; an unknown cost says so.
+// Not selectable, like the proposals: the commands decide, in a shell, with the id the row shows.
+export const LOOPS_MAX = 3;
+export const LOOP_COMMANDS = "agentgraph loop status|cancel RUN";
+const LOOP_STATUS = {
+  running: ["running", "accent"], passed: ["passed", "plain"], failed: ["failed", "danger"], limit: ["at its limit", "muted"],
+  invalid: ["not started", "danger"], check_error: ["check error", "danger"], inconclusive: ["inconclusive", "muted"],
+  stalled: ["stalled", "danger"], agent_error: ["agent error", "danger"], cancelled: ["cancelled", "muted"], interrupted: ["interrupted", "muted"],
+};
+function loopRows(doc, width) {
+  const shown = list(doc.loops).filter((r) => isObject(r) && typeof r.run === "string" && r.run && typeof r.flow === "string" && r.flow && typeof r.status === "string");
+  if (!shown.length) return [];
+  const rows = shown.filter((r) => r.status === "running").concat(shown.filter((r) => r.status !== "running"));
+  const out = [];
+  const take = rows.length > LOOPS_MAX + 1 ? rows.slice(0, LOOPS_MAX) : rows;
+  for (const r of take) {
+    const [words, tone] = LOOP_STATUS[r.status] || [clean(r.status) || "unknown", "muted"];
+    const used = Array.isArray(r.attempts) ? r.attempts.length : Math.max(0, Math.floor(Number(r.attempts) || 0));
+    const limit = Math.floor(Number(isObject(r.limits) ? r.limits.attempts : r.limit) || 0);
+    const spent = isObject(r.totals) ? r.totals.cost : r.cost;
+    const known = spent !== null && spent !== undefined && spent !== "" && Number.isFinite(Number(spent));
+    out.push(composeRow(width, {
+      head: [sp(r.status === "running" ? LOOP_MARK : r.status === "passed" ? "✓" : "–", tone), sp(" ", "plain")],
+      name: clean(r.flow),
+      tail: [sp(" " + words, tone), sp(` ${used}/${limit} ${known ? formatDollars(spent) : "cost unknown"}`, "muted")],
+      what: clean(r.run),
+    }));
+  }
+  if (take.length < rows.length) out.push([sp(`+${rows.length - take.length} more loop runs`, "muted")]);
+  out.push([sp(truncate(LOOP_COMMANDS, width), "muted")]);
+  return out;
+}
+
 function hubRow(doc, hub, idle, width, frame) {
   const working = hubWorking(doc, hub);
   const rootName = isObject(doc.root) && typeof doc.root.agent === "string" ? doc.root.agent : "";
@@ -1097,6 +1133,7 @@ export function layout(snapshot, options = {}) {
   if (shownNeeds.length < needs.length) rows.push({ line: [sp(`+${needs.length - shownNeeds.length} more`, "muted")] });
 
   for (const line of proposalRows(snapshot, inner)) rows.push({ line });
+  for (const line of loopRows(snapshot, inner)) rows.push({ line });
 
   // 2. who works now: the hub, then the others (longest at it first); idle agents are a count on the hub's row
   const flagged = new Set(needs.map((n) => n.agent).filter(Boolean));

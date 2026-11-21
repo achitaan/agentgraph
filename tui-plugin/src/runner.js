@@ -617,3 +617,98 @@ export function createSideAskRunner(deps) {
     running: () => running,
   };
 }
+
+// The loop runs of a project: `<python> -P -m agentgraph.looprun list --json --project DIR` (what `agentgraph loop list
+// --json` runs), newest first, the snapshot's spawn rules (no shell, absolute interpreter, PYTHONPATH = the orchestration
+// folder, SIGKILL after the timeout, output capped). Read only when the project has a `.opencode/loops` folder, so a project
+// that never ran a loop costs no process. Resolves an array of run states; any failure (and the demo) is an empty list.
+export const LOOPS_TIMEOUT_MS = 10000;
+export const LOOPS_MAX_BYTES = 4 * 1024 * 1024;
+
+// deps: { spawn, fs, path, env, home, python, demo?, timeoutMs? }
+export function createLoopRunner(deps) {
+  const timeoutMs = deps.timeoutMs || LOOPS_TIMEOUT_MS;
+  const children = new Set();
+  let stopped = false;
+
+  const folderOf = (candidate) => {
+    if (typeof candidate !== "string" || !candidate || candidate.includes("\0") || !deps.path.isAbsolute(candidate)) return null;
+    try {
+      return deps.fs.statSync(deps.path.join(candidate, ".opencode", "loops")).isDirectory() ? candidate : null;
+    } catch (_) {
+      return null;
+    }
+  };
+
+  function run(project) {
+    return new Promise((resolve) => {
+      const args = ["-P", "-m", "agentgraph.looprun", "list", "--json", "--project", project];
+      const env = Object.assign({}, deps.env, { PYTHONPATH: deps.home, PYTHONIOENCODING: "utf-8" });
+      const out = [];
+      let bytes = 0;
+      let settled = false;
+      let child;
+      let timer = null;
+      const done = (rows) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (child) children.delete(child);
+        resolve(rows);
+      };
+      const kill = () => {
+        try {
+          child.kill("SIGKILL");
+        } catch (_) {
+          /* already gone */
+        }
+        const grace = setTimeout(() => done([]), 300);
+        if (typeof grace.unref === "function") grace.unref();
+      };
+      try {
+        child = deps.spawn(deps.python, args, { cwd: project, env, stdio: ["ignore", "pipe", "ignore"], windowsHide: true, shell: false });
+      } catch (_) {
+        done([]);
+        return;
+      }
+      children.add(child);
+      timer = setTimeout(kill, timeoutMs);
+      if (child.stdout) {
+        child.stdout.on("data", (chunk) => {
+          bytes += chunk.length;
+          if (bytes > LOOPS_MAX_BYTES) kill();
+          else out.push(chunk);
+        });
+      }
+      child.on("error", () => done([]));
+      child.on("close", (code) => {
+        if (code !== 0 || bytes > LOOPS_MAX_BYTES) return done([]);
+        const parsed = safeParse(lastLine(Buffer.concat(out).toString("utf8")) || "");
+        done(Array.isArray(parsed) ? parsed.filter((row) => isPlainObject(row) && typeof row.run === "string" && typeof row.flow === "string") : []);
+      });
+      if (stopped) kill();
+    });
+  }
+
+  return {
+    async list(directory) {
+      try {
+        if (deps.demo || stopped || typeof deps.python !== "string" || !deps.path.isAbsolute(deps.python)) return [];
+        const project = folderOf(directory);
+        return project ? await run(project) : [];
+      } catch (_) {
+        return [];
+      }
+    },
+    stop() {
+      stopped = true;
+      for (const child of children) {
+        try {
+          child.kill("SIGKILL");
+        } catch (_) {
+          /* already gone */
+        }
+      }
+    },
+  };
+}

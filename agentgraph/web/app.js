@@ -3481,6 +3481,346 @@
     }
     const proposalFieldHeld = () => [...detailScroll.querySelectorAll('[data-proposal-field]')].some(box => document.activeElement === box);
     // ---- end n24 ----
+    // ---- v4: loops, in the details of a flow (actions.loops; the contract is agentgraph-loops/v1/r1/api.md) ----
+    // A flow that goes from one agent back to itself (A -> A) can be a loop: the controller runs the agent, runs a check
+    // command, and goes on until the check exits 0 or a limit is reached. The details of such a flow get a Loop section:
+    // the settings (saved with Save, taken back with Remove, each with one Undo), Run, and the runs of the flow newest
+    // first; a run opens to what it was pinned to, every attempt and its final status. Everything shown is what the
+    // back end last said; a refusal is its own words beside the form. The host's action takes `{ op: 'read' }` (the
+    // loops, their settings and runs), `{ op: 'read', run }` (one run) and `{ op: 'save' | 'remove' | 'start' | 'cancel', ... }`
+    // as POST /api/loop takes them. Only a live run is polled (one timer, only while its flow is open).
+    const lcFetch = async request => {
+      const read = request.op === 'read';
+      const response = await fetch(read ? (request.run ? '/api/loop/run?id=' + encodeURIComponent(request.run) : '/api/loops') : '/api/loop', read ? { cache: 'no-store' }
+        : { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request) });
+      let data = null;
+      try { data = await response.json(); } catch (_) { /* the status says it */ }
+      if (!response.ok || !data || data.error) throw Object.assign(new Error(data?.error || 'The loops could not be read or changed (' + response.status + ')'), { status: response.status, ...(typeof data?.rev === 'string' ? { rev: data.rev } : {}) });
+      return data;
+    };
+    const lcAction = action('loops') || (options.actions && typeof fetch === 'function' && /^https?:$/.test(typeof location === 'object' ? location.protocol : '') ? lcFetch : null);
+    const LC_FRESH_MS = 10000, LC_OUTPUT_LINES = 12, LC_POLL_MS = Number(options.loopPollMs) >= 20 ? Number(options.loopPollMs) : 2000;
+    const lc = { data: null, at: 0, loading: false, error: '' };
+    const lcRuns = new Map(), lcReading = new Set(), lcBusy = new Set(), lcDrafts = new Map(), lcNotes = new Map(), lcUndo = new Map(), lcStarts = new Map();
+    let lcOpen = '', lcCancelAsk = '', lcTimer = null, lcWanted = '', lcLate = false;
+    const LC_STATUS = { running: 'Running', passed: 'Passed', failed: 'Failed', limit: 'Stopped at a limit', invalid: 'Not started', check_error: 'Check could not run', inconclusive: 'Check inconclusive', stalled: 'Stalled', agent_error: 'Agent error', cancelled: 'Cancelled', interrupted: 'Interrupted' };
+    const LC_GLOSS = {
+      running: 'The loop is working now.', passed: 'The check exited 0.', failed: 'Every attempt was used and the last check failed.', limit: 'A time or spend limit was reached, so no new attempt began.',
+      invalid: 'It was refused before any attempt (no check command or no goal, for example).', check_error: 'The check command could not be run.', inconclusive: 'The check could not tell whether the work is right.',
+      stalled: 'The last turn was stopped at its time limit.', agent_error: 'The agent could not finish a turn.', cancelled: 'It was cancelled.', interrupted: 'Its controller is gone: it stopped without finishing.'
+    };
+    const LC_AGENT = { returned: 'returned', stalled: 'stalled at its time limit', agent_error: 'agent error' };
+    const LC_CHECK = { pass: 'passed', fail: 'failed', inconclusive: 'inconclusive', check_error: 'could not run' };
+    const lcWord = status => LC_STATUS[status] || text(status) || 'Unknown';
+    const lcKnown = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
+    // An unknown cost is "unknown", never $0.
+    const lcCost = value => lcKnown(value) ? (Number(value) > 0 && Number(value) < 0.005 ? '< $0.01' : cost(value)) : 'unknown';
+    const lcTime = value => { if (!lcKnown(value)) return '—'; const s = Number(value); return s < 1 ? '< 1 s' : s < 10 ? s.toFixed(1) + ' s' : s < 90 ? Math.round(s) + ' s' : s < 5400 ? Math.floor(s / 60) + ' min ' + Math.round(s % 60) + ' s' : Math.floor(s / 3600) + ' h ' + Math.round(s % 3600 / 60) + ' min'; };
+    const lcHere = () => !!lcAction && alive && selected?.type === 'flow' && !!routeById(selected.key);
+    const lcEntry = id => (lc.data?.loops || []).find(item => item.flow === id) || null;
+    const lcRunsOf = id => (lc.data?.runs || []).filter(run => run.flow === id).sort((a, b) => (Number(b.created) || 0) - (Number(a.created) || 0));
+    const lcFieldHeld = () => selected?.type === 'flow' && [...detailScroll.querySelectorAll('[data-loop-field]')].some(box => document.activeElement === box && box.matches('textarea, input[type="text"]'));
+    function lcRedraw(wanted = '', force = true) {
+      if (!lcHere()) return;
+      if (!force && lcFieldHeld()) { lcLate = true; return; }
+      lcWanted = wanted; forceDetail();
+    }
+    function lcClean(reply) {
+      return { project: text(reply.project), loops: (Array.isArray(reply.loops) ? reply.loops : []).filter(item => item && typeof item.flow === 'string'), orphans: (Array.isArray(reply.orphans) ? reply.orphans : []).filter(item => typeof item === 'string'),
+        runs: (Array.isArray(reply.runs) ? reply.runs : []).filter(item => item && typeof item.run === 'string') };
+    }
+    // The loops, read again when older than a few seconds (or when asked); drawn again only when they changed.
+    function lcLoad(force) {
+      if (!lcAction || lc.loading || (!force && lc.data && Date.now() - lc.at < LC_FRESH_MS)) return Promise.resolve();
+      lc.loading = true;
+      const before = JSON.stringify([lc.data, lc.error]);
+      return ask(lcAction, { op: 'read' }).then(reply => { if (!alive) return; lc.data = lcClean(reply); lc.error = ''; },
+        error => { if (alive) lc.error = sentence(text(error?.message) || 'The loops could not be read'); }).then(() => {
+        lc.loading = false; lc.at = Date.now();
+        if (!alive) return;
+        lcSyncOpen(); lcSchedule();
+        if (before !== JSON.stringify([lc.data, lc.error])) lcRedraw('', false);
+      });
+    }
+    // The open run is read again when the list says it moved (and always while it is live).
+    function lcSyncOpen() {
+      if (!lcOpen) return;
+      const row = (lc.data?.runs || []).find(run => run.run === lcOpen), full = lcRuns.get(lcOpen);
+      if (row && (!full || row.live || full.run?.status !== row.status || (full.run?.attempts || []).length !== row.attempts)) lcReadRun(lcOpen);
+    }
+    function lcReadRun(id) {
+      if (!lcAction || lcReading.has(id)) return;
+      lcReading.add(id);
+      ask(lcAction, { op: 'read', run: id }).then(reply => { if (alive && reply.run) { lcRuns.set(id, reply); lcNotes.delete('run:' + id); } },
+        error => { if (alive) lcNotes.set('run:' + id, { kind: 'error', text: sentence(text(error?.message) || 'The run could not be read') }); })
+        .then(() => { lcReading.delete(id); if (alive && lcOpen === id) lcRedraw('', false); });
+    }
+    // One timer, only while the open flow has a live run: it reads the loops again, which reads the open run.
+    function lcSchedule() {
+      const wanted = lcHere() && lcRunsOf(selected.key).some(run => run.live);
+      if (!wanted) { if (lcTimer) { clearTimeout(lcTimer); timers.delete(lcTimer); lcTimer = null; } return; }
+      if (lcTimer) return;
+      lcTimer = later(() => { lcTimer = null; if (lcHere()) lcLoad(true); }, LC_POLL_MS);
+    }
+    // The form's values as text: what is drafted, else what is saved.
+    function lcValues(settings) {
+      const limits = settings?.limits || {}, fromNumber = value => lcKnown(value) ? String(value) : '';
+      return { goal: text(settings?.goal), check: text(settings?.check?.command), attempts: fromNumber(limits.attempts), attempt_seconds: fromNumber(limits.attempt_seconds), seconds: fromNumber(limits.seconds), cost: fromNumber(limits.cost),
+        session: settings?.session === 'fresh' ? 'fresh' : 'reuse', allow_asks: settings?.allow_asks === true };
+    }
+    const lcCurrent = entry => lcDrafts.get(entry.flow) || { ...lcValues(entry.settings), rev: text(entry.rev) };
+    function lcEdit(entry, patch) { lcDrafts.set(entry.flow, { ...lcCurrent(entry), ...patch }); }
+    // The settings to save from the form, or the sentence that refuses them (nothing is sent then).
+    function lcBuild(entry, values) {
+      const number = (raw, top, name, whole) => {
+        const said = String(raw).trim().replace(/^\$/, '');
+        if (!said) return { none: true };
+        const value = Number(said);
+        if (!/^\d+(\.\d+)?$/.test(said) || !(value > 0) || value > top || (whole && !Number.isInteger(value))) return { error: name + ' must be a number above 0 and at most ' + top + '.' };
+        return { value };
+      };
+      const attempts = String(values.attempts).trim();
+      if (!/^\d+$/.test(attempts) || Number(attempts) < 1 || Number(attempts) > 50) return { error: 'Attempts is required: a whole number from 1 to 50.' };
+      const each = number(values.attempt_seconds, 86400, 'Seconds per attempt'), total = number(values.seconds, 604800, 'Seconds in total'), spend = number(values.cost, 10000, 'The spend amount');
+      const bad = [each, total, spend].find(item => item.error); if (bad) return { error: bad.error };
+      const old = entry.settings?.check || {}, command = values.check.trim();
+      const settings = { version: 1, flow: entry.flow };
+      if (values.goal.trim()) settings.goal = values.goal;
+      if (command) settings.check = { command, timeout: lcKnown(old.timeout) ? old.timeout : 300, inconclusive_codes: Array.isArray(old.inconclusive_codes) ? old.inconclusive_codes : [75] };
+      settings.session = values.session === 'fresh' ? 'fresh' : 'reuse';
+      settings.limits = { attempts: Number(attempts) };
+      if (!each.none) settings.limits.attempt_seconds = each.value;
+      if (!total.none) settings.limits.seconds = total.value;
+      if (!spend.none) settings.limits.cost = spend.value;
+      settings.allow_asks = values.allow_asks === true;
+      return { settings };
+    }
+    function lcApply(id, settings, rev) { const entry = lcEntry(id); if (entry) { entry.settings = settings; entry.rev = rev; } }
+    // One write: ask, take the answer, say what happened, read the loops again. A refusal is the server's own words.
+    function lcWrite(id, request, done, wanted) {
+      if (!lcAction || lcBusy.has(id)) return;
+      lcBusy.add(id); lcNotes.delete(id);
+      lcRedraw(wanted);
+      ask(lcAction, request).then(reply => { if (alive) done(reply); }, error => {
+        if (!alive) return;
+        lcNotes.set(id, { kind: 'error', text: sentence(plainWords(text(error?.message))) || 'Not changed.' });
+        const draft = lcDrafts.get(id); if (draft && isStale(error) && typeof error.rev === 'string') draft.rev = error.rev;
+      }).then(() => { lcBusy.delete(id); if (alive) { lcRedraw(wanted); lcLoad(true); } });
+    }
+    function lcSave(entry) {
+      const values = lcCurrent(entry), built = lcBuild(entry, values);
+      if (built.error) { lcNotes.set(entry.flow, { kind: 'error', text: built.error }); lcRedraw('c:save'); return; }
+      const rev = typeof values.rev === 'string' ? values.rev : text(entry.rev), before = entry.settings;
+      lcWrite(entry.flow, { op: 'save', flow: entry.flow, settings: built.settings, rev }, reply => {
+        lcDrafts.delete(entry.flow);
+        const now = reply.settings && typeof reply.settings === 'object' ? reply.settings : built.settings, back = reply.before && typeof reply.before === 'object' ? reply.before : null;
+        lcApply(entry.flow, now, text(reply.rev));
+        lcNotes.set(entry.flow, { kind: 'ok', text: 'Saved.' });
+        lcUndo.set(entry.flow, { what: 'The loop settings were saved.', request: back ? { op: 'save', flow: entry.flow, settings: back, rev: text(reply.rev) } : { op: 'remove', flow: entry.flow, rev: text(reply.rev) },
+          undone: back ? 'The settings are back as they were.' : 'The settings are removed again.' });
+      }, 'c:save');
+    }
+    function lcRemove(entry) {
+      lcWrite(entry.flow, { op: 'remove', flow: entry.flow, rev: text(lcCurrent(entry).rev) }, reply => {
+        lcDrafts.delete(entry.flow); lcApply(entry.flow, null, '');
+        lcNotes.set(entry.flow, { kind: 'ok', text: 'The saved settings are removed.' });
+        if (reply.before && typeof reply.before === 'object') lcUndo.set(entry.flow, { what: 'The loop settings were removed.', request: { op: 'save', flow: entry.flow, settings: reply.before, rev: '' }, undone: 'The settings are back.' });
+        else lcUndo.delete(entry.flow);
+      }, 'c:remove');
+    }
+    function lcUndoNow(entry) {
+      const last = lcUndo.get(entry.flow); if (!last || lcBusy.has(entry.flow)) return;
+      lcWrite(entry.flow, last.request, reply => {
+        lcUndo.delete(entry.flow); lcDrafts.delete(entry.flow);
+        if (last.request.op === 'save') lcApply(entry.flow, reply.settings && typeof reply.settings === 'object' ? reply.settings : last.request.settings, text(reply.rev)); else lcApply(entry.flow, null, '');
+        lcNotes.set(entry.flow, { kind: 'ok', text: last.undone });
+      }, 'c:save');
+    }
+    // Run: with a goal saved it starts at once; without one it asks for the goal and, if wanted, a work folder.
+    function lcStart(entry, request) {
+      lcWrite(entry.flow, { op: 'start', flow: entry.flow, ...request }, reply => {
+        lcStarts.delete(entry.flow);
+        const id = text(reply.run); lcOpen = id; lcCancelAsk = '';
+        lcNotes.set(entry.flow, { kind: reply.status === 'invalid' ? 'error' : 'ok', text: reply.status === 'invalid' ? 'Not started: ' + (sentence(text(reply.reason)) || 'it was refused.') : 'Started. The run is open below.' });
+        if (id) lcReadRun(id);
+      }, 'c:run');
+    }
+    function lcRunPressed(entry) {
+      if (lcBusy.has(entry.flow)) return;
+      if (text(entry.settings?.goal).trim()) { lcStart(entry, {}); return; }
+      lcStarts.set(entry.flow, { goal: lcCurrent(entry).goal, workdir: '' }); lcNotes.delete(entry.flow); lcRedraw('f:run_goal');
+    }
+    function lcStartForm(entry) {
+      const ask = lcStarts.get(entry.flow), box = el('div', 'ag-loop-start');
+      const goal = el('textarea', 'ag-route-text ag-loop-goal'); goal.rows = 3; goal.spellcheck = false; goal.value = ask.goal; goal.dataset.loopField = 'run_goal'; goal.setAttribute('aria-required', 'true');
+      goal.addEventListener('input', () => { ask.goal = goal.value; });
+      const folder = el('input', 'ag-input'); folder.type = 'text'; folder.autocomplete = 'off'; folder.spellcheck = false; folder.value = ask.workdir; folder.dataset.loopField = 'workdir'; folder.placeholder = text(lc.data?.project);
+      folder.addEventListener('input', () => { ask.workdir = folder.value; });
+      const one = el('label', 'ag-field'), two = el('label', 'ag-field');
+      one.append(el('span', 'ag-form-label', 'Goal for this run (required)'), goal);
+      two.append(el('span', 'ag-form-label', 'Work folder (optional; the project folder if empty)'), folder);
+      const buttons = el('span', 'ag-form-buttons');
+      buttons.append(setupButton('Start', { loopControl: 'start' }, () => {
+        if (lcBusy.has(entry.flow)) return;
+        const said = ask.goal.trim(), where = ask.workdir.trim();
+        if (!said) { lcNotes.set(entry.flow, { kind: 'error', text: 'Say what the loop should do: a goal is needed.' }); lcRedraw('f:run_goal'); return; }
+        lcStart(entry, { goal: said, ...(where ? { workdir: where } : {}) });
+      }, 'ag-form-submit'), setupButton('Cancel', { loopControl: 'start-cancel' }, () => { lcStarts.delete(entry.flow); lcNotes.delete(entry.flow); lcRedraw('c:run'); }));
+      box.append(one, two, buttons);
+      return box;
+    }
+    function lcFieldRow(entry, label, name, kind, hint) {
+      const values = lcCurrent(entry), field = el('label', 'ag-field ag-loop-field');
+      let box;
+      if (kind === 'textarea') { box = el('textarea', 'ag-route-text ag-loop-goal'); box.rows = 3; box.spellcheck = false; }
+      else if (kind === 'session') {
+        box = el('select', 'ag-input'); [['reuse', 'One session for every attempt'], ['fresh', 'A fresh session for each attempt']].forEach(([value, said]) => { const option = el('option', '', said); option.value = value; box.append(option); });
+      } else { box = el('input', 'ag-input'); box.type = 'text'; box.autocomplete = 'off'; box.spellcheck = false; if (kind === 'number') box.inputMode = 'decimal'; }
+      box.value = values[name]; box.dataset.loopField = name; box.dataset.saved = text(lcValues(entry.settings)[name]);
+      if (name === 'attempts') box.setAttribute('aria-required', 'true');
+      const edit = () => lcEdit(entry, { [name]: box.value });
+      box.addEventListener(kind === 'session' ? 'change' : 'input', edit);
+      box.addEventListener('blur', () => { if (lcLate) { lcLate = false; later(() => lcRedraw('', false), 0); } });
+      field.append(el('span', 'ag-form-label', label), box);
+      if (hint) field.append(el('span', 'ag-loop-hint', hint));
+      return field;
+    }
+    function lcForm(item, entry) {
+      const form = el('div', 'ag-loop-form'); form.dataset.loopForm = entry.flow;
+      form.append(lcFieldRow(entry, 'Goal', 'goal', 'textarea'), lcFieldRow(entry, 'Check command', 'check', 'text', 'The loop is done when it exits 0.'),
+        lcFieldRow(entry, 'Attempts (1 to 50, required)', 'attempts', 'number'), lcFieldRow(entry, 'Seconds per attempt (optional)', 'attempt_seconds', 'number'),
+        lcFieldRow(entry, 'Seconds in total (optional)', 'seconds', 'number'), lcFieldRow(entry, 'No new attempt once spend reaches… (dollars, optional)', 'cost', 'number', 'Checked before each attempt; an attempt already begun can pass it.'),
+        lcFieldRow(entry, 'Session', 'session', 'session'));
+      const asks = el('label', 'ag-check ag-loop-asks'), box = el('input'); box.type = 'checkbox'; box.checked = lcCurrent(entry).allow_asks === true; box.dataset.loopField = 'allow_asks';
+      box.addEventListener('change', () => lcEdit(entry, { allow_asks: box.checked }));
+      asks.append(box, el('span', '', 'Allow actions that would ask')); form.append(asks);
+      form.append(el('p', 'ag-loop-hint', 'Off: an action that would ask for permission is refused. On: the agent can do anything its agent file does not deny; use a folder you can afford to lose.'));
+      const actions = el('div', 'ag-form-actions'), buttons = el('div', 'ag-form-buttons'), busy = lcBusy.has(entry.flow);
+      const save = setupButton('Save', { loopControl: 'save' }, () => { if (!lcBusy.has(entry.flow)) lcSave(entry); }, 'ag-form-submit');
+      buttons.append(save);
+      if (entry.settings) buttons.append(setupButton('Remove', { loopControl: 'remove' }, () => { if (!lcBusy.has(entry.flow)) lcRemove(entry); }));
+      if (busy) buttons.querySelectorAll('button').forEach(button => button.setAttribute('aria-disabled', 'true'));
+      actions.append(buttons); form.append(actions);
+      item.append(form);
+    }
+    function lcLines(item, entry) {
+      const said = lcNotes.get(entry.flow);
+      if (said) { const line = el('p', said.kind === 'error' ? 'ag-form-error ag-loop-line' : 'ag-form-reason ag-loop-line', said.text); line.dataset.loopLine = said.kind; line.setAttribute('role', said.kind === 'error' ? 'alert' : 'status'); item.append(line); }
+      else if (lcBusy.has(entry.flow)) item.append(el('p', 'ag-form-reason ag-loop-line', 'Waiting for the answer…'));
+      const undo = lcUndo.get(entry.flow);
+      if (undo) { const row = el('p', 'ag-setup-undo'); row.append(el('span', '', undo.what + ' '), setupButton('Undo', { loopControl: 'undo' }, () => lcUndoNow(entry))); item.append(row); }
+    }
+    // What a run was pinned to: the check and the limits it used, in the words of the settings.
+    function lcDefinition(full) {
+      const box = el('div', 'ag-loop-definition'); box.dataset.loopDefinition = '';
+      const settings = full.definition?.settings || {}, limits = settings.limits || {}, line = (label, value) => { const p = el('p', 'ag-loop-def'); p.append(el('span', 'ag-loop-def-label', label), el('span', 'ag-loop-def-value', value)); box.append(p); return p; };
+      line('Pinned', 'what this run used, even if the settings changed since');
+      if (settings.check?.command) { const p = line('Check', ''); const code = el('code', '', text(settings.check.command)); p.lastChild.append(code, document.createTextNode(lcKnown(settings.check.timeout) ? ' (stops after ' + Number(settings.check.timeout) + ' s)' : '')); }
+      else line('Check', 'none');
+      const bits = [plural(Number(limits.attempts) || 0, 'attempt', 'attempts')];
+      if (lcKnown(limits.attempt_seconds)) bits.push(Number(limits.attempt_seconds) + '\u00a0s per attempt');
+      if (lcKnown(limits.seconds)) bits.push(Number(limits.seconds) + '\u00a0s in total');
+      if (lcKnown(limits.cost)) bits.push('no new attempt once spend reaches ' + cost(limits.cost));
+      line('Limits', bits.join(' · '));
+      line('Session', (settings.session === 'fresh' ? 'a fresh one for each attempt' : 'one for every attempt') + ' · actions that would ask: ' + (settings.allow_asks ? 'allowed' : 'refused'));
+      if (full.definition?.goal) line('Goal', text(full.definition.goal).trim());
+      if (full.definition?.workdir) line('Folder', text(full.definition.workdir));
+      return box;
+    }
+    const lcClip = line => Array.from(line.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')).slice(0, 400).join('');
+    function lcAttempt(parent, attempt, given, next) {
+      const item = el('div', 'ag-loop-attempt'); item.dataset.attempt = String(attempt.n);
+      item.append(el('h4', '', 'Attempt ' + attempt.n));
+      const agent = el('p', 'ag-loop-agent'), turn = attempt.agent;
+      agent.textContent = turn ? 'Agent: ' + (LC_AGENT[turn.outcome] || text(turn.outcome) || 'no outcome') + ' · ' + lcTime(turn.seconds) + ' · ' + lcCost(turn.cost) + (turn.error ? ' · ' + sentence(lcClip(text(turn.error))) : '') : 'Agent: working…';
+      item.append(agent);
+      const check = el('p', 'ag-loop-check'), result = attempt.check;
+      if (result) {
+        check.dataset.outcome = text(result.outcome);
+        check.textContent = 'Check: ' + (LC_CHECK[result.outcome] || text(result.outcome) || 'no outcome') + (lcKnown(result.exit) ? ' · exit ' + Number(result.exit) : '') + (result.timed_out ? ' · timed out' : '') + ' · ' + lcTime(result.seconds) + (result.error ? ' · ' + sentence(lcClip(text(result.error))) : '');
+      } else check.textContent = turn ? 'Check: not run yet' : 'Check: waiting for the agent';
+      item.append(check);
+      const output = text(given?.check_output).replace(/\n+$/, '');
+      if (output) {
+        const lines = output.split('\n'), shown = lines.slice(-LC_OUTPUT_LINES);
+        if (lines.length > shown.length || given?.check_output_truncated) item.append(el('p', 'ag-loop-hint', (lines.length > shown.length ? plural(lines.length - shown.length, 'earlier line', 'earlier lines') + ' not shown' : 'The output was cut') + (given?.check_output_truncated ? '; only its last part was kept' : '') + '.'));
+        const pre = el('pre', 'ag-loop-output', shown.map(lcClip).join('\n')); pre.tabIndex = 0; pre.setAttribute('aria-label', 'Last lines of the check output, attempt ' + attempt.n); item.append(pre);
+      }
+      if (attempt.feedback && next?.message) {
+        item.append(el('p', 'ag-loop-hint', 'Sent to the agent next:'));
+        const pre = el('pre', 'ag-loop-feedback', text(next.message).replace(/\n+$/, '')); item.append(pre);
+      }
+      parent.append(item);
+    }
+    function lcBody(row, run, full) {
+      const body = el('div', 'ag-loop-body'), info = full.run || {}, live = info.live === true || run.live === true;
+      if (live) {
+        if (lcCancelAsk === run.run) {
+          const dialog = el('div', 'ag-loop-ask'); dialog.setAttribute('role', 'group'); dialog.setAttribute('aria-label', 'Confirm cancel');
+          dialog.append(el('p', '', 'Cancel this run? The turn now running is stopped and no new attempt begins.'));
+          const buttons = el('span', 'ag-form-buttons');
+          buttons.append(setupButton('Cancel run', { loopControl: 'cancel-confirm:' + run.run }, () => { lcCancelAsk = ''; lcWrite(run.flow, { op: 'cancel', run: run.run }, () => { lcNotes.set(run.flow, { kind: 'ok', text: 'Cancel asked. The run stops at once or before its next attempt.' }); }, 'c:cancel-run:' + run.run); }, 'ag-form-submit'),
+            setupButton('Keep it running', { loopControl: 'cancel-keep:' + run.run }, () => { lcCancelAsk = ''; lcRedraw('c:cancel-run:' + run.run); }));
+          dialog.append(buttons); body.append(dialog);
+        } else body.append(setupButton('Cancel run', { loopControl: 'cancel-run:' + run.run }, () => { lcCancelAsk = run.run; lcRedraw('c:cancel-confirm:' + run.run); }));
+      }
+      body.append(lcDefinition(full));
+      const given = new Map((Array.isArray(full.attempts) ? full.attempts : []).map(item => [item.n, item]));
+      (Array.isArray(info.attempts) ? info.attempts : []).forEach(attempt => lcAttempt(body, attempt, given.get(attempt.n), given.get(attempt.n + 1)));
+      if (!(Array.isArray(info.attempts) && info.attempts.length)) body.append(el('p', 'ag-run-empty', live ? 'No attempt has finished yet' : 'No attempt was made'));
+      const final = el('p', 'ag-loop-final'), word = el('span', 'ag-loop-final-status', lcWord(info.status || run.status)); word.dataset.status = text(info.status || run.status); if ((info.status || run.status) === 'passed') word.dataset.pass = 'true';
+      final.append(word, el('span', 'ag-loop-final-reason', text(info.reason || run.reason)));
+      body.append(final);
+      row.append(body);
+    }
+    function lcRunRow(list, run) {
+      const open = lcOpen === run.run, full = lcRuns.get(run.run), row = el('div', 'ag-loop-run');
+      row.dataset.loopRun = run.run; row.dataset.status = text(run.status); row.dataset.open = String(open);
+      const head = el('button', 'ag-loop-run-head'); head.type = 'button'; head.setAttribute('aria-expanded', String(open)); head.dataset.loopControl = 'open:' + run.run;
+      const status = el('span', 'ag-loop-status', lcWord(run.status)); status.dataset.status = text(run.status); status.title = LC_GLOSS[run.status] || '';
+      if (run.status === 'passed') status.dataset.pass = 'true';
+      const meta = el('span', 'ag-loop-meta'), seen = Number(run.attempts) || 0, limit = Number(run.limit) || 0;
+      const age = ago(run.created);
+      meta.append(el('span', 'ag-loop-attempts', seen + ' of ' + limit + (limit === 1 ? ' attempt' : ' attempts')), el('span', 'ag-loop-time', lcTime(run.seconds)), el('span', 'ag-loop-cost', lcCost(run.cost)), el('span', 'ag-loop-age', age === 'now' ? 'just now' : age + ' ago'));
+      head.append(status, meta);
+      head.addEventListener('click', () => { lcOpen = open ? '' : run.run; lcCancelAsk = ''; if (!open && !lcRuns.has(run.run)) lcReadRun(run.run); else if (!open) lcSyncOpen(); lcRedraw('c:open:' + run.run); });
+      row.append(head);
+      if (open) {
+        const note = lcNotes.get('run:' + run.run);
+        if (full) lcBody(row, run, full); else row.append(note ? el('p', 'ag-form-error ag-loop-line', note.text) : el('p', 'ag-run-empty ag-loop-line', 'Reading the run…'));
+      }
+      list.append(row);
+    }
+    // The section of one flow. Not drawn without the host's action, nor for a flow the loops list does not know.
+    function lcSection(flow) {
+      if (!lcAction) return null;
+      lcLoad(false); lcSchedule();
+      const entry = lcEntry(flow.id), item = el('section', 'ag-detail-section ag-loopbox');
+      item.dataset.loopFor = flow.id;
+      item.append(el('h3', '', 'Loop'));
+      if (lc.error) { const line = el('p', 'ag-form-error ag-loop-line', lc.error); line.dataset.loopLine = 'error'; line.setAttribute('role', 'alert'); item.append(line); }
+      if (!entry) { if (!lc.data && !lc.error) item.append(el('p', 'ag-run-empty', 'Reading the loop settings…')); return lc.data && !lc.error ? null : item; }
+      item.dataset.loopRunnable = String(entry.runnable === true);
+      if (entry.runnable !== true) item.append(Object.assign(el('p', 'ag-form-reason ag-loop-reason', text(entry.reason) || 'This flow cannot be a loop.'), { }));
+      if (entry.runnable !== true) item.lastChild.dataset.loopReason = '';
+      if (entry.problem) { const line = el('p', 'ag-form-error ag-loop-problem', 'The saved settings cannot be used: ' + sentence(plainWords(text(entry.problem)))); line.dataset.loopProblem = ''; item.append(line); }
+      if (entry.runnable === true) {
+        item.append(el('p', 'ag-loop-intro', 'Runs this agent again and again. After each turn your check command runs; the loop is done when it exits 0, or when a limit is reached.'));
+        lcForm(item, entry); lcLines(item, entry);
+        const runRow = el('div', 'ag-loop-runrow');
+        if (lcStarts.has(entry.flow)) runRow.append(lcStartForm(entry));
+        else runRow.append(setupButton('Run', { loopControl: 'run' }, () => lcRunPressed(entry), 'ag-form-submit'));
+        item.append(runRow);
+        const runs = lcRunsOf(flow.id), list = el('div', 'ag-loop-runs');
+        item.append(el('p', 'ag-form-label ag-loop-runs-label', 'Runs'), list);
+        appendList(list, runs, run => lcRunRow(list, run));
+        if (!runs.length) list.append(el('p', 'ag-run-empty', 'No runs yet'));
+      }
+      const orphans = lc.data?.orphans || [];
+      if (orphans.length) { const line = el('p', 'ag-form-reason ag-loop-orphans', 'Saved loop settings with no flow: ' + orphans.slice(0, 20).map(text).join(', ') + (orphans.length > 20 ? ' and ' + (orphans.length - 20) + ' more' : '') + '.'); line.dataset.loopOrphans = ''; item.append(line); }
+      return item;
+    }
+    // ---- end v4 ----
     function renderRunDetail(graph) {
       eyebrow.textContent = '';
       detailScroll.append(el('h2', 'ag-detail-title ag-run-title', 'Run'));
@@ -4350,6 +4690,7 @@
       if (outputHeld()) return; // a step's output being edited
       if (!force && setupFieldHeld()) return; // n10: a limit or a setup name being typed
       if (!force && proposalFieldHeld()) return; // n24: a reason for rejecting being typed
+      if (!force && lcFieldHeld()) { lcLate = true; return; } // v4: a loop field being typed in
       if (!force && detailScroll.querySelector('[data-form]')?.dataset.form === selected.type + ':' + selected.key) return;
       // Nor the name of an agent being renamed.
       const renaming = selected.type === 'agent' ? detailScroll.querySelector('[data-rename]') : null;
@@ -4363,6 +4704,7 @@
       // A skill control with focus gets it back after the rebuild (the same control of the same skill).
       const focusedSkill = detailScroll.contains(focused) ? SKILL_CONTROLS.find(key => key in focused.dataset) : null, focusedValue = focusedSkill ? focused.dataset[focusedSkill] : null;
       const focusedProposal = detailScroll.contains(focused) ? focused.closest('[data-proposal-control]')?.dataset.proposalControl : '';
+      const focusedLoop = detailScroll.contains(focused) && focused.closest?.('[data-loop-control]') ? 'c:' + focused.closest('[data-loop-control]').dataset.loopControl : '';
       const focusedSection = detailScroll.contains(focused) ? headingOf(focused.closest('.ag-detail-section')) : '';
       detailScroll.replaceChildren();
       if (selected.type === 'learning') {
@@ -4401,7 +4743,8 @@
             actions.append(state, remove); item.append(actions);
           } else box.readOnly = true;
           detailScroll.append(item);
-          [pathRunSection(flow), costSection(flow), commandSection(flow)].forEach(part => { if (part) detailScroll.append(part); });
+          const looping = lcSection(flow); // v4: before Run for a flow that can loop, last otherwise
+          [looping?.dataset.loopRunnable === 'true' ? looping : null, pathRunSection(flow), costSection(flow), commandSection(flow), looping?.dataset.loopRunnable === 'true' ? null : looping].forEach(part => { if (part) detailScroll.append(part); });
         }
       } else if (selected.type === 'new-agent') renderNewAgent();
       else if (selected.type === 'new-skill') renderNewSkill(selected.key);
@@ -4503,6 +4846,7 @@
       detailScroll.scrollTop = scroll;
       if (side.el.isConnected && focusedChat && side.el.contains(focusedChat) && document.activeElement !== focusedChat) focusedChat.focus({ preventScroll: true });
       if (chat.el.isConnected) { chatScroll(); if (focusedChat?.isConnected && document.activeElement !== focusedChat) focusedChat.focus({ preventScroll: true }); }
+      { const wanted = lcWanted || focusedLoop; lcWanted = ''; if (wanted) Array.from(detailScroll.querySelectorAll('[data-loop-control], [data-loop-field]')).find(item => (item.dataset.loopControl ? 'c:' + item.dataset.loopControl : 'f:' + item.dataset.loopField) === wanted)?.focus({ preventScroll: true }); }
       { const wanted = proposalWanted || focusedProposal; proposalWanted = ''; if (wanted) Array.from(detailScroll.querySelectorAll('[data-proposal-control]')).find(item => item.dataset.proposalControl === wanted)?.focus({ preventScroll: true }); }
       if (focusedStep) Array.from(detailScroll.querySelectorAll('[data-step]')).find(row => row.dataset.step === focusedStep)?.querySelector('summary').focus({ preventScroll: true });
       if (focusedSkill && !detailScroll.contains(document.activeElement)) Array.from(detailScroll.querySelectorAll('button, textarea')).find(item => item.dataset[focusedSkill] === focusedValue)?.focus({ preventScroll: true });

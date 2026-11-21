@@ -33,7 +33,7 @@ import {
   scene, sceneFits, frameInterval, changeAt, orbitTurned, orbitReset, TURN_STEP, ELEVATION_STEP, DRAG_TURN_PER_CELL, DRAG_ELEVATION_PER_ROW,
   finishedRuns, STREAK_MS, STREAK_GAP_MS,
 } from "./scene.js";
-import { createSnapshotRunner, createChatRunner, createSideAskRunner, errorDocument, errorMessage, oneLine, runFlowPrompt, GOAL_LIMIT, SIDE_QUESTION_LIMIT } from "./runner.js";
+import { createSnapshotRunner, createChatRunner, createSideAskRunner, createLoopRunner, errorDocument, errorMessage, oneLine, runFlowPrompt, GOAL_LIMIT, SIDE_QUESTION_LIMIT } from "./runner.js";
 import { chatLines, chatWindow, chatHeading, cleanChat, CHAT_MIN_INLINE } from "./chat.js";
 import { createDemoRunner, DEMO_INTERVAL_MS } from "./demo.js";
 
@@ -356,6 +356,10 @@ export function createPlugin(host) {
           demo: options.demo,
         });
 
+    // The loop runs of the project (`agentgraph loop list --json`), added to each snapshot as `doc.loops`; read only when the
+    // project has run a loop (a `.opencode/loops` folder), so most projects spawn nothing.
+    const loopRunner = createLoopRunner({ spawn: host.spawn, fs: host.fs, path: host.path, env: host.env, home: options.home, python: options.python, demo: demo || options.demo });
+
     const requestRender = () => {
       try {
         if (ctx.renderer && typeof ctx.renderer.requestRender === "function") ctx.renderer.requestRender();
@@ -539,9 +543,14 @@ export function createPlugin(host) {
         if (disposed || stopped || !current) return Promise.resolve();
         const session = current;
         const asked = generation;
-        return runner
-          .snapshot({ session, directory: directory() })
-          .catch((error) => errorDocument(errorMessage(error)))
+        return Promise.all([
+          runner.snapshot({ session, directory: directory() }).catch((error) => errorDocument(errorMessage(error))),
+          loopRunner.list(directory()).catch(() => []),
+        ])
+          .then(([doc, loops]) => {
+            if (doc && typeof doc === "object" && !doc.error && loops.length) doc.loops = loops;
+            return doc;
+          })
           .then((doc) => {
             if (disposed || stopped || asked !== generation || session !== current) return; // late result: drop it
             const before = state();
@@ -1708,6 +1717,7 @@ export function createPlugin(host) {
       chatFeed.stop();
       sideRunner.stop();
       runner.stop();
+      loopRunner.stop();
       for (const remove of [...panelLayers]) remove();
       for (const unregister of disposers) {
         try {

@@ -1918,6 +1918,103 @@ test("proposals: more than 3 are cut to +N more, none or malformed ones add no r
   assert.ok(!/[\u0000-\u0008\u001b]/.test(text) && text.includes("<b>x</b>"), text);
 });
 
+// v4: loop runs (`doc.loops`: what `agentgraph loop list --json` prints, one state per run, newest first)
+const loopRun = (id, flow, status, extra = {}) => Object.assign({ version: 1, run: id, flow, status, reason: "", created: 100, limits: { attempts: 4 }, attempts: [], totals: { attempts: 0, cost: 0.0438, seconds: 15 } }, extra);
+const loopDoc = (loops) => keep(D([A("orchestrator", "decide")], null, "orchestrator", { loops }));
+const LOOPS = [
+  loopRun("20261121-051500-0002", "fix-loop", "running", { attempts: [{ n: 1 }], totals: { attempts: 1, cost: null, seconds: 5 } }),
+  loopRun("20261121-050000-0001", "fix-loop", "failed", { attempts: [{ n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }], totals: { attempts: 4, cost: 0.2, seconds: 30 } }),
+  loopRun("20261121-043755-90a7", "v2-real", "passed", { attempts: [{ n: 1 }, { n: 2 }], totals: { attempts: 2, cost: 0.0438369, seconds: 15 } }),
+];
+test("loops: a short list of runs (flow, status, attempts of the limit, cost, run id), the live one first, then the commands; an unknown cost reads unknown, never $0.00", () => {
+  const lines = listText(loopDoc(LOOPS), 70);
+  const at = lines.findIndex((l) => l.includes("fix-loop"));
+  assert.ok(at >= 0, lines.join("\n"));
+  assert.deepEqual(lines.slice(at, at + 4).map((l) => l.trimEnd()), [
+    "↻ fix-loop running 1/4 cost unknown  20261121-051500-0002",
+    "– fix-loop failed 4/4 $0.20  20261121-050000-0001",
+    "✓ v2-real passed 2/4 $0.04  20261121-043755-90a7",
+    R.LOOP_COMMANDS,
+  ]);
+  assert.equal(R.LOOP_COMMANDS, "agentgraph loop status|cancel RUN");
+  assert.ok(!lines.join("\n").includes("$0.00"));
+  const view = R.layout(loopDoc(LOOPS), { width: 70, now: NOW });
+  assert.ok(view.items.every((item) => !/loop/.test(item.key)), "a loop row is selectable");
+  const rows = R.render(loopDoc(LOOPS), { width: 70, now: NOW });
+  assert.equal(rows[at][0].tone, "accent");
+  assert.equal(rows[at + 1].find((span) => span.text === " failed").tone, "danger");
+});
+test("loops: every contract status reads differently in words and only passed reads as a pass; more than 3 runs are cut to +N more; none or malformed ones add no row; hostile text is plain; every width holds", () => {
+  const statuses = ["running", "passed", "failed", "limit", "invalid", "check_error", "inconclusive", "stalled", "agent_error", "cancelled", "interrupted"];
+  const words = statuses.map((status) => {
+    const text = listText(loopDoc([loopRun("r-" + status, "f", status)]), 80).find((l) => l.includes("r-" + status));
+    assert.ok(text, status);
+    return text.split(" ").slice(2).join(" ").split(" 0/")[0].replace(/ \d+\/\d+.*$/, "");
+  });
+  assert.equal(new Set(words).size, 11, words.join(" | "));
+  statuses.forEach((status, i) => { if (status !== "passed") assert.ok(!/pass/i.test(words[i]) && !listText(loopDoc([loopRun("r-" + status, "f", status)]), 80).some((l) => l.includes("r-" + status) && l.startsWith("✓")), status); });
+  const many = Array.from({ length: 6 }, (_, i) => loopRun("r-" + i, "f" + i, "failed", { created: 100 - i }));
+  const cut = listText(loopDoc(many), 60);
+  assert.ok(cut.some((l) => l.startsWith("+3 more loop runs")), cut.join("\n"));
+  assert.equal(cut.filter((l) => l.startsWith("– f")).length, 3);
+  const without = listText(loopDoc([]), 50).join("\n");
+  for (const bad of [undefined, null, "x", [null, 3, {}, { run: 5 }, { run: "" }, { run: "a" }, { run: "a", flow: "f" }]]) {
+    assert.equal(listText(keep(D([A("orchestrator", "decide")], null, "orchestrator", { loops: bad })), 50).join("\n"), without, JSON.stringify(bad));
+  }
+  const evil = loopDoc([loopRun("r-e", "\u001b[31mred\u0007 <b>x</b>\n", "failed", { reason: "x\u0000" })]);
+  for (const width of [8, 12, 20, 37, 80]) for (const line of R.render(evil, { width, now: NOW })) assert.ok(R.lineWidth(line) <= width, "wide at " + width);
+  const text = listText(evil, 60).join("\n");
+  assert.ok(!/[\u0000-\u0008\u001b]/.test(text) && text.includes("<b>x</b>"), text);
+});
+const { createLoopRunner } = await import(src("runner.js"));
+test("loop runner: `agentgraph.looprun list --json --project DIR`, no shell, only when the project has a loops folder; any failure is an empty list", async () => {
+  const project = fs.mkdtempSync(path.join(tmp, "loop-project-"));
+  const argvs = [];
+  const python = fakePython("loop-python", `echo '[{"run":"r-1","flow":"f","status":"passed","attempts":[],"limits":{"attempts":2},"totals":{"cost":0.01}}]'`);
+  const mk = (extra = {}) => createLoopRunner(Object.assign({ spawn: (c, a, o) => (argvs.push([c, ...a, o]), spawn(c, a, o)), fs, path, env: process.env, home: tmp, python }, extra));
+  assert.deepEqual(await mk().list(project), [], "no loops folder, no process");
+  assert.equal(argvs.length, 0);
+  fs.mkdirSync(path.join(project, ".opencode", "loops"), { recursive: true });
+  const rows = await mk().list(project);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].run, "r-1");
+  assert.deepEqual(argvs[0].slice(0, 7), [python, "-P", "-m", "agentgraph.looprun", "list", "--json", "--project"]);
+  assert.equal(argvs[0][7], project);
+  assert.equal(argvs[0].at(-1).shell, false);
+  assert.equal(argvs[0].at(-1).env.PYTHONPATH, tmp);
+  const bad = async (body) => assert.deepEqual(await mk({ python: fakePython("loop-bad", body) }).list(project), [], body);
+  await bad("echo 'not json'");
+  await bad(`echo '{"run":"x"}'`);
+  await bad("exit 3");
+  await bad("");
+  assert.deepEqual(await mk({ python: path.join(tmp, "no-such-python") }).list(project), []);
+  assert.deepEqual(await mk({ python: "python3" }).list(project), [], "a relative interpreter is refused");
+  assert.deepEqual(await mk().list(path.join(tmp, "nope")), []);
+  assert.deepEqual(await mk({ demo: true }).list(project), [], "the demo has no loops");
+});
+
+test("loops in the panel: a project with a loops folder gets the loop runs in its panel (read with the snapshot, `agentgraph.looprun list --json`); one without spawns no loop command", async () => {
+  const loopsFolder = path.join(tmp, ".opencode", "loops");
+  const listing = JSON.stringify([loopRun("20261121-051500-0002", "fix-loop", "running", { attempts: [{ n: 1 }], totals: { attempts: 1, cost: null, seconds: 5 } })]);
+  const python = fakePython("panel-loop-python", `case "$*" in *agentgraph.looprun*) echo '${listing}';; *agentgraph.chatfeed*) echo '{"session":"x","agent":null,"busy":false,"items":[],"truncated":false,"more":false,"warning":null}';; *) cat "${chatSnap}";; esac`);
+  const none = await chatPanel({ python, size: [80, 38] });
+  try {
+    assert.ok(!none.argvs.some((a) => a.includes("agentgraph.looprun")), "a loop command ran with no loops folder");
+    assert.ok(!none.lines().join("\n").includes(R.LOOP_COMMANDS));
+  } finally { none.done(); }
+  fs.mkdirSync(loopsFolder, { recursive: true });
+  try {
+    const c = await chatPanel({ python, size: [80, 38] });
+    try {
+      await waitFor(() => c.lines().join("\n").includes(R.LOOP_COMMANDS), 5000, "the loop rows");
+      const text = c.lines().join("\n");
+      assert.ok(/fix-loop running 1\/4 cost unknown/.test(text), text);
+      const call = c.argvs.find((a) => a.includes("agentgraph.looprun"));
+      assert.deepEqual(call.slice(1, 8), ["-P", "-m", "agentgraph.looprun", "list", "--json", "--project", tmp]);
+    } finally { c.done(); }
+  } finally { fs.rmSync(path.join(tmp, ".opencode"), { recursive: true, force: true }); }
+});
+
 test("scene 2D: header, needs lines, the hub ring, names on both sides, the instruments; no labels", () => {
   const lines = sceneText(S.sceneStrict(demoWorn, { width: 120, height: 40, now: 1234 }));
   assert.match(lines[0], /^◉ orchestrator [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] +\d+\/11  \$\d+\.\d\d$/);

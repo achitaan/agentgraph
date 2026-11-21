@@ -316,6 +316,7 @@ function loadWindow(code, { onAgentGraph } = {}) {
 
 const STALE_REV = "0000000000000000"; // a rev the view showed before something else changed the thing
 const CURRENT_REV = "1111111111111111";
+const LOOP_REV_NOW = "ab".repeat(32); // a loop settings rev: the file's sha256
 
 function windowContext(definition, overrides = {}) {
   const added = [];
@@ -401,6 +402,16 @@ function windowContext(definition, overrides = {}) {
           if (input.id === "p-refused") return JSON.stringify({ error: "file agents/impl.md changed since the proposal was drafted" });
           if (input.op === "read" && !input.id) return JSON.stringify({ proposals: [{ id: "p-1", title: "T", state: "drafted", created: 1, added: 1, removed: 0, files: ["agents/a.md"], summary: { verdict: "not enough runs" } }] });
           return JSON.stringify({ id: input.id, state: { approve: "applied", reject: "rejected", reopen: "drafted", revert: "reverted", read: "drafted" }[input.op], files: [], history: [] });
+        },
+        // v4: loops (the page's request as JSON text, with the session's directory): the loops, a run, a save, a start, a cancel.
+        loops: async (input, options) => {
+          calls.push({ op: "loops", input: JSON.parse(JSON.stringify(input)), options });
+          const request = JSON.parse(input.request);
+          if (request.flow === "stale-loop") return JSON.stringify({ error: "the settings changed since you read them", rev: LOOP_REV_NOW });
+          if (request.flow === "refused-loop") return JSON.stringify({ error: "a loop needs limits.attempts" });
+          if (request.op === "read" && request.run) return JSON.stringify({ run: { run: request.run, status: "passed" }, definition: {}, attempts: [] });
+          if (request.op === "read") return JSON.stringify({ project: input.directory, scratch: false, loops: [{ flow: "fix-loop", runnable: true }], orphans: [], runs: [] });
+          return JSON.stringify({ ok: true, op: request.op });
         },
         snapshot: async (input, options) => {
           calls.push({ op: "snapshot", input: JSON.parse(JSON.stringify(input)), options });
@@ -499,11 +510,15 @@ await check("main registers exactly one Ipc (<id>.snapshot) with snapshot, flow,
   // n14: the chat method (one session's recent chat: its id and a number of messages) joined them.
   // n8: the side method (one question to the side chat, sent on stdin) joined them (the key list above gains "side").
   // n10: the setup and spend methods (the preset, the saved setups, the spend limit) joined them.
-  assert.deepEqual(Object.keys(token.spec.methods), ["snapshot", "flow", "skills", "roster", "skillfile", "team", "output", "chat", "side", "setup", "spend", "improve"]);
+  assert.deepEqual(Object.keys(token.spec.methods), ["snapshot", "flow", "skills", "roster", "skillfile", "team", "output", "chat", "side", "setup", "spend", "improve", "loops"]);
   // n24: the improve method (the improvement proposals) joined them.
   assert.deepEqual(Object.keys(token.spec.methods.improve.input.fields), ["op", "id", "note"]);
   assert.ok(Object.values(token.spec.methods.improve.input.fields).every((field) => field._tag === "String"), "improve: strings only");
   assert.ok(typeof impl.improve === "function");
+  // v4: the loops method (the loop settings and runs of a self-loop flow) joined them.
+  assert.deepEqual(Object.keys(token.spec.methods.loops.input.fields), ["directory", "request"]);
+  assert.ok(Object.values(token.spec.methods.loops.input.fields).every((field) => field._tag === "String"), "loops: strings only");
+  assert.ok(typeof impl.loops === "function");
   assert.deepEqual(Object.keys(token.spec.methods.setup.input.fields), ["op", "directory", "name", "record", "replace", "expect"]);
   assert.deepEqual(Object.keys(token.spec.methods.spend.input.fields), ["op", "directory", "limit", "warn"]);
   assert.ok(Object.entries(token.spec.methods.setup.input.fields).every(([key, field]) => key === "expect" ? field._tag === "optionalKey" && field.schema._tag === "String" : field._tag === "String"), "setup: strings and an optional expect");
@@ -3123,6 +3138,98 @@ await check("n24 panel: the view gets actions.improve, which asks main with stri
   demoRendered.dispose();
 });
 // ---- end n24 ----
+
+// ---- v4: loops (the Loop section of a self-loop flow) ----
+await check("v4 main: loops runs `python3 -P -m agentgraph.loopapi --project DIR` in home without a shell, the page's request as JSON on stdin; only the known fields are passed on; bad input and the demo spawn nothing", async () => {
+  const python = path.join(TMP, "fake-loops-python");
+  const stdin = path.join(TMP, "fake-loops-stdin.json");
+  fs.writeFileSync(python, `#!/bin/sh
+cat > "${stdin}"
+if grep -q refuse-me "${stdin}"; then printf '{"error": "refused", "rev": "${"cd".repeat(32)}"}\\n'; exit 1; fi
+printf 'noise\\n{"ok": true, "args": "%s"}\\n' "$*"
+`, { mode: 0o700 });
+  const log = [];
+  const loaded = loadMain(CODE, log);
+  const m = mainContext({ home: ORCHESTRATION, python });
+  resolveDefault(loaded.module.exports).main(m.ctx);
+  const impl = m.provided[0].impl;
+  const loops = async (request, directory = "/work/project") => JSON.parse(await impl.loops({ directory, request: JSON.stringify(request) }));
+  const first = await loops({ op: "read" });
+  assert.equal(first.args, "-P -m agentgraph.loopapi --project /work/project");
+  assert.deepEqual(JSON.parse(fs.readFileSync(stdin, "utf8")), { op: "read" });
+  await loops({ op: "read", run: "20261121-043755-90a7" });
+  assert.deepEqual(JSON.parse(fs.readFileSync(stdin, "utf8")), { op: "read", run: "20261121-043755-90a7" });
+  const settings = { version: 1, flow: "fix-loop", goal: "g; rm -rf /", check: { command: "sh check.sh", timeout: 300, inconclusive_codes: [75] }, session: "reuse", limits: { attempts: 4 }, allow_asks: false };
+  await loops({ op: "save", flow: "fix-loop", settings, rev: "", extra: "dropped" });
+  assert.deepEqual(JSON.parse(fs.readFileSync(stdin, "utf8")), { op: "save", flow: "fix-loop", settings, rev: "" });
+  await loops({ op: "remove", flow: "fix-loop", rev: "ab".repeat(32) });
+  await loops({ op: "start", flow: "fix-loop", goal: "do it", workdir: "/tmp/work" });
+  assert.deepEqual(JSON.parse(fs.readFileSync(stdin, "utf8")), { op: "start", flow: "fix-loop", goal: "do it", workdir: "/tmp/work" });
+  await loops({ op: "cancel", run: "20261121-043755-90a7" });
+  assert.equal((await loops({ op: "read" }, "")).args, "-P -m agentgraph.loopapi", "no folder, no --project");
+  const refused = await loops({ op: "start", flow: "refuse-me" });
+  assert.deepEqual([refused.error, refused.rev], ["refused", "cd".repeat(32)], "a refusal keeps its words and its rev");
+  const spawned = log.length;
+  assert.equal(spawned, 8, "one command each");
+  const bad = [{}, { op: "list" }, { op: "read", run: "../x" }, { op: "read", run: "-x" }, { op: "save", flow: "f" }, { op: "save", flow: "f", settings: [], rev: "" }, { op: "save", flow: "f", settings: {}, rev: "zz" },
+    { op: "save", flow: "", settings: {}, rev: "" }, { op: "remove", flow: "f" }, { op: "start", flow: "f", goal: 5 }, { op: "start", flow: "f", goal: "x".repeat(4001) }, { op: "start", flow: "f", workdir: "a\0b" },
+    { op: "cancel" }, { op: "cancel", run: "a b" }, { op: "start", flow: "f".repeat(200) }];
+  for (const request of bad) assert.equal(typeof (await loops(request)).error, "string", JSON.stringify(request));
+  for (const odd of [{ directory: 5, request: "{}" }, { directory: "rel/dir", request: JSON.stringify({ op: "read" }) }, { directory: "/a\0b", request: JSON.stringify({ op: "read" }) }, { directory: "", request: "not json" }, { directory: "", request: "[]" }, { directory: "", request: JSON.stringify({ op: "save", flow: "f", settings: { big: "x".repeat(70000) }, rev: "" }) }])
+    assert.equal(typeof JSON.parse(await impl.loops(odd)).error, "string", JSON.stringify(odd).slice(0, 80));
+  assert.equal(typeof JSON.parse(await impl.loops({ directory: "" })).error, "string", "missing fields");
+  assert.equal(log.length, spawned, "invalid loop requests spawned something");
+  for (const entry of log) assert.ok(!JSON.stringify(entry).includes("--force") && !JSON.stringify(entry).includes("shell\":true"), "a force flag or a shell");
+  const demo = mainContext({ home: ORCHESTRATION, python, demo: true });
+  resolveDefault(loaded.module.exports).main(demo.ctx);
+  assert.match(JSON.parse(await demo.provided[0].impl.loops({ directory: "", request: JSON.stringify({ op: "read" }) })).error, /demo/);
+  assert.equal(log.length, spawned, "the demo spawned something");
+});
+
+await check("v4 panel: the view gets actions.loops, which asks main with the session's folder and the request as JSON text, answers as main said, turns a refusal into a rejection with its words (a stale one with its rev), and refuses a bad request before main; the demo has none", async () => {
+  const definition = windowLoad.gui.defined[0];
+  const session = { key: "srv\nses_a", id: "ses_a", directory: ORCHESTRATION };
+  const props = { get session() { return session; }, screen: {} };
+  const w = windowContext(definition, { session });
+  definition.setup(w.ctx);
+  const rendered = windowLoad.solid.runWithOwner(() => value(w.added[1].item).render(props));
+  const { loops } = mountCalls[mountCalls.length - 1].options.actions;
+  assert.equal(typeof loops, "function");
+  assert.equal((await loops({ op: "read" })).loops[0].flow, "fix-loop");
+  assert.equal((await loops({ op: "read", run: "20261121-043755-90a7" })).run.status, "passed");
+  assert.equal((await loops({ op: "save", flow: "fix-loop", settings: { version: 1 }, rev: "" })).ok, true);
+  assert.equal((await loops({ op: "start", flow: "fix-loop", goal: "g" })).ok, true);
+  assert.deepEqual(w.calls.filter((c) => c.op === "loops").map((c) => c.input), [
+    { directory: ORCHESTRATION, request: JSON.stringify({ op: "read" }) },
+    { directory: ORCHESTRATION, request: JSON.stringify({ op: "read", run: "20261121-043755-90a7" }) },
+    { directory: ORCHESTRATION, request: JSON.stringify({ op: "save", flow: "fix-loop", settings: { version: 1 }, rev: "" }) },
+    { directory: ORCHESTRATION, request: JSON.stringify({ op: "start", flow: "fix-loop", goal: "g" }) },
+  ]);
+  const failure = async (request) => {
+    try {
+      await loops(request);
+    } catch (error) {
+      return error;
+    }
+    return null;
+  };
+  const refused = await failure({ op: "start", flow: "refused-loop" });
+  assert.match(refused.message, /a loop needs limits\.attempts/);
+  assert.notEqual(refused.status, 409);
+  const stale = await failure({ op: "save", flow: "stale-loop", settings: {}, rev: "" });
+  assert.deepEqual([stale.message, stale.status, stale.stale, stale.rev], ["the settings changed since you read them", 409, true, LOOP_REV_NOW]);
+  const asked = w.calls.filter((c) => c.op === "loops").length;
+  for (const bad of [undefined, null, {}, { op: "list" }, { op: "read", run: "../x" }, { op: "save", flow: "f" }, { op: "start", flow: "f", goal: 5 }, { op: "cancel" }])
+    assert.equal((await failure(bad)).message, "Bad loop request.", JSON.stringify(bad));
+  assert.equal(w.calls.filter((c) => c.op === "loops").length, asked, "a bad request reached main");
+  rendered.dispose();
+  const demoWindow = windowContext(definition, { session, options: { demo: true } });
+  definition.setup(demoWindow.ctx);
+  const demoRendered = windowLoad.solid.runWithOwner(() => value(demoWindow.added[1].item).render(props));
+  assert.equal(mountCalls[mountCalls.length - 1].options.actions?.loops, undefined, "the demo has a loops action");
+  demoRendered.dispose();
+});
+// ---- end v4 ----
 
 await check("the harness replaces an existing temporary bundle before reading it", () => {
   // build.mjs writes atomically, so even an identical rebuild replaces the existing file.

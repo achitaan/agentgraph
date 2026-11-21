@@ -56,6 +56,8 @@ const VARIANT_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/; // a model's variant:
 // A thing's `rev` (agentfiles.rev: 16 hex digits). A change from the view sends the rev it was showing as `expect`;
 // the command refuses it, changing nothing, when the thing changed since (the answer is { error, rev }).
 const REV = /^[0-9a-f]{16}$/;
+const LOOP_REV = /^(?:[0-9a-f]{64})?$/; // a loop's settings rev: the file's sha256, "" when nothing is saved
+const anyRev = (value) => typeof value === "string" && (REV.test(value) || LOOP_REV.test(value));
 const FLOW_STEPS_LIMIT = 20;
 // The command's own limit, counted the same way: in characters (code points), not UTF-16 units.
 const FLOW_TEXT_MAX_CHARS = 2000;
@@ -334,6 +336,17 @@ function snapshotIpc(pluginId) {
           output: Schema.String,
         },
         // ---- end n24 ----
+        // ---- v4: loops (the Loop section of a self-loop flow) ----
+        // loops (`agentgraph.loopapi`): the session's directory (the project the runs belong to; "" for none) and the
+        // page's request as JSON text: {"op": "read", "run"?}, {"op": "save", "flow", "settings", "rev"}, {"op": "remove",
+        // "flow", "rev"}, {"op": "start", "flow", "goal"?, "workdir"?} or {"op": "cancel", "run"}, the shapes of
+        // POST /api/loop. Output: the command's JSON text (the loops and their runs, one run, or the change's answer), or
+        // {"error": "...", "rev"?}.
+        loops: {
+          input: Schema.Struct({ directory: Schema.String, request: Schema.String }),
+          output: Schema.String,
+        },
+        // ---- end v4 ----
       },
     });
     ipcTokens.set(pluginId, token);
@@ -491,7 +504,7 @@ function runCommand(deps, request, label, accept) {
         doc = undefined;
       }
       if (isPlainObject(doc) && typeof doc.error === "string" && doc.error)
-        return typeof doc.rev === "string" && REV.test(doc.rev) ? { error: oneLine(doc.error), rev: doc.rev } : fail(doc.error);
+        return anyRev(doc.rev) ? { error: oneLine(doc.error), rev: doc.rev } : fail(doc.error);
       const answer = !error && isPlainObject(doc) ? accept(doc) : null;
       if (answer) return answer;
       if (error && error.code === "ENOENT")
@@ -965,6 +978,53 @@ function createImproveRunner(deps) {
 }
 // ---- end n24 ----
 
+// ---- v4 ---- Main process: `python3 -P -m agentgraph.loopapi [--project DIR]` without a shell. The page's loop request (the loops
+// and their runs, one run, save, remove, start, cancel: the shapes of POST /api/loop) is checked here and again in the view, only
+// its known fields are passed on, and it goes in on stdin as one JSON line, never in the arguments. The project is the session's
+// folder; the answer's JSON comes back as the command printed it.
+const LOOP_RUN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const LOOP_FLOW = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const LOOP_REQUEST_MAX = 65536;
+const LOOP_GOAL_MAX = 4000;
+const LOOP_DIR_MAX = 4096;
+const looseText = (value, max) => typeof value === "string" && value.length <= max && !value.includes("\0");
+// The request as it may go on, or null.
+function loopRequest(request) {
+  if (!isPlainObject(request) || typeof request.op !== "string") return null;
+  const flow = typeof request.flow === "string" && LOOP_FLOW.test(request.flow);
+  const rev = typeof request.rev === "string" && LOOP_REV.test(request.rev);
+  const run = typeof request.run === "string" && LOOP_RUN.test(request.run);
+  if (request.op === "read") return request.run === undefined ? { op: "read" } : run ? { op: "read", run: request.run } : null;
+  if (request.op === "save") return flow && rev && isPlainObject(request.settings) ? { op: "save", flow: request.flow, settings: request.settings, rev: request.rev } : null;
+  if (request.op === "remove") return flow && rev ? { op: "remove", flow: request.flow, rev: request.rev } : null;
+  if (request.op === "cancel") return run ? { op: "cancel", run: request.run } : null;
+  if (request.op === "start") {
+    if (!flow || (request.goal !== undefined && !looseText(request.goal, LOOP_GOAL_MAX)) || (request.workdir !== undefined && !looseText(request.workdir, LOOP_DIR_MAX))) return null;
+    return Object.assign({ op: "start", flow: request.flow }, request.goal === undefined ? {} : { goal: request.goal }, request.workdir === undefined ? {} : { workdir: request.workdir });
+  }
+  return null;
+}
+function createLoopsRunner(deps) {
+  const fail = (message) => ({ error: oneLine(message) });
+  function command(input) {
+    if (!isPlainObject(input) || typeof input.directory !== "string" || typeof input.request !== "string") return fail("Bad loop request.");
+    const { directory } = input;
+    if (directory && (!looseText(directory, LOOP_DIR_MAX) || !deps.path.isAbsolute(directory))) return fail("Bad loop request.");
+    if (input.request.length > LOOP_REQUEST_MAX) return fail("The loop request is too large.");
+    let parsed;
+    try {
+      parsed = JSON.parse(input.request);
+    } catch (_) {
+      return fail("Bad loop request.");
+    }
+    const request = loopRequest(parsed);
+    if (!request) return fail("Bad loop request.");
+    return { args: ["-P", "-m", "agentgraph.loopapi"].concat(directory ? ["--project", directory] : []), stdin: JSON.stringify(request) + "\n" };
+  }
+  return { loops: serialRunner(deps, (input) => command(input), "The loops command", (doc) => doc, "The demo has no loops.") };
+}
+// ---- end v4 ----
+
 // Main process: `python3 -P -m agentgraph.chatfeed --session=ID --json --limit=N [--demo] [--side]` without a shell, read-only. The
 // session id and the limit are checked here as the window checks them; the feed is passed on as the command printed it
 // (it holds no tool input or output), and an error document or a failed command is { error: one line }.
@@ -1085,6 +1145,7 @@ function main(ctx) {
   const setups = createSetupRunner(commandDeps(FLOW_MAX_BYTES)); // n10
   const spends = createSpendRunner(commandDeps(FLOW_MAX_BYTES)); // n10
   const improves = createImproveRunner(commandDeps(FLOW_MAX_BYTES)); // n24
+  const loopsRun = createLoopsRunner(commandDeps(FLOW_MAX_BYTES)); // v4
   // The chat is read as the snapshot is: the same time limit and size cap.
   const chats = createChatRunner(Object.assign(commandDeps(SNAPSHOT_MAX_BYTES), { timeoutMs: SNAPSHOT_TIMEOUT_MS }));
 
@@ -1101,6 +1162,7 @@ function main(ctx) {
     setup: (input) => setups.setup(input).then((doc) => JSON.stringify(doc)), // n10
     spend: (input) => spends.spend(input).then((doc) => JSON.stringify(doc)), // n10
     improve: (input) => improves.improve(input).then((doc) => JSON.stringify(doc)), // n24
+    loops: (input) => loopsRun.loops(input).then((doc) => JSON.stringify(doc)), // v4
     chat: (input) => chats.chat(input).then((doc) => JSON.stringify(doc)),
     side: (input) => sides.side(input).then((doc) => JSON.stringify(doc)),
   });
@@ -1218,7 +1280,7 @@ function renderPanel(ctx, solid, props) {
   // Stale needs both: an error, and a rev. An answer with no error is never a stale refusal (review n8 r6).
   const refusal = (doc, fallback) => {
     const error = new Error(oneLine(isPlainObject(doc) && doc.error ? doc.error : fallback));
-    if (isPlainObject(doc) && typeof doc.error === "string" && doc.error && typeof doc.rev === "string" && REV.test(doc.rev))
+    if (isPlainObject(doc) && typeof doc.error === "string" && doc.error && anyRev(doc.rev))
       Object.assign(error, { status: 409, stale: true, rev: doc.rev });
     return error;
   };
@@ -1479,6 +1541,15 @@ function renderPanel(ctx, solid, props) {
     return askMain("improve", input, "proposals", (doc) => Array.isArray(doc.proposals) || typeof doc.id === "string");
   };
   // ---- end n24 ----
+  // ---- v4 ---- The loops take the page's request (see loopRequest) and answer as the command printed it.
+  const loops = async (request) => {
+    if (!alive) throw new Error("The panel is closed.");
+    const clean = loopRequest(request);
+    if (!clean) throw new Error("Bad loop request.");
+    const where = sessionRequest();
+    return askMain("loops", { directory: where && where.directory ? where.directory : "", request: JSON.stringify(clean) }, "loops", () => true);
+  };
+  // ---- end v4 ----
   const spend = async (request) => {
     if (!alive) throw new Error("The panel is closed.");
     if (!isPlainObject(request) || (request.op !== "limit" && request.op !== "off")) throw new Error("Bad spend request.");
@@ -1583,7 +1654,7 @@ function renderPanel(ctx, solid, props) {
   // The page shows a control only for an action it is given: send and stop only where the host has the call.
   const demoMode = ctx.options && ctx.options.demo === true;
   const hostHas = (name) => typeof sessionClient()?.[name] === "function";
-  const actions = demoMode ? { chat } : { flow, skills, roster, skillfile, team, output, run, chat, side, setup, spend, improve };
+  const actions = demoMode ? { chat } : { flow, skills, roster, skillfile, team, output, run, chat, side, setup, spend, improve, loops };
   if (!demoMode && hostHas("prompt")) actions.send = send;
   if (!demoMode && hostHas("interrupt")) actions.stop = stop;
 

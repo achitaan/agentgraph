@@ -825,3 +825,43 @@
 /* n24: the verdict line carries the four counts beside the sentence. */
 .agentgraph .ag-proposal-verdictline .ag-proposal-counts { display: block; margin-top: 2px; color: var(--ag-muted); font-size: 11px; }
 .agentgraph .ag-proposal-verdict[data-verdict="better on tune only"] { color: var(--ag-ink); }
+
+/* v4: loops, the Loop section of a flow's details. No colour but the page's own; only a live run's marker may move. */
+.agentgraph .ag-loopbox .ag-loop-intro, .agentgraph .ag-loopbox .ag-loop-hint { margin: 0 0 6px; color: var(--ag-muted); white-space: normal; }
+.agentgraph .ag-loopbox .ag-loop-hint { margin: 2px 0 0; }
+.agentgraph .ag-loopbox .ag-loop-form { display: block; min-width: 0; }
+.agentgraph .ag-loopbox .ag-loop-field { min-width: 0; }
+.agentgraph .ag-loopbox .ag-loop-goal { min-height: 64px; }
+.agentgraph .ag-loopbox .ag-loop-asks { margin-top: 8px; }
+.agentgraph .ag-loopbox .ag-loop-runrow { margin: 10px 0 14px; }
+.agentgraph .ag-loopbox .ag-loop-start { display: block; padding: 8px 10px; border: 1px solid var(--ag-control-border); border-radius: 6px; background: var(--ag-highlight); }
+.agentgraph .ag-loopbox .ag-loop-start .ag-form-buttons { margin-top: 8px; }
+.agentgraph .ag-loopbox .ag-loop-runs { margin: 0; }
+.agentgraph .ag-loopbox .ag-loop-run { border-top: 1px solid var(--ag-row-divider); min-width: 0; }
+.agentgraph .ag-loopbox .ag-loop-run:first-child { border-top: 0; }
+.agentgraph .ag-loopbox .ag-loop-run-head { width: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; border: 0; background: none; padding: 7px 0; text-align: left; font: inherit; font-size: 11px; color: var(--ag-ink); cursor: pointer; }
+.agentgraph .ag-loopbox .ag-loop-run-head:hover .ag-loop-status { color: var(--ag-work); }
+.agentgraph .ag-loopbox .ag-loop-run-head:focus-visible { outline: 2px solid var(--ag-work); outline-offset: -2px; }
+.agentgraph .ag-loopbox .ag-loop-status { font-weight: 600; color: var(--ag-ink); }
+.agentgraph .ag-loopbox .ag-loop-status[data-status="running"]::before { content: '● '; color: var(--ag-work); }
+.agentgraph .ag-loopbox .ag-loop-status[data-pass="true"]::before { content: '✓ '; }
+.agentgraph .ag-loopbox .ag-loop-status:not([data-status="running"]):not([data-pass="true"])::before { content: '– '; color: var(--ag-muted); }
+.agentgraph .ag-loopbox .ag-loop-meta { display: inline-flex; flex-wrap: wrap; gap: 2px 10px; color: var(--ag-muted); font-variant-numeric: tabular-nums; }
+.agentgraph .ag-loopbox .ag-loop-body { padding: 0 0 10px 10px; border-left: 1px solid var(--ag-row-divider); min-width: 0; }
+.agentgraph .ag-loopbox .ag-loop-ask { padding: 8px 10px; margin: 0 0 8px; border: 1px solid var(--ag-control-border); border-radius: 6px; background: var(--ag-highlight); }
+.agentgraph .ag-loopbox .ag-loop-ask p { margin: 0 0 8px; }
+.agentgraph .ag-loopbox .ag-loop-definition { margin: 4px 0 8px; }
+.agentgraph .ag-loopbox .ag-loop-def { display: flex; flex-wrap: wrap; gap: 0 8px; margin: 0 0 2px; }
+.agentgraph .ag-loopbox .ag-loop-def-label { flex: 0 0 4.5em; color: var(--ag-muted); }
+.agentgraph .ag-loopbox .ag-loop-def-value { flex: 1 1 10em; min-width: 0; overflow-wrap: anywhere; }
+.agentgraph .ag-loopbox .ag-loop-attempt { padding: 6px 0; border-top: 1px solid var(--ag-row-divider); min-width: 0; }
+.agentgraph .ag-loopbox .ag-loop-attempt h4 { margin: 0 0 3px; font-size: 11px; font-weight: 600; color: var(--ag-ink); }
+.agentgraph .ag-loopbox .ag-loop-agent, .agentgraph .ag-loopbox .ag-loop-check { margin: 0 0 2px; white-space: normal; }
+.agentgraph .ag-loopbox .ag-loop-check[data-outcome="fail"], .agentgraph .ag-loopbox .ag-loop-check[data-outcome="check_error"], .agentgraph .ag-loopbox .ag-loop-check[data-outcome="inconclusive"] { color: var(--ag-danger); }
+.agentgraph .ag-loopbox .ag-loop-output, .agentgraph .ag-loopbox .ag-loop-feedback { display: block; max-width: 100%; box-sizing: border-box; margin: 3px 0 4px; padding: 5px 7px; overflow: auto; border: 1px solid var(--ag-line); border-radius: 5px; background: var(--ag-paper); color: var(--ag-ink); font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agentgraph .ag-loopbox .ag-loop-output:focus-visible { outline: 2px solid var(--ag-work); outline-offset: -2px; }
+.agentgraph .ag-loopbox .ag-loop-final { display: flex; flex-wrap: wrap; gap: 2px 8px; margin: 6px 0 0; padding-top: 6px; border-top: 1px solid var(--ag-row-divider); }
+.agentgraph .ag-loopbox .ag-loop-final-status { font-weight: 600; }
+.agentgraph .ag-loopbox .ag-loop-final-reason { flex: 1 1 10em; min-width: 0; color: var(--ag-muted); overflow-wrap: anywhere; }
+.agentgraph .ag-loopbox .ag-loop-orphans { margin-top: 10px; }
+.agentgraph .ag-loopbox button { max-width: 100%; }
