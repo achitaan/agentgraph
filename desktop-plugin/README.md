@@ -127,7 +127,9 @@ node desktop-plugin/test/harness.mjs # builds and tests a fresh temporary bundle
 ```
 
 Rebuild after every change to `src/plugin.cjs`, `agentgraph/web/app.js` or `agentgraph/web/style.css`. Each rebuild
-of the live bundle reloads the GUI in every window and in the main process. The harness never replaces the live
+of the live bundle reloads the GUI in every window. The main process keeps the copy it loaded when the app started:
+a method added since then (seen for `side` and `loops`) answers `no method` until you quit the app and open it again,
+and the panel says so. The harness never replaces the live
 bundle. If `app.js` or `style.css` is
 missing, the build still succeeds and embeds a placeholder view (agent names and busy counts); if `app.js` exists but
 does not parse, the build fails instead of shipping a broken bundle. `--app`, `--css` and `--out` override the paths.

@@ -182,6 +182,9 @@ What remains:
 5. The six minor findings of the final review are not fixed (`docs/REPORT.md` section 3.6). The temporary folders were deleted on 2026-11-21 on the user's word,
    except `p4-before`, `p4-after` and `p4-pad` (299 MB left; `docs/REPORT.md` section 7).
 
+6. The Desktop Loop section showed `no method "loops"` in the real app (2026-11-21): the app had not been restarted since before the
+   loops work. The panel now says to quit and reopen the app; nobody has seen the section after such a restart.
+
 A next session should first run `bin/agentgraph check --task agentgraph-loops` and `bin/agentgraph check --task agentgraph-improve`,
 read `docs/REPORT.md` sections 1, 3.6 and 5, and read `.opencode/artifacts/agentgraph-improve/n15/r1/install.md`
 before changing anything.

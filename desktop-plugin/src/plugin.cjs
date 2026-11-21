@@ -1394,9 +1394,21 @@ function renderPanel(ctx, solid, props) {
   // with "-" are refused here and again in main.
   const plainName = (value) => typeof value === "string" && value !== "" && !/\s/.test(value) && !value.startsWith("-");
   const optionalText = (value) => (value === undefined || value === null ? "" : value);
+  // The host answers a method the running main process never provided with `Ipc "<id>" is unavailable: no method "<m>"`:
+  // the app's main process loaded this plugin before the method existed, and it loads the plugin again only when the
+  // app starts. Seen in the real app for `side` and for `loops`; say what to do instead of the host's words.
+  const oldMain = (error, what) =>
+    /\bis unavailable: no method\b/.test(errorMessage(error))
+      ? new Error("OpenCode Desktop is still running an older copy of this plugin. Quit the app and open it again to use " + what + ".")
+      : error;
   const askMain = async (method, input, label, valid) => {
     if (!alive) throw new Error("The panel is closed.");
-    const text = await ctx.main(snapshotIpc(ctx.id))[method](input, { signal: ctx.signal });
+    let text;
+    try {
+      text = await ctx.main(snapshotIpc(ctx.id))[method](input, { signal: ctx.signal });
+    } catch (error) {
+      throw oldMain(error, label);
+    }
     let doc;
     try {
       doc = JSON.parse(text);
@@ -1628,7 +1640,7 @@ function renderPanel(ctx, solid, props) {
       if (typeof doc.answer !== "string") return { ok: false, error: "The side chat did not answer." };
       return { ok: true, answer: doc.answer };
     } catch (error) {
-      return { ok: false, error: oneLine(errorMessage(error)) };
+      return { ok: false, error: oneLine(errorMessage(oldMain(error, "the side chat"))) };
     }
   };
   // Steering and stopping use the host's own client (props.session.server.client.session), read where used, and answer

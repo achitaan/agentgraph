@@ -409,6 +409,7 @@ function windowContext(definition, overrides = {}) {
           const request = JSON.parse(input.request);
           if (request.flow === "stale-loop") return JSON.stringify({ error: "the settings changed since you read them", rev: LOOP_REV_NOW });
           if (request.flow === "refused-loop") return JSON.stringify({ error: "a loop needs limits.attempts" });
+          if (request.flow === "old-main-loop") throw new Error('Ipc "agentgraph-desktop.snapshot" is unavailable: no method "loops"');
           if (request.op === "read" && request.run) return JSON.stringify({ run: { run: request.run, status: "passed" }, definition: {}, attempts: [] });
           if (request.op === "read") return JSON.stringify({ project: input.directory, scratch: false, loops: [{ flow: "fix-loop", runnable: true }], orphans: [], runs: [] });
           return JSON.stringify({ ok: true, op: request.op });
@@ -3218,6 +3219,9 @@ await check("v4 panel: the view gets actions.loops, which asks main with the ses
   assert.notEqual(refused.status, 409);
   const stale = await failure({ op: "save", flow: "stale-loop", settings: {}, rev: "" });
   assert.deepEqual([stale.message, stale.status, stale.stale, stale.rev], ["the settings changed since you read them", 409, true, LOOP_REV_NOW]);
+  // A main process that loaded the plugin before `loops` existed: the host's words become what to do about it.
+  const old = await failure({ op: "start", flow: "old-main-loop", goal: "g" });
+  assert.equal(old.message, "OpenCode Desktop is still running an older copy of this plugin. Quit the app and open it again to use loops.");
   const asked = w.calls.filter((c) => c.op === "loops").length;
   for (const bad of [undefined, null, {}, { op: "list" }, { op: "read", run: "../x" }, { op: "save", flow: "f" }, { op: "start", flow: "f", goal: 5 }, { op: "cancel" }])
     assert.equal((await failure(bad)).message, "Bad loop request.", JSON.stringify(bad));
