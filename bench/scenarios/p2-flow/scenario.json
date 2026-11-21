@@ -1,0 +1,7 @@
+{
+  "agent": "orchestrator",
+  "prompt": "Build a tiny key-value tool in the `kv` package in three dependent steps, and run it as a task graph (declare `.opencode/graph/kv-store.json` first, one node per step (n1, n2, n3 for the steps, in that order), each with a done_when check, keep it updated as nodes finish, and finish with `agentgraph check`). Read kv/SPEC.md first.\n\nn1: kv/store.py, the storage module.\nn2: kv/commands.py, the commands on top of n1's Store.\nn3: kv/cli.py, the command line on top of n2's commands.\n\nn2 may only start once n1 has passed, and n3 once n2 has passed. Run `python3 -m unittest discover -s tests -t . -q` at the end.\n\nDispatch each node to the impl-openai implementer subagent (one subagent call per node) and do not write a node's code yourself.",
+  "check": "python3 p2check.py",
+  "timeout": 1200,
+  "check_timeout": 60
+}
