@@ -12,12 +12,12 @@ installed into the live config only after the user approves.
 
 | Phase | Graph nodes | Status |
 |---|---|---|
-| 0. Audit and baselines | n0-n7 | running |
-| 1. Context and cost | n8, n9 | not started |
-| 2. Orchestration | n10 | not started |
-| 3. Execution reliability | n11 | not started |
-| 4. Self-improvement in the views | n12 | not started |
-| 5. Install and customization | n13 | not started |
+| 0. Audit and baselines | n0-n7 | audits n1-n4 and synthesis n7 passed; bench n5 running, baseline n6 next |
+| 1. Context and cost | n22 (cost visibility, code), n8 (prompt/settings proposals), n9 | n22 running |
+| 2. Orchestration | n10 | waits for the baseline |
+| 3. Execution reliability | n11 (transitions), n19 (liveness, status), n20 (view labels), n21 (flows, shared problems) | n11, n19 running |
+| 4. Self-improvement in the views | n12 | after n20, n21 |
+| 5. Install and customization | n13 | running |
 | Approval and install | n14, n15 | waits for the user |
 | Review and final report | n16, n17 | not started |
 
@@ -31,6 +31,27 @@ installed into the live config only after the user approves.
   cost $195.56 (44% of the chat); the 383 turns over 400k context cost $226.75. Its 123 worker sessions cost $792.98.
 - Cost trend (`bin/agentgraph cost --trend`): $0.305 a turn before the cost settings changes, $0.109 a turn after
   the one-hour cache (Fable models only) and the compaction buffer change.
+
+## Ranked problems (from the audits; details in `.opencode/artifacts/agentgraph-improve/n7/r1/ranked.md`)
+
+1. Graph rules live only in prompts: `check` accepted 38 of 51 invalid edits (n2 experiment); the real
+   `agentgraph-desktop` graph has 17 nodes passed before a dependency. Fix: n11, n21.
+2. Re-running `install.sh` resets the chosen preset, drops added agents, deletes the user's own prompt files and
+   replaces edited skills (n3 scratch install). Fix: n13.
+3. Five long Opus `impl-claude` sessions (400+ turns) cost $309, 43% of worker spend; worker context is 13% fixed
+   text and 87% growth (n1). Fix: proposal n8 (needs approval).
+4. Compaction summary calls cost about $119 (9%) and are not shown by `cost` (n1). Fix: n22.
+5. The improvement cycle has never completed on real data (0 cases, 0 improvements) and no view or command can
+   approve, reject or revert (n3). Fix: n12.
+6. Reported `running` is drawn as live; resume is prompt-only (n2). Fix: n19, n20.
+7. Drawn flows can be bypassed by retyping or reassigning a node; `check`, `record` and the views disagree (n2).
+   Fix: n21.
+8. 9-12k tokens of each worker's first prompt are not counted by `bloat` (tool schemas, built-in prompt) (n1).
+   Measure with bench probes, then proposal n8.
+9. `AGENTS.md` (the orchestrator policy) is in every worker's system prompt, about 3k tokens a turn, est $5.8
+   (n1, confirmed). Proposal n8.
+
+Measured not to matter: orchestrator prompt text (~2% of root cost), skills (<$2), delegation briefs (~2% a lane).
 
 ## Measured changes
 
