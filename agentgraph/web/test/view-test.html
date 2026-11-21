@@ -9523,24 +9523,30 @@
         entry('fresh-loop', ['impl-claude', 'impl-claude']),
         entry('two-step', ['researcher', 'oracle'])] };
       if (options.problem) state.loops[1].problem = options.problem;
-      const details = new Map(), order = [];
+      if (options.noCheck) delete state.loops[0].settings.check;
+      const details = new Map(), order = [], lag = new Map();
       const add = detail => { details.set(detail.run.run, detail); order.push(detail.run.run); };
-      if (options.statuses) LOOP_STATUSES.forEach((status, i) => add(loopDetail('20261121-0000' + String(10 + i) + '-aaaa', 'fix-loop', status, { created: now - 100 * (i + 1), reason: 'because ' + status })));
+      if (options.statuses) LOOP_STATUSES.forEach((status, i) => add(loopDetail('20261121-0000' + String(10 + i) + '-aaaa', 'fix-loop', status, { created: now - 100 * (i + 1), reason: options.rawReasons ? (['check_error', 'inconclusive'].includes(status) ? 'check: ' : status === 'agent_error' ? 'agent: ' : 'work: ') + status : 'because ' + status, ...(options.rawReasons && ['agent_error', 'check_error', 'inconclusive'].includes(status) ? { attempts: [{ n: 1, agent: { outcome: status === 'agent_error' ? 'agent_error' : 'returned', exit: 0, seconds: 3, cost: null, error: status === 'agent_error' ? 'the model call failed' : null }, check: status === 'agent_error' ? null : { outcome: status, exit: status === 'check_error' ? 127 : 75, seconds: 0.1, timed_out: false, error: null }, feedback: null, message: 'go', output: '' }] } : {}) })));
       else {
         add(loopDetail('20261121-043755-90a7', 'fix-loop', 'passed', { created: now - 3000, attempts: loopTwoAttempts(), reason: 'the check exited 0' }));
         add(loopDetail('20261121-050000-0001', 'fix-loop', 'failed', { created: now - 200, limit: 4, reason: 'the attempt limit (4) was reached and the last check failed', cost: options.unknownCost ? null : 0.2, attempts: [1, 2, 3, 4].map(n => ({ n, agent: { outcome: 'returned', exit: 0, seconds: 5, cost: options.unknownCost ? null : 0.05, error: null }, check: { outcome: 'fail', exit: 2, seconds: 0.1, timed_out: false, error: null }, feedback: n < 4 ? 'attempt-' + (n + 1) + '/message.md' : null, message: 'message ' + n, output: n === 4 ? loopOutput(30) : 'out ' + n + '\n' })) }));
         if (options.live) add(loopDetail('20261121-051500-0002', 'fix-loop', 'running', { created: now - 30, reason: '', cost: 0.01, attempts: [{ n: 1, agent: { outcome: 'returned', exit: 0, seconds: 5, cost: 0.01, error: null }, check: { outcome: 'fail', exit: 1, seconds: 0.1, timed_out: false, error: null }, feedback: 'attempt-2/message.md', message: 'm1', output: 'still failing\n' }, { n: 2, message: 'm2' }] }));
         add(loopDetail('20261121-040000-0003', 'fresh-loop', 'cancelled', { created: now - 9000, reason: 'cancelled' }));
       }
+      if (options.queued) add(loopDetail('20261121-052000-0004', 'fix-loop', 'queued', { created: now - 5, reason: '', cost: null, attempts: [] }));
       const listed = () => order.map(id => details.get(id).run).sort((a, b) => b.created - a.created).map(run => ({ run: run.run, flow: run.flow, status: run.status, reason: run.reason, live: run.live, attempts: run.attempts.length, limit: run.limits.attempts, cost: run.totals.cost, seconds: run.totals.seconds, created: run.created, ended: run.ended, goal: run.goal, check: 'sh check.sh', last_check: run.attempts.length ? run.attempts.at(-1).check || null : null }));
       const fail = (message, status = 400, extra = {}) => { throw Object.assign(new Error(message), { status, ...extra }); };
+      let readsFailed = 0, listReads = 0;
       const loops = async request => {
         calls.push(JSON.parse(JSON.stringify(request)));
         if (options.hold) await options.hold(request);
-        if (options.readFail && request.op === 'read') fail(options.readFail, 500);
+        if (options.readFail && request.op === 'read' && (!options.readFailTimes || readsFailed++ < options.readFailTimes)) fail(options.readFail, 500);
         if (request.op === 'read') {
           if (request.run) { const found = details.get(request.run); if (!found) fail('no such run', 404); return JSON.parse(JSON.stringify(found)); }
-          return JSON.parse(JSON.stringify({ project: '/work/project', scratch: false, loops: state.loops, orphans: state.orphans, runs: listed() }));
+          const first = listReads++ === 0 && options.missingFirst;
+          const rows = listed().filter(row => !(lag.get(row.run) > 0));
+          lag.forEach((left, id) => { if (left > 0) lag.set(id, left - 1); });
+          return JSON.parse(JSON.stringify({ project: '/work/project', scratch: false, loops: first ? state.loops.filter(item => item.flow !== options.missingFirst) : state.loops, orphans: state.orphans, runs: rows }));
         }
         if (options.refuse) fail(options.refuse, options.status || 400, options.staleRev ? { rev: options.staleRev } : {});
         const found = state.loops.find(item => item.flow === request.flow);
@@ -9556,7 +9562,8 @@
           if (!found) fail('unknown flow ' + request.flow);
           if (!request.goal && !found.settings?.goal) fail('there is no goal');
           const id = '20261121-06' + String(state.revs++).padStart(2, '0') + '00-bbbb';
-          add(loopDetail(id, request.flow, 'running', { created: Date.now() / 1000, cost: null, attempts: [] }));
+          add(loopDetail(id, request.flow, options.startQueued ? 'queued' : 'running', { created: Date.now() / 1000, cost: null, attempts: [] }));
+          if (options.lagReads) lag.set(id, options.lagReads);
           return { ok: true, run: id, status: 'running', reason: '' };
         }
         if (request.op === 'cancel') { if (!details.has(request.run)) fail('no such run', 404); return { ok: true, run: request.run }; }
@@ -9733,10 +9740,10 @@
       });
     });
 
-    await test('v4 loops cost: an unknown cost reads "unknown" in the list and in the attempts, never $0.00; a spend limit is "no new attempt once spend reaches", not a cap', async () => {
+    await test('v4 loops cost: an unknown cost reads "cost unknown" in the list and in the attempts, never $0.00; a spend limit is "no new attempt once spend reaches", not a cap', async () => {
       await loopMount({ unknownCost: true }, async root => {
         const row = loopRow(root, '20261121-050000-0001');
-        assert(row.querySelector('.ag-loop-cost').textContent === 'unknown' && !/\$0/.test(row.textContent), 'list: ' + row.textContent);
+        assert(row.querySelector('.ag-loop-cost').textContent === 'cost unknown' && !/\$0/.test(row.textContent), 'list: ' + row.textContent);
         await loopOpen(root, '20261121-050000-0001');
         const body = loopRow(root, '20261121-050000-0001').querySelector('.ag-loop-body');
         assert(!/\$0\.00/.test(body.textContent) && /unknown/.test(body.querySelector('.ag-loop-agent').textContent), 'attempt: ' + body.querySelector('.ag-loop-agent').textContent);
@@ -9787,6 +9794,9 @@
         assert(loopRows(root)[0] === id && loopRow(root, id).querySelector('.ag-loop-status').textContent === 'Running', 'the new run is not first and running');
       });
       await loopMount({}, async (root, fakes) => {
+        // a loop with no saved check cannot run (Run is off), so a check, and no goal, is saved first
+        typeIn(loopField(root, 'check', 'fresh-loop'), 'sh check.sh'); typeIn(loopField(root, 'attempts', 'fresh-loop'), '3'); await loopClick(root, 'save', 'fresh-loop');
+        assert(await loopUntil(() => loopSection(root, 'fresh-loop').querySelector('[data-loop-control="run"]')?.getAttribute('aria-disabled') !== 'true'), 'Run stayed off after a check was saved');
         await loopClick(root, 'run', 'fresh-loop');
         assert(!fakes.calls.some(call => call.op === 'start') && loopField(root, 'run_goal', 'fresh-loop') && loopField(root, 'workdir', 'fresh-loop'), 'no goal question');
         await loopClick(root, 'start', 'fresh-loop');
@@ -9807,6 +9817,120 @@
         assert(/loop folder is unreadable/.test(loopSection(root).querySelector('[data-loop-line="error"]')?.textContent || ''), 'a failed read is not said');
       });
     });
+
+    // ---- v4 fixes found on the real page (v5): follow a started run, no endless Reading, the empty check, raw words, cost unknown ----
+    const FINAL_STATUSES = ['passed', 'failed', 'limit', 'invalid', 'check_error', 'inconclusive', 'stalled', 'agent_error', 'cancelled'];
+    const listReads = fakes => fakes.calls.filter(call => call.op === 'read' && !call.run).length;
+    await test('v4 loops follow: a run listed queued is polled until it is running and then passed, with no reload, and polling stops after the final state', async () => {
+      await loopMount({ queued: true }, async (root, fakes) => {
+        const id = '20261121-052000-0004', word = () => loopRow(root, id)?.querySelector('.ag-loop-status')?.textContent;
+        assert(word() === 'Queued', 'a queued run reads ' + word());
+        await sleep(300); assert(listReads(fakes) >= 4, 'a queued run is not polled: ' + listReads(fakes) + ' list reads');
+        const detail = fakes.details.get(id); detail.run.status = 'running'; detail.run.live = true;
+        assert(await loopUntil(() => word() === 'Running'), 'the run did not turn Running by itself: ' + word());
+        fakes.finish(id, 'passed');
+        assert(await loopUntil(() => word() === 'Passed'), 'the run did not turn Passed by itself: ' + word());
+        await sleep(150); const at = fakes.calls.length; await sleep(500);
+        assert(fakes.calls.length === at, 'it kept asking after the final state: ' + (fakes.calls.length - at) + ' more requests');
+      });
+    });
+    await test('v4 loops follow: after the page\'s own Start, a list that does not hold the run yet is still polled until the run appears, then until it ends', async () => {
+      await loopMount({ startQueued: true, lagReads: 3 }, async (root, fakes) => {
+        await loopClick(root, 'run');
+        const id = [...fakes.details.keys()].find(key => key.startsWith('20261121-06')), word = () => loopRow(root, id)?.querySelector('.ag-loop-status')?.textContent;
+        assert(id, 'no run was started');
+        assert(await loopUntil(() => word() === 'Queued'), 'the started run never appeared in the list: ' + word() + ', ' + listReads(fakes) + ' list reads');
+        fakes.finish(id, 'passed');
+        assert(await loopUntil(() => word() === 'Passed'), 'the started run did not turn Passed by itself: ' + word());
+        await sleep(150); const at = fakes.calls.length; await sleep(500);
+        assert(fakes.calls.length === at, 'it kept asking after the final state: ' + (fakes.calls.length - at));
+      });
+    });
+    await test('v4 loops follow: nothing is asked while the page is hidden or the panel shows another flow, and it goes on when the page is back', async () => {
+      await loopMount({ live: true }, async (root, fakes) => {
+        let hidden = true; Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+        try {
+          document.dispatchEvent(new Event('visibilitychange')); await sleep(150); const at = fakes.calls.length; await sleep(400);
+          assert(fakes.calls.length <= at, 'it asked while the page was hidden: ' + (fakes.calls.length - at));
+          hidden = false; document.dispatchEvent(new Event('visibilitychange'));
+          assert(await loopUntil(() => fakes.calls.length > at + 2), 'it did not go on when the page came back');
+        } finally { delete document.hidden; }
+        openStep(root, 'fresh-loop'); await settled(); await sleep(150); const away = fakes.calls.length; await sleep(400);
+        assert(fakes.calls.length <= away, 'it asked while another flow was shown: ' + (fakes.calls.length - away));
+      });
+    });
+    await test('v4 loops cancel: a queued run is offered Cancel, which asks first and posts { op: "cancel", run }', async () => {
+      await loopMount({ queued: true }, async (root, fakes) => {
+        const id = '20261121-052000-0004'; await loopOpen(root, id);
+        assert(loopRow(root, id).querySelector('[data-loop-control="cancel-run:' + id + '"]'), 'no Cancel on a queued run');
+        await loopClick(root, 'cancel-run:' + id); await loopClick(root, 'cancel-confirm:' + id);
+        assert(sameJson(fakes.calls.filter(call => call.op === 'cancel'), [{ op: 'cancel', run: id }]), 'cancel POST ' + JSON.stringify(fakes.calls.filter(call => call.op === 'cancel')));
+      });
+    });
+    await test('v4 loops reading: a flow drawn while its panel is open never stays on "Reading the loop settings" (the instruction box held, a list that missed the flow, a read that failed)', async () => {
+      // 1. the first read answers while the new flow\'s instruction box has the focus (a flow just drawn focuses it).
+      { let release; const gate = new Promise(resolve => { release = resolve; }); let held = false;
+        const fakes = loopFakes({ hold: async request => { if (request.op === 'read' && !request.run && !held) { held = true; await gate; } } });
+        await using(selfLoopFixture(), async root => {
+          openStep(root, 'fix-loop'); await settled();
+          assert(/Reading the loop settings/.test(root.querySelector('.ag-detail').textContent), 'the section is not waiting for the read');
+          const box = root.querySelector('.ag-detail [data-route-text]'); box.focus(); release();
+          assert(await loopUntil(() => loopSection(root)?.querySelector('[data-loop-form]')), 'the form never came while the instruction box was focused: ' + loopSection(root)?.textContent.slice(0, 80));
+          assert(!/Reading the loop/.test(root.querySelector('.ag-detail').textContent) && document.activeElement === box, 'Reading is still said, or the focus was taken');
+        }, { actions: { loops: fakes.loops }, loopPollMs: 60 }); }
+      // 2. the list was read before the flow existed: it is read again when the panel needs it.
+      { const fakes = loopFakes({ missingFirst: 'fix-loop' });
+        await using(selfLoopFixture(), async root => {
+          openStep(root, 'fix-loop'); await settled();
+          assert(await loopUntil(() => loopSection(root)?.querySelector('[data-loop-form]')), 'a list that missed the flow was not read again: ' + (root.querySelector('.ag-detail')?.textContent || '').slice(0, 120));
+          assert(!/Reading the loop/.test(root.querySelector('.ag-detail').textContent), 'Reading is still said');
+        }, { actions: { loops: fakes.loops }, loopPollMs: 60 }); }
+      // 3. a read that fails is said in words and can be tried again.
+      await loopMount({ readFail: 'the loop folder is unreadable', readFailTimes: 1 }, async (root, fakes) => {
+        assert(/loop folder is unreadable/.test(loopSection(root).querySelector('[data-loop-line="error"]')?.textContent || '') && !/Reading the loop/.test(loopSection(root).textContent), 'the failed read is not said in place of Reading');
+        assert(loopSection(root).querySelector('[data-loop-control="retry"]'), 'no way to try again');
+        await loopClick(root, 'retry');
+        assert(await loopUntil(() => loopSection(root)?.querySelector('[data-loop-form]')), 'trying again did not bring the form: ' + loopSection(root)?.textContent.slice(0, 100));
+      });
+    });
+    await test('v4 loops empty check: a loop with no check command says so before Run and Run is off with that reason; Save still works and turns Run on', async () => {
+      await loopMount({ noCheck: true }, async (root, fakes) => {
+        const need = () => loopSection(root).querySelector('[data-loop-need="check"]'), run = () => loopSection(root).querySelector('[data-loop-control="run"]');
+        assert(need() && /needs a check command/.test(need().textContent) && need().compareDocumentPosition(run()) & Node.DOCUMENT_POSITION_FOLLOWING, 'no line before Run: ' + need()?.textContent);
+        assert(run().getAttribute('aria-disabled') === 'true' && /check command/.test(run().title), 'Run is not off with a reason: ' + run().outerHTML.slice(0, 160));
+        await loopClick(root, 'run'); assert(!fakes.calls.some(call => call.op === 'start'), 'Run started a loop with no check');
+        typeIn(loopField(root, 'check'), 'sh check.sh'); await loopClick(root, 'save');
+        assert(fakes.calls.some(call => call.op === 'save' && call.settings.check?.command === 'sh check.sh'), 'Save did not send the check');
+        assert(await loopUntil(() => !need() && run().getAttribute('aria-disabled') !== 'true'), 'the line or the off Run stayed after a check was saved');
+        await loopClick(root, 'run'); assert(fakes.calls.some(call => call.op === 'start'), 'Run did nothing with a check saved');
+      });
+      await loopMount({ noCheck: true }, async (root, fakes) => {
+        await loopClick(root, 'save'); assert(fakes.calls.some(call => call.op === 'save' && !call.settings.check), 'Save with an empty check did not go through');
+      });
+      await loopMount({}, async root => { assert(!loopSection(root).querySelector('[data-loop-need]') && loopSection(root).querySelector('[data-loop-control="run"]').getAttribute('aria-disabled') !== 'true', 'the check line or off Run with a check saved'); });
+    });
+    await test('v4 loops raw words: no status or reason token (check_error, agent_error, "check: inconclusive", "work: cancelled") shows beside the plain words, for each final status; a reason sentence still shows', async () => {
+      await loopMount({ statuses: true, rawReasons: true }, async root => {
+        const token = /\b(?:check_error|agent_error)\b|\b(?:check|work|agent): (?:passed|failed|limit|invalid|check_error|inconclusive|stalled|agent_error|cancelled|interrupted|running)\b/;
+        for (const status of [...FINAL_STATUSES, 'interrupted']) {
+          const row = [...loopSection(root).querySelectorAll('[data-loop-run]')].find(item => item.dataset.status === status); assert(row, 'no row for ' + status);
+          await loopOpen(root, row.dataset.loopRun);
+          const said = loopSection(root).textContent; assert(!token.test(said), status + ' shows a raw word: ' + (said.match(token) || [])[0]);
+          assert(!/[a-z]+_[a-z]+/.test(loopRow(root, row.dataset.loopRun).textContent), status + ' shows a word with an underscore: ' + loopRow(root, row.dataset.loopRun).textContent.slice(0, 200));
+        }
+      });
+      await loopMount({}, async root => { await loopOpen(root, '20261121-043755-90a7'); assert(/the check exited 0/.test(loopRow(root, '20261121-043755-90a7').querySelector('.ag-loop-final-reason').textContent), 'a reason sentence is gone'); });
+    });
+    await test('v4 loops cost unknown: a null cost reads "cost unknown" in the list and the attempts, never $0 or a bare dash', async () => {
+      await loopMount({ unknownCost: true }, async root => {
+        const row = loopRow(root, '20261121-050000-0001');
+        assert(row.querySelector('.ag-loop-cost').textContent === 'cost unknown' && !/\$0/.test(row.textContent), 'list: ' + row.textContent);
+        await loopOpen(root, '20261121-050000-0001');
+        assert(/cost unknown/.test(loopRow(root, '20261121-050000-0001').querySelector('.ag-loop-agent').textContent), 'attempt: ' + loopRow(root, '20261121-050000-0001').querySelector('.ag-loop-agent').textContent);
+      });
+      await loopMount({}, async root => { const row = loopRow(root, '20261121-043755-90a7'); assert(/^\$0\.04/.test(row.querySelector('.ag-loop-cost').textContent) && !/unknown/.test(row.textContent), 'a known cost: ' + row.textContent); });
+    });
+    // ---- end v4 fixes ----
 
     await test('v4 loops look: light and dark, at 1400, 620 and 420 px, with a run open: no green-dominant colour, nothing under 11 px, no sideways scroll, nothing clipped, nothing animating', async () => {
       for (const scheme of ['light', 'dark']) for (const width of [1400, 620, 420]) {
