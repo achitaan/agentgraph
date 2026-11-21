@@ -24,7 +24,7 @@ installed into the live config only after the user approves. Lanes run on Sonnet
 | 5. Install and customization | n13 (install, in a scratch home), n27 (install review fixes) | passed: 42 install tests, a reinstall kept the preset, an added agent, own prompt files and an edited skill; not run on the live home |
 | Review | n16 (independent review), n26 and n27 (its minor findings) | passed: n16 confirmed (nothing run), twelve minor findings; n26 fixed 1-5, 10, 11 and n27 fixed 6-9; finding 12 (no server-side confirm) is a known limit |
 | Final suites and report | n17 | passed: `docs/REPORT.md` and `docs/ARCHITECTURE.md` written; final suite counts and total spend are in `docs/REPORT.md` section 7 |
-| Approval and install | n14, n15 | waits for the user; nothing below "Waiting for your review" is installed |
+| Approval and install | n14, n15 | done 2026-11-21: A, B (less one deny), D, L installed; C, J deferred; K not drafted |
 
 ### Starting numbers (measured, 2026-11-21, before any change)
 
@@ -81,7 +81,7 @@ Code (committed on `design-lab`, tests rerun by the orchestrator):
   held-out results, and a verdict computed by code; `agentgraph improve` and the page can approve (with a
   backup), reject, revert and reopen. The verdict says "better on tune only" when held-out did not move.
 
-Measured on scratch configs only (not installed):
+Measured on scratch configs (A and B were installed later, on 2026-11-21; see "Waiting for your review"):
 
 - Context, first turn (n8, `7fc7639`): with proposals A+B a worker's first turn falls from 15,915 to 6,886 tokens
   (impl-openai, -56.7%); verifier -63.2%, oracle -66.5%, every worker role -25% or more.
@@ -103,7 +103,7 @@ Measured on scratch configs only (not installed):
 
 ### Waiting for your review
 
-Nothing here is in the live config. Each item names the file to read. Say "approve <letter>" or "reject".
+Decided on 2026-11-21: A, B, D and L approved and installed (`.opencode/artifacts/agentgraph-improve/n15/r1/install.md`; B with the `ast_grep_replace` deny left out for the four agents that write). C and J deferred. K is not drafted. Undo: `sh .opencode/artifacts/agentgraph-improve/n15/r1/undo.sh`.
 
 | | Change | Evidence | File |
 |---|---|---|---|
@@ -171,11 +171,11 @@ No release is called complete until it has been run through the real page and re
 
 What remains:
 
-1. Your decision on the items under "Waiting for your review" (A, B, C, D, J, K, L and the earlier sections). Item K is not drafted.
-2. Install into the live configuration only after you approve (n14, n15). Nothing is installed.
+1. Your decision on C, J, K and the earlier sections. Item K is not drafted.
+2. A, B, D and L are installed (n14, n15): first-turn tokens of the implementers 15,911 to 7,273 (-54.3%), orchestrator -4.0%, one probe each; no whole run on the installed config. Restart OpenCode for open sessions to read the new text.
 3. Total spend at the closing sample is in `docs/REPORT.md` section 7.
 4. After the report was closed, the loops graph was recorded in the `memory-fast` ledger (`bin/agentgraph record`), so the ledger fingerprint is now
-   `d7201d28c3276af0` (13 files); the config fingerprint is unchanged (`86f9673fc3ff6a77`). The record says an improvement is due
+   `d7201d28c3276af0` (13 files); the config fingerprint was unchanged then (`86f9673fc3ff6a77`) and is `a39b89269a623236` after the install. The record says an improvement is due
    (1 pending run, 78 pending feedback items); none was proposed or applied in this session.
 5. The six minor findings of the final review are not fixed (`docs/REPORT.md` section 3.6). Nothing in the temporary folders was deleted
    (`docs/REPORT.md` section 7).

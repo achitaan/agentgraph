@@ -12,6 +12,8 @@ Words used with a fixed meaning:
 
 The live configuration was unchanged throughout: `bin/agentgraph bench fingerprint` gave config `86f9673fc3ff6a77` (347 files) and ledger `e3340c0e1d2cbb5b` (11 files) at the start, and gave the same values when this report was written (checked by running the command, not read from an artifact). Earlier nodes report the same values (`.opencode/artifacts/agentgraph-loops/v9/r2/results.md`).
 
+**Installed on 2026-11-21, after this report was closed:** you approved A, B, D and L and they are in the live configuration (`.opencode/artifacts/agentgraph-improve/n15/r1/install.md`). B went in with one deny left out (`ast_grep_replace` for the four agents that write), and one code fix was needed (a settings entry of denies only was read as read-only). First-turn tokens measured after the install (one probe each): implementers 15,911 to 7,273 (-54.3%), verifier -63.3%, oracle -66.5%, explorer -47.1%, reviewer -42.5%, `impl-hard` -39.3%, orchestrator -4.0%. No whole run was made on the installed config. Config fingerprint now `a39b89269a623236`. Undo: `sh .opencode/artifacts/agentgraph-improve/n15/r1/undo.sh`. C and J are deferred; K is not drafted.
+
 ## 1. One-screen summary
 
 Task graphs: Part 1 is `.opencode/graph/agentgraph-improve.json`, Part 2 is `.opencode/graph/agentgraph-loops.json`.
@@ -27,7 +29,7 @@ Task graphs: Part 1 is `.opencode/graph/agentgraph-improve.json`, Part 2 is `.op
 | 4 Self-improvement in the views | n23, n24, n25, n12 | done, demonstrated on a scratch config | One real cycle, $6.11; verdict "better on tune only"; approve and revert driven by clicking in the real page, 8 of 8 checks (`.opencode/artifacts/agentgraph-improve/n25/r1/cycle.md`, `.opencode/graph/agentgraph-improve.json#n12`). |
 | 5 Install and customization | n13, n27 | done, demonstrated in a scratch home; not run on the live home | 42 install tests; a reinstall kept the preset, an added agent, own prompt files and an edited skill (`.opencode/graph/agentgraph-improve.json#n13`). |
 | Review | n16, n26, n27 | done | Verdict confirmed, 12 minor findings, the reviewer ran nothing (`.opencode/artifacts/agentgraph-improve/n16/r1/review.md`). |
-| Approval and install | n14, n15 | not done | Wait for the owner (`.opencode/graph/agentgraph-improve.json#n14`). |
+| Approval and install | n14, n15 | done after the report closed: A, B, D, L installed; C, J deferred | `.opencode/artifacts/agentgraph-improve/n15/r1/install.md` |
 | Final report | n17 | this document | |
 
 ### Part 2: executable visual workflows (vNext.1 to vNext.5)
@@ -46,8 +48,7 @@ Task graphs: Part 1 is `.opencode/graph/agentgraph-improve.json`, Part 2 is `.op
 
 ### What waits for you
 
-- Decisions on review items A, B, C, D, J, K, L and the earlier pending sections (section 6). Nothing in them is installed.
-- The install into the live configuration after you approve (n14, n15).
+- Decisions on review items C, J, K and the earlier pending sections (section 6). A, B, D and L were approved and installed after the report closed (`.opencode/artifacts/agentgraph-improve/n15/r1/install.md`).
 - The six minor findings of the final review stay unfixed (section 3.6).
 - Nothing in the temporary folders was deleted (section 7).
 - Item K is not drafted (section 6).
@@ -382,7 +383,7 @@ Grouped. None softened.
 - `cancel` can wait up to 2 s on a run that is paused, waiting or pausing (section 5.2). A run's end is written by one code path, which also removes `cancel` and `pause` (`.opencode/artifacts/agentgraph-loops/v8b/r3/findings.md`).
 - New files: `docs/CUSTOMIZE.md`, `docs/LOOPS.md`, this report, `docs/ARCHITECTURE.md`.
 
-Nothing has been installed into the live configuration. No prompt, skill, setting or model was changed there.
+Until the report was closed nothing was installed into the live configuration. After it, A, B, D and L were installed on your approval (`.opencode/artifacts/agentgraph-improve/n15/r1/install.md`); no skill or model was changed.
 
 ### Waiting for your approval (copied from `PROGRESS.md`; paths under `.opencode/artifacts/agentgraph-improve/`)
 
@@ -398,7 +399,7 @@ Nothing has been installed into the live configuration. No prompt, skill, settin
 
 Letters E to I name sections of an earlier review list (side chat round); `PROGRESS.md` holds no more detail on them.
 
-Item K is not drafted. Nothing in this table is installed.
+Item K is not drafted. A, B (less one deny), D and L are installed (2026-11-21); C and J are deferred; the rest of this table is not installed.
 
 ## 7. Tests
 
@@ -411,7 +412,7 @@ Final runs by the orchestrator, from the repository root, at the commit after th
 | Terminal view | `node tui-plugin/test/run.mjs` | 194 passed, 0 failed |
 | Desktop harness | `node desktop-plugin/test/harness.mjs` | 78 ok, 0 not ok |
 | Real host | `python3 tui-plugin/test/real-host.py --size 160x45 --demo` (drives the real OpenCode terminal app; one small model call) | exit 0 |
-| Fingerprint | `bin/agentgraph bench fingerprint` | config `86f9673fc3ff6a77` (347 files), ledger `e3340c0e1d2cbb5b` (11 files), unchanged |
+| Fingerprint | `bin/agentgraph bench fingerprint` | config `86f9673fc3ff6a77` (347 files), ledger `e3340c0e1d2cbb5b` (11 files), unchanged until the report closed; config `a39b89269a623236` after the install |
 
 Part 1 ended at 1444 Python tests (`.opencode/graph/agentgraph-improve.json#n26`). Counts by node, for the Python suite: 1490 (v2), 1522 (v3), 1584 (v6), 1679 (v8), 1695 (v8b round 1), 1719 (v8b round 2), 1732 (v8b round 3) (`.opencode/graph/agentgraph-loops.json#v2`; `.opencode/graph/agentgraph-loops.json#v3`; `.opencode/graph/agentgraph-loops.json#v6`; `.opencode/graph/agentgraph-loops.json#v8`; `.opencode/graph/agentgraph-loops.json#v8b`; `.opencode/artifacts/agentgraph-loops/v8b/r2/findings.md`; `.opencode/artifacts/agentgraph-loops/v8b/r3/findings.md`). Web: 402 (v7 round 1), 410 (round 3), 414 (round 4) (`.opencode/artifacts/agentgraph-loops/v7/r3/findings.md`, `.opencode/artifacts/agentgraph-loops/v7/r4/findings.md`).
 

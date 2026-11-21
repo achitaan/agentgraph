@@ -91,7 +91,7 @@ Run record, in `<project>/.opencode/loops/<run id>/`: `definition.json`, `run.js
 | Install and update keep user changes | Code | `agentgraph/installer.py` |
 | A proposal's verdict | Code | `agentgraph/improve.py` |
 | Which agent works, who delegates, when to write a graph, which commands the orchestrator calls | Prompts only | `config/`, `skills/` |
-| Delegation policy | Prompts only | `config/AGENTS.md` and the `orchestrator_append.md` files |
+| Delegation policy | Prompts only | the `orchestrator_append.md` files (base and one per preset); `config/AGENTS.md` holds a two-line header since proposal A was installed, so workers no longer read the policy |
 
 `docs/REPORT.md` section 2.4 lists the evidence for each code rule and what is still prompts only.
 

@@ -20,7 +20,7 @@ Measured on one long orchestration chat (659 turns, context up to 848k tokens) w
 
 - `~/.config/opencode/opencode.json` now has `"compaction": { "buffer": 750000 }`. On a model with a 1M-token window the conversation is summarized at 250k tokens instead of 850k; models with smaller windows ignore the value and keep the default. Estimated effect on the measured chat: $319 becomes $195. Summaries lose detail, so the task graph file and its artifacts carry the state. To undo, delete that line.
 - 2026-11-20: the value is now `850000`, so on a 1M-token window the conversation is summarized at 150k tokens (token audit, about $13 a week less on long worker sessions; their summaries lose more detail). To undo, set it back to `750000`.
-- `AGENTS.md` has a short Cost section: one task per chat, long results go to artifacts, accept a verifier's pass on its evidence, scripts for mechanical work, settings changes in one batch.
+- The orchestrator's policy (in the `orchestrator_append.md` files, moved there from `AGENTS.md`) has a short Cost section: one task per chat, long results go to artifacts, accept a verifier's pass on its evidence, scripts for mechanical work, settings changes in one batch.
 
 ## A one-hour cache for the orchestrator
 

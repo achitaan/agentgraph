@@ -428,11 +428,16 @@ def from_plugin(permission, skills=()):
     """Rules from a plugin preset entry's `permission` (OpenCode 1 keys) and `skills`, in the order the plugin
     gives them (see COPYABLE); never wider than the source under the host's last-match-wins: the plugin's first
     `* * allow` and any '*' allow only let the copy read, a later deny stays where it is, `task` is denied.
-    No permission at all (the host default, as impl-claude) becomes the writer shape. Returns (rules, notes)."""
+    No permission at all (the host default, as impl-claude) becomes the writer shape, and so does a permission
+    of denies only, less what it denies. Returns (rules, notes)."""
     notes = []
     rules = [*({"action": tool, "resource": "*", "effect": "allow"} for tool in READ_TOOLS), *PLUGIN_READS]
     if permission is None:
         permission = {"bash": "allow", "edit": "allow"}
+    elif isinstance(permission, dict) and permission and "*" not in permission \
+            and all(effect == "deny" for effect in permission.values()):
+        # only denies: the host default less what is denied (a deny of bash or edit replaces the allow here)
+        permission = {"bash": "allow", "edit": "allow", **permission}
     if isinstance(permission, str) and permission in EFFECTS:
         permission = {"*": permission}  # as the plugin reads a permission given as one word
     if not isinstance(permission, dict):

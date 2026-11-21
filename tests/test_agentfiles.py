@@ -633,6 +633,26 @@ class CopyNeverWider(Base):
                     found.append((action, resource, was, now))
         return found
 
+    def test_a_source_of_denies_only_is_the_writer_less_what_it_denies(self):
+        denies = {"task": "deny", "webfetch": "deny", "websearch": "deny", "execute": "deny", "ast_grep_search": "deny"}
+        rules = agentfiles.from_plugin(denies)[0]
+        self.assertFalse(agentfiles.read_only(rules))
+        self.assertEqual(agentfiles.host_effect(rules, "edit", "x.py"), "allow")
+        self.assertEqual(agentfiles.host_effect(rules, "shell", "ls"), "allow")
+        for action in ("webfetch", "websearch", "subagent"):
+            self.assertEqual(agentfiles.host_effect(rules, action, "x"), "deny", action)
+        self.assertEqual(self.wider(denies), [])
+        for more in ({"edit": "deny"}, {"bash": "deny"}, {"ast_grep_replace": "deny"}):
+            source = {**denies, **more}
+            rules = agentfiles.from_plugin(source)[0]
+            self.assertEqual(self.wider(source), [], more)
+            if "bash" in more:
+                self.assertEqual(agentfiles.host_effect(rules, "shell", "ls"), "deny")
+            else:
+                self.assertTrue(agentfiles.read_only(rules), more)
+        for source in ({}, {"webfetch": "ask"}, {"webfetch": "deny", "*": "allow"}):  # not denies only: as before
+            self.assertTrue(agentfiles.read_only(agentfiles.from_plugin(source)[0]), source)
+
     def test_the_reviewers_three_sources_give_copies_no_wider_than_they_are(self):
         rules = agentfiles.from_plugin({"edit": "allow", "*": "deny"})[0]
         self.assertTrue(agentfiles.read_only(rules))
