@@ -50,7 +50,7 @@ Task graphs: Part 1 is `.opencode/graph/agentgraph-improve.json`, Part 2 is `.op
 
 - Decisions on review items C, J, K and the earlier pending sections (section 6). A, B, D and L were approved and installed after the report closed (`.opencode/artifacts/agentgraph-improve/n15/r1/install.md`).
 - The six minor findings of the final review stay unfixed (section 3.6).
-- Nothing in the temporary folders was deleted (section 7).
+- The temporary folders were deleted after the report closed, on your word, except three kept for the deferred proposals (section 7).
 - Item K is not drafted (section 6).
 - No placeholder is left in this report. Total spend is in section 7.
 
@@ -418,6 +418,6 @@ Part 1 ended at 1444 Python tests (`.opencode/graph/agentgraph-improve.json#n26`
 
 Desktop bundle: rebuilt once with `node desktop-plugin/build.mjs` from the reviewed sources, 807,261 bytes, in the commit `038ef58` (`desktop-plugin/gui-experimental.cjs`). Check 63 failed before the rebuild because the bundle was stale; it passes after it. An open Desktop panel reloads the bundle. No person looked at the Loop section in the Desktop app (`.opencode/artifacts/agentgraph-loops/v12/r1/final-values.md`).
 
-Temporary folders: the OpenCode temporary folder holds 33.5 GB in 1095 entries. Keep three until the review is decided: `p4-before` (a scratch config and ledger holding the proposals' state), `p4-after` and `p4-pad`. Everything else is leftover scratch from tests, trials and demonstrations; its evidence was copied into `.opencode/artifacts`. The largest are `trial-5` (8.6 GB), `trial-4` (6.1 GB) and `orbit-trial` (4.1 GB). Nothing was deleted (`.opencode/artifacts/agentgraph-loops/v12/r1/temp-folders.txt`).
+Temporary folders: the OpenCode temporary folder holds 33.5 GB in 1095 entries. Keep three until the review is decided: `p4-before` (a scratch config and ledger holding the proposals' state), `p4-after` and `p4-pad`. Everything else is leftover scratch from tests, trials and demonstrations; its evidence was copied into `.opencode/artifacts`. The largest are `trial-5` (8.6 GB), `trial-4` (6.1 GB) and `orbit-trial` (4.1 GB). Nothing was deleted while the report was written (`.opencode/artifacts/agentgraph-loops/v12/r1/temp-folders.txt`). On 2026-11-21, after the report closed, the owner said to delete them: everything but `p4-before`, `p4-after` and `p4-pad` was removed (the folder went from 34 GB to 299 MB).
 
 Recorded spend per part, from the nodes (not a total): benchmark $2.4506 (`.opencode/artifacts/agentgraph-loops/v9/r2/results.md`), demonstrations $0.098 (`.opencode/graph/agentgraph-loops.json#v5`), $0.6446 (`.opencode/artifacts/agentgraph-loops/v10/r1/page-demo.md`), $0.0837 (`.opencode/graph/agentgraph-loops.json#v5a`), $0.123 (v8 real runs, `.opencode/graph/agentgraph-loops.json#v8`), and the Part 1 items in section 2. Total spend: $1440.38 billed at the closing sample, against a hard stop of $1600 (chat messages $476.04, 152 worker sessions $886.40, benchmark $27.48; average $15.18 an hour over the 1916 minutes since the first sample; per-lane amounts in the same file: `.opencode/artifacts/agentgraph-loops/v12/r1/spend.txt`). The sample was taken before the closing commit and the closing message, so the last few turns of the orchestrator are not in it.
