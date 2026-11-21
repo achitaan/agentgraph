@@ -113,7 +113,7 @@ Nothing here is in the live config. Each item names the file to read. Say "appro
 | D | `AGENTS.md` line 9: the orchestrator may do work itself when the change fits in context it holds and has a check it can run (about 150 lines), instead of "under ~20 lines". | Delegating such tasks cost 2x, 1.5-1.8x time, same pass rate (n=3, small tasks, one model). | `n10/r1/comparison.md`, section "Proposal" |
 | J | The n25 proposal "do small steps solo" (one line in `normal/orchestrator_append.md`). Overlaps D. | Better on tune only: tune 3/6 to 5/6, held-out unchanged at 3/9, p = 0.2. By its own rule this is not enough to recommend. | `n25/r1/cycle.md` |
 | K | Point the two improvement skills at the `agentgraph improve` commands; they still describe the older chat ritual. | No measurement; a consistency change. | not drafted |
-| L | Three lines for `config/AGENTS.md` on `graph set`, `status` and flows, so the orchestrator uses the commands instead of editing the graph file whole. | No measurement. | not drafted |
+| L | Three lines for `config/AGENTS.md` on `graph set`, `status` and flows, so the orchestrator uses the commands instead of editing the graph file whole. About 140 tokens more on every orchestrator turn. | No measurement. | `review/proposal-L.md` |
 
 Paths are under `.opencode/artifacts/agentgraph-improve/`.
 Letters E to I are not used here: they name sections of the earlier review list (side chat round).
