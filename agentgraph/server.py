@@ -13,8 +13,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote
 
-from . import (agentfiles, chatfeed, flowcommands, flowrun, mcpview, outputs, roster, setups, sidechat, skillfiles,
-               skillset, spend, structure, teams)
+from . import (agentfiles, chatfeed, flowcommands, flowrun, improve, mcpview, outputs, roster, setups, sidechat,
+               skillfiles, skillset, spend, structure, teams)
 from .demo import demo_activity, demo_setup, demo_sidechat, demo_snapshot, demo_spend
 from .snapshot_json import (ledger_home, learning_document, live_activity, load_structure, skills_document,
                             snapshot_document)
@@ -37,6 +37,8 @@ _SETUP_PATH = "/api/setup"  # the default preset and saved setups: switch, save,
 _SETUP_BODY_LIMIT = 4096
 _SPEND_PATH = "/api/spend"  # the project's spend limit: set or remove (agentgraph.spend)
 _SPEND_BODY_LIMIT = 4096
+_IMPROVE_PATH = "/api/improve"  # improvement proposals: GET list or one, POST approve|reject|revert (agentgraph.improve)
+_IMPROVE_BODY_LIMIT = 4096
 _POSTS = (_FLOW_PATH, _SKILLS_PATH, _ROSTER_PATH, _SKILLFILE_PATH, _TEAM_PATH, _OUTPUT_PATH, _SETUP_PATH, _SPEND_PATH)
 _LOOPBACK = frozenset({"127.0.0.1", "::1"})
 _FLOW_BODY_LIMIT = 32768  # an instruction of 2000 characters, each up to 12 bytes as escaped JSON (and a goal of 4000)
@@ -84,7 +86,7 @@ def make_server(
     skills_backups: Path | None = None, skills_profiles: Path | None = None,
     skills_dir: Path | None = None, skills_bundled: list[Path] | None = None, agents_dir: Path | None = None,
     opencode_dir: Path | None = None, ledger_root: Path | None = None, commands_dir: Path | None = None,
-    sessions_db: Path | None = None, setups_dir: Path | None = None,
+    sessions_db: Path | None = None, setups_dir: Path | None = None, improve_config_root: Path | None = None,
 ) -> ThreadingHTTPServer:
     """Bind a server; the caller is responsible for running and closing it.
     `structure_dir` is the folder `POST /api/structure/flow` edits (default: the
@@ -99,7 +101,10 @@ def make_server(
     command is written into `commands_dir` (default: OpenCode's commands folder). The sessions come from
     `sessions_db` (default: OpenCode's database), and so do the costs in each flow's `stats`. `POST /api/setup`
     switches the default preset in `skills_config` and saves, restores and removes setups in `setups_dir` (default:
-    the orchestration's `setups/`) over the same files, folders and `skills_backups`."""
+    the orchestration's `setups/`) over the same files, folders and `skills_backups`. `/api/improve` lists, shows,
+    approves, rejects and reverts improvement proposals (agentgraph.improve) in the ledger home `ledger_root` gives
+    (as `/api/output`'s edit log) and edits files in `improve_config_root` (default: `opencode_dir`, else OpenCode's
+    config folder)."""
     paths = {"config": skills_config or skillset.CONFIG, "map_path": skills_map or skillset.MAP,
              "backups": skills_backups or skillset.BACKUPS, "profiles": skills_profiles or skillset.PROFILES}
     directory = (web_dir if web_dir is not None else Path(__file__).with_name("web")).resolve()
@@ -128,7 +133,9 @@ def make_server(
                     self.request_version = "HTTP/1.0"
                 self.send_error(403)
                 return False
-            allowed = ("POST",) if self.path.partition("?")[0] in _POSTS else ("GET", "HEAD")
+            target = self.path.partition("?")[0]
+            allowed = ("GET", "HEAD", "POST") if target == _IMPROVE_PATH else (
+                ("POST",) if target in _POSTS else ("GET", "HEAD"))
             if self.command not in allowed:
                 self.send_response(405)
                 self.send_header("Allow", ", ".join(allowed))
@@ -190,7 +197,7 @@ def make_server(
             target = self.path.partition("?")[0]
             handler = {_SKILLS_PATH: self._skills, _ROSTER_PATH: self._roster, _SKILLFILE_PATH: self._skillfile,
                        _TEAM_PATH: self._team, _OUTPUT_PATH: self._output, _SETUP_PATH: self._setup,
-                       _SPEND_PATH: self._spend}.get(target)
+                       _SPEND_PATH: self._spend, _IMPROVE_PATH: self._improve_post}.get(target)
             if handler is not None:
                 handler()
                 return
@@ -544,6 +551,65 @@ def make_server(
             self._answer(lambda: spend.remove(project=project) if request["op"] == "off"
                          else spend.set_limit(request["limit"], request.get("warn"), project=project), spend.SpendError)
 
+        def _improve_where(self):
+            root = improve_config_root if improve_config_root is not None else opencode_dir
+            return improve.config_root(root), outputs.edit_home(root=ledger_root, config_path=paths["config"])
+
+        def _improve_get(self, query: str):
+            """GET /api/improve: every proposal (state, summary, diff sizes); ?id=ID: one with its full text and diffs."""
+            params = parse_qs(query, keep_blank_values=True)
+            ids = params.get("id", [])
+            if len(ids) > 1 or set(params) - {"id", "demo"}:
+                self._refuse(400, "give at most one id")
+                return
+            try:
+                if demo or params.get("demo", [None])[0] == "1":
+                    answer = {"proposals": []}
+                else:
+                    root, home = self._improve_where()
+                    answer = improve.show(home, root, ids[0]) if ids else {"proposals": improve.list_proposals(home, root)}
+            except improve.NotFound as exc:
+                self._refuse(404, str(exc))
+                return
+            except improve.ImproveError as exc:
+                self._refuse(400, str(exc))
+                return
+            except OSError as exc:
+                self._refuse(500, f"could not read the proposals: {exc}")
+                return
+            self._reply(200, "application/json", json.dumps(answer, allow_nan=False).encode("utf-8"))
+
+        def _improve_post(self):
+            # Approve (the user's own click: who is "user"), reject or revert a proposal (agentgraph.improve). An
+            # approval is refused when a file changed since drafting, a revert when a file was edited after applying;
+            # neither can be forced from here.
+            request = self._json_body("the proposals", _IMPROVE_BODY_LIMIT)
+            if request is None:
+                return
+            valid = (isinstance(request, dict) and {"action", "id"} <= set(request) <= {"action", "id", "note"}
+                     and request["action"] in ("approve", "reject", "revert") and isinstance(request["id"], str)
+                     and isinstance(request.get("note", ""), str))
+            if not valid:
+                self._refuse(400, 'expected {"action": "approve"|"reject"|"revert", "id": proposal, "note"?: text} '
+                                  '(a rejection needs a "note": the reason)')
+                return
+            if demo:
+                self._refuse(403, "the demo cannot change the proposals")
+                return
+            action, note = request["action"], request.get("note", "")
+
+            def run():
+                root, home = self._improve_where()
+                if action == "approve":
+                    improve.approve(home, root, request["id"], who="user", note=note or "approved in the view")
+                elif action == "reject":
+                    improve.reject(home, request["id"], note, who="user")
+                else:
+                    improve.revert(home, root, request["id"], who="user", note=note)
+                return improve.show(home, root, request["id"])
+
+            self._answer(run, improve.ImproveError)
+
         def _reply(self, status: int, content_type: str, body: bytes):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -658,6 +724,9 @@ def make_server(
                 return
             if path == _CHAT_PATH:
                 self._chat(query)
+                return
+            if path == _IMPROVE_PATH:
+                self._improve_get(query)
                 return
             filename = path[1:] if path != "/" else "index.html"
             if filename in ("", ".", "..") or any(c in filename for c in ("/", "\\", "\0")):

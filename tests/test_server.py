@@ -193,3 +193,109 @@ class ServeCommandTests(unittest.TestCase):
                 self.assertEqual(stdout.getvalue(), f"agentgraph is serving at {address}\n")
                 self.assertEqual(stderr.getvalue(), "")
                 self.assertEqual(signal.getsignal(signal.SIGTERM), previous)
+
+
+class ImproveEndpointTests(unittest.TestCase):
+    """GET and POST /api/improve on temporary folders only (config root, ledger root, preset file)."""
+
+    def setUp(self):
+        from agentgraph import improve
+        self.improve = improve
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.root, self.ledger = self.tmp / "config", self.tmp / "ledgers"
+        (self.root / "oh-my-opencode-slim").mkdir(parents=True)
+        self.ledger.mkdir()
+        self.rel = "oh-my-opencode-slim/designer_append.md"
+        self.file = self.root / self.rel
+        self.original = b"Be brief.\n"
+        self.file.write_bytes(self.original)
+        self.home = self.ledger / "memory"
+        self.record = improve.propose(self.home, self.root, "Shorter", "too long", [(self.rel, "Be briefer.\n")])
+        self.enterContext(patch.object(server, "build_snapshot", side_effect=AssertionError("unexpected live read")))
+        self.httpd = server.make_server(0, web_dir=self.tmp, graph_dir=self.tmp / "graphs", cwd=self.tmp, session="root",
+                                        skills_config=self.tmp / "none.json", ledger_root=self.ledger,
+                                        improve_config_root=self.root)
+        thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        self.addCleanup(self.httpd.server_close)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(self.httpd.shutdown)
+
+    def call(self, method, path="/api/improve", body=None, headers=None):
+        port = self.httpd.server_port
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            sent = {"Origin": f"http://127.0.0.1:{port}", **(headers or {})}
+            data = None
+            if body is not None:
+                data = body if isinstance(body, bytes) else json.dumps(body).encode()
+                sent.setdefault("Content-Type", "application/json")
+            conn.request(method, path, body=data, headers=sent)
+            response = conn.getresponse()
+            raw = response.read()
+            return response.status, json.loads(raw) if raw else None
+        finally:
+            conn.close()
+
+    def act(self, action, **extra):
+        return self.call("POST", body={"action": action, "id": self.record["id"], **extra})
+
+    def test_list_and_show(self):
+        status, body = self.call("GET")
+        self.assertEqual(status, 200)
+        item, = body["proposals"]
+        self.assertEqual((item["id"], item["state"], item["files"], item["added"], item["removed"]),
+                         (self.record["id"], "drafted", [self.rel], 1, 1))
+        self.assertEqual(item["summary"]["verdict"], "not enough runs")
+        self.assertNotIn("changes", item)
+        status, body = self.call("GET", f"/api/improve?id={self.record['id']}")
+        self.assertEqual(status, 200)
+        self.assertIn("+Be briefer.", body["files"][0]["diff"])
+        self.assertEqual(body["changes"][0]["new_text"], "Be briefer.\n")
+        self.assertEqual(self.call("GET", "/api/improve?id=nope")[0], 404)
+        self.assertEqual(self.call("GET", "/api/improve?id=../x")[0], 400)
+
+    def test_approve_then_revert(self):
+        status, body = self.act("approve", note="yes please")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["state"], "applied")
+        self.assertEqual((body["history"][-1]["who"], body["history"][-1]["note"]), ("user", "yes please"))
+        self.assertEqual(self.file.read_bytes(), b"Be briefer.\n")
+        self.assertTrue((self.home / "improvements.jsonl").is_file())
+        self.assertEqual(self.call("GET")[1]["proposals"][0]["state"], "applied")
+        status, body = self.act("revert")
+        self.assertEqual((status, body["state"]), (200, "reverted"))
+        self.assertEqual(self.file.read_bytes(), self.original)
+
+    def test_approve_refused_when_the_file_changed_and_revert_when_edited(self):
+        self.file.write_bytes(b"edited\n")
+        status, body = self.act("approve")
+        self.assertEqual(status, 400)
+        self.assertIn("changed since", body["error"])
+        self.assertEqual(self.file.read_bytes(), b"edited\n")
+        self.file.write_bytes(self.original)
+        self.assertEqual(self.act("approve")[0], 200)
+        self.file.write_bytes(b"hand edit\n")
+        status, body = self.act("revert")
+        self.assertEqual(status, 400)
+        self.assertEqual(self.file.read_bytes(), b"hand edit\n")
+
+    def test_reject_changes_no_file_and_needs_a_reason(self):
+        self.assertEqual(self.act("reject")[0], 400)
+        status, body = self.act("reject", note="not now")
+        self.assertEqual((status, body["state"]), (200, "rejected"))
+        self.assertEqual(self.file.read_bytes(), self.original)
+        self.assertEqual(self.act("approve")[0], 400)
+
+    def test_bad_requests_and_protections(self):
+        for body in ({"action": "approve"}, {"action": "force", "id": self.record["id"]},
+                     {"action": "approve", "id": 3}, {"action": "approve", "id": "x", "force": True},
+                     {"action": "approve", "id": "x", "note": 1}, [1]):
+            with self.subTest(body=body):
+                self.assertEqual(self.call("POST", body=body)[0], 400)
+        self.assertEqual(self.act("approve", note="x", **{"extra": 1})[0], 400)
+        self.assertEqual(self.call("POST", headers={"Origin": "http://evil.example"},
+                                   body={"action": "approve", "id": self.record["id"]})[0], 403)
+        self.assertEqual(self.call("POST", body=b"{}", headers={"Content-Type": "text/plain"})[0], 415)
+        self.assertEqual(self.call("DELETE")[0], 405)
+        self.assertEqual(self.file.read_bytes(), self.original)
