@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
+import stat
 import sys
 from collections.abc import Iterator
 from math import isfinite
@@ -34,6 +36,7 @@ _NODE_LISTS = ("depends_on", "scope", "tiers", "changed_paths", "feedback_to")
 _NOT_OBJECT = "graph must be an object"
 _INVALID_TASK = "graph task must be a non-blank string"
 _MAX_LIST_ISSUES = 100
+RUN_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{4}")  # a loop run's id (agentgraph.looprun)
 COMMIT_ID = re.compile(r"[0-9a-f]{7,64}")  # a node's `base`: an abbreviated or full hash, lower case (git's own output)
 
 
@@ -81,6 +84,126 @@ def _oversized_lists(raw: dict) -> list[str]:
                         return issues + ["... and more lists over the limit (further checks skipped)"]
                     issues.append(f"{label} has {len(value)} {field}; the limit is {MAX_NODE_LIST}")
     return issues
+
+
+E2E_RULE = "declares an e2e and is passed, but"  # what the message of the end-to-end rule contains (agentgraph.reviewcopy keys on it)
+STALE_EVENTS = ("returned", "attempt", *transitions.RESTART_EVENTS)
+
+
+def _review_copy_issues(label: str, node: dict, events: object) -> list[str]:
+    """The node's `review_copy` (what `agentgraph review-copy` records) and the rule for a node with an `e2e`: it is not `passed`
+    without a review copy whose end-to-end command exited 0, of the e2e it declares now, that left the project unchanged and whose
+    copy was taken (`started`, else `at`) no earlier than the node's last `returned`, `attempt`, `dispatched`, `retried` or
+    `invalidated` event. A graph with no such event for the node has nothing to compare: the result must exist and match, its age
+    cannot be told."""
+    issues: list[str] = []
+    found = node.get("review_copy")
+    if "review_copy" in node:
+        if not isinstance(found, dict):
+            issues.append(f"{label} review_copy must be an object")
+            found = None
+        else:
+            if not _nonblank(found.get("result")):
+                issues.append(f"{label} review_copy result must be a non-blank string (the result file's path)")
+            if not _nonblank(found.get("tree")):
+                issues.append(f"{label} review_copy tree must be a non-blank string")
+            for key in ("at", "started"):
+                if (key == "at" or key in found) and not _number(found.get(key)):
+                    issues.append(f"{label} review_copy {key} must be a finite number")
+            for key in ("check_exit", "e2e_exit"):
+                if found.get(key) is not None and type(found[key]) is not int:
+                    issues.append(f"{label} review_copy {key} must be a whole number or null")
+            for key in ("check_sha256", "e2e_sha256"):
+                if key in found and not isinstance(found[key], str):
+                    issues.append(f"{label} review_copy {key} must be a string")
+            if "project_unchanged" in found and not isinstance(found["project_unchanged"], bool):
+                issues.append(f"{label} review_copy project_unchanged must be a boolean")
+    if node.get("status") != "passed" or not _nonblank(node.get("e2e")):
+        return issues
+    why = "has no review copy"
+    if isinstance(found, dict):
+        last = max((e["time"] for e in events if isinstance(e, dict) and e.get("node") == node.get("id")
+                    and e.get("event") in STALE_EVENTS and _number(e.get("time"))), default=None) \
+            if isinstance(events, list) else None
+        if found.get("e2e_exit") != 0 or type(found.get("e2e_exit")) is not int:
+            why = "its review copy's e2e did not exit 0"
+        elif found.get("e2e_sha256") != hashlib.sha256(node["e2e"].encode("utf-8", "surrogatepass")).hexdigest():
+            why = "its review copy ran a different e2e than the node declares now"
+        elif found.get("project_unchanged") is not True:
+            why = "its review copy did not leave the project unchanged"
+        elif not _number(found.get("at")) or (last is not None and (found["started"] if _number(found.get("started")) else found["at"]) < last):
+            why = "its review copy was taken before the node's last returned, attempt or restart (dispatched, retried, invalidated) event"
+        else:
+            return issues
+    issues.append(f"{label} {E2E_RULE} {why} (agentgraph review-copy --task T --node N runs it and records the result)")
+    return issues
+
+
+RESULT_LIMIT = 1 << 20  # the most of a review-copy result file that `check` reads
+
+
+def _shown(value) -> str:
+    return repr(value)[:40]
+
+
+def _read_result(project: Path, parts: list[str]):
+    """A review-copy result file decoded, or None when it is not there, is reached through a link, is not a regular file (a
+    FIFO would block), is over RESULT_LIMIT or is not JSON. Never raises, never waits."""
+    fd = -1
+    try:
+        fd = os.open(project, os.O_RDONLY | os.O_DIRECTORY)
+        for part in parts[:-1]:
+            fd, parent = outputs._open_dir(fd, part), fd
+            os.close(parent)
+        leaf = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        try:
+            if not stat.S_ISREG(os.fstat(leaf).st_mode):
+                return None
+            with os.fdopen(leaf, "rb", closefd=False) as handle:
+                body = handle.read(RESULT_LIMIT + 1)
+        finally:
+            os.close(leaf)
+        return None if len(body) > RESULT_LIMIT else json.loads(body.decode("utf-8"))
+    except (OSError, ValueError, RecursionError, outputs.OutputError):
+        return None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def review_copy_warnings(raw: dict, path: Path) -> list[str]:
+    """What a node's `review_copy` says that the result file it names does not: the file is not under the node's own artifacts
+    folder, is not there, or its exits and command hashes differ from the node's. Warnings: a hand-written record is the thing
+    this looks for, but `check` cannot tell it from a result file that was edited too."""
+    project = outputs.project_of(path)
+    task = raw.get("task") if isinstance(raw.get("task"), str) else path.stem
+    found: list[str] = []
+    for node in raw.get("nodes") or []:
+        record = node.get("review_copy") if isinstance(node, dict) else None
+        if not isinstance(record, dict) or project is None or not isinstance(node.get("id"), str):
+            continue
+        label, result = f"{node['id']} review_copy", record.get("result")
+        parts = outputs._inside(task, result)
+        if parts is None or len(parts) != 2 or parts[0] != node["id"] or not parts[1].startswith("review-copy-") or not parts[1].endswith(".json"):
+            found.append(f"{label} result {str(result)[:80]!r} is not a file under .opencode/artifacts/{task}/{node['id']}/")
+            continue
+        data = _read_result(project, [".opencode", "artifacts", task, *parts])
+        if data is None:
+            found.append(f"{label} result {result} does not exist or is not a result file")
+            continue
+        commands = data.get("commands") if isinstance(data, dict) else None
+        ran = {c["name"]: c for c in commands if isinstance(c, dict) and isinstance(c.get("name"), str)} if isinstance(commands, list) else {}
+        for name in ("check", "e2e"):
+            made = ran.get(name)
+            exit_code = None if made is None or made.get("timed_out") else made.get("exit")
+            if exit_code != record.get(f"{name}_exit") or (made is not None and record.get(f"{name}_sha256") not in (None, made.get("sha256"))):
+                found.append(f"{label} {name} does not match {result} (the record says exit {_shown(record.get(f'{name}_exit'))}, the file says "
+                             + ("it did not run" if made is None else f"exit {_shown(exit_code)}") + ")")
+        for field in ("started", "at", "tree", "project_unchanged"):
+            if record.get(field) != (data.get(field) if isinstance(data, dict) else None):
+                found.append(f"{label} {field} does not match {result} (the record says {_shown(record.get(field))}, the file says "
+                             f"{_shown(data.get(field) if isinstance(data, dict) else None)})")
+    return found
 
 
 def _raw_issues(raw: dict) -> list[str]:
@@ -155,10 +278,32 @@ def _raw_issues(raw: dict) -> list[str]:
                 issues.append(f"{label} {field} must be a string")
         if "base" in node and node["base"] != "" and not (isinstance(node["base"], str) and COMMIT_ID.fullmatch(node["base"])):
             issues.append(f"{label} base must be a commit id (7 to 64 lower-case hex digits) or empty")
-        for field in ("started", "finished"):
+        for field in ("started", "finished", "ended"):
             value = node.get(field)
             if value is not None and not _number(value):
                 issues.append(f"{label} {field} must be a finite number or null")
+        for field in ("check", "verify", "e2e"):
+            if field in node and not _nonblank(node[field]):
+                issues.append(f"{label} {field} must be a non-blank string")
+        issues += _review_copy_issues(label, node, raw.get("events"))
+        if "loop_run" in node and not (isinstance(node["loop_run"], str) and RUN_ID.fullmatch(node["loop_run"])):
+            issues.append(f"{label} loop_run must be a loop run id (like 20260101-120000-ab12)")
+        if "spent" in node and node["spent"] is not None and not (_number(node["spent"]) and node["spent"] >= 0):
+            issues.append(f"{label} spent must be dollars: a number, 0 or more, or null when no turn's cost is known")
+        if "unpriced" in node and node["unpriced"] is not None and not (type(node["unpriced"]) is int and node["unpriced"] >= 0):
+            issues.append(f"{label} unpriced must be a whole number, 0 or more (turns whose cost is not known)")
+        if "budget" in node:
+            budget = node["budget"]
+            if not isinstance(budget, dict):
+                issues.append(f"{label} budget must be an object ({{\"cost\": dollars, \"attempts\": n}})")
+            else:
+                if "cost" in budget and not (_number(budget["cost"]) and budget["cost"] > 0):
+                    issues.append(f"{label} budget cost must be a number above 0")
+                if "attempts" in budget and not (type(budget["attempts"]) is int and budget["attempts"] >= 1):
+                    issues.append(f"{label} budget attempts must be a whole number, 1 or more")
+                unknown = [key for key in budget if key not in ("cost", "attempts")]
+                if unknown:
+                    issues.append(f"{label} budget has an unknown key {unknown[0]!r} (cost and attempts only)")
 
     for label, objective in _entries(raw, "objectives", "objective", issues):
         for field in ("id", "text"):
@@ -612,7 +757,7 @@ def _examine(raw: dict, path: Path, rules: Rules, folder: int | None, write: boo
     unsaved = outputs.unsaved_edits(graph, rules.edits)  # a save stopped before the graph: a warning
     drift: list[str] = []
     if not _raw_issues(raw):
-        drift = transitions.warnings(raw, path)
+        drift = transitions.warnings(raw, path) + review_copy_warnings(raw, path)
         if folder is not None:
             issues = issues + _history_step(folder, path, raw, issues, graph, rules, write)
     return graph, issues, unsaved, drift

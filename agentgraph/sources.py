@@ -279,6 +279,25 @@ def _sid(value) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _budget(value) -> dict | None:
+    """The node's budget as far as it is well typed: {"cost": number, "attempts": whole number}; unknown keys stay for `check` to name."""
+    if not isinstance(value, dict):
+        return None
+    return {key: item for key, item in value.items() if isinstance(key, str) and _number_like(item)}
+
+
+def _review_copy(value) -> dict | None:
+    """The node's review copy as far as it is plain data: the keys with a text, number, boolean or null value."""
+    if not isinstance(value, dict):
+        return None
+    return {key: item for key, item in value.items()
+            if isinstance(key, str) and (item is None or isinstance(item, (str, bool)) or _number_like(item))}
+
+
+def _number_like(item) -> bool:
+    return isinstance(item, (int, float)) and not isinstance(item, bool) and item == item and abs(item) != float("inf")
+
+
 def _artifact_entries(value, fields: tuple[str, str]) -> list[dict]:
     """Keep only complete, well-typed handoffs; never coerce identity or revision."""
     return [entry for entry in _list(value) if isinstance(entry, dict)
@@ -335,6 +354,15 @@ def _node(raw: dict, over: Counter | None = None) -> Node:
         pattern=pattern if isinstance(pattern, str) else "",
         feedback_to=feedback,
         base=_str(raw.get("base")),
+        check=_str(raw.get("check")),
+        verify=_str(raw.get("verify")),
+        e2e=_str(raw.get("e2e")),
+        review_copy=_review_copy(raw.get("review_copy")),
+        budget=_budget(raw.get("budget")),
+        loop_run=_str(raw.get("loop_run")),
+        spent=_opt_num(raw.get("spent")),
+        unpriced=_int(raw.get("unpriced"), 0) or None,
+        ended=_opt_num(raw.get("ended")),
         artifacts=[Artifact(entry["id"], entry["path"], entry["revision"])
                    for entry in _artifact_entries(_capped(raw, "artifacts", over), ("id", "path"))],
         inputs=[ArtifactInput(entry["from"], entry["artifact"], entry["revision"])

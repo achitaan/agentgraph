@@ -92,8 +92,9 @@ def _graph_document(graph: TaskGraph, busy_ids: set[str], handoffs: set[tuple[st
         transitions = {(a, b) for a, b in pairwise(node.tiers) if a != b}
         handoffs.update(transitions)
         nodes.append({
-            **{key: value for key, value in asdict(node).items() if key != "base"},  # `base` is the ledger's (cases)
-            "busy": contract.node_busy(node, busy_ids),
+            **{key: value for key, value in asdict(node).items()
+               if key != "base" and not (key in contract.RUN_FIELDS and value in ("", None))},  # `base` is the ledger's (cases)
+            "busy": contract.node_busy(node, busy_ids) or liveness[node.id][0] == "live",  # one rule: live is busy
             "liveness": liveness[node.id][0], "idle_since": liveness[node.id][1],
             "wave": wave_by_id[node.id], "escalated": bool(transitions),
             "inputs": [{"from": entry.from_node, "artifact": entry.artifact, "revision": entry.revision,
@@ -591,6 +592,8 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
     # Confirmed state comes from the whole database; a snapshot made without one falls back to the sessions it lists.
     known = snapshot.known if snapshot.known is not None else (
         {item.id: item for item in sessions if item.id is not None} if sessions else None)
+    if known is not None:  # one rule for "this node's session is busy": the one liveness uses, the whole database
+        busy_ids = {item.id for item in known.values() if item.busy and item.id is not None}
     graph_doc = _graph_document(active, busy_ids, handoffs, known, structure) if active is not None else None
     listed = [agent for agents in grouped.values() for agent in agents]
     return _json_safe({

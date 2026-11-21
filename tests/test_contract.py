@@ -1051,6 +1051,81 @@ class RunningByAgent(unittest.TestCase):
         self.assertEqual(running_by_agent(snapshot), {})
 
 
+class BusyAndLivenessAgree(unittest.TestCase):
+    """A node's session may be anywhere in the database (a loop run's sessions are not the orchestrator's children): `busy` and
+    `liveness` in the snapshot are then one answer."""
+
+    def session(self, session_id, busy, parent=None):
+        return Session(id=session_id, parent_id=parent, agent="impl-openai", title="t", model="m", effort="high", busy=busy,
+                       created=1, updated=2)
+
+    def document(self, listed, known, status="running", session_id="ses_loop"):
+        from agentgraph import snapshot_json
+
+        owner = self.session("ses_root", False)
+        work = node("n1", status=status)
+        work.session = session_id
+        snap = Snapshot(now=10, root=owner, sessions=listed, graphs=[graph([work])], known=known)
+        return snapshot_json.snapshot_document(snap, "live")["graph"]["nodes"][0]
+
+    def test_a_busy_session_outside_the_root_tree_is_live_and_busy(self):
+        loop = self.session("ses_loop", True)
+        item = self.document([], {"ses_loop": loop, "ses_root": self.session("ses_root", False)})
+        self.assertEqual(item["liveness"], "live")
+        self.assertTrue(item["busy"])
+
+    def test_they_agree_for_every_status_and_session_state(self):
+        for status in ("pending", "running", "returned", "passed", "failed", "blocked"):
+            for busy in (True, False):
+                for listed in (True, False):
+                    with self.subTest(status=status, busy=busy, listed=listed):
+                        loop = self.session("ses_loop", busy, "ses_root" if listed else None)
+                        known = {"ses_loop": loop, "ses_root": self.session("ses_root", False)}
+                        item = self.document([loop] if listed else [], known, status)
+                        self.assertEqual(item["busy"], item["liveness"] == "live")
+
+
+class EndToEndFields(unittest.TestCase):
+    def test_e2e_and_review_copy_are_node_run_fields_that_default_to_empty(self):
+        item = Node(id="n", type="implement", agent="impl", goal="g")
+        self.assertEqual((item.e2e, item.review_copy), ("", None))
+        self.assertIn("e2e", contract.RUN_FIELDS)
+        self.assertIn("review_copy", contract.RUN_FIELDS)
+
+
+class RunControllerLiveness(unittest.TestCase):
+    """A node whose loop run has a live controller is live, whatever its session says; nothing changes for a node without a run."""
+
+    def node(self, **kw):
+        base = dict(id="n", type="implement", agent="impl", goal="g", status="running", session=None, loop_run="20260101-000000-abcd")
+        return Node(**{**base, **kw})
+
+    def test_a_controlled_run_makes_the_node_live_and_busy(self):
+        item = self.node()
+        controlled = {"20260101-000000-abcd"}
+        self.assertEqual(contract.node_liveness(item, {}, controlled=controlled), ("live", None))
+        self.assertTrue(contract.node_busy(item, set(), controlled))
+        self.assertEqual(contract.graph_liveness(graph([item]), {}, controlled)["n"], ("live", None))
+
+    def test_without_a_controller_the_old_answer_stands(self):
+        item = self.node()
+        self.assertEqual(contract.node_liveness(item, {}, controlled=set()), ("orphan", None))
+        self.assertFalse(contract.node_busy(item, set(), set()))
+
+    def test_a_node_without_a_run_is_not_affected(self):
+        item = self.node(loop_run=None)
+        self.assertEqual(contract.node_liveness(item, {}, controlled={"20260101-000000-abcd"}), ("orphan", None))
+        self.assertFalse(contract.node_busy(item, set(), {"20260101-000000-abcd"}))
+
+    def test_a_node_that_is_not_running_is_not_live_for_its_run(self):
+        item = self.node(status="blocked")
+        self.assertFalse(contract.node_busy(item, set(), {"20260101-000000-abcd"}))
+        self.assertNotEqual(contract.node_liveness(item, {}, controlled={"20260101-000000-abcd"})[0], "live")
+
+    def test_limit_is_a_failure_kind(self):
+        self.assertIn("limit", contract.FAILURE_KINDS)
+
+
 if __name__ == "__main__":
     unittest.main()
 

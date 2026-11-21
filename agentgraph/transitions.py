@@ -27,6 +27,7 @@ SUFFIX = ".state"
 FLOWS_SUFFIX = ".flows"  # the flows recorded for a graph (flows_record)
 STATE_LIMIT = 16 * 1024 * 1024  # bytes read back
 FUTURE_SECONDS = 3600  # a new event dated further ahead than this is a clock error (E5)
+RUN_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{4}")  # a loop run's id (agentgraph.looprun)
 STALL_ATTEMPTS = 3  # attempts at which a node that is not stalled is a "stall candidate" (T8)
 MAX_PER_RULE = 5  # messages of one rule kept per graph; the rest is counted
 
@@ -80,6 +81,11 @@ def _event_time(event):
 # --- the record ----------------------------------------------------------------------------------------------
 
 
+def dispatched(node: dict) -> bool:
+    """Whether a node was ever handed out: it is not pending, or it has attempts, or it names a loop run."""
+    return node.get("status", "pending") != "pending" or _int(node.get("attempts")) > 0 or bool(node.get("loop_run"))
+
+
 def state_of(raw: dict) -> dict:
     """What the rules need of a graph: per node its status, attempts, verdict, stalled, started, finished, input and
     artifact revisions and a hash of `done_when`; a hash of each objective's text; revision, amendments (count),
@@ -101,6 +107,11 @@ def state_of(raw: dict) -> dict:
                 "started": node.get("started"),
                 "finished": node.get("finished"),
                 "done_when": _digest(node.get("done_when")),
+                "check": _digest(node["check"]) if node.get("check") and dispatched(node) else "",  # frozen once the node was dispatched, like done_when
+                "verify": _digest(node["verify"]) if node.get("verify") and dispatched(node) else "",
+                "e2e": _digest(node.get("e2e")) if dispatched(node) else "",  # frozen like check; once dispatched, having none is part of it
+                "budget": _digest(node["budget"]) if node.get("budget") and dispatched(node) else "",  # changes only with an `amended` event
+                "spent": node["spent"] if isinstance(node.get("spent"), (int, float)) and not isinstance(node.get("spent"), bool) else None,
                 "inputs": _revisions(node.get("inputs"), ("from", "artifact")),
                 "artifacts": _revisions(node.get("artifacts"), ("id", "id")),
             } for node_id, node in _nodes(raw).items()},
@@ -375,10 +386,26 @@ def problems(prev: dict, raw: dict, now: float | None = None) -> list[str]:
                or _digest(next(o.get("text") for o in _dicts(raw.get("objectives")) if str(o.get("id")) == o_id)) != digest]
     changed += [f"{node_id} done_when" for node_id, old in prev["nodes"].items()
                 if node_id in nodes and _digest(nodes[node_id].get("done_when")) != old.get("done_when")]
+    # the check and the verifier of a node that was dispatched: a state record from before these were kept has no key, so says nothing
+    for field in ("check", "verify", "e2e"):
+        changed += [f"{node_id} {field}" for node_id, old in prev["nodes"].items()
+                    if node_id in nodes and old.get(field) and _digest(nodes[node_id].get(field)) != old[field]]
     if changed and not (revision > _int(prev.get("revision"), 1) and amendments > _int(prev.get("amendments"))):
         found.append(f"{', '.join(changed[:5])}{' and more' if len(changed) > 5 else ''} changed without an amendment "
                      f"(revision must go up and amendments must get a new line: revision {revision}, "
                      f"{amendments} amendments, was {prev.get('revision')} and {prev.get('amendments')})")
+    # the budget of a node that was dispatched changes only with an `amended` event for it; what it has spent never goes down
+    amended = {e.get("node") for _, e in new_events if isinstance(e, dict) and e.get("event") == "amended"}
+    for node_id, old in prev["nodes"].items():
+        if node_id not in nodes:
+            continue
+        if old.get("budget") and _digest(nodes[node_id].get("budget")) != old["budget"] and node_id not in amended:
+            found.append(f"{node_id} budget changed without an amended event (a budget changes through agentgraph node run --raise-budget, "
+                         "which writes one)")
+        spent, was = nodes[node_id].get("spent"), old.get("spent")
+        if isinstance(was, (int, float)) and not isinstance(was, bool) and not (isinstance(spent, (int, float)) and not isinstance(spent, bool) and spent >= was):
+            found.append(f"{node_id} spent went down from ${was:,.4f} to " + (f"${spent:,.4f}" if isinstance(spent, (int, float)) and not isinstance(spent, bool) else "nothing")
+                         + " (what a node has spent only grows)")
     created, updated = raw.get("created"), raw.get("updated")
     if isinstance(updated, (int, float)) and isinstance(prev.get("updated"), (int, float)) and updated < prev["updated"]:
         found.append(f"updated went back from {prev['updated']} to {updated}")
@@ -415,6 +442,59 @@ def warnings(raw: dict, path) -> list[str]:
                   "same evidence again? mark it stalled or change the approach)"
                   for node_id, node in nodes.items()
                   if node.get("status") != "passed" and _int(node.get("attempts")) >= STALL_ATTEMPTS
-                  and node.get("stalled") is not True]
+                  and node.get("stalled") is not True and not _run_passed(node, project)]
     found += _capped(candidates, "stall candidates")
+    found += _capped(_run_warnings(nodes, project, raw.get("task") if isinstance(raw.get("task"), str) else path.stem), "node runs")
     return found
+
+
+def _run_passed(node: dict, project) -> bool:
+    """Whether the loop run the node names ended with the check passed: a node that took three rounds and returned is not stalled."""
+    run = node.get("loop_run")
+    if project is None or not isinstance(run, str) or not RUN_ID.fullmatch(run):
+        return False
+    found = _run_state(project / ".opencode" / "loops" / run)
+    return bool(found) and found[1].get("status") == "passed"
+
+
+def _run_warnings(nodes: dict[str, dict], project, task: str = "TASK") -> list[str]:
+    """What the budget and loop-run fields of a node say that does not hold: spent over the budget, a loop run that is not
+    in the project's `.opencode/loops`, a node that still says running after its run ended, or whose run has no controller."""
+    found: list[str] = []
+    for node_id, node in nodes.items():
+        budget, spent = node.get("budget"), node.get("spent")
+        limit = budget.get("cost") if isinstance(budget, dict) else None
+        if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (limit, spent)) and spent > limit:
+            found.append(f"{node_id} spent ${spent:,.2f}, over its budget of ${limit:,.2f}")
+        unpriced = node.get("unpriced")
+        if type(unpriced) is int and unpriced > 0:
+            known = f"at least ${spent:,.2f}" if isinstance(spent, (int, float)) and not isinstance(spent, bool) else "an unknown amount"
+            found.append(f"{node_id} has {unpriced} turn{'s' if unpriced != 1 else ''} with no known cost: it spent {known}, so its budget cannot be trusted")
+        run = node.get("loop_run")
+        if project is None or not isinstance(run, str) or not RUN_ID.fullmatch(run):
+            continue
+        folder = project / ".opencode" / "loops" / run
+        if not folder.is_dir():
+            found.append(f"{node_id} names the loop run {run}, which is not in {project / '.opencode' / 'loops'}")
+        elif node.get("status") == "running":
+            state = _run_state(folder)
+            if state and state[0] not in ("running", "queued"):
+                where = f"--task {task} --node {node_id}"
+                if state[0] in ("interrupted", "paused", "waiting"):
+                    why = "no controller holds it" if state[0] == "interrupted" else f"it is {state[0]} and nothing works on it until it is resumed"
+                    advice = (f": {why}; agentgraph node cancel {where} ends it and the next node run counts what it spent (prefer it to loop resume: "
+                              f"a resumed run has no follower, so the node is not kept current, no report is written and its old limits apply)")
+                else:
+                    advice = f": agentgraph node status {where} brings the node up to date"
+                found.append(f"{node_id} is running, but its loop run {run} is {state[0]}" + advice)
+    return found
+
+
+def _run_state(folder: Path):
+    """(the run's shown status, its record) or None when it cannot be read."""
+    from . import looprun  # the loop controller is a large module: only a node that names a run needs it
+    try:
+        state = looprun.read_run(folder)
+        return looprun.shown_status(folder, state), state
+    except (looprun.LoopError, OSError, ValueError, KeyError):
+        return None

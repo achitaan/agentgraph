@@ -19,7 +19,7 @@ PATTERNS = ("chain", "route", "parallel", "vote", "orchestrate", "evaluate", "sy
 # "returned" = the worker reports PASS and the orchestrator has not evaluated it yet.
 NODE_STATUSES = ("pending", "running", "returned", "passed", "failed", "blocked")
 VERDICTS = ("confirmed", "refuted", "unverifiable")  # result of a gate node
-FAILURE_KINDS = ("code", "evaluation", "environment", "input")
+FAILURE_KINDS = ("code", "evaluation", "environment", "input", "limit")
 GRAPH_STATUSES = ("running", "passed", "blocked")
 EVENT_NAMES = (
     "declared", "dispatched", "attempt", "returned", "evaluated", "retried", "stalled", "escalated",
@@ -177,6 +177,15 @@ class Node:
     artifacts: list[Artifact] = field(default_factory=list)
     inputs: list[ArtifactInput] = field(default_factory=list)
     base: str = ""  # the project's commit when the node was dispatched (optional; lets a failure be tried again there)
+    check: str = ""  # the command that decides the node (`agentgraph node run`)
+    verify: str = ""  # the agent that judges the work once the check has passed
+    e2e: str = ""  # one end-to-end command that starts what the node built (`agentgraph review-copy`)
+    review_copy: dict | None = None  # what the last review copy recorded: result path, exits, tree digest, times
+    budget: dict | None = None  # {"cost": dollars, "attempts": n} the node may use
+    loop_run: str = ""  # the loop run that works on the node
+    spent: float | None = None  # dollars the node's runs have cost so far (at least, when some turns had no known price)
+    unpriced: int | None = None  # turns of the node's runs whose cost is not known
+    ended: float | None = None  # unix seconds the node's run ended
 
 
 @dataclass
@@ -281,27 +290,33 @@ def waves(graph: TaskGraph) -> list[list[Node]]:
     return layers
 
 
-def node_busy(node: Node, busy_ids: Collection[str]) -> bool:
-    """A node is busy when it is running and its session is busy now. A
-    session is often reused for several nodes, so a busy session alone does
-    not make a finished node busy."""
-    return node.status == "running" and node.session is not None and node.session in busy_ids
+def node_busy(node: Node, busy_ids: Collection[str], controlled: Collection[str] = frozenset()) -> bool:
+    """A node is busy when it is running and its session is busy now, or the loop run it names has a live controller
+    (`controlled`). A session is often reused for several nodes, so a busy session alone does not make a finished node busy."""
+    if node.status != "running":
+        return False
+    return (node.loop_run in controlled and bool(node.loop_run)) or (node.session is not None and node.session in busy_ids)
 
 
+RUN_FIELDS = ("check", "verify", "e2e", "review_copy", "budget", "loop_run", "spent", "unpriced", "ended")  # a node's fields from `agentgraph node run`
 LIVENESS = ("live", "quiet", "orphan", "unreported")
 # A passed or failed node's session is often reused for later work, so its being busy says nothing.
 _UNREPORTED_STATUSES = ("pending", "returned", "blocked")
 
 
-def node_liveness(node: Node, known: Mapping[str, Session] | None,
-                  shared: Collection[str] = frozenset()) -> tuple[str | None, float | None]:
+def node_liveness(node: Node, known: Mapping[str, Session] | None, shared: Collection[str] = frozenset(),
+                  controlled: Collection[str] = frozenset()) -> tuple[str | None, float | None]:
     """What the database confirms about a node, as (liveness, idle_since); never stored in the graph.
 
     `live`: status running and its session busy. `quiet`: running, the session exists and is idle
     (`idle_since` is when it went idle, else its last update). `orphan`: running with no session id, or one the
     database does not have. `unreported`: the session is busy but the node is pending, returned or blocked, and
     no running node (`shared` holds the sessions of running nodes and the graph's owner) accounts for it.
-    Otherwise (None, None). `known` None means the database was unreadable: a session id says nothing then."""
+    Otherwise (None, None). `known` None means the database was unreadable: a session id says nothing then.
+    A running node whose `loop_run` is in `controlled` (runs that a live controller holds) is `live` whatever its session says: the
+    controller is working on it between turns, while the check or a verifier runs, and before the first session is recorded."""
+    if node.status == "running" and node.loop_run and node.loop_run in controlled:
+        return "live", None
     sid = node.session if isinstance(node.session, str) and node.session else None
     session = known.get(sid) if known is not None and sid is not None else None
     if node.status == "running":
@@ -319,12 +334,35 @@ def node_liveness(node: Node, known: Mapping[str, Session] | None,
     return None, None
 
 
-def graph_liveness(graph: TaskGraph, known: Mapping[str, Session] | None) -> dict[str, tuple[str | None, float | None]]:
-    """`node_liveness` for every node of a graph, by node id."""
+def controlled_runs(graph: TaskGraph) -> set[str]:
+    """The loop runs of the graph's running nodes that a live controller holds (or that were queued a moment ago): read from the
+    project's `.opencode/loops` folder, so only a graph with a running node that names a run looks at the disk."""
+    runs = {node.loop_run for node in graph.nodes if node.status == "running" and node.loop_run}
+    root = _project_root(graph.path) if graph.path else None
+    if not runs or root is None:
+        return set()
+    from pathlib import Path
+
+    from . import looprun  # the loop controller is a large module: only a node that names a run needs it
+    found = set()
+    for run in runs:
+        try:
+            folder = looprun.run_dir(Path(str(root)), run)
+            if looprun.shown_status(folder, looprun.read_run(folder)) in ("running", "queued"):
+                found.add(run)
+        except (looprun.LoopError, OSError, ValueError, KeyError, TypeError):
+            continue
+    return found
+
+
+def graph_liveness(graph: TaskGraph, known: Mapping[str, Session] | None,
+                   controlled: Collection[str] | None = None) -> dict[str, tuple[str | None, float | None]]:
+    """`node_liveness` for every node of a graph, by node id. `controlled` defaults to `controlled_runs(graph)`."""
     shared = {node.session for node in graph.nodes if node.status == "running" and node.session}
     if graph.session:
         shared.add(graph.session)
-    return {node.id: node_liveness(node, known, shared) for node in graph.nodes}
+    held = controlled_runs(graph) if controlled is None else controlled
+    return {node.id: node_liveness(node, known, shared, held) for node in graph.nodes}
 
 
 def running_by_agent(snapshot: Snapshot) -> dict[str, int]:
@@ -810,6 +848,13 @@ def validate(graph: TaskGraph) -> list[str]:
     ids = Counter(node.id for node in graph.nodes)
     issues = [f"duplicate node id {node_id}" for node_id in sorted(ids) if ids[node_id] > 1]
     by_id = {node.id: node for node in graph.nodes}
+    # A graph that says it is done: a `completed` event with no reopening (a node dispatched, retried or invalidated) after it.
+    completed = False
+    for event in graph.events:
+        if event.event == "completed":
+            completed = True
+        elif event.event in ("dispatched", "retried", "invalidated"):
+            completed = False
     project_root = _project_root(graph.path)
     prefixes = _Prefixes()
     scope_keys: dict[str, list[list[int]]] = {}
@@ -830,6 +875,19 @@ def validate(graph: TaskGraph) -> list[str]:
             issues.append(f"{node.id} has no done_when evaluation")
         if graph.status == "passed" and node.status != "passed":
             issues.append(f"graph is passed but node {node.id} is {node.status}")
+        elif node.status == "running" and completed:
+            issues.append(f"graph is completed but node {node.id} is still running")
+        if node.budget is not None:
+            for key in node.budget:
+                if key not in ("cost", "attempts"):
+                    issues.append(f"{node.id} budget has an unknown key {key!r} (cost and attempts only)")
+            cost, attempts = node.budget.get("cost"), node.budget.get("attempts")
+            if cost is not None and not (cost > 0):
+                issues.append(f"{node.id} budget cost must be more than 0")
+            if attempts is not None and attempts < 1:
+                issues.append(f"{node.id} budget attempts must be at least 1")
+        if node.spent is not None and node.spent < 0:
+            issues.append(f"{node.id} spent cannot be below 0")
         if node.status == "passed" and not node.evidence.strip():
             issues.append(f"{node.id} passed with no evidence")
         if node.type == "gate" and node.status == "passed" and node.verdict != "confirmed":

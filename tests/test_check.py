@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -568,6 +569,420 @@ class Check(unittest.TestCase):
         result, output = self.run_check()
         self.assertEqual(result, 0, output)
         self.assertIn("warning: task 'test-task' differs from the file name 'other-name.json'", output)
+
+
+class NodeFields(unittest.TestCase):
+    """The fields `agentgraph node run` writes (check, verify, budget, loop_run, spent, ended) and the two holes it closed."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.project = Path(temporary.name)
+        self.directory = self.project / ".opencode" / "graph"
+        self.directory.mkdir(parents=True)
+
+    def write_graph(self, data):
+        (self.directory / "test-task.json").write_text(json.dumps(data))
+
+    def run_check(self, *args):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(["--dir", str(self.directory), "--no-history", *args])
+        return result, output.getvalue()
+
+    def running_graph(self, **node):
+        data = valid_graph()
+        data["status"] = "running"
+        data["nodes"][0].update(status="running", evidence="", session="ses_x", changed_paths=[], **node)
+        return data
+
+    def test_old_graphs_without_the_new_fields_stay_valid(self):
+        self.write_graph(valid_graph())
+        self.assertEqual(self.run_check()[0], 0)
+        self.write_graph(self.running_graph(started=5.5))
+        result, output = self.run_check()
+        self.assertEqual(result, 0, output)
+        self.assertNotIn("warning", output)
+
+    def test_the_new_fields_are_accepted(self):
+        self.write_graph(self.running_graph(check="python3 -m unittest", verify="reviewer", budget={"cost": 2.5, "attempts": 4},
+                                            spent=0.5, started=5.5, ended=None))
+        result, output = self.run_check()
+        self.assertEqual(result, 0, output)
+
+    def test_the_new_fields_are_typed(self):
+        for field, value in (("check", ""), ("check", 3), ("verify", " "), ("verify", []), ("budget", 5), ("budget", {"cost": "x"}),
+                             ("budget", {"cost": 0}), ("budget", {"attempts": 0}), ("budget", {"attempts": 2.5}), ("budget", {"money": 1}),
+                             ("loop_run", "../x"), ("loop_run", 7), ("spent", "1"), ("spent", -1), ("spent", True), ("ended", "now"), ("ended", True)):
+            with self.subTest(field=field, value=value):
+                self.write_graph(self.running_graph(**{field: value}))
+                result, output = self.run_check()
+                self.assertEqual(result, 1, output)
+                self.assertIn(f" {field}", output)
+
+    def test_a_graph_marked_passed_may_not_have_a_running_node(self):
+        data = self.running_graph()
+        data["status"] = "passed"
+        self.write_graph(data)
+        result, output = self.run_check()
+        self.assertEqual(result, 1, output)
+        self.assertIn("graph is passed but node n1 is running", output)
+
+    def test_a_completed_event_may_not_stand_over_a_running_node(self):
+        data = self.running_graph()
+        data["events"] = [{"time": 1, "node": "", "event": "completed", "note": "done"}]
+        self.write_graph(data)
+        result, output = self.run_check()
+        self.assertEqual(result, 1, output)
+        self.assertIn("graph is completed but node n1 is still running", output)
+
+    def test_spent_over_the_budget_is_a_warning(self):
+        self.write_graph(self.running_graph(budget={"cost": 1.0}, spent=1.5))
+        result, output = self.run_check()
+        self.assertEqual(result, 0, output)
+        self.assertIn("warning: n1 spent $1.50, over its budget of $1.00", output)
+
+    def test_a_loop_run_that_does_not_exist_is_a_warning(self):
+        self.write_graph(self.running_graph(loop_run="20260101-000000-abcd"))
+        result, output = self.run_check()
+        self.assertEqual(result, 0, output)
+        self.assertIn("warning: n1 names the loop run 20260101-000000-abcd, which is not in", output)
+        (self.project / ".opencode" / "loops" / "20260101-000000-abcd").mkdir(parents=True)
+        result, output = self.run_check()
+        self.assertEqual(result, 0, output)
+        self.assertNotIn("names the loop run", output)
+
+    def test_a_graph_reopened_after_a_completed_event_may_have_a_running_node(self):
+        data = self.running_graph()
+        data["events"] = [{"time": 1, "node": "", "event": "completed", "note": "done"},
+                          {"time": 2, "node": "n1", "event": "retried", "note": "again"}]
+        self.write_graph(data)
+        result, output = self.run_check()
+        self.assertEqual(result, 0, output)
+        self.assertNotIn("completed but node", output)
+
+    def test_a_graph_that_is_passed_now_with_a_running_node_is_an_error_whatever_the_events(self):
+        data = self.running_graph()
+        data["status"] = "passed"
+        data["events"] = [{"time": 1, "node": "", "event": "completed", "note": "done"},
+                          {"time": 2, "node": "n1", "event": "retried", "note": "again"}]
+        self.write_graph(data)
+        result, output = self.run_check()
+        self.assertEqual(result, 1, output)
+        self.assertIn("graph is passed but node n1 is running", output)
+
+    def test_spent_may_be_null_until_a_cost_is_known(self):
+        self.write_graph(self.running_graph(spent=None, unpriced=2))
+        result, output = self.run_check()
+        self.assertEqual(result, 0, output)
+        self.assertIn("warning: n1 has 2 turns with no known cost: it spent an unknown amount", output)
+
+    def test_unpriced_turns_with_a_known_part_say_at_least(self):
+        self.write_graph(self.running_graph(spent=0.25, unpriced=1))
+        result, output = self.run_check()
+        self.assertEqual(result, 0, output)
+        self.assertIn("warning: n1 has 1 turn with no known cost: it spent at least $0.25", output)
+
+    def test_unpriced_is_typed(self):
+        for value in (-1, 1.5, "2", True):
+            with self.subTest(value=value):
+                self.write_graph(self.running_graph(unpriced=value))
+                result, output = self.run_check()
+                self.assertEqual(result, 1, output)
+                self.assertIn(" unpriced", output)
+
+    def test_limit_is_a_failure_kind(self):
+        data = valid_graph()
+        data["status"] = "running"
+        data["nodes"][0].update(status="failed", failure_kind="limit", evidence="ran out of money", changed_paths=[])
+        self.write_graph(data)
+        result, output = self.run_check()
+        self.assertEqual(result, 0, output)
+
+    def test_the_stall_candidate_warning_skips_a_node_whose_run_passed(self):
+        run = "20260101-000000-abcd"
+        folder = self.project / ".opencode" / "loops" / run
+        folder.mkdir(parents=True)
+        (folder / "run.json").write_text(json.dumps({"status": "passed", "run": run}))
+        data = self.running_graph(attempts=4, loop_run=run)
+        data["status"] = "running"
+        data["nodes"][0]["status"] = "returned"
+        data["nodes"][0]["evidence"] = "the check passed"
+        self.write_graph(data)
+        result, output = self.run_check()
+        self.assertEqual(result, 0, output)
+        self.assertNotIn("stall candidate", output)
+        (folder / "run.json").write_text(json.dumps({"status": "failed", "run": run}))
+        result, output = self.run_check()
+        self.assertIn("stall candidate", output)
+
+    def test_a_paused_run_names_node_cancel_and_prefers_it_to_loop_resume(self):
+        run = "20260101-000000-abcd"
+        folder = self.project / ".opencode" / "loops" / run
+        folder.mkdir(parents=True)
+        (folder / "run.json").write_text(json.dumps({"status": "paused", "run": run}))
+        self.write_graph(self.running_graph(loop_run=run))
+        result, output = self.run_check()
+        self.assertEqual(result, 0, output)
+        self.assertIn("agentgraph node cancel --task test-task --node n1", output)
+        self.assertIn("prefer it to loop resume", output)  # a resumed run has no follower: node cancel is the way out
+        self.assertNotIn(f"agentgraph loop resume {run}", output)
+
+    def test_a_check_changed_after_dispatch_needs_an_amendment(self):
+        (self.directory / ".history").mkdir()
+        data = self.running_graph(check="python3 -m unittest")
+        self.write_graph(data)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(main(["--dir", str(self.directory)]), 0, output.getvalue())  # saves the history
+        data["nodes"][0]["check"] = "true"
+        self.write_graph(data)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(["--dir", str(self.directory)])
+        self.assertEqual(result, 1, output.getvalue())
+        self.assertIn("n1 check changed without an amendment", output.getvalue())
+
+    def saved_history(self, data):
+        (self.directory / ".history").mkdir(exist_ok=True)
+        self.write_graph(data)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(main(["--dir", str(self.directory)]), 0, output.getvalue())  # saves the history
+
+    def with_history(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(["--dir", str(self.directory)])
+        return result, output.getvalue()
+
+    def test_spent_going_down_is_an_error_against_the_history(self):
+        data = self.running_graph(check="true", budget={"cost": 5.0, "attempts": 3}, spent=0.5, loop_run="")
+        data["nodes"][0].pop("loop_run")
+        self.saved_history(data)
+        data["nodes"][0]["spent"] = 0.1
+        self.write_graph(data)
+        result, output = self.with_history()
+        self.assertEqual(result, 1, output)
+        self.assertIn("n1 spent went down from $0.5000 to $0.1000", output)
+        data["nodes"][0].pop("spent")
+        self.write_graph(data)
+        self.assertIn("n1 spent went down from $0.5000 to nothing", self.with_history()[1])
+        data["nodes"][0]["spent"] = 0.7  # it may grow
+        self.write_graph(data)
+        result, output = self.with_history()
+        self.assertEqual(result, 0, output)
+
+    def test_a_budget_changed_after_dispatch_needs_an_amended_event(self):
+        data = self.running_graph(check="true", budget={"cost": 5.0, "attempts": 3}, spent=0.5)
+        data["nodes"][0].pop("loop_run", None)
+        self.saved_history(data)
+        data["nodes"][0]["budget"] = {"cost": 50.0, "attempts": 3}
+        self.write_graph(data)
+        result, output = self.with_history()
+        self.assertEqual(result, 1, output)
+        self.assertIn("n1 budget changed without an amended event", output)
+        data.setdefault("events", []).append({"time": data["updated"] + 1, "node": "n1", "event": "amended", "note": "budget changed by node run --raise-budget"})
+        data["updated"] += 1
+        self.write_graph(data)
+        result, output = self.with_history()
+        self.assertEqual(result, 0, output)
+
+    def test_the_budget_a_node_gets_when_it_is_dispatched_is_not_a_change(self):
+        data = valid_graph()
+        data["nodes"][0].update(status="pending", evidence="", changed_paths=[])
+        data["status"] = "running"
+        self.saved_history(data)
+        data["nodes"][0].update(status="running", evidence="", session="ses_x", changed_paths=[], check="true", budget={"cost": 5.0, "attempts": 3})
+        data.setdefault("events", []).append({"time": data["updated"] + 1, "node": "n1", "event": "dispatched", "note": "x"})
+        data["updated"] += 1
+        data["status"] = "running"
+        self.write_graph(data)
+        result, output = self.with_history()
+        self.assertEqual(result, 0, output)
+
+
+class EndToEnd(unittest.TestCase):
+    """The node's `e2e` command and the `review_copy` record `agentgraph review-copy` writes: types, the rule for a passed node, the amendment."""
+
+    E2E = "python3 main.py | grep -q ok"
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name) / ".opencode" / "graph"
+        self.directory.mkdir(parents=True)
+
+    def write_graph(self, data):
+        (self.directory / "test-task.json").write_text(json.dumps(data))
+
+    def run_check(self, *args):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = main(["--dir", str(self.directory), *args])
+        return result, output.getvalue()
+
+    def graph(self, review=True, **review_changes):
+        """A passed graph whose node declares an e2e; `review` is the node's review_copy (True: a good one)."""
+        data = valid_graph()
+        data["events"] = [{"time": 5, "node": "n1", "event": "returned", "note": "ok"}]
+        data["nodes"][0]["e2e"] = self.E2E
+        if review:
+            data["nodes"][0]["review_copy"] = {
+                "result": ".opencode/artifacts/test-task/n1/review-copy-1.json", "check_exit": 0, "e2e_exit": 0, "tree": "ab" * 32, "at": 6,
+                "e2e_sha256": hashlib.sha256(self.E2E.encode()).hexdigest(), "project_unchanged": True, **review_changes}
+        return data
+
+    def problem(self, data):
+        self.write_graph(data)
+        result, output = self.run_check("--no-history")
+        return result, output
+
+    def test_graphs_without_an_e2e_are_not_affected(self):
+        data = valid_graph()
+        self.write_graph(data)
+        self.assertEqual(self.run_check("--no-history")[0], 0)
+        data["nodes"][0]["review_copy"] = {"result": "r.json", "check_exit": 1, "e2e_exit": None, "tree": "t", "at": 1}  # recorded, never required
+        self.assertEqual(self.problem(data)[0], 0)
+
+    def test_the_fields_are_typed(self):
+        for field, value in (("e2e", ""), ("e2e", 3), ("e2e", " "), ("review_copy", "x"), ("review_copy", [])):
+            with self.subTest(field=field, value=value):
+                data = valid_graph()
+                data["nodes"][0][field] = value
+                result, output = self.problem(data)
+                self.assertEqual(result, 1, output)
+                self.assertIn(f"node 'n1' {field} must be", output)
+        for key, value in (("result", ""), ("tree", ""), ("at", "x"), ("at", None), ("check_exit", "0"), ("e2e_exit", 1.5), ("e2e_exit", True),
+                           ("e2e_sha256", 5), ("project_unchanged", "yes")):
+            with self.subTest(key=key, value=value):
+                data = self.graph(**{key: value})
+                data["nodes"][0]["status"] = "returned"  # only the types are in question
+                result, output = self.problem(data)
+                self.assertEqual(result, 1, output)
+                self.assertIn(f"review_copy {key} must be", output)
+
+    def test_a_passed_node_with_an_e2e_needs_a_good_review_copy(self):
+        self.assertEqual(self.problem(self.graph())[0], 0)
+        result, output = self.problem(self.graph(review=False))
+        self.assertEqual(result, 1, output)
+        self.assertIn("node 'n1' declares an e2e and is passed, but has no review copy", output)
+        for changes, words in (({"e2e_exit": 1}, "e2e did not exit 0"), ({"e2e_exit": None}, "e2e did not exit 0"),
+                               ({"e2e_sha256": "0" * 64}, "different e2e"), ({"project_unchanged": False}, "did not leave the project unchanged"),
+                               ({"at": 4.9}, "was taken before the node's last returned, attempt or restart")):
+            with self.subTest(changes=changes):
+                result, output = self.problem(self.graph(**changes))
+                self.assertEqual(result, 1, output)
+                self.assertIn(words, output)
+
+    def test_a_review_copy_is_not_stale_when_it_is_as_new_as_the_last_returned_or_attempt_event(self):
+        data = self.graph(at=5)
+        self.assertEqual(self.problem(data)[0], 0)  # not older
+        data["events"].append({"time": 7, "node": "n1", "event": "attempt", "note": "fixed -> ok"})
+        result, output = self.problem(data)
+        self.assertEqual(result, 1, output)
+        self.assertIn("was taken before the node's last returned, attempt or restart", output)
+        data["events"].append({"time": 9, "node": "n2", "event": "returned", "note": "another node"})  # not this node's
+        data["events"][-2:] = [{"time": 5.5, "node": "n1", "event": "evaluated", "note": "not a returned or attempt event"}]
+        self.assertEqual(self.problem(data)[0], 0)
+
+    def test_a_restart_event_makes_an_older_review_copy_stale_even_without_a_returned_event(self):
+        for restart in ("invalidated", "dispatched", "retried"):
+            with self.subTest(restart=restart):
+                data = self.graph(at=6, started=5.5)
+                data["events"] = [{"time": 5, "node": "n1", "event": "returned", "note": "ok"},
+                                  {"time": 7, "node": "n1", "event": restart, "note": "rework"}]  # passed again with no new `returned`
+                result, output = self.problem(data)
+                self.assertEqual(result, 1, output)
+                self.assertIn("was taken before the node's last returned, attempt or restart", output)
+                data["nodes"][0]["review_copy"].update(started=7, at=8)
+                self.assertEqual(self.problem(data)[0], 0)
+
+    def test_the_copy_counts_from_when_it_was_taken_not_when_the_run_ended(self):
+        data = self.graph(at=9, started=4.5)  # copied before the node returned at 5, finished after it
+        result, output = self.problem(data)
+        self.assertEqual(result, 1, output)
+        self.assertIn("was taken before the node's last returned, attempt or restart", output)
+        data["nodes"][0]["review_copy"]["started"] = 5
+        self.assertEqual(self.problem(data)[0], 0)
+        data["nodes"][0]["review_copy"]["started"] = "x"
+        result, output = self.problem(data)
+        self.assertEqual(result, 1, output)
+        self.assertIn("review_copy started must be a finite number", output)
+
+    def test_a_passed_node_with_no_events_still_needs_a_matching_result_but_its_age_cannot_be_told(self):
+        data = self.graph(at=1, started=1)
+        data["events"] = []
+        self.assertEqual(self.problem(data)[0], 0)
+        data["nodes"][0]["review_copy"]["e2e_exit"] = 1
+        self.assertEqual(self.problem(data)[0], 1)
+        data["nodes"][0].pop("review_copy")
+        result, output = self.problem(data)
+        self.assertEqual(result, 1, output)
+        self.assertIn("has no review copy", output)
+
+    def test_an_e2e_added_or_put_back_after_dispatch_needs_an_amendment(self):
+        data = self.graph()
+        data["status"] = "running"
+        data["nodes"][0].update(status="running", evidence="", session="ses_x", changed_paths=[])
+        data["nodes"][0].pop("review_copy")
+        data["nodes"][0].pop("e2e")  # dispatched with none
+        (self.directory / ".history").mkdir()
+        self.write_graph(data)
+        self.assertEqual(self.run_check()[0], 0)
+        data["nodes"][0]["e2e"] = self.E2E
+        self.write_graph(data)
+        result, output = self.run_check()
+        self.assertEqual(result, 1, output)
+        self.assertIn("n1 e2e changed without an amendment", output)
+        data["revision"], data["amendments"] = 2, ["n1 e2e: added (approved)"]
+        self.write_graph(data)
+        self.assertEqual(self.run_check()[0], 0)
+        data["nodes"][0].pop("e2e")  # dropped (amended), then put back unamended: the old review copy must not come back with it
+        data["revision"], data["amendments"] = 3, data["amendments"] + ["n1 e2e: dropped (approved)"]
+        self.write_graph(data)
+        self.assertEqual(self.run_check()[0], 0)
+        data["nodes"][0]["e2e"] = self.E2E
+        self.write_graph(data)
+        result, output = self.run_check()
+        self.assertEqual(result, 1, output)
+        self.assertIn("n1 e2e changed without an amendment", output)
+
+    def test_the_rule_does_not_hold_a_node_that_is_not_passed(self):
+        data = self.graph(review=False)
+        data["nodes"][0]["status"] = "returned"
+        data["status"] = "running"
+        self.assertEqual(self.problem(data)[0], 0)
+
+    def test_an_e2e_changed_after_dispatch_needs_an_amendment(self):
+        data = self.graph()
+        data["status"] = "running"
+        data["nodes"][0].update(status="running", evidence="", session="ses_x", changed_paths=[])
+        data["nodes"][0].pop("review_copy")
+        (self.directory / ".history").mkdir()
+        self.write_graph(data)
+        self.assertEqual(self.run_check()[0], 0)  # saves the history
+        data["nodes"][0]["e2e"] = "true"
+        self.write_graph(data)
+        result, output = self.run_check()
+        self.assertEqual(result, 1, output)
+        self.assertIn("n1 e2e changed without an amendment", output)
+        data["revision"] = 2
+        data["amendments"] = ["n1 e2e: the old command did not start the program (approved by the orchestrator)"]
+        self.write_graph(data)
+        result, output = self.run_check()
+        self.assertEqual(result, 0, output)
+
+    def test_an_e2e_may_be_set_before_the_node_is_dispatched(self):
+        data = self.graph(review=False)
+        data["status"] = "running"
+        data["nodes"][0].update(status="pending", evidence="", changed_paths=[])
+        (self.directory / ".history").mkdir()
+        self.write_graph(data)
+        self.assertEqual(self.run_check()[0], 0)
+        data["nodes"][0]["e2e"] = "true"
+        self.write_graph(data)
+        self.assertEqual(self.run_check()[0], 0)
 
 
 if __name__ == "__main__":

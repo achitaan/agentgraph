@@ -677,6 +677,16 @@ def _live(args) -> int:
 
 
 def main(argv=None) -> int:
+    given = sys.argv[1:] if argv is None else list(argv)
+    if given[:1] == ["handoff"]:  # bin/agentgraph sends the commands it does not name here
+        from .handoff import main as handoff_main
+        return handoff_main(given[1:])
+    if given[:1] == ["node"]:
+        from .noderun import main as node_main
+        return node_main(given[1:])
+    if given[:1] == ["review-copy"]:
+        from .reviewcopy import main as review_copy_main
+        return review_copy_main(given[1:])
     args = _arguments(argv)
     if args.html is not None:
         return _html(args)

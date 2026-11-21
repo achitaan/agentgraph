@@ -430,7 +430,7 @@ class SnapshotDocumentTests(unittest.TestCase):
         # A snapshot that read the whole database decides by it, not by the root's tree alone.
         node.session = "outside"
         snap.known = {"outside": replace(session, id="outside", busy=True)}
-        self.assertEqual(state()[:3], ("live", None, False))
+        self.assertEqual(state()[:3], ("live", None, True))  # busy and liveness are one answer (a loop run's session is outside the tree)
         snap.known = {}
         self.assertEqual(state()[0], "orphan")
 
@@ -743,6 +743,55 @@ class SnapshotDocumentTests(unittest.TestCase):
         doc = snapshot_json.snapshot_document(Snapshot(3, graphs=[graph]), "live")
         self.assertEqual(doc["graph"]["problems"], contract.validate(graph))
         self.assertEqual([node["wave"] for node in doc["graph"]["nodes"]], [0, 0])
+
+
+class NodeRunFieldsTests(unittest.TestCase):
+    def document(self, **fields):
+        work = Node(id="n1", type="implement", agent="impl-openai", goal="g", status="running", **fields)
+        graph = TaskGraph(path="g.json", task="t", goal="g", status="running", created=0, updated=0, nodes=[work], objectives=[])
+        owner = Session(id="ses_root", parent_id=None, agent="orchestrator", title="t", model="m", effort="", busy=False, created=1, updated=2)
+        return snapshot_json.snapshot_document(Snapshot(now=10, root=owner, graphs=[graph], known={"ses_root": owner}), "live")["graph"]["nodes"][0]
+
+    def test_a_node_whose_loop_run_has_a_live_controller_is_live_and_busy(self):
+        with patch.object(contract, "controlled_runs", return_value={"20260101-000000-abcd"}):
+            item = self.document(loop_run="20260101-000000-abcd")
+        self.assertEqual((item["liveness"], item["busy"]), ("live", True))
+
+    def test_without_a_controller_it_is_an_orphan_and_not_busy(self):
+        with patch.object(contract, "controlled_runs", return_value=set()):
+            item = self.document(loop_run="20260101-000000-abcd")
+        self.assertEqual((item["liveness"], item["busy"]), ("orphan", False))
+
+    def test_a_node_without_a_loop_run_is_as_before(self):
+        item = self.document()
+        self.assertEqual((item["liveness"], item["busy"]), ("orphan", False))
+        self.assertNotIn("loop_run", item)
+
+    def test_e2e_and_review_copy_are_shown_like_the_other_node_run_fields_and_left_out_when_empty(self):
+        record = {"result": ".opencode/artifacts/t/n1/review-copy-1.json", "check_exit": 0, "e2e_exit": 0, "tree": "ab", "started": 1.5, "at": 2.5,
+                  "project_unchanged": True, "e2e_sha256": "cd"}
+        item = self.document(e2e="python3 main.py", review_copy=record)
+        self.assertEqual((item["e2e"], item["review_copy"]), ("python3 main.py", record))
+        plain = self.document()
+        self.assertNotIn("e2e", plain)
+        self.assertNotIn("review_copy", plain)
+
+    def test_the_graph_loader_reads_e2e_and_a_plain_review_copy(self):
+        from agentgraph.sources import graph_from_raw
+        raw = {"task": "t", "goal": "g", "status": "running", "created": 0, "updated": 0, "objectives": [],
+               "nodes": [{"id": "n1", "type": "implement", "agent": "impl-openai", "goal": "g", "status": "pending",
+                          "e2e": "python3 main.py", "review_copy": {"result": "r", "e2e_exit": 0, "at": 2.5, "nested": {"x": 1}, 3: "k"}},
+                         {"id": "n2", "type": "implement", "agent": "impl-openai", "goal": "g", "status": "pending",
+                          "e2e": 5, "review_copy": "x"}]}
+        first, second = graph_from_raw(raw, Path("t.json")).nodes
+        self.assertEqual(first.e2e, "python3 main.py")
+        self.assertEqual(first.review_copy, {"result": "r", "e2e_exit": 0, "at": 2.5})  # only plain data, string keys
+        self.assertEqual(second.review_copy, None)  # not a record; `check` names it
+
+    def test_an_unknown_spent_is_left_out_and_unpriced_is_shown(self):
+        item = self.document(spent=None, unpriced=2)
+        self.assertNotIn("spent", item)
+        self.assertEqual(item["unpriced"], 2)
 
 
 class RootWearTests(unittest.TestCase):
