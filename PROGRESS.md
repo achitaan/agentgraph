@@ -177,11 +177,13 @@ What remains:
 4. After the report was closed, the loops graph was recorded in the `memory-fast` ledger (`bin/agentgraph record`), so the ledger fingerprint is now
    `d7201d28c3276af0` (13 files); the config fingerprint was unchanged then (`86f9673fc3ff6a77`) and is `a39b89269a623236` after the install. The record says an improvement is due
    (1 pending run, 78 pending feedback items); none was proposed or applied in this session.
+   After the install the improvement graph was closed (27 of 27 nodes, 9 of 9 objectives, three lessons) and recorded too: ledger
+   `2046809d1c872356` (13 files), "improvement due: 2 pending runs, 78 pending feedback items".
 5. The six minor findings of the final review are not fixed (`docs/REPORT.md` section 3.6). Nothing in the temporary folders was deleted
    (`docs/REPORT.md` section 7).
 
 A next session should first run `bin/agentgraph check --task agentgraph-loops` and `bin/agentgraph check --task agentgraph-improve`,
-read `docs/REPORT.md` sections 1, 3.6 and 5, and read the state of n14, n15 and n17 in `.opencode/graph/agentgraph-improve.json`
+read `docs/REPORT.md` sections 1, 3.6 and 5, and read `.opencode/artifacts/agentgraph-improve/n15/r1/install.md`
 before changing anything.
 
 Documents: `docs/REPORT.md` (what was done, numbers, limits), `docs/ARCHITECTURE.md` (how the parts fit), `docs/LOOPS.md` (loop reference).
