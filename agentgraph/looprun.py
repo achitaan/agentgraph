@@ -77,7 +77,7 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 from . import bench, paths, sidechat, snapshot_json, sources
@@ -91,6 +91,10 @@ TAIL_LINES = 60
 TAIL_CHARS = 6000
 GOAL_LIMIT = 20000
 HEARTBEAT = 5.0
+LOCK_WAIT = 1.0  # seconds a controller (or a cancel) waits for the run lock: a probe holds it for an instant
+CLOCK_MARGIN = 10.0  # seconds: a user message this close before the recorded send time still counts as possibly the sent one
+ANSWER_WAIT = 5.0  # seconds a person's answer (or the controller taking it) waits for the other
+QUEUED_GRACE = 30.0  # seconds after which a queued run that no controller took shows `interrupted`
 RUN_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{4}")
 FLOW_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
 MULTI = "loops between several agents arrive in the next release; only a loop of one agent on itself (A -> A) runs now"  # release 1's refusal, kept for readers of the old text
@@ -542,6 +546,9 @@ def compile(path, settings, agents=None) -> list[dict]:
                     raise LoopError(f"steps.{worker}.escalate.to: {target} is on this path; the escalation agent must be one that is not on this path")
                 if agents is not None and target not in agents:
                     raise LoopError(f"steps.{worker}.escalate.to: the agent {target!r} is not in the structure")
+            for outcome, value in block.get("on", {}).items():
+                if value == "human" and outcome in ("agent_error", "no_artifact"):
+                    raise LoopError(f"steps.{worker}.on.{outcome}: a person cannot pass a worker turn that ended {outcome} (approve would carry on past it, and the run can never pass over it); route it to the worker, stop or next only on returned or stalled")
             defaults = {"returned": nxt(index), "stalled": nxt(index), "agent_error": "stop", "cancelled": "stop", "no_artifact": "work"}
             step = {"id": "work", "kind": "agent", "role": "work", "agent": worker, "session": block.get("session", settings.get("session", "reuse")),
                     "retries": block.get("retries", 0), "artifacts": list(settings.get("artifacts") or []),
@@ -725,7 +732,8 @@ def admit(used: int, limits: dict, elapsed: float, cost, cancelled: bool, passin
 # ---- the check runner ----
 
 def run_check(command: str, timeout, cwd, env, out_path: Path, poll=None) -> dict:
-    """Run `sh -c command`; the whole output goes to `out_path` (capped). {exit, timed_out, seconds, error, truncated}."""
+    """Run `sh -c command`; the whole output goes to `out_path` (capped). {exit, timed_out, cancelled, seconds, error, truncated}. `poll` is
+    called every quarter second; when it answers true the check's process group is killed at once and `cancelled` is true."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     try:
@@ -733,7 +741,7 @@ def run_check(command: str, timeout, cwd, env, out_path: Path, poll=None) -> dic
                                 stderr=subprocess.STDOUT, start_new_session=True)
     except OSError as exc:
         out_path.write_text(f"the check could not be started: {exc}\n", encoding="utf-8")
-        return {"exit": None, "timed_out": False, "seconds": 0.0, "error": str(exc), "truncated": 0}
+        return {"exit": None, "timed_out": False, "cancelled": False, "seconds": 0.0, "error": str(exc), "truncated": 0}
     dropped = [0]
 
     def drain():
@@ -753,16 +761,15 @@ def run_check(command: str, timeout, cwd, env, out_path: Path, poll=None) -> dic
 
     reader = threading.Thread(target=drain, daemon=True)
     reader.start()
-    timed_out = False
+    timed_out = cancelled = False
     while True:
         try:
             code = proc.wait(timeout=0.25)
             break
         except subprocess.TimeoutExpired:
-            if poll:
-                poll()
-            if timeout and time.monotonic() - started > timeout:
-                timed_out = True
+            cancelled = bool(poll and poll())
+            if cancelled or (timeout and time.monotonic() - started > timeout):
+                timed_out = not cancelled
                 sidechat._stop(proc)
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
@@ -773,7 +780,7 @@ def run_check(command: str, timeout, cwd, env, out_path: Path, poll=None) -> dic
     reader.join(5)
     if not reader.is_alive():
         proc.stdout.close()
-    return {"exit": None if timed_out else code, "timed_out": timed_out, "seconds": time.monotonic() - started, "error": None,
+    return {"exit": None if timed_out or cancelled else code, "timed_out": timed_out, "cancelled": cancelled, "seconds": time.monotonic() - started, "error": None,
             "truncated": dropped[0]}
 
 
@@ -786,7 +793,7 @@ def new_session_id() -> str:
 class ScriptedExecutor:
     """For tests. `attempts` is a list (each call takes the next item, whoever is asked) or a dict {agent: list} (each agent's turns are
     scripted on their own; an agent with no item left gets an empty reply). Keys of an item: `sleep` seconds, `hang` (wait for the time
-    limit or a cancel), `error`, `text`, `cost`, `tokens`, `sessions`, `exit`. `calls` holds every call (agent, session, first, message,
+    limit or a cancel), `error`, `text`, `final` (the last message's text, which the verdict is read from; default `text`), `cost`, `tokens`, `sessions`, `exit`. `calls` holds every call (agent, session, first, message,
     cwd, ...) in order, `by_agent(agent)` and `sessions(agent)` read it back; `hook(n, call)` runs first. `reconcile` is a file the
     tests write: JSON {"answer": "not_sent" | "finished" | "unknown", "text", "cost", "sessions", "reason"}; no file, or one that cannot
     be read, answers `unknown`. `reconciles` holds every (session, message_sha256) asked about."""
@@ -807,7 +814,11 @@ class ScriptedExecutor:
     def spec(self) -> dict:
         return {"kind": "scripted", "attempts": self.script, **({"reconcile": str(self.reconcile_file)} if self.reconcile_file else {})}
 
-    def reconcile(self, session: str, message_sha256: str) -> dict:
+    def mark(self, session: str):
+        """The number of user messages the session holds before a send: the scripted executor has no database, so none."""
+        return None
+
+    def reconcile(self, session: str, message_sha256: str, sent_at=None, users=None) -> dict:
         self.reconciles.append((session, message_sha256))
         try:
             answer = json.loads(self.reconcile_file.read_text(encoding="utf-8")) if self.reconcile_file else None
@@ -850,7 +861,8 @@ class ScriptedExecutor:
         outcome = outcome or ("agent_error" if error else "returned")
         return {"exit": None if outcome in ("stalled", "cancelled") else item.get("exit", 1 if error else 0), "outcome": outcome,
                 "session": session, "cost": item.get("cost"), "tokens": item.get("tokens"), "sessions": item.get("sessions"),
-                "seconds": time.monotonic() - started, "error": error, "text": item.get("text", "")}
+                "seconds": time.monotonic() - started, "error": error, "text": item.get("text", ""),
+                **({"final": item["final"]} if "final" in item else {})}
 
 
 class OpenCodeExecutor:
@@ -930,7 +942,7 @@ class OpenCodeExecutor:
         text = "".join(events["text"])
         return {"exit": code, "outcome": outcome, "session": session, "cost": cost, "tokens": tokens,
                 "sessions": tree["sessions"] if tree is not None else None, "seconds": time.monotonic() - started, "error": error,
-                "text": text}
+                "text": text, "final": _final_message(out)}
 
     def _alive(self, session) -> list[int] | None:
         """The pids of processes whose command line names this session (`opencode run ... --session ID`); None when they cannot be listed."""
@@ -941,15 +953,27 @@ class OpenCodeExecutor:
         pids = []
         for line in out.splitlines():
             head, _, rest = line.strip().partition(" ")
-            if head.isdigit() and int(head) != os.getpid() and f"--session {session}" in rest:
+            words = rest.split()
+            if head.isdigit() and int(head) != os.getpid() and any(a == "--session" and b == session for a, b in zip(words, words[1:])):
                 pids.append(int(head))
         return pids
 
-    def reconcile(self, session: str, message_sha256: str) -> dict:
-        """What became of a message that may have been sent to `session` (read-only; never sends). `not_sent`: no process of this session
-        is alive and the session is missing or holds no user message with this text. `finished`: that message is there, an idle row with
-        outcome `succeeded` follows an assistant reply, and nothing of this turn is still busy; `text` and `cost` are read from the turn's own
-        rows. Anything else, including a process still alive and a database that cannot be read, is `unknown` with the reason."""
+    def mark(self, session: str) -> int | None:
+        """How many user messages `session` holds now (0 when it does not exist); None when the database cannot be read. Read-only. The
+        controller records it in the cursor before a send, so a later reconcile can tell this send's message from every earlier one."""
+        try:
+            with closing(costmod._connect(self.db_path)) as db:
+                return db.execute("SELECT count(*) FROM session_message WHERE session_id=? AND type='user'", (session,)).fetchone()[0]
+        except (sqlite3.Error, OSError, ValueError):
+            return None
+
+    def reconcile(self, session: str, message_sha256: str, sent_at: float | None = None, users: int | None = None) -> dict:
+        """What became of a message that may have been sent to `session` (read-only; never sends). `sent_at` (epoch seconds) and `users` (the
+        user-message count, see `mark`) were recorded just before the send and tell this send's message from earlier ones. `not_sent`: no
+        process of this session is alive and the session holds no user message since that send. `finished`: exactly one new user message
+        has this text, an idle row with outcome `succeeded` follows an assistant reply, and nothing of this turn is still busy; `text`,
+        `final` (the last assistant message that has text) and `cost` are read from the turn's own rows. Anything else, including a process
+        still alive, a new message with other text and a database that cannot be read, is `unknown` with the reason."""
         unknown = lambda why: {"answer": "unknown", "reason": why}  # noqa: E731
         if not bench.SESSION.fullmatch(session or ""):
             return unknown("the session id is not valid")
@@ -960,21 +984,31 @@ class OpenCodeExecutor:
             return unknown(f"an opencode process for this session is still running (pid {pids[0]})")
         try:
             with closing(costmod._connect(self.db_path)) as db:
-                return self._reconcile_rows(db, session, message_sha256, unknown)
+                return self._reconcile_rows(db, session, message_sha256, unknown, sent_at, users)
         except (sqlite3.Error, OSError, ValueError) as exc:
             return unknown(f"the opencode database cannot be read: {type(exc).__name__}: {exc}"[:200])
 
     @staticmethod
-    def _reconcile_rows(db, session: str, sha: str, unknown) -> dict:
+    def _reconcile_rows(db, session: str, sha: str, unknown, sent_at: float | None = None, users: int | None = None) -> dict:
         if db.execute("SELECT 1 FROM session_v2 WHERE id=?", (session,)).fetchone() is None:
             return {"answer": "not_sent", "reason": "the session does not exist"}
-        users = [(seq, created, text) for seq, created, text in db.execute(
+        every = [(seq, created, text) for seq, created, text in db.execute(
             "SELECT seq, time_created, CASE WHEN json_valid(data) THEN json_extract(data, '$.text') END FROM session_message WHERE session_id=? AND type='user' ORDER BY seq", (session,))]
-        mine = [(seq, created) for seq, created, text in users if isinstance(text, str) and hashlib.sha256(text.encode("utf-8")).hexdigest() == sha]
+        if isinstance(users, int) and not isinstance(users, bool) and users >= 0 and len(every) >= users:
+            new = every[users:]  # the count before the send is exact: what came after it is this send's (or someone else's)
+        elif _number(sent_at):
+            new = [u for u in every if u[1] >= (sent_at - CLOCK_MARGIN) * 1000]  # the margin errs towards counting a message as new
+        else:
+            new = every  # nothing was recorded about the send: every message may be the sent one
+        if not new:
+            return {"answer": "not_sent", "reason": "the session holds no user message since the send"}
+        mine = [(seq, created) for seq, created, text in new if isinstance(text, str) and hashlib.sha256(text.encode("utf-8")).hexdigest() == sha]
         if not mine:
-            return {"answer": "not_sent", "reason": "the session holds no user message with this text"}
-        seq, created = mine[-1]
-        later = [u[0] for u in users if u[0] > seq]
+            return unknown(f"the session holds {len(new)} new user message(s) since the send, none with this text: someone else wrote into it, so it cannot be told whether this one was sent")
+        if len(mine) > 1:
+            return unknown("two user messages with this text came since the send, so which reply is this turn's cannot be told")
+        seq, created = mine[0]
+        later = [u[0] for u in every if u[0] > seq]
         end = later[0] if later else None
         window = "seq > ?" + (" AND seq < ?" if end is not None else "")
         args = (session, seq) + ((end,) if end is not None else ())
@@ -988,7 +1022,7 @@ class OpenCodeExecutor:
             return unknown(f"the turn ended with outcome {idle[-1][1]!r}, not a finished reply")
         if idle[-1][0] < replies[-1][0]:
             return unknown("an assistant message follows the last idle mark of the turn")
-        costs, texts = [], []
+        costs, texts, final = [], [], ""
         for _seq, raw in replies:
             try:
                 data = json.loads(raw)
@@ -996,9 +1030,11 @@ class OpenCodeExecutor:
                 return unknown("an assistant message of the turn cannot be read")
             cost = data.get("cost") if isinstance(data, dict) else None
             costs.append(float(cost) if _number(cost) else None)
-            for part in (data.get("content") or []) if isinstance(data, dict) and isinstance(data.get("content"), list) else []:
-                if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
-                    texts.append(part["text"])
+            mine_texts = [part["text"] for part in ((data.get("content") or []) if isinstance(data, dict) and isinstance(data.get("content"), list) else [])
+                          if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)]
+            texts += mine_texts
+            if any(t.strip() for t in mine_texts):
+                final = "\n".join(mine_texts)
         found, queue, seen = 0.0, [session], {session}
         children = 0
         while queue:
@@ -1012,7 +1048,7 @@ class OpenCodeExecutor:
                     return unknown(f"a session this turn started ({sid}) is not idle")
                 found += float(cost) if _number(cost) else 0.0
         total = None if any(c is None for c in costs) else round(sum(costs) + found, 8)
-        return {"answer": "finished", "text": "".join(texts), "cost": total, "sessions": 1 + children}
+        return {"answer": "finished", "text": "".join(texts), "final": final, "cost": total, "sessions": 1 + children}
 
     def _tree(self, session, expect: bool):
         for attempt in range(6 if expect else 1):
@@ -1024,6 +1060,24 @@ class OpenCodeExecutor:
                 return tree
             time.sleep(0.5)
         return None
+
+
+def _final_message(out: str) -> str:
+    """The text of the last assistant message that has text, from a `--format json` stream: its text parts are told apart by `messageID`
+    and joined with a newline. An earlier message's words (a verdict line among them) are never part of it."""
+    last: dict = {}
+    for line in (out or "").splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        part = event.get("part") if isinstance(event, dict) and isinstance(event.get("part"), dict) else {}
+        if isinstance(event, dict) and event.get("type") == "text" and isinstance(part.get("text"), str):
+            last.setdefault(part.get("messageID"), []).append(part["text"])
+    for texts in reversed(list(last.values())):
+        if any(t.strip() for t in texts):
+            return "\n".join(texts)
+    return ""
 
 
 def make_executor(spec: dict):
@@ -1078,7 +1132,7 @@ def _event(folder: Path, **fields) -> None:
 
 def list_runs(project) -> list[str]:
     try:
-        return sorted((p.name for p in loops_folder(project).iterdir() if p.is_dir() and RUN_ID.fullmatch(p.name)), reverse=True)
+        return sorted((p.name for p in loops_folder(project).iterdir() if RUN_ID.fullmatch(p.name) and p.is_dir() and not p.is_symlink()), reverse=True)
     except OSError:
         return []
 
@@ -1088,24 +1142,51 @@ def request_cancel(folder) -> None:
 
 
 def _held(folder: Path) -> bool:
-    """Whether a controller holds the run's lock right now."""
+    """Whether a controller holds the run's lock right now. A probe only reads: it never creates the lock file (a missing one means not held),
+    never follows a symlink and takes the lock shared and at once, so two probes never see each other and a controller that starts while
+    one is probing gets its lock within a few milliseconds (it waits `LOCK_WAIT` for it)."""
+    folder = Path(folder)
+    if folder.is_symlink():
+        return False
     try:
-        stream = open(folder / "lock", "a+")
+        fd = os.open(folder / "lock", os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
         return False
     try:
-        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
     except OSError:
         return True
     finally:
-        stream.close()
+        os.close(fd)
     return False
+
+
+def _flock(stream, wait: float | None = None) -> bool:
+    """Take the exclusive lock of a run, waiting up to `wait` seconds (default `LOCK_WAIT`) for a probe that holds it for an instant."""
+    end = time.monotonic() + (LOCK_WAIT if wait is None else wait)
+    while True:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            if time.monotonic() >= end:
+                return False
+            time.sleep(0.005)
+
+
+def _never_started(state: dict) -> bool:
+    """A queued run whose controller never appeared within `QUEUED_GRACE` seconds of its creation (the caller has checked the lock)."""
+    return state.get("status") == "queued" and time.time() - (state.get("created") or 0) > QUEUED_GRACE
 
 
 def shown_status(folder, state: dict) -> str:
     """The status to show: a run that says `running` but whose controller is gone shows `interrupted` (the files are not changed). A
-    `waiting` run shows `waiting` with or without a controller: it makes no model call either way, and `answer` then `resume` goes on."""
+    `waiting` run shows `waiting` with or without a controller: it makes no model call either way, and `answer` then `resume` goes on. A `queued`
+    run that no controller took within `QUEUED_GRACE` seconds shows `interrupted` too."""
     if state.get("status") == "running" and not _held(Path(folder)):
+        return "interrupted"
+    if _never_started(state) and not _held(Path(folder)):
         return "interrupted"
     return state.get("status", "unknown")
 
@@ -1113,6 +1194,8 @@ def shown_status(folder, state: dict) -> str:
 def hint(folder, state: dict) -> str:
     """One line saying what to do with a run that is not running: empty for any other."""
     run, shown = state.get("run", Path(folder).name), shown_status(folder, state)
+    if shown == "interrupted" and state.get("status") == "queued":
+        return f"  its controller never started (nothing was sent to an agent): agentgraph loop resume {run}  starts it  (or: agentgraph loop cancel {run})"
     if shown == "interrupted":
         return f"  no controller is running this run: agentgraph loop resume {run}  (or: agentgraph loop cancel {run})"
     if shown == "paused":
@@ -1431,7 +1514,7 @@ class Controller:
             record.update(answer=None, action="accept", reason=None)
         else:
             try:
-                answer = self.executor.reconcile(cursor.get("session"), sha)
+                answer = self.executor.reconcile(cursor.get("session"), sha, cursor.get("sent_at"), cursor.get("users"))
             except Exception as exc:  # anything that goes wrong is "cannot tell"
                 answer = {"answer": "unknown", "reason": f"reconcile failed: {type(exc).__name__}: {exc}"[:200]}
             name = answer.get("answer") if isinstance(answer, dict) else None
@@ -1441,7 +1524,7 @@ class Controller:
                 cost, sessions = answer.get("cost"), answer.get("sessions")
                 result = {"exit": 0, "outcome": "returned", "session": cursor.get("session"), "tokens": None, "seconds": 0.0, "error": None, "recovered": True,
                           "cost": float(cost) if _number(cost) else None, "sessions": int(sessions) if _number(sessions) and sessions > 0 else None,
-                          "text": answer.get("text") if isinstance(answer.get("text"), str) else ""}
+                          "text": answer.get("text") if isinstance(answer.get("text"), str) else "", "final": answer.get("final") if isinstance(answer.get("final"), str) else None}
                 record.update(answer="finished", action="adopt", reason=None)
             else:
                 why = str(answer.get("reason") or "no reason was given")[:300] if isinstance(answer, dict) else "no usable answer"
@@ -1533,32 +1616,32 @@ class Controller:
         """Wait (no model call) for `answer.json`; returns the route the answer leads to. `approve` follows the route `pass` would have
         taken, `reject` sends the worker back with the note, `stop` ends the run `cancelled`. Waiting counts toward the seconds limit."""
         n = self.attempt["n"]
-        question = (f"{step['id']} ended with {outcome}" + (": every check and judge passed. " if approval else ". ") +
-                    "Answer approve to carry on" + (" and finish the run as passed" if approval else "") +
-                    ", reject (with a note) to send the work back to the worker, or stop to end the run.")
-        self.state.update(status="waiting", waiting={"step": step["id"], "outcome": outcome, "since": round(time.time(), 3), "question": question})
-        _event(self.folder, attempt=n, step=step["id"], outcome="waiting", route="human")
-        self.save()
-        path = self.folder / "answer.json"
-        while True:
-            if self.cancelled():
-                raise _End("cancelled", "cancel requested while waiting for an answer", step["id"])
-            seconds = self.limits.get("seconds")
-            elapsed = time.monotonic() - self.began
-            if seconds is not None and elapsed >= seconds:
-                raise _End("limit", f"seconds limit ({seconds:g}) reached while waiting for an answer, after {elapsed:.0f} seconds", step["id"])
-            given = self._answer_file(path)
-            if given:
-                break
-            if time.monotonic() - self.last_save >= HEARTBEAT:
-                self.save()
-            time.sleep(0.05)
-        kind, note = given["answer"], given.get("note", "")
-        number = len(self.state["answers"]) + 1
-        kept = f"attempt-{n}/answer-{number}.json"
-        os.replace(path, self.folder / kept)
-        self.state["answers"].append({"attempt": n, "step": step["id"], "outcome": outcome, "answer": kind, "note": note, "time": given.get("time"), "file": kept})
-        self.state.update(status="running", waiting=None)
+        prior = (self.state.get("answers") or [None])[-1]
+        if entry.get("answer") in ANSWERS and prior and prior.get("attempt") == n and prior.get("step") == step["id"]:
+            kind, note, kept = prior["answer"], prior.get("note", ""), prior["file"]  # the answer was taken into the record before a kill: it is not asked for again
+        else:
+            question = (f"{step['id']} ended with {outcome}" + (": every check and judge passed. " if approval else ". ") +
+                        "Answer approve to carry on" + (" and finish the run as passed" if approval else "") +
+                        ", reject (with a note) to send the work back to the worker, or stop to end the run.")
+            self.state.update(status="waiting", waiting={"step": step["id"], "outcome": outcome, "since": round(time.time(), 3), "question": question})
+            _event(self.folder, attempt=n, step=step["id"], outcome="waiting", route="human")
+            self.save()
+            path = self.folder / "answer.json"
+            taken = None
+            while taken is None:
+                if self.cancelled():
+                    raise _End("cancelled", "cancel requested while waiting for an answer", step["id"])
+                seconds = self.limits.get("seconds")
+                elapsed = time.monotonic() - self.began
+                if seconds is not None and elapsed >= seconds:
+                    raise _End("limit", f"seconds limit ({seconds:g}) reached while waiting for an answer, after {elapsed:.0f} seconds", step["id"])
+                if self._answer_file(path):
+                    taken = self._take_answer(path, step, outcome, entry)
+                    continue
+                if time.monotonic() - self.last_save >= HEARTBEAT:
+                    self.save()
+                time.sleep(0.05)
+            kind, note, kept = taken
         entry["answer"] = kind
         if kind == "stop":
             raise _End("cancelled", f"a person stopped the run at {step['id']}", step["id"])
@@ -1573,6 +1656,27 @@ class Controller:
         _event(self.folder, attempt=n, step=step["id"], outcome=kind, route=route)
         self.save()
         return route
+
+    def _take_answer(self, path: Path, step, outcome: str, entry: dict):
+        """Take the answer file into the record under the answer lock (the one `answer()` decides under): the record says `running`, holds the
+        answer and names its filed copy before the file is moved, so a kill at any point leaves either the file waiting or the answer in the
+        record (`_rebuild` files the file away). None when there is no usable answer after all."""
+        try:
+            with _answer_lock(self.folder, 1.0):
+                given = self._answer_file(path)
+                if not given:
+                    return None
+                n = self.attempt["n"]
+                kept = f"attempt-{n}/answer-{len(self.state['answers']) + 1}.json"
+                self.state["answers"].append({"attempt": n, "step": step["id"], "outcome": outcome, "answer": given["answer"], "note": given.get("note", ""),
+                                              "time": given.get("time"), "file": kept})
+                self.state.update(status="running", waiting=None)
+                entry["answer"] = given["answer"]
+                self.save()
+                os.replace(path, self.folder / kept)
+                return given["answer"], given.get("note", ""), kept
+        except Busy:
+            return None
 
     def _answer_file(self, path: Path) -> dict | None:
         try:
@@ -1590,12 +1694,27 @@ class Controller:
     def finish_done(self, step) -> str:
         refusal = self._pass_refusal()
         if refusal:
-            return self.finish("check_error" if "check" in refusal else "inconclusive", f"the definition ended the run without {refusal}", step["id"])
+            status, why = self._refusal_status(refusal)
+            return self.finish(status, f"the definition routed the run onward to its end without {refusal}" + (f" ({why})" if why else ""), step["id"])
         approved = any(a.get("approved") for a in [self.attempt])
         by = "check" if self.check_step and not self.judges else ("judges" if not self.check_step else "check+judges")
         self.state["passed_by"] = by + ("+approval" if approved else "")
         reason = {"check": "the check exited 0", "judges": "the judges passed", "check+judges": "the check exited 0 and the judges passed"}[by]
         return self.finish("passed", reason + (" and a person approved" if approved else ""), step["id"])
+
+    def _refusal_status(self, refusal: str) -> tuple[str, str]:
+        """(final status, detail) of a run that the definition routed to its end without a pass: the outcome that kept it from passing names the
+        status, so a check that exited non-zero or a judge that said FAIL is `failed`, and `check_error` / `inconclusive` stay for those outcomes."""
+        attempt = self.attempt or {}
+        check = attempt.get("check") or {}
+        if self.check_step and check.get("outcome") in ("fail", "check_error", "inconclusive"):
+            return ("failed" if check["outcome"] == "fail" else check["outcome"]), f"the check {'exited ' + str(check.get('exit')) if check.get('exit') is not None else 'ended ' + check['outcome']}"
+        ran = {e["step"]: e for e in attempt.get("steps", [])}
+        for judge in self.judges:
+            entry = ran.get(judge["id"])
+            if entry and not entry.get("approved") and entry.get("outcome") in ("fail", "inconclusive", "agent_error", "stalled"):
+                return ("failed" if entry["outcome"] == "fail" else entry["outcome"]), f"{judge['id']} ended {entry['outcome']}"
+        return ("check_error" if "check" in refusal else "inconclusive"), ""
 
     def finish(self, status: str, reason: str, step_id: str) -> str:
         refusal = self._pass_refusal() if status == "passed" else ""
@@ -1718,8 +1837,12 @@ class Controller:
         if role == "work":
             self.attempt["message"] = f"attempt-{n}/message.md"
         first = session not in self.confirmed and not exists
+        try:
+            users = self.executor.mark(session) if result is None else None
+        except Exception:  # noqa: BLE001 - without a count the time of the send is all a reconcile has
+            users = None
         self.state["cursor"] = {"attempt": n, "step": step["id"], "phase": "started", "try": attempt_try, "session": session, "message_sha256": _text_sha(message),
-                                "next": None}
+                                "sent_at": round(time.time(), 3), "users": users, "next": None}
         self.save()
         if result is None:
             try:
@@ -1743,7 +1866,7 @@ class Controller:
             if result.get("accepted"):
                 entry["accepted"] = True
         if role == "judge" and outcome == "returned":
-            outcome, findings = read_verdict(text)
+            outcome, findings = read_verdict(result["final"] if isinstance(result.get("final"), str) else text)  # the last message's words, not every message's
             entry["verdict"] = outcome
             if outcome == "fail":
                 entry["findings"] = f"attempt-{n}/{stem}.findings.md"
@@ -1811,6 +1934,8 @@ class Controller:
         self.state["cursor"] = {"attempt": n, "step": step["id"], "phase": "started", "try": 1, "session": None, "message_sha256": None, "next": None}
         self.save()
         result = run_check(step["command"], step.get("timeout"), self.workdir, self.env, path, self.poll)
+        if result.get("cancelled"):  # the check was cut short: its half-written output is not a result
+            raise _End("cancelled", f"cancel requested while the check of attempt {n} was running; it was stopped", step["id"])
         outcome = check_outcome(result["exit"], result["timed_out"], step.get("inconclusive_codes", []))
         data = path.read_bytes()
         self.attempt["check"] = {"exit": result["exit"], "outcome": outcome, "seconds": round(result["seconds"], 2),
@@ -1939,17 +2064,20 @@ def execute(folder, executor=None, resume: str | None = None, check_only: bool =
     definition = read_definition(folder)
     lock = open(folder / "lock", "a+")
     try:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise Busy(f"run {folder.name} is already running in another process: its controller is alive") from None
+        if not _flock(lock):
+            raise Busy(f"run {folder.name} is already running in another process: its lock was still held after waiting {LOCK_WAIT:g}s, so a controller is alive") from None
         state = read_run(folder)
         status = state.get("status")
         if resume is None:
             if status != "queued":
                 raise Busy(f"run {folder.name} is already {status}; only a queued run can be started")
+        elif status == "queued" and _never_started(state):  # nothing was ever sent (no cursor): it is started as a new run
+            if resume:
+                raise LoopError(f"run {folder.name} never started, so nothing was sent and there is no step to {resume}: resume it without --{resume}, or start again")
+            resume = None
         elif status in FINAL or status == "queued" or status not in ("running", "paused", "waiting"):
-            raise Busy(f"run {folder.name} is {status}: " + ("it is over and cannot be resumed" if status in FINAL else "it has not started; nothing to resume"))
+            raise Busy(f"run {folder.name} is {status}: " + ("it is over and cannot be resumed" if status in FINAL else f"it was created less than {QUEUED_GRACE:g}s ago and may still be starting; cancel it, or resume it later"))
+        _verify_pins(definition)
         if executor is None and not check_only:
             executor = make_executor(definition["executor"])
         controller = Controller(folder, definition, state, executor, executor.env(definition["workdir"]) if executor is not None else {})
@@ -1971,6 +2099,13 @@ def execute(folder, executor=None, resume: str | None = None, check_only: bool =
                 signal.signal(signal.SIGTERM, previous)
     finally:
         lock.close()
+
+
+def _verify_pins(definition: dict) -> None:
+    """The definition is pinned when the run starts: refuse (LoopError, nothing written) one whose settings or steps no longer match their hashes."""
+    for key, now in (("settings_sha256", lambda: hashlib.sha256(_json(definition.get("settings"))).hexdigest()), ("steps_sha256", lambda: steps_hash(definition.get("steps")))):
+        if definition.get(key) != now():
+            raise LoopError(f"the definition of run {definition.get('run')} was changed after the run started ({key} does not match): it is not run; start again")
 
 
 def resume(folder, choice: str | None = None, wait: bool = False, executor=None) -> str | None:
@@ -2006,25 +2141,20 @@ def pause(folder) -> None:
 
 
 def cancel(folder) -> str:
-    """Stop a run. A controller that is alive (or about to start a queued run) is asked through the `cancel` file and stops itself
-    (returns "requested"). With no controller (interrupted, paused or waiting) the run is marked `cancelled` here, under its lock
-    (returns "cancelled"). Busy for a run that is over."""
+    """Stop a run. A controller that holds the run's lock is asked through the `cancel` file and stops itself (returns "requested"). With no
+    controller (queued and never taken, interrupted, paused or waiting) the run is marked `cancelled` here, under its lock (returns
+    "cancelled"); a controller that starts late then finds a run that is over. Busy for a run that is over."""
     folder = Path(folder)
     state = read_run(folder)
     status = state.get("status")
     if status in FINAL:
         raise Busy(f"run {folder.name} is already {status}")
-    if status == "queued":
-        request_cancel(folder)
-        return "requested"
     if _held(folder):
         request_cancel(folder)
         return "requested"
     lock = open(folder / "lock", "a+")
     try:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        if not _flock(lock):
             request_cancel(folder)
             return "requested"
         state = read_run(folder)
@@ -2034,7 +2164,7 @@ def cancel(folder) -> str:
         attempts = state.get("attempts") or []
         if attempts and attempts[-1].get("ended") is None:
             attempts[-1]["ended"] = now
-        state.update(status="cancelled", reason=f"cancelled by a person while no controller was running it (it was {state.get('status')})", ended=now, waiting=None)
+        state.update(status="cancelled", reason=f"cancelled by a person while no controller was running it (it was {state.get('status')}" + (", and its controller never started)" if state.get("status") == "queued" else ")"), ended=now, waiting=None)
         _write_atomic(folder / "run.json", _json(state))
         _event(folder, attempt=len(attempts), step=(state.get("cursor") or {}).get("step", "-"), outcome="cancelled", route="end", reason=state["reason"])
         for name in ("pause", "cancel"):
@@ -2044,30 +2174,43 @@ def cancel(folder) -> str:
         lock.close()
 
 
+@contextmanager
+def _answer_lock(folder: Path, wait: float = ANSWER_WAIT):
+    """The lock an answer is decided and taken under: a `flock` on `answer.lock`, so a file left by a killed command never blocks anyone.
+    Busy when it is still held after `wait` seconds."""
+    fd = os.open(folder / "answer.lock", os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        end = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= end:
+                    raise Busy(f"run {Path(folder).name}: an answer is being taken or given right now; try again") from None
+                time.sleep(0.01)
+        yield
+    finally:
+        os.close(fd)
+
+
 def answer(folder, word: str, note: str = "") -> None:
     """A person's answer to a waiting run: written atomically to `answer.json` in the run folder, which the controller polls. Refused when
-    the run is not waiting or has an answer that was not taken yet."""
+    the run is not waiting (decided under the answer lock, after any answer being taken has been recorded) or has an answer that was not taken yet."""
     folder = Path(folder)
     if word not in ANSWERS:
         raise LoopError(f"the answer must be one of {', '.join(ANSWERS)}")
     note = note or ""
     if len(note) > NOTE_LIMIT:
         raise LoopError(f"the note is longer than {NOTE_LIMIT} characters")
-    state = read_run(folder)
-    if shown_status(folder, state) != "waiting" or not state.get("waiting"):
-        raise Busy(f"run {folder.name} is not waiting for an answer (it is {shown_status(folder, state)})")
     target = folder / "answer.json"
-    try:
-        fd = os.open(target.with_suffix(".lock"), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        raise Busy(f"run {folder.name} already has an answer that was not taken yet") from None
-    try:
-        os.close(fd)
+    with _answer_lock(folder):  # decided under the lock the controller takes an answer under: never written into a run that stopped waiting
+        state = read_run(folder)
+        if shown_status(folder, state) != "waiting" or not state.get("waiting"):
+            raise Busy(f"run {folder.name} is not waiting for an answer (it is {shown_status(folder, state)})")
         if target.exists():
             raise Busy(f"run {folder.name} already has an answer that was not taken yet")
         _write_atomic(target, _json({"answer": word, "note": note, "step": state["waiting"]["step"], "time": round(time.time(), 3)}))
-    finally:
-        target.with_suffix(".lock").unlink(missing_ok=True)
 
 
 # ---- command line ----
@@ -2245,9 +2388,26 @@ def _start(args) -> int:
 def _run_folder(args) -> Path:
     project = Path(args.project).absolute()
     folder = run_dir(project, args.run)
-    if not folder.is_dir():
+    if folder.is_symlink() or not folder.is_dir():
         raise LoopError(f"no run {args.run} in {loops_folder(project)}")
     return folder
+
+
+def _never_ran(folder: Path, resume, exc: Exception) -> None:
+    """The detached `run` command failed before its controller loop: a queued run gets a final status with the reason in words (the person
+    would otherwise read `queued` for ever). A resumed run keeps the record it had; the reason goes to the command's stderr and `run.log`."""
+    if resume is not None:
+        return
+    try:
+        state = read_run(folder)
+        if state.get("status") != "queued":
+            return
+        reason = f"the controller could not start: {exc}"[:300]
+        state.update(status="agent_error" if isinstance(exc, Busy) else "invalid", reason=reason, ended=round(time.time(), 3))
+        _write_atomic(folder / "run.json", _json(state))
+        _event(folder, attempt=0, step="-", outcome=state["status"], route="end", reason=reason)
+    except (LoopError, OSError):
+        pass
 
 
 def _find_run(args) -> tuple[Path, dict]:
@@ -2256,7 +2416,7 @@ def _find_run(args) -> tuple[Path, dict]:
     if run_id is None:
         raise Busy(f"no runs in {loops_folder(project)}")
     folder = run_dir(project, run_id)
-    if not folder.is_dir():
+    if folder.is_symlink() or not folder.is_dir():
         raise Busy(f"no run {run_id} in {loops_folder(project)}")
     return folder, read_run(folder)
 
@@ -2281,7 +2441,11 @@ def main(argv: list[str] | None = None) -> int:
             return _start(args)
         if args.command == "run":
             folder = Path(args.run_dir)
-            status = execute(folder, resume=args.resume)
+            try:
+                status = execute(folder, resume=args.resume)
+            except (LoopError, bench.BenchError, KeyError) as exc:
+                _never_ran(folder, args.resume, exc)
+                raise
             print(describe(folder, read_run(folder)))
             return 0 if status == "passed" else 1
         if args.command == "status":
@@ -2300,9 +2464,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "answer":
             project = Path(args.project).absolute()
-            folder = run_dir(project, args.run)
-            if not folder.is_dir():
-                raise LoopError(f"no run {args.run} in {loops_folder(project)}")
+            folder = _run_folder(args)
             answer(folder, args.answer, args.note)
             print(f"answered {args.answer} for run {args.run}")
             return 0

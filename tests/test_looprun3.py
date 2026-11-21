@@ -609,3 +609,752 @@ class StatusWordsTests(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---- round 2: findings of the review of release 3 (see `.opencode/artifacts/agentgraph-loops/v8/r2/findings.md`) ----
+
+def queue(base, flow="self", **kw) -> str:
+    """A queued run with no controller: the detached process is not started."""
+    with mock.patch.object(looprun.subprocess, "Popen"):
+        return looprun.start(base.project, flow, structure=base.structure, goal="g", executor=kw.pop("executor", base.executor()), **kw)
+
+
+def age(base, run, seconds):
+    """The run was created `seconds` ago."""
+    for name in ("run.json", "definition.json"):
+        path = base.folder(run) / name
+        data = json.loads(path.read_text())
+        data["created"] = data["created"] - seconds
+        path.write_text(json.dumps(data))
+
+
+class ProbeTests(Base):
+    def test_f01_probers_in_a_tight_loop_neither_see_each_other_as_held_nor_stop_a_controller(self):
+        self.save(check="exit 0")
+        runs = [queue(self) for _ in range(6)]
+        folders = [self.folder(r) for r in runs]
+        stop, held, errors = threading.Event(), [], []
+
+        def probe():
+            while not stop.is_set():
+                for folder in folders:
+                    if looprun._held(folder):
+                        held.append(folder.name)
+        probers = [threading.Thread(target=probe) for _ in range(6)]
+        for thread in probers:
+            thread.start()
+        try:
+            time.sleep(0.5)
+            self.assertEqual(held, [])  # nothing is running: a probe must never see another probe
+            def go(folder):
+                try:
+                    looprun.execute(folder, self.executor([{}]))
+                except BaseException as exc:  # noqa: BLE001
+                    errors.append(f"{folder.name}: {type(exc).__name__}: {exc}")
+            controllers = [threading.Thread(target=go, args=(f,)) for f in folders]
+            for thread in controllers:
+                thread.start()
+            for thread in controllers:
+                thread.join(60)
+        finally:
+            stop.set()
+            for thread in probers:
+                thread.join(10)
+        self.assertEqual(errors, [])
+        self.assertEqual([self.record(r)["status"] for r in runs], ["passed"] * 6)
+
+    def test_f12_probing_creates_no_lock_file_and_a_missing_lock_means_not_held(self):
+        self.save()
+        run = queue(self)
+        folder = self.folder(run)
+        self.assertFalse((folder / "lock").exists())
+        self.assertFalse(looprun._held(folder))
+        looprun.shown_status(folder, self.record(run))
+        looprun.hint(folder, self.record(run))
+        self.assertFalse((folder / "lock").exists())
+
+    def test_f12_listing_and_reading_runs_write_nothing_in_any_run_folder(self):
+        self.save()
+        done = self.start(self.executor())
+        dead = self.crash(self.executor(hook=kill_at(1)))
+        fresh = queue(self)
+        old = queue(self)
+        age(self, old, 300)
+        for run in (dead, fresh, old):
+            (self.folder(run) / "lock").unlink(missing_ok=True)
+
+        def snapshot():
+            return {str(p.relative_to(self.project)): (p.stat().st_mtime_ns, p.stat().st_size) for p in sorted(looprun.loops_folder(self.project).rglob("*"))}
+        before = snapshot()
+        time.sleep(0.05)
+        from agentgraph import loopapi
+        loopapi.listing(self.structure, self.project, None)
+        for run in (done, dead, fresh, old):
+            loopapi.run_detail(self.project, run)
+        for argv in (("list",), ("list", "--json"), ("status", dead), ("status", fresh, "--json"), ("status", old)):
+            self.assertIn(self.cli(*argv, "--project", str(self.project))[0], (0,))
+        self.assertEqual(snapshot(), before)
+
+    def test_f12_a_symlinked_run_folder_is_not_listed_and_not_followed(self):
+        self.save()
+        run = self.start(self.executor())
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        link = looprun.loops_folder(self.project) / "20990101-000000-abcd"
+        link.symlink_to(self.folder(run), target_is_directory=True)
+        self.assertEqual(looprun.list_runs(self.project), [run])
+        self.assertFalse(looprun._held(link))
+        self.assertEqual(self.cli("list", "--project", str(self.project))[1].count("\n"), 1)
+        from agentgraph import loopapi
+        self.assertEqual([r["run"] for r in loopapi.listing(self.structure, self.project, None)["runs"]], [run])
+        with self.assertRaises(loopapi.ApiError):
+            loopapi.run_detail(self.project, "20990101-000000-abcd")
+
+
+class QueuedRunTests(Base):
+    def test_f02_cancel_of_a_queued_run_with_no_controller_marks_it_cancelled(self):
+        self.save()
+        run = queue(self)
+        self.assertEqual(looprun.cancel(self.folder(run)), "cancelled")
+        record = self.record(run)
+        self.assertEqual(record["status"], "cancelled")
+        self.assertIn("controller", record["reason"])
+        with self.assertRaises(looprun.Busy):  # a controller that starts late finds a run that is over
+            looprun.execute(self.folder(run), self.executor())
+
+    def test_f02_a_queued_run_with_a_controller_that_holds_the_lock_is_still_asked(self):
+        self.save()
+        run = queue(self)
+        lock = open(self.folder(run) / "lock", "a+")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            self.assertEqual(looprun.cancel(self.folder(run)), "requested")
+        finally:
+            lock.close()
+        self.assertEqual(self.record(run)["status"], "queued")
+
+    def test_f02_a_run_command_that_cannot_take_its_lock_writes_a_final_status_with_the_reason(self):
+        self.save()
+        run = queue(self)
+        with open(self.folder(run) / "lock", "a+") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            code, _, err = self.cli("run", "--run-dir", str(self.folder(run)))
+        record = self.record(run)
+        self.assertEqual(code, 1)
+        self.assertIn(record["status"], looprun.FINAL)
+        self.assertIn("lock", record["reason"])
+        self.assertIsNotNone(record.get("ended"))
+
+    def test_f02_an_executor_that_cannot_be_made_is_written_as_invalid_with_the_reason(self):
+        self.save()
+        run = queue(self)
+        path = self.folder(run) / "definition.json"
+        data = json.loads(path.read_text())
+        data["executor"] = {"kind": "nonsense"}
+        path.write_text(json.dumps(data))
+        code, _, err = self.cli("run", "--run-dir", str(self.folder(run)))
+        record = self.record(run)
+        self.assertEqual((code, record["status"]), (2, "invalid"))
+        self.assertIn("executor", record["reason"])
+
+    def test_f02_an_unreadable_definition_is_written_as_invalid_with_the_reason(self):
+        self.save()
+        run = queue(self)
+        (self.folder(run) / "definition.json").write_text("{not json")
+        code, _, _ = self.cli("run", "--run-dir", str(self.folder(run)))
+        record = self.record(run)
+        self.assertEqual(record["status"], "invalid")
+        self.assertIn("definition", record["reason"])
+
+    def test_f02_a_queued_run_whose_controller_never_came_shows_interrupted_and_can_be_cancelled_or_resumed(self):
+        self.save()
+        young, old = queue(self), queue(self)
+        age(self, old, 300)
+        self.assertEqual((self.shown(young), self.shown(old)), ("queued", "interrupted"))
+        hint = looprun.hint(self.folder(old), self.record(old))
+        self.assertIn("resume", hint)
+        self.assertIn("never", hint)
+        with self.assertRaises(looprun.Busy) as raised:  # a young one may still be starting
+            looprun.resume(self.folder(young), wait=True, executor=self.executor())
+        self.assertIn("starting", str(raised.exception))
+        with self.assertRaises(looprun.LoopError):  # nothing was sent: there is no step for --redo to send again
+            looprun.resume(self.folder(old), "redo", wait=True, executor=self.executor())
+        executor = self.executor()
+        self.assertEqual(self.resume(old, executor), "passed")  # nothing was ever sent, so it is started as a new run
+        self.assertEqual(len(executor.calls), 2)
+        other = queue(self)
+        age(self, other, 300)
+        self.assertEqual(looprun.cancel(self.folder(other)), "cancelled")
+
+    def test_f02_a_held_queued_run_is_never_shown_interrupted(self):
+        self.save()
+        run = queue(self)
+        age(self, run, 300)
+        lock = open(self.folder(run) / "lock", "a+")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            self.assertEqual(self.shown(run), "queued")
+        finally:
+            lock.close()
+
+
+class FixtureDb:
+    """A small sqlite file with the columns OpenCode's database really has (`session_v2`, `session_message`)."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.db = sqlite3.connect(path)
+        self.db.executescript("""
+            CREATE TABLE session_v2 (id text PRIMARY KEY, parent_id text, cost real DEFAULT 0 NOT NULL, time_created integer NOT NULL, time_idle integer);
+            CREATE TABLE session_message (id text PRIMARY KEY, session_id text NOT NULL, type text NOT NULL, seq integer NOT NULL, time_created integer NOT NULL,
+                                          time_updated integer NOT NULL, data text NOT NULL);
+            CREATE UNIQUE INDEX seq_idx ON session_message (session_id, seq);""")
+        self.seq = {}
+
+    def session(self, sid, parent=None, cost=0.0, made=1000, idle=1000):
+        self.db.execute("INSERT INTO session_v2 (id, parent_id, cost, time_created, time_idle) VALUES (?,?,?,?,?)", (sid, parent, cost, made, idle))
+        self.db.commit()
+
+    def add(self, sid, kind, data, at):
+        seq = self.seq.get(sid, -1) + 1
+        self.seq[sid] = seq
+        self.db.execute("INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?,?,?,?,?,?,?)",
+                        (f"msg_{sid}_{seq}", sid, kind, seq, at, at, json.dumps(data)))
+        self.db.commit()
+
+    def user(self, sid, text, at):
+        self.add(sid, "user", {"text": text, "time": {"created": at}}, at)
+
+    def reply(self, sid, texts, at, cost=0.01):
+        self.add(sid, "assistant", {"cost": cost, "content": [{"type": "reasoning", "text": ""}, *({"type": "text", "text": t} for t in texts)]}, at)
+
+    def idle(self, sid, outcome, at):
+        self.add(sid, "idle", {"outcome": outcome}, at)
+
+
+def sha(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+class ReconcileRowsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.fx = FixtureDb(self.tmp / "o.db")
+        self.sid = "ses_aaaaaaaaaaaa1111111111"
+        self.addCleanup(self.fx.db.close)
+
+    def ask(self, text="hello", sent_at=None, users=None):
+        kw = {k: v for k, v in (("sent_at", sent_at), ("users", users)) if v is not None}
+        return looprun.OpenCodeExecutor._reconcile_rows(self.fx.db, self.sid, sha(text), lambda why: {"answer": "unknown", "reason": why}, **kw)
+
+    def test_a_session_that_is_not_there_was_never_sent_to(self):
+        self.assertEqual(self.ask()["answer"], "not_sent")
+
+    def test_no_user_message_is_not_sent(self):
+        self.fx.session(self.sid)
+        self.assertEqual(self.ask()["answer"], "not_sent")
+        self.assertEqual(self.ask(sent_at=5.0, users=0)["answer"], "not_sent")
+
+    def test_a_newer_user_message_with_other_text_is_unknown_never_not_sent(self):
+        self.fx.session(self.sid)
+        self.fx.user(self.sid, "someone typed this", 10_000)
+        for kw in ({"sent_at": 9.0, "users": 0}, {"sent_at": 9.0}, {"users": 0}):
+            answer = self.ask(**kw)
+            self.assertEqual(answer["answer"], "unknown", kw)
+            self.assertIn("new", answer["reason"])
+
+    def test_a_user_message_older_than_the_send_does_not_count(self):
+        self.fx.session(self.sid)
+        self.fx.user(self.sid, "hello", 1_000)
+        self.fx.reply(self.sid, ["old reply"], 1_100)
+        self.fx.idle(self.sid, "succeeded", 1_200)
+        self.assertEqual(self.ask(sent_at=100.0)["answer"], "not_sent")  # sent at 100 s: the message at 1 s is long before it
+        self.assertEqual(self.ask(sent_at=100.0, users=1)["answer"], "not_sent")
+        self.assertEqual(self.ask(sent_at=0.5)["answer"], "finished")  # a message after the send time is the sent one
+        self.assertEqual(self.ask(sent_at=2.0)["answer"], "finished")  # inside the clock margin: counted as possibly sent
+
+    def test_the_matching_message_with_no_reply_is_unknown(self):
+        self.fx.session(self.sid)
+        self.fx.user(self.sid, "hello", 1_000)
+        self.assertEqual(self.ask()["answer"], "unknown")
+        self.assertEqual(self.ask(sent_at=0.5, users=0)["answer"], "unknown")
+
+    def test_a_reply_without_idle_is_unknown(self):
+        self.fx.session(self.sid)
+        self.fx.user(self.sid, "hello", 1_000)
+        self.fx.reply(self.sid, ["half"], 1_100)
+        self.assertEqual(self.ask()["answer"], "unknown")
+
+    def test_idle_succeeded_after_a_reply_is_finished_with_its_text_cost_and_final_message(self):
+        self.fx.session(self.sid)
+        self.fx.user(self.sid, "hello", 1_000)
+        self.fx.reply(self.sid, ["thinking. VERDICT: PASS"], 1_100, cost=0.01)
+        self.fx.reply(self.sid, ["and then", "the end"], 1_200, cost=0.02)
+        self.fx.idle(self.sid, "succeeded", 1_300)
+        answer = self.ask(sent_at=0.5, users=0)
+        self.assertEqual((answer["answer"], answer["cost"], answer["sessions"]), ("finished", 0.03, 1))
+        self.assertIn("VERDICT: PASS", answer["text"])
+        self.assertEqual(answer["final"].splitlines()[-1], "the end")  # the last message that has text, not the parts of all of them
+        self.assertNotIn("VERDICT", answer["final"])
+
+    def test_an_idle_that_did_not_succeed_is_unknown(self):
+        self.fx.session(self.sid)
+        self.fx.user(self.sid, "hello", 1_000)
+        self.fx.reply(self.sid, ["x"], 1_100)
+        self.fx.idle(self.sid, "errored", 1_200)
+        self.assertEqual(self.ask()["answer"], "unknown")
+
+    def test_two_identical_user_messages_since_the_send_are_unknown(self):
+        self.fx.session(self.sid)
+        for at in (1_000, 2_000):
+            self.fx.user(self.sid, "hello", at)
+            self.fx.reply(self.sid, ["r"], at + 100)
+            self.fx.idle(self.sid, "succeeded", at + 200)
+        answer = self.ask(sent_at=0.5, users=0)
+        self.assertEqual(answer["answer"], "unknown")
+        self.assertIn("two", answer["reason"])
+
+    def test_a_retry_with_the_same_text_is_told_from_its_earlier_try_by_the_count_before_the_send(self):
+        self.fx.session(self.sid)
+        self.fx.user(self.sid, "hello", 1_000)  # try 1: sent, answered, but the process failed afterwards
+        self.fx.reply(self.sid, ["try one's reply"], 1_100)
+        self.fx.idle(self.sid, "succeeded", 1_200)
+        self.assertEqual(self.ask(sent_at=1.25, users=1)["answer"], "not_sent")  # try 2 was cut before its message arrived
+        self.fx.user(self.sid, "hello", 1_300)  # try 2's message arrived, no reply yet
+        answer = self.ask(sent_at=1.25, users=1)
+        self.assertEqual(answer["answer"], "unknown")
+        self.assertNotIn("final", answer)
+
+    def test_a_busy_child_session_is_unknown_and_a_finished_one_is_counted(self):
+        self.fx.session(self.sid, cost=0.1)
+        self.fx.user(self.sid, "hello", 1_000)
+        self.fx.reply(self.sid, ["x"], 1_100)
+        self.fx.idle(self.sid, "succeeded", 1_200)
+        self.fx.session("ses_child1", parent=self.sid, cost=0.5, made=1_050, idle=None)
+        answer = self.ask()
+        self.assertEqual(answer["answer"], "unknown")
+        self.assertIn("ses_child1", answer["reason"])
+        self.fx.db.execute("UPDATE session_v2 SET time_idle=1150 WHERE id='ses_child1'")
+        self.fx.db.commit()
+        answer = self.ask()
+        self.assertEqual((answer["answer"], answer["sessions"], answer["cost"]), ("finished", 2, 0.51))
+
+    def test_the_user_count_before_a_send_is_read_from_the_database_read_only(self):
+        self.fx.session(self.sid)
+        self.fx.user(self.sid, "a", 1_000)
+        self.fx.user(self.sid, "b", 2_000)
+        executor = object.__new__(looprun.OpenCodeExecutor)
+        executor.db_path = self.fx.path
+        self.assertEqual(executor.mark(self.sid), 2)
+        self.assertEqual(executor.mark("ses_bbbbbbbbbbbb2222222222"), 0)
+        executor.db_path = self.tmp / "missing.db"
+        self.assertIsNone(executor.mark(self.sid))
+
+
+class AliveTests(unittest.TestCase):
+    def test_alive_matches_the_session_exactly_and_never_its_own_pid(self):
+        ps = "\n".join([
+            "  111 /bin/opencode run --standalone --format json --agent w --session ses_abc",
+            f"  {os.getpid()} python -m agentgraph.looprun run --session ses_abc",
+            "  222 /bin/opencode run --standalone --agent w --session ses_abcdef",
+            "  333 /bin/opencode run --standalone --session ses_abc --auto",
+            "  444 /bin/opencode run --standalone --session ses_xyz",
+            "  not-a-pid line --session ses_abc"])
+        executor = object.__new__(looprun.OpenCodeExecutor)
+        with mock.patch.object(looprun.subprocess, "run", return_value=mock.Mock(stdout=ps)):
+            self.assertEqual(executor._alive("ses_abc"), [111, 333])
+            self.assertEqual(executor._alive("ses_abcdef"), [222])
+            self.assertEqual(executor._alive("ses_none"), [])
+        with mock.patch.object(looprun.subprocess, "run", side_effect=OSError("no ps")):
+            self.assertIsNone(executor._alive("ses_abc"))
+
+
+class DbExecutor(looprun.ScriptedExecutor):
+    """The scripted executor on top of a fixture database: every send writes what OpenCode would (the user message, a reply and an idle mark), so
+    reconcile reads real rows through `OpenCodeExecutor._reconcile_rows`."""
+
+    def __init__(self, fx, script, hook=None, replies=None):
+        super().__init__(script, hook=hook)
+        self.fx, self.replies, self.clock = fx, replies or {}, 1_000_000
+
+    def mark(self, session):
+        return self.fx.db.execute("SELECT count(*) FROM session_message WHERE session_id=? AND type='user'", (session,)).fetchone()[0]
+
+    def reconcile(self, session, message_sha256, sent_at=None, users=None):
+        self.reconciles.append((session, message_sha256))
+        unknown = lambda why: {"answer": "unknown", "reason": why}  # noqa: E731
+        return looprun.OpenCodeExecutor._reconcile_rows(self.fx.db, session, message_sha256, unknown, **{k: v for k, v in (("sent_at", sent_at), ("users", users)) if v is not None})
+
+    def attempt(self, **call):
+        session = call["session"]
+        if self.fx.db.execute("SELECT 1 FROM session_v2 WHERE id=?", (session,)).fetchone() is None:
+            self.fx.session(session)
+        self.clock += 1000
+        self.fx.user(session, call["message"], int(time.time() * 1000) + self.clock - 1_000_000)
+        n = len(self.calls) + 1
+        if self.hook:
+            self.hook(n, {**call, "n": n})
+        item = self._item_for(call["agent"], n)
+        if item.get("write_reply", True):
+            self.fx.reply(session, [item.get("text", "ok")], int(time.time() * 1000) + self.clock - 1_000_000 + 10)
+            self.fx.idle(session, "succeeded", int(time.time() * 1000) + self.clock - 1_000_000 + 20)
+        self.calls.append({"agent": call["agent"], "session": session, "first": call["first"], "title": call["title"], "message": call["message"], "timeout": None, "cwd": "", "auto": False})
+        error = item.get("error")
+        return {"exit": 1 if error else 0, "outcome": "agent_error" if error else "returned", "session": session, "cost": 0.01, "tokens": None, "sessions": 1,
+                "seconds": 0.0, "error": error, "text": item.get("text", "ok")}
+
+    def _item_for(self, agent, n):
+        items = self.script
+        return items[n - 1] if n - 1 < len(items) else {}
+
+
+class RetryAdoptionTests(Base):
+    def setup_run(self):
+        self.save("duo", check="exit 0", attempts=1, steps={"worker": {"retries": 1}, "reviewer": {"retries": 0}})
+        return FixtureDb(self.tmp / "o.db")
+
+    def test_f04_kill_before_try_2_reached_the_session_does_not_adopt_try_1s_reply(self):
+        fx = self.setup_run()
+        executor = DbExecutor(fx, [{"error": "boom afterwards", "text": "try one's reply"}, {"text": "try two's reply"}, {"text": PASS}])
+        original = looprun.Controller._turn
+
+        def turn(controller, step, agent, session, title, message, attempt_try, *a, **kw):
+            if attempt_try == 2 and not kw.get("result"):
+                raise Kill()  # after the cursor of try 2 is written would be better; the cursor is written inside `_turn`, so die in the executor instead
+            return original(controller, step, agent, session, title, message, attempt_try, *a, **kw)
+        original_attempt = executor.attempt
+
+        def attempt(**call):
+            if len(executor.calls) == 1:
+                raise Kill()  # try 2 is cut before its message is sent
+            return original_attempt(**call)
+        executor.attempt = attempt
+        run = self.crash(executor, "duo")
+        self.assertEqual(self.record(run)["cursor"]["try"], 2)
+        executor.attempt = original_attempt
+        looprun.resume(self.folder(run), wait=True, executor=executor)
+        record = self.record(run)
+        turns = [e for a in record["attempts"] for e in a["steps"] if e["kind"] == "agent" and e["role"] == "work"]
+        self.assertEqual([t["try"] for t in turns], [1, 2])
+        self.assertFalse(turns[1].get("recovered"), "try 2 adopted a reply that is try 1's")
+        self.assertEqual(record["recoveries"][-1]["answer"], "not_sent")
+        self.assertEqual(len(executor.calls), 3)  # try 1, then try 2 sent once after the resume, then the judge
+
+    def test_f04_kill_after_try_2s_message_arrived_waits_for_a_person(self):
+        fx = self.setup_run()
+        executor = DbExecutor(fx, [{"error": "boom afterwards", "text": "try one's reply"}, {"text": "try two", "write_reply": False}])
+
+        def hook(n, call):
+            if n == 2:
+                raise Kill()
+        executor.hook = hook
+        run = self.crash(executor, "duo")
+        executor.hook = None
+        looprun.resume(self.folder(run), wait=True, executor=executor)
+        record = self.record(run)
+        self.assertEqual(record["status"], "paused")
+        self.assertEqual(record["recoveries"][-1]["answer"], "unknown")
+        self.assertEqual(len(executor.calls), 1)
+
+
+class VerdictTests(Base):
+    def duo(self, reviewer, **extra):
+        self.save("duo", check="exit 0", attempts=1, steps={"reviewer": {"retries": 0}})
+        return self.executor({"worker": [{}], "reviewer": [reviewer]})
+
+    def test_f08_a_pass_in_an_earlier_message_is_not_the_verdict_when_the_last_message_says_something_else(self):
+        executor = self.duo({"text": "findings\nVERDICT: PASS", "final": "I changed my mind, see below"})
+        run = self.start(executor, "duo")
+        record = self.record(run)
+        judge = record["attempts"][0]["steps"][-1]
+        self.assertEqual((judge["verdict"], record["status"]), ("inconclusive", "inconclusive"))
+
+    def test_f08_the_verdict_is_read_from_the_last_message_that_has_text(self):
+        executor = self.duo({"text": "VERDICT: FAIL\nthen the last message: VERDICT: PASS", "final": "all is well\nVERDICT: PASS"})
+        run = self.start(executor, "duo")
+        self.assertEqual(self.record(run)["status"], "passed")
+
+    def test_f08_the_live_stream_is_split_into_messages_and_the_last_one_with_text_is_the_verdict(self):
+        def event(message, text):
+            return json.dumps({"type": "text", "sessionID": "ses_x", "part": {"type": "text", "messageID": message, "text": text}})
+        out = "\n".join([event("m1", "first part VERDICT: PASS"), event("m1", " ends here"), json.dumps({"type": "tool_use", "part": {}}), event("m2", "see you\nlater"),
+                         json.dumps({"type": "text", "part": {"type": "text", "messageID": "m3", "text": ""}})])
+        executor = object.__new__(looprun.OpenCodeExecutor)
+        executor._seen = {}
+        with mock.patch.object(looprun.OpenCodeExecutor, "_tree", return_value=None):
+            result = executor._result("ses_x", "returned", 0, time.monotonic(), out)
+        self.assertEqual(result["final"], "see you\nlater")
+        self.assertEqual(looprun.read_verdict(result["final"])[0], "inconclusive")
+        self.assertIn("VERDICT: PASS", result["text"])
+
+    def test_f08_the_adopted_reply_of_a_finished_turn_is_read_the_same_way(self):
+        self.save("duo", check="exit 0", attempts=1, steps={"reviewer": {"retries": 0}})
+        executor = self.executor({"worker": [{}], "reviewer": [{"text": PASS}]}, hook=lambda n, call: (_ for _ in ()).throw(Kill()) if call["agent"] == "reviewer" else None,
+                                 answer="finished", text="found it.\nVERDICT: PASS", final="but then I said this")
+        run = self.crash(executor, "duo")
+        looprun.resume(self.folder(run), wait=True, executor=executor)
+        record = self.record(run)
+        judge = record["attempts"][0]["steps"][-1]
+        self.assertEqual((judge["recovered"], judge["verdict"], record["status"]), (True, "inconclusive", "inconclusive"))
+        self.reconcile.write_text(json.dumps({"answer": "finished", "text": "x"}))  # an answer without `final` falls back to its text
+
+
+class EndingTests(Base):
+    def test_f06_a_check_routed_onward_that_failed_ends_failed_not_check_error(self):
+        self.save("duo", check="exit 1", attempts=1, steps={"check": {"on": {"fail": "next"}}})
+        run = self.start(self.executor({"worker": [{}], "reviewer": [{"text": PASS}]}), "duo")
+        record = self.record(run)
+        self.assertEqual(record["status"], "failed")
+        self.assertIn("exit", record["reason"])
+        self.assertIsNone(record.get("passed_by"))
+
+    def test_f06_check_error_and_inconclusive_checks_routed_onward_keep_their_words(self):
+        for code, status in ((127, "check_error"), (75, "inconclusive")):
+            self.save("duo", check=f"exit {code}", attempts=1, steps={"check": {"on": {"check_error": "next", "inconclusive": "next"}}})
+            run = self.start(self.executor({"worker": [{}], "reviewer": [{"text": PASS}]}), "duo")
+            self.assertEqual(self.record(run)["status"], status, code)
+
+    def test_f06_a_judge_that_failed_and_was_routed_onward_ends_failed(self):
+        self.save("duo", check="exit 0", attempts=1, steps={"reviewer": {"on": {"fail": "next"}}})
+        run = self.start(self.executor({"worker": [{}], "reviewer": [{"text": "bad\nVERDICT: FAIL"}]}), "duo")
+        record = self.record(run)
+        self.assertEqual(record["status"], "failed")
+        self.assertIn("reviewer", record["reason"])
+
+    def test_f06_a_judge_that_gave_no_verdict_and_was_routed_onward_ends_inconclusive(self):
+        self.save("duo", check="exit 0", attempts=1, steps={"reviewer": {"on": {"inconclusive": "next"}, "retries": 0}})
+        run = self.start(self.executor({"worker": [{}], "reviewer": [{"text": "no verdict"}]}), "duo")
+        self.assertEqual(self.record(run)["status"], "inconclusive")
+
+    def test_f07_a_person_cannot_pass_a_worker_outcome_that_can_never_pass(self):
+        for outcome in ("agent_error", "no_artifact"):
+            with self.assertRaises(looprun.LoopError) as raised:
+                looprun.compile(["worker", "reviewer", "worker"], self.settings("duo", steps={"worker": {"on": {outcome: "human"}}}), {"worker", "reviewer"})
+            self.assertIn(outcome, str(raised.exception))
+            self.assertIn("person", str(raised.exception))
+        steps = looprun.compile(["worker", "reviewer", "worker"], self.settings("duo", steps={"worker": {"on": {"stalled": "human"}}}), {"worker", "reviewer"})
+        self.assertEqual(steps[0]["on"]["stalled"], "human")  # a stalled worker may have done the work
+
+
+class PinTests(Base):
+    def interrupted(self):
+        self.save("duo", check="exit 0", attempts=3, steps={"reviewer": {"retries": 0}})
+        executor = self.executor({"worker": [{}], "reviewer": [{"text": PASS}, {"text": PASS}]}, hook=kill_at(2), answer="not_sent")
+        return self.crash(executor, "duo"), executor
+
+    def edit(self, run, key, value):
+        path = self.folder(run) / "definition.json"
+        data = json.loads(path.read_text())
+        data[key] = value
+        path.write_text(json.dumps(data, indent=2, sort_keys=True))
+
+    def test_f05_changed_steps_are_refused_on_resume_and_the_run_is_left_as_it_was(self):
+        run, executor = self.interrupted()
+        data = json.loads((self.folder(run) / "definition.json").read_text())
+        steps = data["steps"]
+        steps[0]["on"]["returned"] = "done"
+        self.edit(run, "steps", steps)
+        before = tree_hash(self.folder(run))
+        for wait in (True, False):
+            with self.assertRaises(looprun.LoopError) as raised:
+                looprun.resume(self.folder(run), wait=wait, executor=executor)
+            self.assertIn("steps_sha256", str(raised.exception))
+        self.assertEqual({k: v for k, v in tree_hash(self.folder(run)).items() if k != "lock"}, {k: v for k, v in before.items() if k != "lock"})
+        self.assertEqual(self.record(run)["status"], "running")
+        self.assertEqual(self.cli("resume", run, "--project", str(self.project))[0], 2)
+
+    def test_f05_changed_settings_are_refused_on_resume(self):
+        run, executor = self.interrupted()
+        data = json.loads((self.folder(run) / "definition.json").read_text())
+        settings = data["settings"]
+        settings["limits"]["attempts"] = 40
+        self.edit(run, "settings", settings)
+        with self.assertRaises(looprun.LoopError) as raised:
+            looprun.resume(self.folder(run), wait=True, executor=executor)
+        self.assertIn("settings_sha256", str(raised.exception))
+        self.assertEqual(self.record(run)["status"], "running")
+
+    def test_f05_a_queued_run_whose_definition_changed_is_not_started_and_says_why(self):
+        self.save()
+        run = queue(self)
+        self.edit(run, "settings", {**json.loads((self.folder(run) / "definition.json").read_text())["settings"], "allow_asks": True})
+        code, _, err = self.cli("run", "--run-dir", str(self.folder(run)))
+        record = self.record(run)
+        self.assertEqual((code, record["status"]), (2, "invalid"))
+        self.assertIn("settings_sha256", record["reason"])
+
+    def test_f05_an_untouched_definition_resumes(self):
+        run, executor = self.interrupted()
+        self.assertEqual(self.resume(run, executor), "passed")
+
+
+class ClockTests(Base):
+    def test_f09_a_kill_during_a_turn_loses_at_most_one_heartbeat_of_the_clock(self):
+        self.save()
+        seen = {}
+
+        class Dies(looprun.ScriptedExecutor):
+            def attempt(self, **call):
+                started = time.monotonic()
+                while time.monotonic() - started < 1.0:
+                    call["poll"]()
+                    time.sleep(0.02)
+                seen["elapsed"] = time.monotonic() - started
+                raise Kill()
+        with mock.patch.object(looprun, "HEARTBEAT", 0.2):
+            run = self.crash(Dies([{}]))
+        saved = self.record(run)["totals"]["seconds"]
+        self.assertGreaterEqual(saved, seen["elapsed"] - 0.2 - 0.1)
+
+    def test_f09_a_kill_during_a_check_loses_at_most_one_heartbeat_of_the_clock(self):
+        self.save(check="sleep 3; exit 1")
+        clock = {}
+        original = looprun.Controller.poll
+
+        def poll(controller):
+            clock.setdefault("start", time.monotonic())
+            if time.monotonic() - clock["start"] > 1.0:
+                clock["end"] = time.monotonic()
+                raise Kill()
+            return original(controller)
+        with mock.patch.object(looprun, "HEARTBEAT", 0.2), mock.patch.object(looprun.Controller, "poll", poll):
+            run = self.crash(self.executor())
+        saved = self.record(run)["totals"]["seconds"]
+        self.assertGreaterEqual(saved, clock["end"] - clock["start"] - 0.2 - 0.5)  # the check polls every quarter second
+
+    def test_f09_time_with_no_controller_is_not_counted_and_the_clock_goes_on_from_the_saved_value(self):
+        self.save(check=CHECK_SECOND)
+        run = self.crash(self.executor(hook=kill_at(2), answer="not_sent"))
+        before = self.record(run)["totals"]["seconds"]
+        time.sleep(1.2)
+        executor = self.executor(answer="not_sent")
+        self.assertEqual(self.resume(run, executor), "passed")
+        after = self.record(run)["totals"]["seconds"]
+        self.assertGreaterEqual(after, before)
+        self.assertLess(after, before + 1.2)
+
+
+class CancelInCheckTests(Base):
+    def test_f10_cancel_during_a_check_stops_its_process_group_and_ends_cancelled(self):
+        self.save(check=f"echo $$ > {self.tmp}/pid; sleep 60; exit 1")
+        executor = self.executor()
+        box = {}
+
+        def cancel_soon():
+            end = time.monotonic() + 20
+            while time.monotonic() < end and not (self.tmp / "pid").exists():
+                time.sleep(0.02)
+            time.sleep(0.3)
+            run, = looprun.list_runs(self.project)
+            box["result"] = looprun.cancel(self.folder(run))
+            box["at"] = time.monotonic()
+        thread = threading.Thread(target=cancel_soon)
+        thread.start()
+        started = time.monotonic()
+        run = self.start(executor)
+        done = time.monotonic()
+        thread.join(10)
+        self.assertEqual(box["result"], "requested")
+        self.assertLess(done - box["at"], 3)
+        self.assertLess(done - started, 15)
+        self.assertEqual(self.record(run)["status"], "cancelled")
+        pid = int((self.tmp / "pid").read_text())
+        time.sleep(0.2)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_f10_a_pause_during_a_check_lets_it_finish(self):
+        self.save(check="sleep 1; exit 1")
+        executor = self.executor()
+
+        def pause_soon():
+            end = time.monotonic() + 20
+            while time.monotonic() < end and not looprun.list_runs(self.project):
+                time.sleep(0.02)
+            run, = looprun.list_runs(self.project)
+            while time.monotonic() < end and looprun.read_run(self.folder(run)).get("cursor", {}) is None or looprun.read_run(self.folder(run)).get("cursor", {}).get("step") != "check":
+                time.sleep(0.02)
+            looprun.pause(self.folder(run))
+        thread = threading.Thread(target=pause_soon)
+        thread.start()
+        run = self.start(executor)
+        thread.join(10)
+        record = self.record(run)
+        self.assertEqual(record["status"], "paused")
+        self.assertEqual(record["attempts"][0]["check"]["exit"], 1)  # the check ran to its end
+
+
+class AnswerTests(Base):
+    def waiting(self, **extra):
+        """A run that asked a person and whose controller died while it waited."""
+        self.save("duo", check="exit 0", approval="before_pass", **extra)
+        executor = self.executor({"worker": [{}], "reviewer": [{"text": PASS}]})
+
+        def answer_file(controller, path):
+            raise Kill()
+        with mock.patch.object(looprun.Controller, "_answer_file", answer_file):
+            run = self.crash(executor, "duo")
+        return run, executor
+
+    def test_f11_a_stale_answer_lock_never_wedges_a_run(self):
+        run, executor = self.waiting()
+        (self.folder(run) / "answer.lock").write_text("a person's command that was killed")
+        looprun.answer(self.folder(run), "approve", "go")
+        self.assertTrue((self.folder(run) / "answer.json").is_file())
+        self.assertEqual(self.resume(run, executor), "passed")
+
+    def test_f11_an_answer_is_decided_under_the_lock_and_never_written_into_a_run_that_stopped_waiting(self):
+        run, executor = self.waiting()
+        folder = self.folder(run)
+        box = {}
+        lock = open(folder / "answer.lock", "a+")
+        fcntl.flock(lock, fcntl.LOCK_EX)  # the controller is in the middle of leaving the waiting state
+
+        def answer():
+            try:
+                looprun.answer(folder, "approve")
+            except looprun.Busy as exc:
+                box["error"] = str(exc)
+        thread = threading.Thread(target=answer)
+        thread.start()
+        time.sleep(0.3)
+        state = looprun.read_run(folder)
+        state.update(status="cancelled", waiting=None)
+        (folder / "run.json").write_text(json.dumps(state))
+        lock.close()
+        thread.join(10)
+        self.assertIn("not waiting", box.get("error", ""))
+        self.assertFalse((folder / "answer.json").exists())
+
+    def test_f11_a_cancelled_waiting_controller_refuses_a_later_answer(self):
+        self.save("duo", check="exit 0", approval="before_pass")
+        executor = self.executor({"worker": [{}], "reviewer": [{"text": PASS}]})
+        thread = threading.Thread(target=lambda: self.start(executor, "duo"))
+        thread.start()
+        end = time.monotonic() + 20
+        while time.monotonic() < end and not (looprun.list_runs(self.project) and (self.record(looprun.list_runs(self.project)[0]).get("status") == "waiting")):
+            time.sleep(0.02)
+        run, = looprun.list_runs(self.project)
+        self.assertEqual(looprun.cancel(self.folder(run)), "requested")
+        thread.join(20)
+        self.assertEqual(self.record(run)["status"], "cancelled")
+        with self.assertRaises(looprun.Busy):
+            looprun.answer(self.folder(run), "approve")
+        self.assertFalse((self.folder(run) / "answer.json").exists())
+
+    def test_f11_a_kill_after_the_answer_was_taken_and_before_it_was_saved_does_not_lose_it(self):
+        run, executor = self.waiting(seconds=4)
+        looprun.answer(self.folder(run), "approve", "ship it")
+        original = looprun._event
+
+        def event(folder, **fields):
+            if fields.get("outcome") == "approve":
+                raise Kill()
+            return original(folder, **fields)
+        executor.hook = None
+        with mock.patch.object(looprun, "_event", event), self.assertRaises(Kill):
+            looprun.resume(self.folder(run), wait=True, executor=executor)
+        self.assertEqual(looprun.resume(self.folder(run), wait=True, executor=executor), "passed")  # it was not asked again, and the time limit did not end it
+        record = self.record(run)
+        self.assertEqual([(a["answer"], a["note"]) for a in record["answers"]], [("approve", "ship it")])
+        self.assertEqual(len(executor.calls), 2)

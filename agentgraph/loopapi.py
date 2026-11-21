@@ -297,7 +297,7 @@ def start(structure_dir, project, flow, goal=None, workdir=None, *, scratch=None
 
 def cancel(project, run_id) -> dict:
     """Stop a run: a live controller is asked (before the next attempt, or now if an agent turn is running; the reply is `{"run"}`, as in release 1); with no
-    controller (interrupted, paused, waiting) the run is marked cancelled here (`{"run", "result": "cancelled"}`). 409 for a run that is over."""
+    controller (interrupted, paused, waiting, or queued whose controller never started) the run is marked cancelled here (`{"run", "result": "cancelled"}`). 409 for a run that is over."""
     folder = _run_folder(project, run_id)
     _state(folder)
     try:
@@ -324,7 +324,8 @@ def pause(project, run_id) -> dict:
 
 def resume(project, run_id, choice=None) -> dict:
     """Start a controller on an interrupted, paused or waiting run, from its cursor and pinned definition. `choice` is `redo` or `accept`
-    for a paused step whose fate is unknown. 409 for a run that is over, queued or has a live controller; 400 for a choice that does not fit."""
+    for a paused step whose fate is unknown. A queued run older than 30 s with no controller (shown `interrupted`) is started. 409 for a run that is over, queued
+    and young, or with a live controller; 400 for a choice that does not fit or a definition that no longer matches its pinned hashes."""
     folder = _run_folder(project, run_id)
     _state(folder)
     if choice is not None and choice not in looprun.CHOICES:

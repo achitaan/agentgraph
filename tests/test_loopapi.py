@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agentgraph import loopapi, looprun
 
@@ -385,6 +386,57 @@ class Release3Tests(Base):
                {"op": "start", "flow": "f", "settings": "x"}, {"op": "pause", "run": "r", "x": "y"}]
         self.assertEqual([loopapi.shape_ok(r) for r in good], [True] * len(good))
         self.assertEqual([loopapi.shape_ok(r) for r in bad], [False] * len(bad))
+
+
+class QueuedNeverStartedTests(Base):
+    """A run whose detached controller never came (round 2): what the page API shows and does."""
+
+    def queued(self, age=0):
+        looprun.save_settings(self.structure, "self", {"version": 1, "flow": "self", "limits": {"attempts": 3}, "check": {"command": "true", "timeout": 20}})
+        with mock.patch.object(looprun.subprocess, "Popen"):
+            run = looprun.start(self.project, "self", structure=self.structure, goal="g", executor=looprun.ScriptedExecutor([{}]))
+        folder = looprun.run_dir(self.project, run)
+        for name in ("run.json", "definition.json"):
+            data = json.loads((folder / name).read_text())
+            data["created"] -= age
+            (folder / name).write_text(json.dumps(data))
+        return run, folder
+
+    def refused(self, call, status):
+        with self.assertRaises(loopapi.ApiError) as caught:
+            call()
+        self.assertEqual(caught.exception.status, status)
+        return caught.exception
+
+    def test_a_queued_run_with_no_controller_for_30_seconds_is_listed_and_shown_interrupted(self):
+        run, folder = self.queued(age=60)
+        row = next(r for r in loopapi.listing(self.structure, self.project, None)["runs"] if r["run"] == run)
+        self.assertEqual(row["status"], "interrupted")
+        self.assertEqual(loopapi.run_detail(self.project, run)["run"]["status"], "interrupted")
+        self.assertEqual(json.loads((folder / "run.json").read_text())["status"], "queued")  # shown, not stored
+        self.assertFalse((folder / "lock").exists())  # looking made no file
+
+    def test_a_young_queued_run_is_still_queued_and_cannot_be_resumed(self):
+        run, _ = self.queued(age=1)
+        row = next(r for r in loopapi.listing(self.structure, self.project, None)["runs"] if r["run"] == run)
+        self.assertEqual(row["status"], "queued")
+        self.assertEqual(self.refused(lambda: loopapi.resume(self.project, run), 409).status, 409)
+
+    def test_cancel_of_a_never_started_run_answers_cancelled(self):
+        run, folder = self.queued(age=60)
+        self.assertEqual(loopapi.cancel(self.project, run), {"run": run, "result": "cancelled"})
+        self.assertEqual(looprun.read_run(folder)["status"], "cancelled")
+
+    def test_resume_of_a_never_started_run_with_a_changed_definition_is_400_and_leaves_it(self):
+        run, folder = self.queued(age=60)
+        definition = json.loads((folder / "definition.json").read_text())
+        definition["steps"][0]["on"]["returned"] = "done"
+        (folder / "definition.json").write_text(json.dumps(definition))
+        with mock.patch.object(looprun.subprocess, "Popen") as popen:
+            error = self.refused(lambda: loopapi.resume(self.project, run), 400)
+        self.assertIn("steps_sha256", str(error.message))
+        self.assertFalse(popen.called)
+        self.assertEqual(looprun.read_run(folder)["status"], "queued")
 
 
 if __name__ == "__main__":

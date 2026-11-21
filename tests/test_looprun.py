@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agentgraph import looprun
 
@@ -215,17 +216,22 @@ class AlsoTests(Base):
 
     def test_a_second_process_cannot_run_the_same_folder(self):
         self.save()
-        run_id = looprun.start(self.project, "self", structure=self.structure, goal="g", executor=looprun.ScriptedExecutor([{}]))
+        with mock.patch.object(looprun.subprocess, "Popen"):  # no real controller: this test plays the one that holds the run
+            run_id = looprun.start(self.project, "self", structure=self.structure, goal="g", executor=looprun.ScriptedExecutor([{}]))
+            other = looprun.start(self.project, "self", structure=self.structure, goal="g", executor=looprun.ScriptedExecutor([{}]))
         folder = self.folder(run_id)
         with open(folder / "lock", "a+") as held:
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)  # another controller holds the run
-            with self.assertRaises(looprun.LoopError) as caught:
+            with mock.patch.object(looprun, "LOCK_WAIT", 0.1), self.assertRaises(looprun.LoopError) as caught:
                 looprun.execute(folder, looprun.ScriptedExecutor([{}]))
             self.assertIn("already", str(caught.exception))
-            code, _, err = self.cli("run", "--run-dir", str(folder))
+            self.assertEqual(looprun.read_run(folder)["status"], "queued")  # the library call writes nothing
+            with mock.patch.object(looprun, "LOCK_WAIT", 0.1):
+                code, _, err = self.cli("run", "--run-dir", str(folder))
             self.assertEqual(code, 1)
             self.assertIn("already", err)
-        self.assertEqual(looprun.read_run(folder)["status"], "queued")
+        self.assertEqual(looprun.read_run(folder)["status"], "agent_error")  # the detached command says why it did not run, instead of leaving `queued`
+        folder = self.folder(other)
         looprun.execute(folder, looprun.ScriptedExecutor([{}, {}]))
         self.assertEqual(looprun.read_run(folder)["status"], "passed")
         with self.assertRaises(looprun.LoopError):  # a finished run is never run again
@@ -531,7 +537,8 @@ class RecordTests(Base):
         run = looprun.start(self.project, "self", structure=self.structure, goal="g", executor=looprun.ScriptedExecutor([{}]))
         folder = self.folder(run)
         definition = json.loads((folder / "definition.json").read_text())
-        definition["steps"][0]["on"]["returned"] = "done"  # a hand-edited definition
+        definition["steps"][0]["on"]["returned"] = "done"  # a hand-edited definition (re-pinned: the walk's own guard is what is tested here)
+        definition["steps_sha256"] = looprun.steps_hash(definition["steps"])
         (folder / "definition.json").write_text(json.dumps(definition))
         looprun.execute(folder, looprun.ScriptedExecutor([{}]))
         self.assertNotEqual(looprun.read_run(folder)["status"], "passed")
@@ -615,8 +622,11 @@ class CommandTests(Base):
 
     def test_cancel_marks_a_live_run_with_a_file(self):
         self.save()
-        run = looprun.start(self.project, "self", structure=self.structure, goal="g", executor=looprun.ScriptedExecutor([]))
-        code, out, _ = self.cli("cancel", run, "--project", str(self.project))
+        with mock.patch.object(looprun.subprocess, "Popen"):  # no real controller: this test plays it, holding the run's lock
+            run = looprun.start(self.project, "self", structure=self.structure, goal="g", executor=looprun.ScriptedExecutor([]))
+        with open(self.folder(run) / "lock", "a+") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            code, out, _ = self.cli("cancel", run, "--project", str(self.project))
         self.assertEqual(code, 0)
         self.assertTrue((self.folder(run) / "cancel").exists())
         looprun.execute(self.folder(run), looprun.ScriptedExecutor([{}]))

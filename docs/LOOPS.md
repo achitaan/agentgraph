@@ -148,14 +148,26 @@ the sha256 of the message) and after the step is recorded (`phase: done`, with t
 
 - A step whose cursor is `done` continues at its route. A check step whose cursor is `started` runs the check again (see below).
 - An agent step whose cursor is `started` may or may not have been sent. `resume` asks the executor to **reconcile** and acts on one of three answers:
-  - `not_sent`: the session does not exist or holds no user message with exactly this text. The message is sent.
-  - `finished`: the message is in the session and the session is idle after a reply (an idle row that says `succeeded` after an assistant reply, no live
+  - `not_sent`: the session does not exist, or it holds no user message since the send (the cursor records the send time and the count of user
+    messages before the send; the time is compared with a margin of 10 seconds that errs towards counting a message as new). The message is sent.
+    A new user message that does not have this text, or two new messages with it, is `unknown`: someone else wrote into the session, or two tries cannot be told apart.
+    A retry of a turn is told from its earlier try by that count, so a finished reply of try 1 is never adopted for try 2.
+  - `finished`: exactly one new user message has this text and the session is idle after a reply (an idle row that says `succeeded` after an assistant reply, no live
     process for the session, every sub-session idle). The reply is adopted as the step's result (`recovered: true`, cost read from the session) and the walk goes on.
   - `unknown`: anything else (still busy, a live process, the database unreadable, no idle row). The run becomes `paused` with the reason and **nothing is sent**.
 - A paused step is the person's to decide: `resume --redo` sends the message again, `resume --accept` takes the step as returned and goes to the check.
   Both are refused (and change nothing) for a step that may not have run, a judge's turn cannot be accepted (no verdict to read), and any other
   word is refused. Each decision is in `run.json` `recoveries[]` (`answer`, `action`: `adopt`, `redo`, `accept`, `pause`, `send`).
-- `resume` is refused (nothing written) for a final run, a queued run (it has not started) and a run whose controller is alive.
+- `resume` is refused (nothing written) for a final run, a queued run younger than 30 seconds (its controller may still be starting) and a run whose controller is alive.
+  It is also refused when `settings_sha256` or `steps_sha256` no longer matches `definition.json` (the same check runs when a controller starts), in words, and the run is left as it was.
+- A run still `queued` 30 seconds after it was created with no controller holding its lock is shown `interrupted` (the controller never started, nothing was sent):
+  `resume` starts it (`--redo` and `--accept` are refused: there is no step to redo) and `cancel` marks it `cancelled`. A detached `run` that cannot start the
+  controller (lock still held after a short wait, no OpenCode, unreadable definition) writes a final status with the reason in words instead of leaving `queued`.
+- Looking does not touch a run: `list` and `status` only probe the lock read-only (a missing lock file means not held), create no file and do not follow a symlinked run folder.
+  A probe never keeps a controller from taking its lock, and a controller waits up to a second for it.
+- `cancel` while a check is running stops the check's process group within a quarter second and the run ends `cancelled`; a `pause` lets the check finish.
+- `answer` is decided and written under `answer.lock` (a `flock`, so a stale file wedges nothing): a run that is no longer `waiting` refuses it, and an answer taken
+  by a controller that is killed before it saved is not lost.
 - `pause` is for a run a controller is running: it writes a `pause` file and the controller stops after the step it is on (the run says `paused`,
   `resume` goes on at the next step). `cancel` and `answer` act on a paused, waiting or interrupted run with no controller, under the run's lock.
 - `list` and `status` say it in words: `interrupted (the controller is gone; agentgraph loop resume RUN)`, `paused`, `waiting`, `trial`.
@@ -206,17 +218,24 @@ Each run keeps a folder `<project>/.opencode/loops/<run id>/`:
 - `passed`: in one attempt, the check (when one is saved) exited 0 and every judge answered `VERDICT: PASS` (or a person approved over a judge),
   and, with `approval`, a person approved. The run says how in `passed_by`: `check`, `judges` or `check+judges`, plus `+approval`. Nothing else
   gives this; a judge that passes while the saved check failed was never asked, and a definition edited by hand to skip a step still cannot pass.
-- `failed`: every attempt (worker turn) was used and the last check or judge failed.
+- `failed`: every attempt (worker turn) was used and the last check or judge failed; also a definition that routed the run onward to its end after a check that exited non-zero or a judge that said FAIL.
 - `limit`: stopped before an agent turn because the time or the spend limit was reached, or while waiting for a person (the reason says which).
 - `stalled`: the last agent turn ran past `attempt_seconds` and was stopped, and no check passed.
 - `agent_error`: the agent process failed (no model, bad agent, crash). The run stops unless `retries` allow another turn.
 - `check_error`: the check command could not run (not found, not executable, killed by a signal).
 - `inconclusive`: the check exited with one of your `inconclusive_codes` or timed out, or a judge gave no verdict line after its retries. The run stops; it does not guess.
+  A judge's verdict is read from the last assistant message that has text (the last line of it); a `VERDICT: PASS` in an earlier message does not count.
 - `waiting`: a person must answer (`agentgraph loop answer`). Not final.
 - `paused`: the run stopped on request (`loop pause`) or because a step's fate could not be told after a restart (the reason says which). Not final; `loop resume`.
 - `invalid`: refused before any attempt (no check command, no goal, unreadable settings, no OpenCode).
 - `cancelled`: you asked it to stop (or answered `stop`). A cancel file stops it before the next turn, or stops a running turn at once.
-- `interrupted` (shown, not stored): the record says `running` but the process is gone. `agentgraph loop resume RUN` goes on from the cursor.
+- `interrupted` (shown, not stored): the record says `running` but the process is gone, or it says `queued` for 30 seconds with no controller. `agentgraph loop resume RUN` goes on from the cursor.
+
+## The run clock
+
+`totals.seconds` (and `limits.seconds`) counts the time a controller was alive and running the run: the walk, a turn, a check and the wait for an answer. It is saved at
+the start and end of every step and every 5 seconds while a turn or a check runs, so a killed controller loses at most one heartbeat (5 s) plus a check's quarter-second
+poll. Time with no controller (between a kill and a `resume`, a paused run, a queued run waiting for its controller) is **not** counted; `resume` continues from the saved value.
 
 ## The spend limit: what it does and does not promise
 

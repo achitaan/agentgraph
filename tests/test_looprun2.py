@@ -669,6 +669,7 @@ class GuardTests(Base):
         folder = self.folder(run)
         definition = json.loads((folder / "definition.json").read_text())
         edit(definition["steps"])
+        definition["steps_sha256"] = looprun.steps_hash(definition["steps"])  # re-pinned: the walk's own guard is what is tested here
         (folder / "definition.json").write_text(json.dumps(definition))
         looprun.execute(folder, ex)
         return looprun.read_run(folder), ex
@@ -695,6 +696,7 @@ class GuardTests(Base):
         folder = self.folder(run)
         definition = json.loads((folder / "definition.json").read_text())
         definition["steps"][1]["on"]["pass"] = "done"
+        definition["steps_sha256"] = looprun.steps_hash(definition["steps"])  # re-pinned: the walk's own guard is what is tested here
         (folder / "definition.json").write_text(json.dumps(definition))
         looprun.execute(folder, ex)
         self.assertNotEqual(looprun.read_run(folder)["status"], "passed")
@@ -709,6 +711,7 @@ class GuardTests(Base):
         folder = self.folder(run)
         definition = json.loads((folder / "definition.json").read_text())
         edit(definition["steps"])
+        definition["steps_sha256"] = looprun.steps_hash(definition["steps"])  # re-pinned: the walk's own guard is what is tested here
         (folder / "definition.json").write_text(json.dumps(definition))
         looprun.execute(folder, ex)
         self.assertNotEqual(looprun.read_run(folder)["status"], "passed")
