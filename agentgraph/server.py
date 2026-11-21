@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote
 
-from . import (agentfiles, chatfeed, flowcommands, flowrun, improve, mcpview, outputs, roster, setups, sidechat,
+from . import (agentfiles, chatfeed, flowcommands, flowrun, improve, loopapi, mcpview, outputs, roster, setups, sidechat,
                skillfiles, skillset, spend, structure, teams)
 from .demo import demo_activity, demo_setup, demo_sidechat, demo_snapshot, demo_spend
 from .snapshot_json import (ledger_home, learning_document, live_activity, load_structure, skills_document,
@@ -39,7 +39,12 @@ _SPEND_PATH = "/api/spend"  # the project's spend limit: set or remove (agentgra
 _SPEND_BODY_LIMIT = 4096
 _IMPROVE_PATH = "/api/improve"  # improvement proposals: GET list or one, POST approve|reject|reopen|revert (agentgraph.improve)
 _IMPROVE_BODY_LIMIT = 4096
-_POSTS = (_FLOW_PATH, _SKILLS_PATH, _ROSTER_PATH, _SKILLFILE_PATH, _TEAM_PATH, _OUTPUT_PATH, _SETUP_PATH, _SPEND_PATH)
+_LOOPS_PATH = "/api/loops"  # GET only: every drawn flow with its saved loop, and the newest runs (agentgraph.loopapi)
+_LOOP_RUN_PATH = "/api/loop/run"  # GET only: one run with every attempt
+_LOOP_PATH = "/api/loop"  # POST: save|remove a flow's loop, start|cancel a run
+_LOOP_BODY_LIMIT = 12 * 20000 + 16384  # a goal of 20000 characters (or a check command) as escaped JSON, and the rest
+_POSTS = (_FLOW_PATH, _SKILLS_PATH, _ROSTER_PATH, _SKILLFILE_PATH, _TEAM_PATH, _OUTPUT_PATH, _SETUP_PATH, _SPEND_PATH,
+          _LOOP_PATH)
 _LOOPBACK = frozenset({"127.0.0.1", "::1"})
 _FLOW_BODY_LIMIT = 32768  # an instruction of 2000 characters, each up to 12 bytes as escaped JSON (and a goal of 4000)
 # A write from a view that has not seen a later change (stale-contract.md): every op that names an existing thing
@@ -87,6 +92,7 @@ def make_server(
     skills_dir: Path | None = None, skills_bundled: list[Path] | None = None, agents_dir: Path | None = None,
     opencode_dir: Path | None = None, ledger_root: Path | None = None, commands_dir: Path | None = None,
     sessions_db: Path | None = None, setups_dir: Path | None = None, improve_config_root: Path | None = None,
+    loops_project: Path | None = None, loop_scratch: Path | None = None, loop_executor_spec: dict | None = None,
 ) -> ThreadingHTTPServer:
     """Bind a server; the caller is responsible for running and closing it.
     `structure_dir` is the folder `POST /api/structure/flow` edits (default: the
@@ -104,7 +110,10 @@ def make_server(
     the orchestration's `setups/`) over the same files, folders and `skills_backups`. `/api/improve` lists, shows,
     approves, rejects and reverts improvement proposals (agentgraph.improve) in the ledger home `ledger_root` gives
     (as `/api/output`'s edit log) and edits files in `improve_config_root` (default: `opencode_dir`, else OpenCode's
-    config folder)."""
+    config folder). `/api/loops`, `/api/loop/run` and `/api/loop` (agentgraph.loopapi) save a flow's loop in
+    `structure_dir` and start, list, read and cancel its runs under `<loops_project>/.opencode/loops` (default: `cwd`, else
+    the current folder); `loop_scratch` (a scratch config folder, default none) is what a started run uses instead of the
+    live config, and `loop_executor_spec` (a looprun executor spec, for tests: the scripted one) replaces OpenCode."""
     paths = {"config": skills_config or skillset.CONFIG, "map_path": skills_map or skillset.MAP,
              "backups": skills_backups or skillset.BACKUPS, "profiles": skills_profiles or skillset.PROFILES}
     directory = (web_dir if web_dir is not None else Path(__file__).with_name("web")).resolve()
@@ -197,7 +206,7 @@ def make_server(
             target = self.path.partition("?")[0]
             handler = {_SKILLS_PATH: self._skills, _ROSTER_PATH: self._roster, _SKILLFILE_PATH: self._skillfile,
                        _TEAM_PATH: self._team, _OUTPUT_PATH: self._output, _SETUP_PATH: self._setup,
-                       _SPEND_PATH: self._spend, _IMPROVE_PATH: self._improve_post}.get(target)
+                       _SPEND_PATH: self._spend, _IMPROVE_PATH: self._improve_post, _LOOP_PATH: self._loop_post}.get(target)
             if handler is not None:
                 handler()
                 return
@@ -612,6 +621,60 @@ def make_server(
 
             self._answer(run, improve.ImproveError, ValueError)
 
+        def _loop_project(self) -> Path:
+            return Path(loops_project if loops_project is not None else cwd if cwd is not None else Path.cwd()).absolute()
+
+        def _loop_get(self, path: str, query: str):
+            """GET /api/loops, and GET /api/loop/run?id=RUN (the run id is checked before any path is built)."""
+            params = parse_qs(query, keep_blank_values=True)
+            ids = params.get("id", [])
+            if set(params) - {"id", "demo"} or len(ids) > 1 or (ids and path == _LOOPS_PATH) or (not ids and path == _LOOP_RUN_PATH):
+                self._refuse(400, "give a run id" if path == _LOOP_RUN_PATH else "no query is expected")
+                return
+            shown = demo or params.get("demo", [None])[0] == "1"
+            try:
+                if path == _LOOPS_PATH:
+                    answer = ({"project": "", "scratch": False, "loops": [], "orphans": [], "runs": []} if shown
+                              else loopapi.listing(structure_root, self._loop_project(), loop_scratch))
+                elif shown:
+                    raise loopapi.ApiError(404, f"no run {ids[0][:40]}")
+                else:
+                    answer = loopapi.run_detail(self._loop_project(), ids[0])
+                body = json.dumps(answer, allow_nan=False).encode("utf-8")
+            except loopapi.ApiError as exc:
+                self._reply(exc.status, "application/json", json.dumps(exc.body()).encode("utf-8"))
+                return
+            except (OSError, ValueError) as exc:
+                self._refuse(500, f"could not read the loops: {exc}")
+                return
+            self._reply(200, "application/json", body)
+
+        def _loop_post(self):
+            # Save or remove a flow's loop (with the rev the page read), start a run, cancel one (agentgraph.loopapi). A refusal
+            # carries the controller's message (400), a stale rev answers 409 with the current one, an unknown run 404.
+            request = self._json_body("the loops", _LOOP_BODY_LIMIT)
+            if request is None:
+                return
+            if not loopapi.shape_ok(request):
+                self._refuse(400, "expected " + loopapi.SHAPES)
+                return
+            if demo:
+                self._refuse(403, "the demo cannot change the loops")
+                return
+            try:
+                body = json.dumps(loopapi.post(request, structure_root, self._loop_project(), scratch=loop_scratch,
+                                               executor_spec=loop_executor_spec), allow_nan=False).encode("utf-8")
+            except loopapi.ApiError as exc:
+                self._reply(exc.status, "application/json", json.dumps(exc.body()).encode("utf-8"))
+                return
+            except ValueError as exc:
+                self._refuse(400, str(exc))
+                return
+            except OSError as exc:
+                self._refuse(500, f"could not make the change: {exc}")
+                return
+            self._reply(200, "application/json", body)
+
         def _reply(self, status: int, content_type: str, body: bytes):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -729,6 +792,9 @@ def make_server(
                 return
             if path == _IMPROVE_PATH:
                 self._improve_get(query)
+                return
+            if path in (_LOOPS_PATH, _LOOP_RUN_PATH):
+                self._loop_get(path, query)
                 return
             filename = path[1:] if path != "/" else "index.html"
             if filename in ("", ".", "..") or any(c in filename for c in ("/", "\\", "\0")):

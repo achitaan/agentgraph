@@ -564,7 +564,10 @@ def remove_flow(flow_id, directory: Path | None = None, *, commands_dir: Path | 
     its command file first. A file that cannot be read as a flow (an agent on its path is gone, say) is removed the
     same way: its command file goes too while it is exactly what was written for it. Returns the flow as it was
     ({"id", "path", "text", "name", "command"}; None for a file that could not be read as a flow), so `add_flow`
-    can put it back. Given `expect`, refused (StaleError) when the file's rev is another."""
+    can put it back. Given `expect`, refused (StaleError) when the file's rev is another. A saved loop of the flow
+    (`<structure>/.loops/<id>.json`, agentgraph.looprun) stays: the undo record is this dict and the add that undoes
+    it cannot carry another file, and `add_flow` gives a self-loop the same id again, so the loop is back with it. Until then
+    the page lists it among the orphans."""
     root = Path(directory) if directory is not None else STRUCTURE_DIR
     with _locked(root) as root_fd, _plain():
         shape = _shape(root)

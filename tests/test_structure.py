@@ -1244,5 +1244,45 @@ class OneProblemList(unittest.TestCase):
         self.assertEqual((result.code, [run["task"] for run in result.runs]), (0, ["flows"]))
 
 
+class SavedLoops(unittest.TestCase):
+    """A saved loop (`.loops/<flow id>.json`) belongs to the flow's id, not to its file: removing a flow leaves it (an orphan,
+    which the undo's `add_flow` picks up again under the same id), and a flow whose path stops being a self-loop keeps it."""
+
+    def setUp(self):
+        from agentgraph import loopapi, looprun
+        self.loopapi, self.looprun = loopapi, looprun
+        self.root = make_structure(Path(self.enterContext(tempfile.TemporaryDirectory())))
+        self.flow, _ = structure.add_flow(["impl-openai", "impl-openai"], None, self.root)
+        looprun.save_settings(self.root, self.flow["id"], {"version": 1, "flow": self.flow["id"], "check": {"command": "true"},
+                                                          "limits": {"attempts": 3}})
+        self.project = self.root.parent
+
+    def listing(self):
+        return self.loopapi.listing(self.root, self.project, None)
+
+    def test_a_flow_without_a_saved_loop_is_removed_as_before(self):
+        other, _ = structure.add_flow(["impl-openai", "reviewer"], None, self.root)
+        structure.remove_flow(other["id"], self.root)
+        self.assertEqual([flow["id"] for flow in structure.drawn_flows(self.root)], [self.flow["id"]])
+        self.assertTrue(self.looprun.settings_path(self.root, self.flow["id"]).is_file())
+
+    def test_removing_the_flow_leaves_the_loop_as_an_orphan_and_undo_picks_it_up(self):
+        saved = self.looprun.settings_path(self.root, self.flow["id"]).read_bytes()
+        removed = structure.remove_flow(self.flow["id"], self.root)
+        doc = self.listing()
+        self.assertEqual((doc["loops"], doc["orphans"]), ([], [self.flow["id"]]))
+        again, _ = structure.add_flow(removed["path"], removed["text"], self.root, name=removed["name"] or None)
+        self.assertEqual(again["id"], self.flow["id"])
+        entry, = self.listing()["loops"]
+        self.assertEqual((entry["runnable"], entry["problem"], self.listing()["orphans"]), (True, "", []))
+        self.assertEqual(self.looprun.settings_path(self.root, self.flow["id"]).read_bytes(), saved)
+
+    def test_a_flow_that_is_no_longer_a_self_loop_keeps_its_loop_and_is_not_runnable(self):
+        (self.root / "flows" / f"{self.flow['id']}.md").write_text("path: impl-openai -> reviewer -> impl-openai\n\nEdited by hand.\n")
+        entry, = self.listing()["loops"]
+        self.assertEqual((entry["runnable"], entry["settings"] is not None, entry["problem"]), (False, True, ""))
+        self.assertTrue(self.looprun.settings_path(self.root, self.flow["id"]).is_file())
+
+
 if __name__ == "__main__":
     unittest.main()

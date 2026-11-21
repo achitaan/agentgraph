@@ -5,6 +5,7 @@ import signal
 import socket
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -193,6 +194,205 @@ class ServeCommandTests(unittest.TestCase):
                 self.assertEqual(stdout.getvalue(), f"agentgraph is serving at {address}\n")
                 self.assertEqual(stderr.getvalue(), "")
                 self.assertEqual(signal.getsignal(signal.SIGTERM), previous)
+
+
+class LoopEndpointTests(unittest.TestCase):
+    """GET /api/loops, GET /api/loop/run and POST /api/loop on temporary folders and the scripted executor (no OpenCode)."""
+    CHECK_SECOND = 'n=$(cat .count 2>/dev/null || echo 0); n=$((n+1)); echo $n > .count; echo "check call $n"; [ "$n" -ge 2 ]'
+    SETTINGS = {"check": {"command": CHECK_SECOND, "timeout": 20}, "limits": {"attempts": 4}}
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.structure, self.project, self.work = self.tmp / "structure", self.tmp / "project", self.tmp / "work"
+        (self.structure / "30-build").mkdir(parents=True)
+        (self.structure / "30-build" / "worker.md").write_text("Does the work.\n")
+        (self.structure / "30-build" / "reviewer.md").write_text("Reviews.\n")
+        (self.structure / "flows").mkdir()
+        (self.structure / "flows" / "self.md").write_text("path: worker -> worker\n\nCheck its own work.\n")
+        (self.structure / "flows" / "pair.md").write_text("path: worker -> reviewer -> worker\n\nA longer path.\n")
+        self.project.mkdir()
+        self.work.mkdir()
+        self.httpd = self.serve()
+
+    def serve(self, **extra):
+        self.enterContext(patch.object(server, "build_snapshot", side_effect=AssertionError("unexpected live read")))
+        httpd = server.make_server(0, web_dir=self.tmp, graph_dir=self.tmp / "graphs", cwd=self.project, session="root",
+                                   skills_config=self.tmp / "none.json", structure_dir=self.structure,
+                                   **{"loop_executor_spec": {"kind": "scripted", "attempts": [{}] * 6}, **extra})
+        thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        self.addCleanup(httpd.server_close)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(httpd.shutdown)
+        return httpd
+
+    def call(self, method, path, body=None, headers=None, httpd=None):
+        port = (httpd or self.httpd).server_port
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            sent = {"Origin": f"http://127.0.0.1:{port}", **(headers or {})}
+            data = None
+            if body is not None:
+                data = body if isinstance(body, bytes) else json.dumps(body).encode()
+                sent.setdefault("Content-Type", "application/json")
+            conn.request(method, path, body=data, headers=sent)
+            response = conn.getresponse()
+            raw = response.read()
+            return response.status, json.loads(raw) if raw else None, raw
+        finally:
+            conn.close()
+
+    def post(self, op, expect=200, **fields):
+        status, body, _ = self.call("POST", "/api/loop", {"op": op, **fields})
+        self.assertEqual(status, expect, body)
+        return body
+
+    def loops(self):
+        status, body, _ = self.call("GET", "/api/loops")
+        self.assertEqual(status, 200, body)
+        return body
+
+    def entry(self, flow="self"):
+        return next(item for item in self.loops()["loops"] if item["flow"] == flow)
+
+    def save(self, rev="", **settings):
+        return self.post("save", flow="self", settings={**self.SETTINGS, **settings}, rev=rev)
+
+    def wait(self, run, *final, seconds=30):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            row = next((r for r in self.loops()["runs"] if r["run"] == run), None)
+            if row and row["status"] in final:
+                return row
+            time.sleep(0.05)
+        self.fail(f"run {run} did not reach {final}: {self.loops()['runs']}")
+
+    def test_listing_shape_before_anything_is_saved(self):
+        doc = self.loops()
+        self.assertEqual((doc["project"], doc["scratch"], doc["orphans"], doc["runs"]), (str(self.project), False, [], []))
+        pair, own = doc["loops"]
+        self.assertEqual((own["runnable"], own["settings"], own["rev"], own["problem"]), (True, None, "", ""))
+        self.assertEqual((pair["runnable"], pair["settings"]), (False, None))
+        self.assertIn("next release", pair["reason"])
+        self.assertEqual(self.call("GET", "/api/loops?demo=1")[1]["loops"], [])
+
+    def test_save_round_trip_with_before_and_undo(self):
+        first = self.save()
+        self.assertEqual((first["ok"], first["before"], first["settings"]["flow"]), (True, None, "self"))
+        self.assertEqual(self.entry()["rev"], first["rev"])
+        second = self.save(first["rev"], goal="Do it.")
+        self.assertEqual(second["before"], first["settings"])
+        self.assertEqual(self.entry()["settings"]["goal"], "Do it.")
+        undone = self.post("save", flow="self", settings=second["before"], rev=second["rev"])
+        self.assertEqual(undone["rev"], first["rev"])
+        gone = self.post("remove", flow="self", rev=undone["rev"])
+        self.assertEqual(gone["before"], first["settings"])
+        self.assertIsNone(self.entry()["settings"])
+        self.assertEqual(self.post("save", flow="self", settings=gone["before"], rev="")["rev"], first["rev"])
+
+    def test_stale_rev_is_409_with_the_current_rev(self):
+        first = self.save()
+        status, body, _ = self.call("POST", "/api/loop", {"op": "save", "flow": "self", "settings": self.SETTINGS, "rev": ""})
+        self.assertEqual((status, body["rev"]), (409, first["rev"]))
+        self.assertEqual(self.call("POST", "/api/loop", {"op": "remove", "flow": "self", "rev": "ff"})[0], 409)
+        self.assertEqual(self.entry()["rev"], first["rev"])
+
+    def test_refusals_are_400_with_the_controllers_words(self):
+        status, body, _ = self.call("POST", "/api/loop", {"op": "save", "flow": "self", "rev": "", "settings": {**self.SETTINGS, "x": 1}})
+        self.assertEqual(status, 400)
+        self.assertIn("unknown key 'x'", body["error"])
+        self.assertEqual(self.call("POST", "/api/loop", {"op": "save", "flow": "pair", "rev": "", "settings": self.SETTINGS})[2].count(b"next release"), 1)
+        for body in ({"op": "nope"}, {"op": "save", "flow": "self"}, {"op": "start"}, {"op": "start", "flow": "self", "x": 1},
+                     {"op": "cancel", "run": 3}, {"op": "save", "flow": "self", "rev": "", "settings": []}, [1], {"op": "start", "flow": "self", "goal": None}):
+            with self.subTest(body=body):
+                self.assertEqual(self.call("POST", "/api/loop", body)[0], 400)
+        self.assertEqual(self.post("start", expect=400, flow="self", goal="g")["error"].count("no loop is saved"), 1)
+        self.assertEqual(self.post("start", expect=400, flow="ghost", goal="g")["error"].count("ghost"), 1)
+        self.assertEqual(self.post("start", expect=400, flow="self", goal="g", workdir="relative")["error"].count("absolute"), 1)
+        self.assertFalse((self.structure / ".loops").exists())
+
+    def test_a_loop_runs_fail_then_pass_over_http(self):
+        self.save()
+        started = self.post("start", flow="self", goal="Make the check pass.", workdir=str(self.work))
+        run = started["run"]
+        self.assertEqual((started["ok"], started["status"], started["reason"]), (True, "running", ""))
+        row = self.wait(run, "passed")
+        self.assertEqual((row["flow"], row["attempts"], row["limit"], row["live"]), ("self", 2, 4, False))
+        self.assertEqual(row["last_check"], {"outcome": "pass", "exit": 0})
+        self.assertIsNone(row["cost"])
+        status, doc, raw = self.call("GET", f"/api/loop/run?id={run}")
+        self.assertEqual(status, 200)
+        self.assertEqual((doc["run"]["status"], doc["run"]["live"]), ("passed", False))
+        first, second = doc["attempts"]
+        self.assertIn("check call 1", first["check_output"])
+        self.assertIn("check call 2", second["check_output"])
+        self.assertIn("Make the check pass.", first["message"])
+        self.assertIn("check call 1", second["message"])
+        self.assertEqual((doc["definition"]["workdir"], doc["definition"]["goal"]), (str(self.work), "Make the check pass."))
+        self.assertIn(b'"cost": null', raw)  # unknown is null in the JSON, never 0
+        self.assertEqual((self.work / ".count").read_text().strip(), "2")
+
+    def test_no_check_is_an_invalid_run_with_no_attempt(self):
+        self.post("save", flow="self", settings={"limits": {"attempts": 3}}, rev="")
+        started = self.post("start", flow="self", goal="Do it.")
+        self.assertEqual(started["status"], "invalid")
+        self.assertIn("no check command", started["reason"])
+        row, = self.loops()["runs"]
+        self.assertEqual((row["status"], row["attempts"]), ("invalid", 0))
+        doc = self.call("GET", f"/api/loop/run?id={started['run']}")[1]
+        self.assertEqual(doc["attempts"], [])
+
+    def test_cancel_a_running_loop(self):
+        hanging = self.serve(loop_executor_spec={"kind": "scripted", "attempts": [{"hang": True}]})  # the agent turn waits for a cancel
+        self.save()
+        run = self.call("POST", "/api/loop", {"op": "start", "flow": "self", "goal": "g", "workdir": str(self.work)}, httpd=hanging)[1]["run"]
+        row = self.wait(run, "running")
+        end = time.monotonic() + 10
+        while not row["live"] and time.monotonic() < end:  # the controller takes the run's lock a moment after it starts
+            time.sleep(0.05)
+            row = self.wait(run, "running")
+        self.assertEqual(self.post("cancel", run=run), {"ok": True, "run": run})
+        self.assertEqual(self.wait(run, "cancelled")["attempts"], 1)
+        self.assertEqual(self.post("cancel", expect=409, run=run)["error"].count("already cancelled"), 1)
+
+    def test_run_ids_are_validated(self):
+        for bad in ("..%2Fx", "x", "", "20261121-043755-90AZ"):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.call("GET", f"/api/loop/run?id={bad}")[0], 400)
+        self.assertEqual(self.call("GET", "/api/loop/run")[0], 400)
+        self.assertEqual(self.call("GET", "/api/loop/run?id=20261121-043755-90a7")[0], 404)
+        self.assertEqual(self.call("GET", "/api/loop/run?id=20261121-043755-90a7&id=20261121-043755-90a8")[0], 400)
+        self.assertEqual(self.post("cancel", expect=400, run="../x")["error"].count("not a run id"), 1)
+        self.assertEqual(self.post("cancel", expect=404, run="20261121-043755-90a7")["error"].count("no run"), 1)
+
+    def test_demo_mode_refuses_posts_and_lists_nothing(self):
+        demo = self.serve(demo=True)
+        for body in ({"op": "save", "flow": "self", "settings": self.SETTINGS, "rev": ""}, {"op": "start", "flow": "self", "goal": "g"}):
+            self.assertEqual(self.call("POST", "/api/loop", body, httpd=demo)[0], 403)
+        self.assertEqual(self.call("GET", "/api/loops", httpd=demo)[1]["loops"], [])
+        self.assertEqual(self.call("GET", "/api/loop/run?id=20261121-043755-90a7", httpd=demo)[0], 404)
+        self.assertFalse((self.structure / ".loops").exists())
+
+    def test_protections_like_the_other_endpoints(self):
+        body = {"op": "save", "flow": "self", "settings": self.SETTINGS, "rev": ""}
+        self.assertEqual(self.call("POST", "/api/loop", body, headers={"Origin": "http://evil.example"})[0], 403)
+        self.assertEqual(self.call("POST", "/api/loop", b"{}", headers={"Content-Type": "text/plain"})[0], 415)
+        self.assertEqual(self.call("POST", "/api/loop", b"{not json")[0], 400)
+        self.assertEqual(self.call("GET", "/api/loop")[0], 405)
+        self.assertEqual(self.call("POST", "/api/loops", body)[0], 405)
+        self.assertEqual(self.call("POST", "/api/loop/run", body)[0], 405)
+        self.assertFalse((self.structure / ".loops").exists())
+
+    def test_a_valueerror_is_answered_not_dropped(self):
+        from agentgraph import loopapi
+        with patch.object(loopapi, "save", side_effect=ValueError("surrogates not allowed")):
+            status, body, _ = self.call("POST", "/api/loop", {"op": "save", "flow": "self", "settings": self.SETTINGS, "rev": ""})
+        self.assertEqual(status, 400)
+        self.assertIn("surrogates", body["error"])
+
+    def test_scratch_is_reported(self):
+        scratched = self.serve(loop_scratch=self.tmp / "scratch")
+        self.assertTrue(self.call("GET", "/api/loops", httpd=scratched)[1]["scratch"])
 
 
 class ImproveEndpointTests(unittest.TestCase):

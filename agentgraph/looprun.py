@@ -865,9 +865,10 @@ def start(project, flow_id: str, *, structure=None, goal: str | None = None, wor
         return run_id
     log = open(folder / "run.log", "ab")
     try:
-        subprocess.Popen([sys.executable, "-P", "-m", "agentgraph.looprun", "run", "--run-dir", str(folder)], cwd=project,
-                         stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
-                         env={**os.environ, "PYTHONPATH": str(paths.REPO)})
+        proc = subprocess.Popen([sys.executable, "-P", "-m", "agentgraph.looprun", "run", "--run-dir", str(folder)], cwd=project,
+                                stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+                                env={**os.environ, "PYTHONPATH": str(paths.REPO)})
+        threading.Thread(target=proc.wait, daemon=True).start()  # a long-lived caller (the page's server) must not collect zombies
     finally:
         log.close()
     return run_id
