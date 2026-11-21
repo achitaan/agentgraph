@@ -20,14 +20,24 @@ never a tool's input or output). Everything passes `chatfeed.clean` (control cha
 masked). A later question in the same side session sends a part again only when it changed: an unchanged section is
 replaced by one line, the main chat by the lines after the ones already sent (`--full` sends it all again).
 
-**How it runs.** `opencode-cli run --standalone --agent side-chat --model M --format json [--session ID]` in the
-project folder (`--standalone`: a private server; a CLI of another version attached to the shared background
-service would restart that service). The first question has no `--session` and creates the side session, archived so
+**How it runs.** `opencode-cli run [--standalone] --agent side-chat --model M --format json [--session ID]` in the
+project folder, by one of two routes chosen for each question. **service** (no `--standalone`): the shared background
+service answers; it holds the providers and credentials, so this is the route that works from an app whose own
+process has none (the Desktop app). It is taken only when a service is running (`ps`, a fixed argument list, a short
+timeout, nothing from the question or the project) AND its executable is the very file this module is about to run:
+a CLI of another version attached to the shared service would restart that service and kill the user's running
+sessions. **standalone** (`--standalone`: a private server that takes its providers from the caller's environment) is
+every other case: no service, another executable, any doubt. `AGENTGRAPH_SIDECHAT_ROUTE` = `service` | `standalone` |
+`auto` (the default) overrides the choice; `service` while the executables differ is refused, never attached. The
+first question has no `--session` and creates the side session, archived so
 it stays out of the user's session list (its cost stays readable); its id is remembered per main session in
 `<project>/.opencode/sidechat/<main>.json` (git-ignored with the rest of `.opencode/`). One question at a time (an
-flock; a second `ask` is refused, not queued). A question runs with a timeout; the process and its children are
-stopped when it passes. The model is `openai/gpt-6-luna`; when that run fails (exit code, an error event or no
-text, not a timeout) the same question is asked once more with `anthropic/claude-haiku-5-5`.
+flock; a second `ask` is refused, not queued). A question runs with a timeout; our `run` process and its children are
+stopped when it passes (on the service route the service ends the turn itself when its client goes away: probed
+with a 2 s timeout, the side session went idle at once, no more cost, and `opencode-cli` has no command to stop a
+turn, so none is called). The model is `openai/gpt-6-luna`; when that run fails (exit code, an error event or no
+text, not a timeout) the same question is asked once more with `anthropic/claude-haiku-5-5`. A standalone run that
+fails with a provider or credential kind of error says so in its one-line error and what to do.
 
 **Never the orchestrator.** The only command this module builds is `command()`; it names one session, the side
 session it created, and only after checking that the id is not in the main session's tree (the main session, its
@@ -74,6 +84,12 @@ MARK = "# agentgraph: sidechat"
 MODELS = ("openai/gpt-6-luna", "anthropic/claude-haiku-5-5")
 DEFAULT_BINARY = "/Applications/OpenCode.app/Contents/Resources/opencode-cli"
 ENV_BINARY = "OPENCODE_CLI"
+ROUTE_ENV = "AGENTGRAPH_SIDECHAT_ROUTE"
+ROUTES = ("service", "standalone")
+PS_TIMEOUT = 3.0
+CREDENTIAL = re.compile(r"Model unavailable|api-key|\b40[13]\b", re.IGNORECASE)
+CREDENTIAL_HINT = ("the side chat ran on its own server, which has no providers here; open it from an app whose "
+                   "background service is running")
 QUESTION_LIMIT = 4000
 BRIEF_LIMIT = 24000
 ANSWER_LIMIT = 6000
@@ -481,11 +497,70 @@ def build_brief(question: str, snapshot, project, main: str, *, db_path, previou
     return brief
 
 
+# --- the route ------------------------------------------------------------------------------------------------
+
+def service_executables(*, run=subprocess.run) -> list[str] | None:
+    """The executables of the user's own running background services (`<exe> serve --service`), as `ps` reports
+    them; [] when none runs; None when it cannot be told (a `ps` failure or timeout, an unreadable line). Fixed
+    argument lists, a short timeout, no shell, and nothing from a question, snapshot or project."""
+    def ps(cmd):
+        out = run(cmd, capture_output=True, text=True, timeout=PS_TIMEOUT, shell=False)
+        if out.returncode != 0:
+            raise OSError("ps failed")
+        return out.stdout or ""
+    try:
+        lines = []
+        for line in ps(["ps", "-x", "-o", "pid=,command="]).splitlines():
+            parts = line.split(None, 1)
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].split()[-2:] == ["serve", "--service"]:
+                lines.append((int(parts[0]), " ".join(parts[1].split())))
+        found = []
+        for pid, command in lines:
+            path = ps(["ps", "-p", str(pid), "-o", "comm="]).strip()
+            if not path.startswith("/"):
+                return None
+            if command == f"{path} serve --service":  # started as the executable itself, not `sh -c "... serve --service"`
+                found.append(path)
+        return found
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _same_file(a: str, b: str) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def choose_route(executable: str | None = None) -> tuple[str | None, str | None]:
+    """(route, why-not): the route the next question takes, "service" or "standalone", or (None, a one-line reason)
+    when the override asks for the service while it is not running from the file this module would run."""
+    exe = executable or binary()
+    wanted = (os.environ.get(ROUTE_ENV) or "auto").strip().lower()
+    if wanted not in (*ROUTES, "auto"):
+        return None, f"{ROUTE_ENV} must be service, standalone or auto"
+    if wanted == "standalone":
+        return "standalone", None
+    found = service_executables()
+    same = bool(found) and all(_same_file(path, exe) for path in found)
+    if same:
+        return "service", None
+    if wanted == "service":
+        return None, (f"{ROUTE_ENV}=service refused: no background service is running from {exe}; the side chat never "
+                      "attaches a CLI of another version to the shared service")
+    return "standalone", None
+
+
 # --- running --------------------------------------------------------------------------------------------------
 
-def command(*, model: str, side: str | None, title: str, tree: set[str], executable: str | None = None) -> list[str]:
+def command(*, model: str, side: str | None, title: str, tree: set[str], executable: str | None = None,
+            route: str = "standalone") -> list[str]:
     """The command line (without the message) for one question. It names at most one session: the side session
-    (`side`), refused when it is in the main session's tree. Nothing else in this module starts the host."""
+    (`side`), refused when it is in the main session's tree. Nothing else in this module starts the host. Only the
+    `standalone` route carries `--standalone`; the `service` route never does."""
+    if route not in ROUTES:
+        raise SidechatError("the route must be service or standalone")
     if side is not None:
         if not chatfeed.valid_session(side):
             raise SidechatError("the side session id is not a session id")
@@ -493,9 +568,12 @@ def command(*, model: str, side: str | None, title: str, tree: set[str], executa
             raise SidechatError(f"{side} is a session of the task being watched; the side chat never uses one of those")
     if not isinstance(model, str) or not agentfiles.MODEL.fullmatch(model):
         raise SidechatError("the model must be provider/model")
-    cmd = [executable or binary(), "run", "--standalone", "--agent", AGENT, "--model", model, "--format", "json"]
+    cmd = [executable or binary(), "run", *(["--standalone"] if route == "standalone" else []), "--agent", AGENT,
+           "--model", model, "--format", "json"]
     cmd += ["--session", side] if side is not None else ["--archived", "--title", title]
     stray = [arg for arg in cmd[1:] if (arg.startswith("-") or arg == "run") and arg not in ALLOWED_FLAGS]
+    if ("--standalone" in cmd) != (route == "standalone"):
+        raise SidechatError("the service route never carries --standalone, and the standalone route always does")
     if stray:  # a model or title that looks like a flag would be read by the host as one
         raise SidechatError(f"the command line would carry a flag the side chat does not use: {_cut(stray[0], 40)}")
     return cmd
@@ -620,7 +698,7 @@ def _snapshot(project, main, db_path, config_dir, session_graph_dir):
 
 def ask(question, *, main, project=None, db_path=None, config_dir=None, session_graph_dir=sources.ORCHESTRATION_GRAPH_DIR,
         model: str | None = None, timeout: float = TIMEOUT, full: bool = False, executable: str | None = None) -> dict:
-    """Ask the side chat one question about the main session `main`. Returns {answer, session, model, fallback,
+    """Ask the side chat one question about the main session `main`. Returns {answer, session, model, fallback, route,
     brief: {chars, full, task, sections: {name: chars}, files}, cost, tokens, tools, seconds}. Refused
     (SidechatError) for a bad question or session, a second question at the same time, a timeout, or a failed run."""
     question = clean_question(question)
@@ -628,6 +706,9 @@ def ask(question, *, main, project=None, db_path=None, config_dir=None, session_
     db_path = Path(db_path) if db_path is not None else sources.DB_PATH
     config_dir = Path(config_dir) if config_dir is not None else sources.CONFIG_DIR
     started = time.time()
+    route, why_not = choose_route(executable)
+    if route is None:
+        raise SidechatError(why_not)
     with _lock(project):
         snapshot = _snapshot(project, main, db_path, config_dir, session_graph_dir)
         tree = tree_ids(snapshot)
@@ -642,7 +723,7 @@ def ask(question, *, main, project=None, db_path=None, config_dir=None, session_
         total_cost, tokens, attempt, last = 0.0, {}, 0, None
         deadline = time.monotonic() + timeout
         for index, chosen in enumerate(models):
-            cmd = command(model=chosen, side=side, title=title, tree=tree, executable=executable)
+            cmd = command(model=chosen, side=side, title=title, tree=tree, executable=executable, route=route)
             left = deadline - time.monotonic()
             if left <= 0:
                 raise SidechatError(f"the side chat did not answer within {int(timeout)} seconds and was stopped")
@@ -666,11 +747,13 @@ def ask(question, *, main, project=None, db_path=None, config_dir=None, session_
             problem = found["error"] or stderr or (f"it exited with code {code}" if code else "it gave no answer")
             last = None
             if index == len(models) - 1:
+                if route == "standalone" and CREDENTIAL.search(problem):
+                    problem = f"{problem.rstrip('. ')}. {CREDENTIAL_HINT[0].upper()}{CREDENTIAL_HINT[1:]}"
                 raise SidechatError(f"the side chat failed ({chosen}): {problem}")
         chosen, found, answer, fallback = last
         _remember(project, state, main, side, chosen, brief, found, total_cost, done=True)
     spent = session_cost(db_path, side)
-    return {"answer": answer, "session": side, "model": chosen, "fallback": fallback,
+    return {"answer": answer, "session": side, "model": chosen, "fallback": fallback, "route": route,
             "brief": {"chars": len(message), "full": brief.full, "task": brief.task, "sections": brief.sizes(),
                       "files": len(brief.named)},
             "cost": round(total_cost, 6), "tokens": tokens, "tools": found["tools"],
@@ -709,9 +792,11 @@ def side_session(project, main) -> str | None:
     return load_state(project, main).get("side")
 
 
-def status(*, main=None, project=None, db_path=None, agents_dir=None) -> dict:
-    """{installed, where, session, model, busy, spent?, asks}: the snapshot's `sidechat` object plus `where` and
-    `asks`. `spent` (US dollars) is the side session's cost when it can be read."""
+def status(*, main=None, project=None, db_path=None, agents_dir=None, executable: str | None = None,
+           with_route: bool = True) -> dict:
+    """{installed, where, session, model, busy, spent?, asks, route, route_note?}: the snapshot's `sidechat` object
+    plus `where`, `asks` and the `route` the next question would take (None, with the reason in `route_note`, when
+    it would be refused). `spent` (US dollars) is the side session's cost when it can be read."""
     project = Path(project) if project is not None else Path.cwd()
     db_path = Path(db_path) if db_path is not None else sources.DB_PATH
     where = agent_installed(agents_dir, project)
@@ -719,6 +804,10 @@ def status(*, main=None, project=None, db_path=None, agents_dir=None) -> dict:
     side = state.get("side")
     out = {"installed": where is not None, "where": where, "session": side, "model": state.get("model") if side else None,
            "busy": is_busy(project), "asks": int(state.get("asks") or 0) if side else 0}
+    if with_route:
+        out["route"], note = choose_route(executable)
+        if note:
+            out["route_note"] = note
     spent = session_cost(db_path, side) if side else None
     if spent is None and side and isinstance(state.get("ask_cost"), (int, float)):
         spent = state["ask_cost"]
@@ -732,7 +821,8 @@ def annotate(document: dict, *, project=None, agents_dir=None, db_path=None) -> 
     root = document.get("root")
     main = root.get("id") if isinstance(root, dict) else None
     shown = status(main=main if chatfeed.valid_session(main) else None, project=project, db_path=db_path,
-                   agents_dir=agents_dir)
+                   agents_dir=agents_dir,
+                   with_route=False)  # the snapshot is built often; a `ps` per snapshot is not worth a line nobody there shows
     document["sidechat"] = {key: shown[key] for key in ("installed", "session", "model", "busy", "spent") if key in shown}
 
 
@@ -1071,6 +1161,8 @@ def _text(op: str, result: dict) -> str:
         lines = [f"installed: {'yes (' + result['where'] + ')' if result['installed'] else 'no'}",
                  f"session: {result['session'] or '-'}", f"model: {result['model'] or '-'}",
                  f"busy: {'yes' if result['busy'] else 'no'}", f"questions: {result['asks']}"]
+        if "route" in result:
+            lines.append(f"route: {result['route'] or '-'}" + (f" ({result['route_note']})" if result.get("route_note") else ""))
         if "spent" in result:
             lines.append(f"spent: ${result['spent']:.4f}")
         return "\n".join(lines)

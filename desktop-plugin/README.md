@@ -65,6 +65,10 @@ It is a GUI-only plugin (no server or TUI part), loaded as a local directory. It
   and again in main; a bad one never reaches Python, and nothing is asked before a snapshot has been read. The reply is
   `{ ok: true, answer }` or `{ ok: false, error: "<one line>" }` and never throws. It is given in every mode but the demo
   (the page shows the box only when the side chat is installed); the demo has no `side`.
+  The Desktop app's own process carries no model providers, so `agentgraph sidechat` asks through the shared background
+  service when that service runs from the very CLI file it is about to run (it never attaches a CLI of another version),
+  and on a private `--standalone` server otherwise; a standalone failure about providers or credentials says so in its one
+  line (`AGENTGRAPH_SIDECHAT_ROUTE=service|standalone|auto` overrides the choice).
   - Nothing here logs: no message text, nor the feed, is written to a log or put on a command line.
 
 ## Load it

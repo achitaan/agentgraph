@@ -15,6 +15,7 @@ import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from agentgraph import chatfeed, server, sidechat, snapshot_json
 from agentgraph.demo import DEMO_SIDE, demo_chat, demo_sidechat, demo_snapshot
@@ -139,6 +140,14 @@ class Case(unittest.TestCase):
         self.exe.write_text(FAKE)
         self.exe.chmod(0o755)
         self.plan([{"text": "n2 is running.", "session": SIDE}])
+        # The suite never depends on a real background service: the lookup of the service's executable is pinned
+        # (no service found, so the route is `standalone`, as these tests expect) and the override variable is
+        # cleared. `self.found` is what the stub reports; a test sets it to try the other routes.
+        self.enterContext(mock.patch.dict(os.environ))
+        os.environ.pop("AGENTGRAPH_SIDECHAT_ROUTE", None)
+        self.found = []
+        self.enterContext(mock.patch.object(sidechat, "service_executables", create=True,
+                                            side_effect=lambda *a, **k: self.found))
 
     def write_graph(self, raw):
         (self.project / ".opencode/graph/t1.json").write_text(json.dumps(raw))
@@ -442,6 +451,181 @@ class RunTests(Case):
         after = {str(p.relative_to(self.dir)): p.read_bytes() for p in self.dir.rglob("*")
                  if p.is_file() and ".opencode/sidechat" not in str(p) and p.name != "calls.jsonl"}
         self.assertEqual(before, after)
+
+
+class RouteTests(Case):
+    """Which way a question goes: the shared background service (no `--standalone`) when it runs from the very file
+    this module is about to run, else a private server. The lookup is stubbed (see `Case.setUp`)."""
+
+    def flags(self):
+        return [call["args"] for call in self.calls()]
+
+    def test_auto_same_executable_goes_through_the_service(self):
+        self.found = [str(self.exe)]
+        result = self.ask()
+        (args,) = self.flags()
+        self.assertEqual(args, ["run", "--agent", "side-chat", "--model", "openai/gpt-6-luna", "--format", "json",
+                                "--archived", "--title", f"side chat for {MAIN}"])
+        self.assertEqual(result["route"], "service")
+        self.ask("again")  # the follow-up too
+        self.assertNotIn("--standalone", self.flags()[1])
+        self.assertIn("--session", self.flags()[1])
+
+    def test_a_link_to_the_same_file_is_the_same_executable(self):
+        link = self.dir / "link-cli"
+        link.symlink_to(self.exe)
+        self.found = [str(link)]
+        self.assertEqual(self.ask()["route"], "service")
+
+    def test_auto_anything_else_is_standalone(self):
+        other = self.dir / "other-cli"
+        other.write_text("x")
+        for found in ([str(other)], [], None, [str(other), str(self.exe)], [str(self.dir / "gone"), str(self.exe)]):
+            self.plan([{"text": "n2 is running.", "session": SIDE}])
+            sidechat._state_path(self.project, MAIN).unlink(missing_ok=True)
+            self.found = found
+            result = self.ask()
+            (args,) = self.flags()
+            self.assertEqual(args[:2], ["run", "--standalone"], found)
+            self.assertEqual(result["route"], "standalone", found)
+
+    def test_the_override_variable(self):
+        other = self.dir / "other-cli"
+        other.write_text("x")
+        cases = (("standalone", [str(self.exe)], "standalone"), ("service", [str(self.exe)], "service"),
+                 ("auto", [str(self.exe)], "service"), ("auto", [str(other)], "standalone"),
+                 ("", [str(self.exe)], "service"), (" Standalone ", [str(self.exe)], "standalone"))
+        for value, found, want in cases:
+            os.environ["AGENTGRAPH_SIDECHAT_ROUTE"] = value
+            self.plan([{"text": "n2 is running.", "session": SIDE}])
+            sidechat._state_path(self.project, MAIN).unlink(missing_ok=True)
+            self.found = found
+            result = self.ask()
+            (args,) = self.flags()
+            self.assertEqual(("--standalone" in args, result["route"]), (want == "standalone", want), (value, found))
+
+    def test_service_forced_with_another_executable_or_none_is_refused_and_nothing_runs(self):
+        other = self.dir / "other-cli"
+        other.write_text("x")
+        os.environ["AGENTGRAPH_SIDECHAT_ROUTE"] = "service"
+        for found in ([str(other)], [], None, [str(other), str(self.exe)]):
+            self.found = found
+            with self.assertRaises(sidechat.SidechatError) as caught:
+                self.ask()
+            message = str(caught.exception)
+            self.assertIn("service", message)
+            self.assertNotIn("\n", message)
+            self.assertEqual(self.calls(), [], found)
+        os.environ["AGENTGRAPH_SIDECHAT_ROUTE"] = "sideways"
+        with self.assertRaisesRegex(sidechat.SidechatError, "AGENTGRAPH_SIDECHAT_ROUTE"):
+            self.ask()
+        self.assertEqual(self.calls(), [])
+
+    def test_command_never_has_standalone_on_the_service_route_and_always_on_the_other(self):
+        kw = dict(model="a/b", side=None, title="t", tree=set())
+        self.assertIn("--standalone", sidechat.command(**kw))
+        self.assertIn("--standalone", sidechat.command(route="standalone", **kw))
+        service = sidechat.command(route="service", **kw)
+        self.assertNotIn("--standalone", service)
+        self.assertTrue({arg for arg in service if arg.startswith("-") or arg == "run"} <= set(sidechat.ALLOWED_FLAGS))
+        with self.assertRaises(sidechat.SidechatError):
+            sidechat.command(route="elsewhere", **kw)
+
+    def test_status_shows_the_route_the_next_question_takes(self):
+        def shown():
+            return sidechat.status(main=MAIN, project=self.project, db_path=self.db.path, agents_dir=self.dir / "none",
+                                   executable=str(self.exe))
+        self.assertEqual(shown()["route"], "standalone")
+        self.found = [str(self.exe)]
+        self.assertEqual(shown()["route"], "service")
+        os.environ["AGENTGRAPH_SIDECHAT_ROUTE"] = "standalone"
+        self.assertEqual(shown()["route"], "standalone")
+        os.environ["AGENTGRAPH_SIDECHAT_ROUTE"] = "service"
+        self.found = []
+        refused = shown()
+        self.assertIsNone(refused["route"])
+        self.assertIn("service", refused["route_note"])
+        text = sidechat._text("status", {**refused, "installed": False, "where": None, "asks": 0, "session": None, "model": None,
+                                         "busy": False})
+        self.assertIn("route: -", text)
+        text = sidechat._text("status", {**shown(), "installed": False, "where": None, "asks": 0, "session": None,
+                                         "model": None, "busy": False, "route": "service"})
+        self.assertIn("route: service", text)
+
+    def test_the_snapshots_sidechat_object_does_no_lookup(self):
+        sidechat.annotate({"root": {"id": MAIN}}, project=self.project, agents_dir=self.dir / "none", db_path=self.db.path)
+        sidechat.service_executables.assert_not_called()
+
+
+class CredentialErrorTests(Case):
+    HINT = ("the side chat ran on its own server, which has no providers here; open it from an app whose "
+            "background service is running")
+
+    def fail(self, text):
+        self.plan([{"error": text, "exit": 1}, {"error": text, "exit": 1}])
+        with self.assertRaises(sidechat.SidechatError) as caught:
+            self.ask()
+        return str(caught.exception)
+
+    def test_a_provider_or_credential_error_on_the_standalone_route_ends_with_what_to_do(self):
+        for text in ("Model unavailable: openai/gpt-6-luna", "x-api-key header is required", "HTTP 401 Unauthorized",
+                     "status 403 forbidden", "invalid api-key"):
+            message = self.fail(text)
+            self.assertNotIn("\n", message)
+            self.assertTrue(message.startswith("the side chat failed (anthropic/claude-haiku-5-5): "), message)
+            self.assertIn(text.split()[0], message)
+            self.assertTrue(message.rstrip(".").lower().endswith(self.HINT), message)
+
+    def test_an_ordinary_failure_keeps_the_old_wording(self):
+        for text in ("blocked_service_tier", "the model returned 4010 tokens", "it exited", "version 4.0.3 of x"):
+            message = self.fail(text)
+            self.assertEqual(message, f"the side chat failed (anthropic/claude-haiku-5-5): {text}")
+
+    def test_on_the_service_route_the_same_error_has_no_hint(self):
+        self.found = [str(self.exe)]
+        message = self.fail("x-api-key header is required")
+        self.assertNotIn("its own server", message)
+        self.assertEqual(message, "the side chat failed (anthropic/claude-haiku-5-5): x-api-key header is required")
+
+
+class ServiceLookupTests(unittest.TestCase):
+    """`service_executables` with a fake `ps`: fixed argument lists, a timeout, and doubt means None."""
+
+    def runner(self, table, comm=None, fail=None):
+        calls = []
+
+        def run(cmd, **kw):
+            calls.append((cmd, kw))
+            if fail:
+                raise fail
+            if cmd[:3] == ["ps", "-x", "-o"]:
+                return subprocess.CompletedProcess(cmd, 0, table, "")
+            return subprocess.CompletedProcess(cmd, 0, (comm or {}).get(cmd[2], "") + "\n", "")
+        run.calls = calls
+        return run
+
+    def test_finds_the_services_executable_from_ps(self):
+        table = ("  100 /usr/bin/zsh -l\n  4242 /Applications/Some App.app/opencode-cli serve --service\n"
+                 "  4300 /x/opencode-cli serve --port 4096\n  4400 /bin/sh -c grep serve --service\n")
+        run = self.runner(table, {"4242": "/Applications/Some App.app/opencode-cli", "4400": "/bin/sh"})
+        self.assertEqual(sidechat.service_executables(run=run), ["/Applications/Some App.app/opencode-cli"])
+        for cmd, kw in run.calls:
+            self.assertIsInstance(cmd, list)
+            self.assertFalse(kw.get("shell"))
+            self.assertLessEqual(kw["timeout"], 5)
+        self.assertEqual(run.calls[0][0], ["ps", "-x", "-o", "pid=,command="])
+        self.assertEqual(run.calls[1][0], ["ps", "-p", "4242", "-o", "comm="])
+
+    def test_no_service_is_an_empty_list(self):
+        self.assertEqual(sidechat.service_executables(run=self.runner("  1 /sbin/launchd\n")), [])
+
+    def test_a_failure_a_timeout_or_nonsense_is_none(self):
+        for fail in (OSError("no ps"), subprocess.TimeoutExpired("ps", 3)):
+            self.assertIsNone(sidechat.service_executables(run=self.runner("", fail=fail)))
+        self.assertIsNone(sidechat.service_executables(run=self.runner("  7 /x/cli serve --service\n", {"7": ""})))
+        self.assertIsNone(sidechat.service_executables(run=self.runner("  7 /x/cli serve --service\n", {"7": "cli"})))
+        bad = mock.Mock(return_value=subprocess.CompletedProcess(["ps"], 1, "", "boom"))
+        self.assertIsNone(sidechat.service_executables(run=bad))
 
 
 class StatusTests(Case):
