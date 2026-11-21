@@ -33,6 +33,7 @@ class Base(unittest.TestCase):
         (self.structure / "flows").mkdir()
         (self.structure / "flows" / "self.md").write_text("path: worker -> worker\n\nCheck its own work.\n")
         (self.structure / "flows" / "pair.md").write_text("path: worker -> reviewer -> worker\n\nA longer path.\n")
+        (self.structure / "flows" / "open.md").write_text("path: worker -> reviewer\n\nNever returns to the worker.\n")
         self.project = self.tmp / "project"
         self.project.mkdir()
 
@@ -351,12 +352,13 @@ class CompileTests(Base):
         self.assertEqual(check["on"], {"pass": "done", "fail": "work", "inconclusive": "stop", "check_error": "stop"})
         json.dumps(steps)
 
-    def test_other_paths_are_refused_for_now(self):
+    def test_other_paths_are_refused_for_now(self):  # release 2: a path that returns to its first agent runs (tests/test_looprun2.py); the rest is refused
         settings = looprun.validate(self.settings(), Path("p.json"))
-        for path in (["worker", "reviewer", "worker"], ["worker", "reviewer"], ["worker"], []):
+        for path in (["worker", "reviewer"], ["worker"], []):
             with self.assertRaises(looprun.LoopError) as caught:
                 looprun.compile(path, settings)
-            self.assertIn("next release", str(caught.exception))
+            self.assertIn("does not loop back to its first agent", str(caught.exception))
+        self.assertEqual([s["id"] for s in looprun.compile(["worker", "reviewer", "worker"], settings)], ["work", "check", "judge:reviewer"])
 
     def test_compile_needs_a_check_command(self):
         with self.assertRaises(looprun.LoopError):
@@ -365,8 +367,8 @@ class CompileTests(Base):
     def test_start_refuses_a_multi_agent_flow_without_making_a_run(self):
         looprun.save_settings(self.structure, "pair", {**self.settings(), "flow": "pair"})
         with self.assertRaises(looprun.LoopError) as caught:
-            looprun.start(self.project, "pair", structure=self.structure, goal="g", executor=looprun.ScriptedExecutor([]), wait=True)
-        self.assertIn("next release", str(caught.exception))
+            looprun.start(self.project, "open", structure=self.structure, goal="g", executor=looprun.ScriptedExecutor([]), wait=True)
+        self.assertIn("does not loop back", str(caught.exception))
         self.assertFalse((self.project / ".opencode" / "loops").exists())
 
     def test_the_definition_holds_the_steps_and_their_hash(self):
@@ -576,9 +578,9 @@ class CommandTests(Base):
     def test_set_refuses_bad_values_and_other_paths(self):
         self.assertEqual(self.cli("set", "self", "--check", "x", "--attempts", "0", "--structure", str(self.structure))[0], 2)
         self.assertEqual(self.cli("set", "self", "--check", "x", "--structure", str(self.structure))[0], 2)  # attempts are required
-        code, _, err = self.cli("set", "pair", "--check", "x", "--attempts", "2", "--structure", str(self.structure))
+        code, _, err = self.cli("set", "open", "--check", "x", "--attempts", "2", "--structure", str(self.structure))
         self.assertEqual(code, 2)
-        self.assertIn("next release", err)
+        self.assertIn("does not loop back", err)
         self.assertEqual(self.cli("set", "nothere", "--check", "x", "--attempts", "2", "--structure", str(self.structure))[0], 2)
         self.assertFalse((self.structure / ".loops").exists())
 

@@ -1277,8 +1277,8 @@ class SavedLoops(unittest.TestCase):
         self.assertEqual((entry["runnable"], entry["problem"], self.listing()["orphans"]), (True, "", []))
         self.assertEqual(self.looprun.settings_path(self.root, self.flow["id"]).read_bytes(), saved)
 
-    def test_a_flow_that_is_no_longer_a_self_loop_keeps_its_loop_and_is_not_runnable(self):
-        (self.root / "flows" / f"{self.flow['id']}.md").write_text("path: impl-openai -> reviewer -> impl-openai\n\nEdited by hand.\n")
+    def test_a_flow_that_no_longer_loops_keeps_its_loop_and_is_not_runnable(self):
+        (self.root / "flows" / f"{self.flow['id']}.md").write_text("path: impl-openai -> reviewer\n\nEdited by hand.\n")
         entry, = self.listing()["loops"]
         self.assertEqual((entry["runnable"], entry["settings"] is not None, entry["problem"]), (False, True, ""))
         self.assertTrue(self.looprun.settings_path(self.root, self.flow["id"]).is_file())

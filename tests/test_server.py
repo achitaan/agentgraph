@@ -209,7 +209,7 @@ class LoopEndpointTests(unittest.TestCase):
         (self.structure / "30-build" / "reviewer.md").write_text("Reviews.\n")
         (self.structure / "flows").mkdir()
         (self.structure / "flows" / "self.md").write_text("path: worker -> worker\n\nCheck its own work.\n")
-        (self.structure / "flows" / "pair.md").write_text("path: worker -> reviewer -> worker\n\nA longer path.\n")
+        (self.structure / "flows" / "pair.md").write_text("path: worker -> reviewer\n\nNever returns to the worker.\n")
         self.project.mkdir()
         self.work.mkdir()
         self.httpd = self.serve()
@@ -273,7 +273,7 @@ class LoopEndpointTests(unittest.TestCase):
         pair, own = doc["loops"]
         self.assertEqual((own["runnable"], own["settings"], own["rev"], own["problem"]), (True, None, "", ""))
         self.assertEqual((pair["runnable"], pair["settings"]), (False, None))
-        self.assertIn("next release", pair["reason"])
+        self.assertIn("does not loop back", pair["reason"])
         self.assertEqual(self.call("GET", "/api/loops?demo=1")[1]["loops"], [])
 
     def test_save_round_trip_with_before_and_undo(self):
@@ -301,7 +301,7 @@ class LoopEndpointTests(unittest.TestCase):
         status, body, _ = self.call("POST", "/api/loop", {"op": "save", "flow": "self", "rev": "", "settings": {**self.SETTINGS, "x": 1}})
         self.assertEqual(status, 400)
         self.assertIn("unknown key 'x'", body["error"])
-        self.assertEqual(self.call("POST", "/api/loop", {"op": "save", "flow": "pair", "rev": "", "settings": self.SETTINGS})[2].count(b"next release"), 1)
+        self.assertEqual(self.call("POST", "/api/loop", {"op": "save", "flow": "pair", "rev": "", "settings": self.SETTINGS})[2].count(b"does not loop back"), 1)
         for body in ({"op": "nope"}, {"op": "save", "flow": "self"}, {"op": "start"}, {"op": "start", "flow": "self", "x": 1},
                      {"op": "cancel", "run": 3}, {"op": "save", "flow": "self", "rev": "", "settings": []}, [1], {"op": "start", "flow": "self", "goal": None}):
             with self.subTest(body=body):

@@ -46,7 +46,10 @@ class ListingTests(Base):
         self.assertEqual(set(own), {"flow", "name", "path", "agent", "runnable", "reason", "settings", "problem", "rev"})
         self.assertEqual((own["path"], own["agent"], own["runnable"], own["reason"], own["settings"], own["problem"], own["rev"]),
                          (["worker", "worker"], "worker", True, "", None, "", ""))
-        self.assertEqual((pair["runnable"], pair["reason"], pair["settings"], pair["agent"]), (False, looprun.MULTI, None, "worker"))
+        self.assertEqual((pair["runnable"], pair["reason"], pair["settings"], pair["agent"]), (True, "", None, "worker"))  # release 2: a path that loops back runs
+        (self.structure / "flows" / "open.md").write_text("path: worker -> reviewer\n\nNever returns to the worker.\n")
+        open_flow = self.entry("open")
+        self.assertEqual((open_flow["runnable"], open_flow["reason"]), (False, looprun.LOOP_BACK))
 
     def test_settings_rev_orphan_and_a_broken_file(self):
         looprun.save_settings(self.structure, "self", {"version": 1, "flow": "self", **GOOD})
@@ -65,6 +68,13 @@ class ListingTests(Base):
         self.assertIn("not valid JSON", pair["problem"])
         self.assertEqual(pair["rev"], hashlib.sha256(b"{not json").hexdigest())
 
+    def test_a_pair_runs_and_its_summary_says_who_passed_it(self):
+        looprun.save_settings(self.structure, "pair", {"version": 1, "flow": "pair", "limits": {"attempts": 2}})
+        script = {"worker": [{"text": "done"}], "reviewer": [{"text": "Looks right.\nVERDICT: PASS"}]}
+        run = looprun.start(self.project, "pair", structure=self.structure, goal="g", wait=True, executor=looprun.ScriptedExecutor(script))
+        row, = loopapi.listing(self.structure, self.project, None)["runs"]
+        self.assertEqual((row["run"], row["status"], row["passed_by"], row["waiting"]), (run, "passed", "judges", None))
+
     def test_runs_are_listed_newest_first_with_the_shown_status(self):
         run = self.finished()
         doc = loopapi.listing(self.structure, self.project, None)
@@ -73,6 +83,7 @@ class ListingTests(Base):
         self.assertEqual(row["last_check"], {"outcome": "pass", "exit": 0})
         self.assertEqual((row["check"], row["goal"], row["reason"]), (CHECK_SECOND, "Make it pass.", "the check exited 0"))
         self.assertIsNone(row["cost"])  # unknown is never 0
+        self.assertEqual((row["passed_by"], row["waiting"]), ("check", None))
         json.dumps(doc, allow_nan=False)
         folder = looprun.run_dir(self.project, run)  # a run that says running with no controller is shown interrupted
         state = looprun.read_run(folder)
@@ -170,8 +181,10 @@ class SaveRemoveTests(Base):
         self.refused(lambda: self.save(rev=None), 400)
         self.assertIsNone(looprun.load_settings(self.structure, "self"))
 
-    def test_only_a_drawn_self_loop_can_be_saved(self):
-        self.assertEqual(self.refused(lambda: self.save(flow="pair"), 400).message, looprun.MULTI)
+    def test_only_a_flow_that_loops_back_can_be_saved(self):
+        (self.structure / "flows" / "open.md").write_text("path: worker -> reviewer\n\nNever returns to the worker.\n")
+        self.assertEqual(self.refused(lambda: self.save(flow="open"), 400).message, looprun.LOOP_BACK)
+        self.assertIn("not on this path", self.refused(lambda: self.save({**GOOD, "steps": {"reviewer": {"on": {"fail": "hard"}}}}, flow="pair"), 400).message)
         self.assertIn("no flow", self.refused(lambda: self.save(flow="ghost"), 400).message)
         self.refused(lambda: self.save(flow="../x"), 400)
         self.refused(lambda: self.save(flow=3), 400)

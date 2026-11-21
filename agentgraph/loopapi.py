@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 
 from . import looprun
-from .snapshot_json import is_self_loop, load_structure
+from .snapshot_json import load_structure
 
 OUTPUT_CHARS = 20_000
 RUNS_SHOWN = 50
@@ -119,7 +119,8 @@ def _summary(project, run_id: str) -> dict | None:
             "live": looprun._held(folder), "attempts": len(attempts), "limit": (state.get("limits") or {}).get("attempts"),
             "cost": totals.get("cost"), "seconds": totals.get("seconds") or 0, "created": state.get("created"), "ended": state.get("ended"),
             "goal": (state.get("goal") or "")[:GOAL_SHOWN], "check": command,
-            "last_check": {"outcome": checks[-1].get("outcome"), "exit": checks[-1].get("exit")} if checks else None}
+            "last_check": {"outcome": checks[-1].get("outcome"), "exit": checks[-1].get("exit")} if checks else None,
+            "passed_by": state.get("passed_by"), "waiting": state.get("waiting")}
 
 
 def listing(structure_dir, project, scratch) -> dict:
@@ -128,10 +129,11 @@ def listing(structure_dir, project, scratch) -> dict:
     loops, known = [], set()
     for flow in (shape["flows"] if shape else []):
         known.add(flow["id"])
-        runnable = is_self_loop(flow["path"])
+        reason = looprun.path_refusal(flow["path"], shape["group_of"])
+        runnable = not reason
         settings, problem = _settings_of(structure_dir, flow["id"])
         loops.append({"flow": flow["id"], "name": flow.get("name") or "", "path": list(flow["path"]), "agent": flow["path"][0],
-                      "runnable": runnable, "reason": "" if runnable else looprun.MULTI, "settings": settings, "problem": problem,
+                      "runnable": runnable, "reason": reason, "settings": settings, "problem": problem,
                       "rev": rev_of(_read(structure_dir, flow["id"]))})
     known.update(flow["id"] for flow in (shape["unreadable_flows"] if shape else []))
     runs = [row for row in (_summary(project, run_id) for run_id in looprun.list_runs(project)[:RUNS_SHOWN]) if row is not None]
@@ -174,18 +176,25 @@ def _check_rev(rev, current: str) -> None:
 
 
 def save(structure_dir, flow, settings, rev) -> dict:
-    """Save the loop of a drawn self-loop if `rev` is the file's current rev. `{"settings", "rev", "before"}`."""
+    """Save the loop of a flow that loops back (A -> A, or A -> J1 -> ... -> A) if `rev` is the file's current rev; what the walker would refuse
+    (a bad route, a step on an agent that is not on the path) is refused here too. `{"settings", "rev", "before"}`."""
     flow = _flow_id(flow)
     if not isinstance(settings, dict):
         raise ApiError(400, "the settings must be a JSON object")
     path = _flow_path(structure_dir, flow)
-    if not is_self_loop(path):
-        raise ApiError(400, looprun.MULTI)
+    shape = load_structure(structure_dir)
+    refusal = looprun.path_refusal(path, shape["group_of"] if shape else None)
+    if refusal:
+        raise ApiError(400, refusal)
     target = looprun.settings_path(structure_dir, flow)
     try:
         clean = looprun.validate({"version": looprun.VERSION, "flow": flow, **settings}, target)
         if clean["flow"] != flow:
             raise looprun.LoopError(f"{target}: the settings are for flow {clean['flow']!r}")
+        try:
+            looprun.compile(path, clean, shape["group_of"] if shape else None)
+        except looprun.NoCheck:
+            pass  # saved as it is; a run of it is `invalid` until a check or a judge exists
     except looprun.LoopError as exc:
         raise ApiError(400, str(exc)) from None
     data = (json.dumps(clean, indent=2, sort_keys=True) + "\n").encode("utf-8")
@@ -243,7 +252,7 @@ def cancel(project, run_id) -> dict:
     folder = _run_folder(project, run_id)
     state = _state(folder)
     shown = looprun.shown_status(folder, state)
-    if state.get("status") not in ("queued", "running") or shown == "interrupted":
+    if state.get("status") not in ("queued", "running", "waiting") or shown == "interrupted":
         raise ApiError(409, f"run {run_id} is already {shown}")
     looprun.request_cancel(folder)
     return {"run": run_id}
