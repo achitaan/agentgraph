@@ -7310,6 +7310,7 @@
         data.agents.find(a => a.name === 'reviewer').skills = ['gamma'];
         data.graph.nodes = outputFixture().graph.nodes;
         const n10 = setupFixture(); data.spend = n10.spend; data.setup = n10.setup; data.totals = n10.totals; // n10
+        data.learning = { total: 1, pending: 0, due: false, runs: 2, improvements: 1, last_improvement: 10, lessons: [], notes: [] }; // n24: the proposals sit in the learning panel
         return data;
       };
       const SWEEP_CASES = {
@@ -7322,6 +7323,13 @@
         'a path': async root => { openStep(root, 'f1', 0); },
         'a skill file': async root => { open(root, 'reviewer'); await settle(); skillOpener(root, 'gamma').click(); },
         'the run details: spend limit, preset and saved setups (n10)': async root => { root.querySelector('.ag-usage').click(); },
+        'a rejected proposal open in the learning panel (n24)': async root => {
+          root.querySelector('.ag-usage').click(); await settled();
+          for (let i = 0; i < 40 && !root.querySelector('.ag-detail [data-proposal="p-rej"]'); i++) await sleep(25);
+          root.querySelector('.ag-detail [data-proposal="p-rej"] .ag-proposal-head').click();
+          for (let i = 0; i < 40 && !root.querySelector('.ag-detail [data-proposal="p-rej"] .ag-proposal-body'); i++) await sleep(25);
+          await settled();
+        },
         'a change to undo': async root => {
           openStep(root, 'f1', 0); await settle();
           const name = root.querySelector('.ag-detail [data-route-name]'); name.focus(); name.value = 'Named'; name.dispatchEvent(new Event('input', { bubbles: true })); leave(name); await settled();
@@ -7348,7 +7356,7 @@
           // Fields first, then the buttons that act here, then those that open something else, remove, or close.
           const rank = item => item.matches('input, textarea, select') ? 0 : item.matches('.ag-close') ? 4
             : /^(Delete|Remove this)/.test(item.getAttribute('aria-label') || item.textContent) ? 3
-            : item.matches('summary, .ag-skill-open, .ag-family-link, .ag-flow-row, [data-output-open], [data-team-start], [data-skill-new]') ? 2 : 1;
+            : item.matches('summary, .ag-skill-open, .ag-family-link, .ag-flow-row, [data-output-open], [data-team-start], [data-skill-new], .ag-proposal-head') ? 2 : 1;
           controls.sort((a, b) => rank(a) - rank(b));
           for (const item of controls) {
             if (!shown(item)) continue;
@@ -7380,7 +7388,8 @@
         for (const [name, setup] of Object.entries(SWEEP_CASES)) {
           const data = sweepData(), world = worldHost(data), path = pathHost(data), output = outputHost(data), log = [];
           const n10 = setupFakes(data); // n10: setup and spend
-          const fakes = { ...world.actions, flow: path.flow, run: path.run, output: output.output, setup: n10.setup, spend: n10.spend };
+          const n24 = improveFakes(); // n24: proposals
+          const fakes = { ...world.actions, flow: path.flow, run: path.run, output: output.output, setup: n10.setup, spend: n10.spend, improve: n24.improve };
           let mounted = null;
           const actions = Object.fromEntries(actionNames.map(action => [action, request => {
             log.push({ action, op: request?.op, flat: !mounted || flat(mounted) });
@@ -7401,7 +7410,7 @@
         const bound = [...viewSource.matchAll(/(\w+) = (?:action\('(\w+)'\)|options\.actions && typeof options\.actions\.(\w+))/g)].filter(m => !CHAT_ACTIONS.includes(m[2] || m[3])).map(m => m[1]);
         const direct = bound.filter(name => new RegExp('\\b' + name + '\\s*\\(').test(viewSource)).concat(/options\.actions(\.\w+|\[[^\]]+\])\s*\(/.test(viewSource) ? ['options.actions'] : []);
         assert(actionNames.length >= 7 && bound.length === actionNames.length && !direct.length, 'an action is asked other than through call(): ' + direct.join(', ') + ' (actions ' + actionNames.join(', ') + '; bound ' + bound.join(', ') + ')');
-        const missing = actionNames.filter(action => !['roster', 'skillfile', 'team', 'skills', 'flow', 'run', 'output', 'setup', 'spend'].includes(action));
+        const missing = actionNames.filter(action => !['roster', 'skillfile', 'team', 'skills', 'flow', 'run', 'output', 'setup', 'spend', 'improve'].includes(action));
         assert(!missing.length, 'the sweep has no fake for ' + missing.join(', '));
         const cases = await sweepCases(async root => { sweep(root); return flat(root); });
         const reached = new Set(cases.flatMap(item => writesOf(item.asked).map(call => call.action)));
@@ -9268,6 +9277,222 @@
       assert(!/(setupAction|spendAction)\s*\(/.test(source), 'an action is called directly');
     });
     // ==== n10: end ====
+
+    // ==== n24: improvement proposals in the Learning area ====
+    function proposalFixtures() {
+      const rows = (phase, split, passed, total, cost) => Array.from({ length: total }, (_, i) => ({ case: split + i, split, outcome: i < passed ? 'pass' : 'fail', cost, turns: 3, source: 'bench', time: 1 }));
+      const diff = (path, plus) => '--- a/' + path + '\n+++ b/' + path + '\n@@ -1,2 +1,2 @@\n keep this line\n-old line\n+' + plus + '\n';
+      const make = (id, title, state, created, extra = {}) => ({
+        id, title, state, created, why: 'Reviews came back late <b>twice</b>.', evidence: { cases: ['c1', 'c2'], notes: ['n7'], runs: ['r9'], quotes: ['"too slow" <i>said</i> the user'] },
+        evaluation: extra.evaluation || { before: [], after: [] }, history: [{ time: created, state: 'drafted', who: 'agent', note: 'drafted' }].concat(extra.history || []),
+        applications: extra.applications || [], added: 1, removed: 1,
+        files: [{ path: 'agents/impl.md', diff: diff('agents/impl.md', 'new line <img src=x onerror=window.n24pwned=1>'), added: 1, removed: 1, base_matches: true, after_matches: true }],
+        summary: extra.summary || { tune: { before: [0, 0], after: [0, 0] }, held_out: { before: [0, 0], after: [0, 0] }, verdict: 'not enough runs', text: 'no results' }
+      });
+      const evaluated = { before: rows('before', 'tune', 2, 4, 0.5).concat(rows('before', 'held-out', 1, 3, 0.5)), after: rows('after', 'tune', 3, 4, 0.25).concat(rows('after', 'held-out', 3, 3, 0.25)) };
+      const better = { tune: { before: [2, 4], after: [3, 4] }, held_out: { before: [1, 3], after: [3, 3] }, verdict: 'better', text: 'held-out 1/3 before, 3/3 after' };
+      // The real cycle that made the old rule misleading: held-out 3/9 -> 3/9, tune 3/6 -> 5/6.
+      const tuneOnly = { tune: { before: [3, 6], after: [5, 6] }, held_out: { before: [3, 9], after: [3, 9] }, verdict: 'better on tune only', text: 'held-out 3/9 before, 3/9 after; tune 3/6 before, 5/6 after: better on tune only' };
+      return [
+        make('p-old', 'Old drafted idea', 'drafted', 1000),
+        make('p-eval', 'Ask for small diffs', 'evaluated', 3000, { evaluation: evaluated, summary: better }),
+        make('p-applied', 'Review earlier', 'applied', 4000, { evaluation: evaluated, summary: better, applications: [{ time: 4001, backup: '/cfg/backups/t-improve-p-applied' }] }),
+        make('p-rej', 'Rejected one', 'rejected', 2000, { history: [{ time: 2001, state: 'rejected', who: 'user', note: 'not now' }] }),
+        make('p-rev', 'Reverted one', 'reverted', 2500, { evaluation: evaluated, summary: tuneOnly })
+      ];
+    }
+    function improveFakes(options = {}) {
+      const records = new Map(proposalFixtures().map(item => [item.id, item])), calls = [];
+      const entry = full => ({ id: full.id, created: full.created, title: full.title, state: full.state, summary: full.summary, added: full.added, removed: full.removed, files: full.files.map(file => file.path) });
+      const improve = async request => {
+        calls.push(JSON.parse(JSON.stringify(request)));
+        if (options.hold) await options.hold();
+        if (request.op === 'read') {
+          if (!request.id) return { proposals: [...records.values()].map(entry).sort((a, b) => b.created - a.created) };
+          return JSON.parse(JSON.stringify(records.get(request.id)));
+        }
+        if (options.refuse) throw Object.assign(new Error(options.refuse), { status: 400 });
+        const full = records.get(request.id), next = { approve: 'applied', reject: 'rejected', revert: 'reverted', reopen: full.evaluation.after.length ? 'evaluated' : 'drafted' }[request.op];
+        if (!next) throw new Error('unknown op ' + request.op);
+        full.state = next; full.history.push({ time: 9000, state: next, who: 'user', note: request.note || 'by hand' });
+        if (next === 'applied') full.applications.push({ time: 9000, backup: '/cfg/backups/new-improve-' + full.id });
+        return JSON.parse(JSON.stringify(full));
+      };
+      return { improve, calls, records };
+    }
+    const n24Fixture = () => { const data = setupFixture(); data.learning = { total: 1, pending: 0, due: false, runs: 2, improvements: 1, last_improvement: 10, lessons: [], notes: [] }; return data; };
+    const n24Section = root => root.querySelector('.ag-detail [data-run-section="proposals"]');
+    const n24Row = (root, id) => n24Section(root)?.querySelector('[data-proposal="' + id + '"]');
+    const n24Controls = row => [...row.querySelectorAll('.ag-proposal-actions button')].map(button => button.textContent);
+    async function n24Mount(options, run) {
+      const fakes = improveFakes(options), data = n24Fixture();
+      await using(data, async (root, app) => {
+        await n10Open(root); for (let i = 0; i < 40 && !n24Section(root)?.querySelector('[data-proposal]'); i++) await sleep(25);
+        await run(root, fakes, app);
+      }, { actions: { improve: fakes.improve } });
+    }
+    const n24Open = async (root, id) => { n24Row(root, id).querySelector('.ag-proposal-head').click(); for (let i = 0; i < 40 && !n24Row(root, id).querySelector('.ag-proposal-body'); i++) await sleep(25); await settled(); };
+    const n24Click = async (root, id, kind) => { const button = n24Row(root, id).querySelector('[data-proposal-action="' + kind + '"]'); assert(button, 'no ' + kind + ' button for ' + id); button.click(); for (let i = 0; i < 6; i++) await sleep(25); await settled(); };
+
+    await test('n24 list: one row per proposal, newest first, with title, state, verdict, +/- lines and age; the count of those waiting is in the Learning line and the Proposals line', async () => {
+      await n24Mount({}, async root => {
+        const ids = [...n24Section(root).querySelectorAll('[data-proposal]')].map(row => row.dataset.proposal);
+        assert(ids.join() === 'p-applied,p-eval,p-rev,p-rej,p-old', 'order ' + ids.join());
+        const row = n24Row(root, 'p-eval'), text = row.querySelector('.ag-proposal-head').textContent;
+        assert(row.querySelector('.ag-proposal-title').textContent === 'Ask for small diffs' && row.querySelector('.ag-proposal-state').textContent === 'evaluated' && row.querySelector('.ag-proposal-verdict').textContent === 'better' && /\+1 -1/.test(text) && row.querySelector('.ag-proposal-age').textContent.length > 0, 'row text ' + text);
+        assert(n24Section(root).querySelector('.ag-proposals-line').textContent.startsWith('2 waiting · 1 applied · 5 proposals'), n24Section(root).querySelector('.ag-proposals-line').textContent);
+        assert(root.querySelector('.ag-detail [data-run-section="learning"] .ag-learning-line').textContent.includes('2 proposals waiting'), 'the learning line does not count them');
+        assert(!n24Row(root, 'p-eval').querySelector('.ag-proposal-body'), 'a row is open before a click');
+      });
+    });
+
+    await test('n24 verdict: better needs the held-out rate up; "better on tune only" says the fix is not confirmed, with the four counts beside it, in the row and the detail', async () => {
+      await n24Mount({}, async root => {
+        const head = n24Row(root, 'p-rev').querySelector('.ag-proposal-verdict');
+        assert(head.textContent === 'better on tune only' && head.title === 'held-out 3/9 → 3/9 · tune 3/6 → 5/6', 'row: ' + head.textContent + ' | ' + head.title);
+        await n24Open(root, 'p-rev');
+        const line = n24Row(root, 'p-rev').querySelector('.ag-proposal-verdictline');
+        assert(line.querySelector('.ag-proposal-verdicttext').textContent.startsWith('Better on tune only') && /not confirmed on cases it was not written from/.test(line.textContent), 'wording: ' + line.textContent);
+        assert(line.querySelector('.ag-proposal-counts').textContent === 'held-out 3/9 → 3/9 · tune 3/6 → 5/6', 'counts: ' + line.textContent);
+        await n24Open(root, 'p-eval');
+        const better = n24Row(root, 'p-eval').querySelector('.ag-proposal-verdictline');
+        assert(/held-out pass rate is higher and the tune rate is not lower/.test(better.textContent) && better.querySelector('.ag-proposal-counts').textContent === 'held-out 1/3 → 3/3 · tune 2/4 → 3/4', 'better: ' + better.textContent);
+      });
+    });
+
+    await test('n24 applied: the diff and the size show what the proposal changed (the server diffs the backup), not an empty diff; a gone backup is said', async () => {
+      await n24Mount({}, async (root, fakes) => {
+        const head = n24Row(root, 'p-applied').querySelector('.ag-proposal-size');
+        assert(head.textContent === '+1 -1', 'size ' + head.textContent);
+        await n24Open(root, 'p-applied');
+        let row = n24Row(root, 'p-applied');
+        assert(row.querySelector('.ag-diff-line[data-kind=add]') && row.querySelector('.ag-diff-line[data-kind=del]') && !row.querySelector('.ag-diff-none') && !row.querySelector('.ag-proposal-warn'), 'an applied proposal shows its change');
+      });
+      await n24Mount({}, async (root, fakes) => {
+        fakes.records.get('p-applied').files[0].diff_against = 'file';
+        await n24Open(root, 'p-applied');
+        assert(/backup of this file is gone/.test(n24Row(root, 'p-applied').textContent), 'the gone backup is not said');
+      });
+    });
+
+    await test('n24 detail: opening a row shows why, the evidence, the before/after table with the verdict line, the change as a diff with a sign gutter, the history; all as text', async () => {
+      window.n24pwned = 0;
+      await n24Mount({}, async root => {
+        await n24Open(root, 'p-eval');
+        const row = n24Row(root, 'p-eval'), text = row.textContent;
+        assert(row.querySelector('.ag-proposal-head').getAttribute('aria-expanded') === 'true', 'not expanded');
+        assert(text.includes('Reviews came back late <b>twice</b>.') && text.includes('c1, c2') && text.includes('n7') && text.includes('r9') && text.includes('"too slow" <i>said</i> the user'), 'why or evidence missing');
+        const table = row.querySelector('table.ag-eval'), cells = [...table.querySelectorAll('tbody tr')].map(tr => [...tr.children].map(cell => cell.textContent));
+        assert(JSON.stringify(cells[0]) === JSON.stringify(['Tune', '2 / 4', '3 / 4']) && JSON.stringify(cells[1]) === JSON.stringify(['Held-out', '1 / 3', '3 / 3']) && cells[2][0] === 'Cost per run' && cells[2][1] === '$0.50' && cells[2][2] === '$0.25', JSON.stringify(cells));
+        assert(row.querySelector('.ag-proposal-verdictline').textContent.startsWith('Better'), 'verdict line');
+        assert(row.querySelector('.ag-proposal-path').textContent === 'agents/impl.md', 'file path');
+        const lines = [...row.querySelectorAll('.ag-diff-line')].map(line => [line.dataset.kind, line.querySelector('.ag-diff-sign').textContent]);
+        assert(lines.some(([kind, sign]) => kind === 'add' && sign === '+') && lines.some(([kind, sign]) => kind === 'del' && sign === '-') && lines.some(([kind, sign]) => kind === 'same' && sign === ''), 'diff gutters ' + JSON.stringify(lines));
+        assert(row.querySelector('.ag-diff-text[class]') && [...row.querySelectorAll('.ag-diff-text')].some(item => item.textContent === 'new line <img src=x onerror=window.n24pwned=1>'), 'the diff text');
+        assert(!row.querySelector('img, b, i') && window.n24pwned === 0, 'markup built from proposal text');
+        assert(row.querySelector('.ag-history-row') && row.querySelector('.ag-history-row').textContent.includes('drafted by agent'), 'history');
+        assert(root.querySelectorAll('.ag-detail [data-run-section="learning"]').length === 1 && root.querySelector('.ag-detail [data-run-section="learning"] .ag-learning-line'), 'learning content gone');
+      });
+    });
+
+    await test('n24 actions: each state offers exactly its valid actions (drafted and evaluated Approve and Reject; applied Revert; rejected Reopen; reverted Approve again)', async () => {
+      await n24Mount({}, async root => {
+        const want = { 'p-old': 'Approve|Reject', 'p-eval': 'Approve|Reject', 'p-applied': 'Revert', 'p-rej': 'Reopen', 'p-rev': 'Approve again' };
+        for (const id of Object.keys(want)) { await n24Open(root, id); assert(n24Controls(n24Row(root, id)).join('|') === want[id], id + ': ' + n24Controls(n24Row(root, id)).join('|')); }
+      });
+    });
+
+    await test('n24 approve: one confirmation names the files and the backup; Cancel sends nothing; Confirm sends the POST and the row shows the answer\'s state, never a guess', async () => {
+      const fakes = improveFakes(), data = n24Fixture();
+      await using(data, async root => {
+        await n10Open(root); for (let i = 0; i < 40 && !n24Section(root)?.querySelector('[data-proposal]'); i++) await sleep(25);
+        await n24Open(root, 'p-eval');
+        await n24Click(root, 'p-eval', 'approve');
+        const ask = n24Row(root, 'p-eval').querySelector('.ag-proposal-ask');
+        assert(ask && /agents\/impl\.md/.test(ask.textContent) && /backup/i.test(ask.textContent) && !fakes.calls.some(call => call.op === 'approve'), 'no confirmation naming the file and the backup');
+        assert(n24Controls(n24Row(root, 'p-eval')).join('|') === 'Approve and write|Cancel', n24Controls(n24Row(root, 'p-eval')).join('|'));
+        await n24Click(root, 'p-eval', 'cancel');
+        assert(!n24Row(root, 'p-eval').querySelector('.ag-proposal-ask') && !fakes.calls.some(call => call.op === 'approve'), 'Cancel sent something or left the question');
+        await n24Click(root, 'p-eval', 'approve'); await n24Click(root, 'p-eval', 'confirm');
+        const posts = fakes.calls.filter(call => call.op === 'approve');
+        assert(posts.length === 1 && JSON.stringify(posts[0]) === JSON.stringify({ op: 'approve', id: 'p-eval' }), 'POST ' + JSON.stringify(posts));
+        const row = n24Row(root, 'p-eval');
+        assert(row.dataset.state === 'applied' && row.querySelector('.ag-proposal-state').textContent === 'applied' && n24Controls(row).join('|') === 'Revert', 'row after approve: ' + row.dataset.state + ' ' + n24Controls(row).join('|'));
+        assert(/written/.test(row.querySelector('[data-proposal-line="ok"]')?.textContent || '') && row.textContent.includes('/cfg/backups/new-improve-p-eval'), 'no plain line saying what happened');
+        assert(row.querySelector('.ag-history-row:last-child').textContent.includes('applied by user'), 'history not from the answer');
+        assert(root.querySelector('.ag-detail [data-run-section="learning"] .ag-learning-line').textContent.includes('1 proposal waiting'), 'the waiting count did not follow');
+      }, { actions: { improve: fakes.improve } });
+    });
+
+    await test('n24 reject asks for a short reason, sends it, and Reopen undoes it; Revert and Approve again send their own POSTs', async () => {
+      await n24Mount({}, async (root, fakes, app) => {
+        await n24Open(root, 'p-old'); await n24Click(root, 'p-old', 'reject');
+        const field = n24Row(root, 'p-old').querySelector('[data-proposal-field]'); assert(field, 'no reason field');
+        await n24Click(root, 'p-old', 'send');
+        assert(!fakes.calls.some(call => call.op === 'reject') && /why/i.test(n24Row(root, 'p-old').querySelector('[data-proposal-line="error"]')?.textContent || ''), 'sent without a reason');
+        const box = n24Row(root, 'p-old').querySelector('[data-proposal-field]'); box.focus(); box.value = 'not needed now'; box.dispatchEvent(new Event('input', { bubbles: true }));
+        await app.refresh(); await sleep(60); await settled(); assert(n24Row(root, 'p-old').querySelector('[data-proposal-field]').value === 'not needed now' && document.activeElement === n24Row(root, 'p-old').querySelector('[data-proposal-field]'), 'a refresh took the typed reason');
+        await n24Click(root, 'p-old', 'send');
+        assert(JSON.stringify(fakes.calls.filter(call => call.op === 'reject')) === JSON.stringify([{ op: 'reject', id: 'p-old', note: 'not needed now' }]), 'reject POST');
+        assert(n24Row(root, 'p-old').dataset.state === 'rejected' && n24Controls(n24Row(root, 'p-old')).join('|') === 'Reopen', 'not rejected');
+        await n24Click(root, 'p-old', 'reopen');
+        assert(JSON.stringify(fakes.calls.filter(call => call.op === 'reopen')) === JSON.stringify([{ op: 'reopen', id: 'p-old' }]) && n24Row(root, 'p-old').dataset.state === 'drafted' && n24Controls(n24Row(root, 'p-old')).join('|') === 'Approve|Reject', 'reopen');
+        await n24Open(root, 'p-applied'); await n24Click(root, 'p-applied', 'revert');
+        assert(fakes.calls.some(call => call.op === 'revert' && call.id === 'p-applied') && n24Row(root, 'p-applied').dataset.state === 'reverted' && n24Controls(n24Row(root, 'p-applied')).join('|') === 'Approve again', 'revert');
+        await n24Click(root, 'p-applied', 'approve'); await n24Click(root, 'p-applied', 'confirm');
+        assert(fakes.calls.filter(call => call.op === 'approve' && call.id === 'p-applied').length === 1 && n24Row(root, 'p-applied').dataset.state === 'applied', 'approve again');
+      });
+    });
+
+    await test('n24 refusal: the server\'s words show in place, in plain words, and the row keeps the state the server has', async () => {
+      await n24Mount({ refuse: 'file agents/impl.md changed since the proposal was drafted' }, async (root, fakes) => {
+        await n24Open(root, 'p-eval'); await n24Click(root, 'p-eval', 'approve'); await n24Click(root, 'p-eval', 'confirm');
+        const row = n24Row(root, 'p-eval'), said = row.querySelector('[data-proposal-line="error"]');
+        assert(said && said.getAttribute('role') === 'alert' && /changed since the proposal was drafted/.test(said.textContent), 'refusal not shown: ' + (said?.textContent));
+        assert(row.dataset.state === 'evaluated' && n24Controls(row).join('|') === 'Approve|Reject', 'the state was guessed: ' + row.dataset.state);
+      });
+    });
+
+    await test('n24 look: no green-dominant colour, no text under 11 px, real buttons, no motion in the section', async () => {
+      await n24Mount({}, async root => {
+        const colours = []; let small = '';
+        const inspect = () => {
+          const section = n24Section(root);
+          for (const item of [section, ...section.querySelectorAll('*')]) {
+            const style = getComputedStyle(item);
+            for (const value of [style.color, style.backgroundColor, style.borderTopColor, style.outlineColor]) { const m = value.match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?\)/); if (m && (m[4] === undefined || Number(m[4]) > 0)) colours.push([Number(m[1]), Number(m[2]), Number(m[3])]); }
+            if (item.textContent && [...item.childNodes].some(node => node.nodeType === 3 && node.textContent.trim()) && parseFloat(style.fontSize) < 11) small += ' ' + item.className + ':' + style.fontSize;
+            assert(style.animationName === 'none' && (style.transitionDuration === '0s' || style.transitionProperty === 'none'), 'motion on ' + item.className);
+          }
+        };
+        for (const id of ['p-applied', 'p-rej']) { await n24Open(root, id); inspect(); }
+        await n24Open(root, 'p-eval'); await n24Click(root, 'p-eval', 'approve'); inspect();
+        const section = n24Section(root);
+        assert(colours.length > 10 && !colours.filter(([r, g, b]) => g > r + 12 && g > b + 12).length, 'a green-leaning colour: ' + JSON.stringify(colours.filter(([r, g, b]) => g > r + 12 && g > b + 12)));
+        assert(!small, 'text under 11px:' + small);
+        const buttons = [...section.querySelectorAll('button')]; assert(buttons.length >= 6 && buttons.every(button => button.tagName === 'BUTTON' && button.type === 'button' && button.textContent.trim()), 'controls');
+        const focus = section.querySelector('button'); focus.focus(); assert(getComputedStyle(focus).outlineStyle !== undefined && document.activeElement === focus, 'focus');
+      });
+    });
+
+    await test('n24 hosts: with no improve action nothing is drawn or asked; a read that fails is said in place; nothing of the Learning content is removed', async () => {
+      const data = n24Fixture();
+      await using(data, async root => { await n10Open(root); assert(!n24Section(root), 'a Proposals section without a host action'); assert(root.querySelector('.ag-detail [data-run-section="learning"] .ag-learning-line').textContent === '1 notes · 1 applied' || root.querySelector('.ag-detail [data-run-section="learning"] .ag-learning-line'), 'learning line'); }, { actions: setupFakes(data).actions });
+      await using(n24Fixture(), async root => {
+        await n10Open(root); for (let i = 0; i < 40 && !n24Section(root)?.querySelector('[data-proposal-line]'); i++) await sleep(25);
+        assert(/ledger is unreadable/.test(n24Section(root).querySelector('[data-proposal-line="error"]')?.textContent || ''), 'a failed read is not said');
+      }, { actions: { improve: async () => { throw new Error('the ledger is unreadable'); } } });
+    });
+    await test('n24 source: the improve action is asked only through ask(), and the code builds no markup', async () => {
+      const source = [...document.scripts].find(script => script.textContent.includes('function call(fn, request)')).textContent;
+      const at = source.indexOf('---- n24: improvement proposals'), end = source.indexOf('---- end n24 ----');
+      assert(at > 0 && end > at, 'the n24 block is not marked');
+      const code = source.slice(at, end);
+      assert(!/innerHTML|insertAdjacentHTML|outerHTML/.test(code), 'the code builds markup');
+      assert(!/improveAction\s*\(/.test(code), 'the action is called directly');
+    });
+    // ==== n24: end ====
+
 
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
   })().catch(error => { document.getElementById('results').textContent = 'RESULT: FAIL ' + error.stack; });

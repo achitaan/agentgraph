@@ -11,7 +11,8 @@ One JSON file per proposal in `<ledger home>/proposals/<id>.json`, written atomi
   "source", "time"}`. `split` is `cases.split_of(case)` (tune or held-out; any id has one, a bench scenario name too),
   `source` is a `cases` trial id or `bench:LABEL:SCENARIO:rN`;
 - `state`: `drafted` -> `evaluated` (a first result was recorded) -> `applied` (approved and written) or `rejected`;
-  `applied` -> `reverted`; a reverted proposal can be approved again. `history`: `[{"time", "state", "who", "note"}]`,
+  `applied` -> `reverted`; a reverted proposal can be approved again; a rejected one can be reopened (back to `evaluated`
+  with results, else `drafted`). `history`: `[{"time", "state", "who", "note"}]`,
   `who` is `user` (the user's own approval or choice, from a command with their words or from the view) or `command`;
 - `applications`: one entry per approval: the backup folder, each file's hash before and after, and the evaluation
   summary at that moment.
@@ -26,16 +27,17 @@ printed and recorded. Revert refuses when a file is no longer what approve wrote
 exact bytes from the backup, or deletes a file the proposal created. Reject changes no file.
 
 Verdict of the evaluation (`summary`): held-out and tune pass rates before and after. Fewer than 2 held-out results
-before or after -> "not enough runs". Otherwise a lower pass rate on either side -> "worse"; else a higher one on
-either side -> "better"; else "no difference". The held-out side is the one that counts for trust, but a drop anywhere
-is shown rather than hidden.
+before or after -> "not enough runs". Otherwise a lower pass rate on either side -> "worse"; else a higher held-out
+rate (tune not lower) -> "better"; else a higher tune rate with held-out equal -> "better on tune only" (the change
+is not confirmed on cases it was not written from); else "no difference". The held-out side is the one that counts for
+trust, but a drop anywhere is shown rather than hidden.
 
     python3 -m agentgraph.improve propose --title T --why W --change PATH=NEWFILE [--case ID ...] [--note-id ID ...]
     python3 -m agentgraph.improve result ID --phase before|after --case CASE --outcome pass|fail [--cost D --turns N --source S]
     python3 -m agentgraph.improve import-bench ID --phase before|after --label L [--results DIR]
     python3 -m agentgraph.improve show ID [--json] | list [--json]
     python3 -m agentgraph.improve approve ID --by-user "their words" [--force]
-    python3 -m agentgraph.improve reject ID --reason R | revert ID [--force] [--note N]
+    python3 -m agentgraph.improve reject ID --reason R | reopen ID [--note N] | revert ID [--force] [--note N]
 
 Every command takes `--config-root DIR` (default: OpenCode's config folder) and `--home DIR` (default: $AGENTGRAPH_HOME,
 else the active preset's ledger folder).
@@ -178,8 +180,10 @@ def summary(evaluation: dict) -> dict:
         verdict = "not enough runs"
     elif delta("held_out") < 0 or delta("tune") < 0:
         verdict = "worse"
-    elif delta("held_out") > 0 or delta("tune") > 0:
+    elif delta("held_out") > 0:
         verdict = "better"
+    elif delta("tune") > 0:
+        verdict = "better on tune only"
     else:
         verdict = "no difference"
     text = (f"held-out {held['before'][0]}/{held['before'][1]} before, {held['after'][0]}/{held['after'][1]} after; "
@@ -347,9 +351,23 @@ def _current_text(target: Path) -> tuple[str, str | None]:
     return (data.decode("utf-8", "replace") if data is not None else ""), _sha(data)
 
 
+def _backup_text(application: dict, item: dict) -> str | None:
+    """The text the file had before the application ("" for a file it created); None when the backup is gone or no
+    longer what was saved (the caller then diffs against the file now)."""
+    if item.get("before_sha256") is None:
+        return ""
+    try:
+        data = _read_file(Path(application["backup"]) / item["path"])
+    except (OSError, ImproveError, KeyError):
+        return None
+    return data.decode("utf-8", "replace") if data is not None and _sha(data) == item["before_sha256"] else None
+
+
 def describe(home: Path, root: Path, record: dict, *, full: bool = True) -> dict:
-    """The record with its evaluation summary and, per change, the diff against the file now and whether the file
-    still has the hash the proposal was drafted against (`base_matches`) or the one it wrote (`after_matches`)."""
+    """The record with its evaluation summary and, per change, the size and diff of the proposal's own change (applied:
+    the backup against the new text, `diff_against: "backup"`; else the file now against it, `"file"`) and whether the
+    file still has the hash the proposal was drafted against (`base_matches`) or the one it wrote (`after_matches`).
+    The line counts of the whole proposal (`added`, `removed`) follow the same diffs."""
     last = record["applications"][-1] if record["applications"] else None
     applied = {item["path"]: item for item in last["files"]} if last and record["state"] == "applied" else {}
     files, added, removed = [], 0, 0
@@ -363,8 +381,15 @@ def describe(home: Path, root: Path, record: dict, *, full: bool = True) -> dict
             text, current, entry["error"] = "", None, str(exc)
         entry.update(current_sha256=current, base_matches=current == change["base_sha256"],
                      after_matches=(current == applied[change["path"]]["after_sha256"]) if change["path"] in applied else None)
-        plus, minus = outputs._line_counts(text, change["new_text"])
-        entry.update(added=plus, removed=minus, diff=_diff(change["path"], text, change["new_text"]))
+        # An applied proposal's own change is the backup (the bytes before it was applied) against its new text: the file
+        # now already holds the new text. Otherwise (drafted, evaluated, rejected, reverted) the file now against it.
+        base, entry["diff_against"] = text, "file"
+        if change["path"] in applied:
+            before = _backup_text(last, applied[change["path"]])
+            if before is not None:
+                base, entry["diff_against"] = before, "backup"
+        plus, minus = outputs._line_counts(base, change["new_text"])
+        entry.update(added=plus, removed=minus, diff=_diff(change["path"], base, change["new_text"]))
         added, removed = added + plus, removed + minus
         files.append(entry)
     result = {key: value for key, value in record.items() if key != "changes"}
@@ -395,6 +420,23 @@ def list_proposals(home: Path, root: Path) -> list[dict]:
                           "state": record["state"], "summary": full["summary"], "added": full["added"],
                           "removed": full["removed"], "files": [item["path"] for item in full["files"]]})
     return sorted(found, key=lambda item: (item["created"], item["id"]), reverse=True)
+
+
+def digest(home: Path, limit: int = 30) -> list[dict]:
+    """The proposals as `{id, created, title, state, verdict}`, newest first, read from the records alone (no file is
+    compared, so it is cheap): what the snapshot carries for the terminal panel."""
+    found = []
+    with ledger._lock(Path(home), writing=False):
+        for path in sorted(_folder(home).glob("*.json")) if _folder(home).is_dir() else []:
+            if not ID.fullmatch(path.stem):
+                continue
+            try:
+                record = _load(home, path.stem)
+            except ImproveError:
+                continue
+            found.append({"id": record["id"], "created": record["created"], "title": str(record["title"])[:200],
+                          "state": record["state"], "verdict": summary(record["evaluation"])["verdict"]})
+    return sorted(found, key=lambda item: (item["created"], item["id"]), reverse=True)[:limit]
 
 
 def approve(home: Path, root: Path, proposal_id: str, *, who: str, note: str, force: bool = False,
@@ -486,6 +528,18 @@ def reject(home: Path, proposal_id: str, reason: str, *, who: str = "user", now:
     return record
 
 
+def reopen(home: Path, proposal_id: str, *, who: str = "user", note: str = "", now: float | None = None) -> dict:
+    """Undo a rejection: back to `evaluated` when the proposal has results, else `drafted`. No file changes."""
+    with ledger._lock(Path(home), writing=True):
+        record = _load(home, proposal_id)
+        if record["state"] != "rejected":
+            raise ImproveError(f"proposal {proposal_id} is {record['state']}; only a rejected one can be reopened")
+        evaluation = record["evaluation"]
+        _move(record, "evaluated" if evaluation["before"] or evaluation["after"] else "drafted", who, note or "reopened", now)
+        _save(home, record)
+    return record
+
+
 def revert(home: Path, root: Path, proposal_id: str, *, who: str = "command", note: str = "", force: bool = False,
            now: float | None = None) -> dict:
     with ledger._lock(Path(home), writing=True):
@@ -551,7 +605,9 @@ def _show_text(shown: dict) -> str:
         if entry.get("after_matches") is False:
             notes.append("file edited since applying")
         lines.append(f"change {entry['path']}  +{entry['added']} -{entry['removed']}" + (f"  ({'; '.join(notes)})" if notes else ""))
-        lines.append(entry["diff"].rstrip("\n") if entry["diff"] else "  (no difference from the file now)")
+        lines.append(entry["diff"].rstrip("\n") if entry["diff"] else
+                     "  (the backup and the new text are the same)" if entry.get("diff_against") == "backup"
+                     else "  (no difference from the file now)")
     for item in shown["history"]:
         when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(item["time"]))
         lines.append(f"history {when} {item['state']} by {item['who']}: {item['note']}")
@@ -587,22 +643,32 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--phase", required=True, choices=("before", "after"))
     p.add_argument("--label", required=True)
     p.add_argument("--results", type=Path, help="bench results folder (default: bench/results)")
+    line = "answer as one line of JSON, an error as {\"error\"} (what the desktop panel reads)"
     p = commands.add_parser("show", parents=[common], help="one proposal with its diffs")
     p.add_argument("id")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--line", action="store_true", help=line)
     p = commands.add_parser("list", parents=[common], help="every proposal")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--line", action="store_true", help=line)
     p = commands.add_parser("approve", parents=[common], help="apply a proposal (after a backup)")
     p.add_argument("id")
     p.add_argument("--by-user", required=True, metavar="WORDS", help="the user's own words approving it")
     p.add_argument("--force", action="store_true", help="apply even if a file changed since drafting")
+    p.add_argument("--line", action="store_true", help=line + "; it answers the proposal and is the user's own click")
     p = commands.add_parser("reject", parents=[common], help="reject a proposal; no file changes")
     p.add_argument("id")
     p.add_argument("--reason", required=True)
+    p.add_argument("--line", action="store_true", help=line + "; it answers the proposal and is the user's own click")
+    p = commands.add_parser("reopen", parents=[common], help="undo a rejection; no file changes")
+    p.add_argument("id")
+    p.add_argument("--note", default="")
+    p.add_argument("--line", action="store_true", help=line + "; it answers the proposal and is the user's own click")
     p = commands.add_parser("revert", parents=[common], help="put back what an applied proposal replaced")
     p.add_argument("id")
     p.add_argument("--force", action="store_true", help="restore even if a file was edited after applying")
     p.add_argument("--note", default="")
+    p.add_argument("--line", action="store_true", help=line + "; it answers the proposal and is the user's own click")
     return parser
 
 
@@ -621,6 +687,7 @@ def _changes(values: list[str]) -> list[tuple[str, str]]:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    line = getattr(args, "line", False)
     try:
         root, home = config_root(args.config_root), default_home(args.home)
         if args.command == "propose":
@@ -636,10 +703,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"imported {count} {args.phase} row(s); {summary(record['evaluation'])['text']}")
         elif args.command == "show":
             shown = show(home, root, args.id)
-            print(json.dumps(shown, indent=2, ensure_ascii=False) if args.json else _show_text(shown))
+            print(_one_line(shown) if line else json.dumps(shown, indent=2, ensure_ascii=False) if args.json else _show_text(shown))
         elif args.command == "list":
             items = list_proposals(home, root)
-            if args.json:
+            if line:
+                print(_one_line({"proposals": items}))
+            elif args.json:
                 print(json.dumps({"proposals": items}, indent=2, ensure_ascii=False))
             else:
                 for item in items:
@@ -648,21 +717,31 @@ def main(argv: list[str] | None = None) -> int:
                     print("no proposals")
         elif args.command == "approve":
             record = approve(home, root, args.id, who="user", note=args.by_user, force=args.force)
-            print(f"applied {record['id']}; backup {record['applications'][-1]['backup']}")
-            print("evaluation: " + summary(record["evaluation"])["text"])
+            if line:
+                print(_one_line(show(home, root, args.id)))
+            else:
+                print(f"applied {record['id']}; backup {record['applications'][-1]['backup']}")
+                print("evaluation: " + summary(record["evaluation"])["text"])
         elif args.command == "reject":
-            reject(home, args.id, args.reason, who="command")
-            print(f"rejected {args.id}; no file was changed")
+            reject(home, args.id, args.reason, who="user" if line else "command")
+            print(_one_line(show(home, root, args.id)) if line else f"rejected {args.id}; no file was changed")
+        elif args.command == "reopen":
+            record = reopen(home, args.id, who="user" if line else "command", note=args.note)
+            print(_one_line(show(home, root, args.id)) if line else f"reopened {args.id}; it is {record['state']} again")
         else:
-            revert(home, root, args.id, note=args.note, force=args.force)
-            print(f"reverted {args.id}; the files are as they were before it was applied")
+            revert(home, root, args.id, who="user" if line else "command", note=args.note, force=args.force)
+            print(_one_line(show(home, root, args.id)) if line else f"reverted {args.id}; the files are as they were before it was applied")
         return 0
-    except ImproveError as exc:
-        print(f"improve: {exc}", file=sys.stderr)
+    except (ImproveError, OSError) as exc:
+        if line:
+            print(_one_line({"error": str(exc)}))
+        else:
+            print(f"improve: {exc}", file=sys.stderr)
         return 1
-    except OSError as exc:
-        print(f"improve: {exc}", file=sys.stderr)
-        return 1
+
+
+def _one_line(value) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
 if __name__ == "__main__":

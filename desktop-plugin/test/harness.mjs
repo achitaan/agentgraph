@@ -395,6 +395,13 @@ function windowContext(definition, overrides = {}) {
           if (input.limit === "999.00") return JSON.stringify({ error: "the limit is too high for this test" });
           return JSON.stringify({ limit: input.op === "off" ? null : Number(input.limit), warn: null, previous: { limit: null, warn: null }, changed: true, message: "set" });
         },
+        // n24: the improvement proposals (read the list or one, approve, reject, reopen, revert).
+        improve: async (input, options) => {
+          calls.push({ op: "improve", input: JSON.parse(JSON.stringify(input)), options });
+          if (input.id === "p-refused") return JSON.stringify({ error: "file agents/impl.md changed since the proposal was drafted" });
+          if (input.op === "read" && !input.id) return JSON.stringify({ proposals: [{ id: "p-1", title: "T", state: "drafted", created: 1, added: 1, removed: 0, files: ["agents/a.md"], summary: { verdict: "not enough runs" } }] });
+          return JSON.stringify({ id: input.id, state: { approve: "applied", reject: "rejected", reopen: "drafted", revert: "reverted", read: "drafted" }[input.op], files: [], history: [] });
+        },
         snapshot: async (input, options) => {
           calls.push({ op: "snapshot", input: JSON.parse(JSON.stringify(input)), options });
           if (overrides.reject) throw new Error("main is not running");
@@ -492,7 +499,11 @@ await check("main registers exactly one Ipc (<id>.snapshot) with snapshot, flow,
   // n14: the chat method (one session's recent chat: its id and a number of messages) joined them.
   // n8: the side method (one question to the side chat, sent on stdin) joined them (the key list above gains "side").
   // n10: the setup and spend methods (the preset, the saved setups, the spend limit) joined them.
-  assert.deepEqual(Object.keys(token.spec.methods), ["snapshot", "flow", "skills", "roster", "skillfile", "team", "output", "chat", "side", "setup", "spend"]);
+  assert.deepEqual(Object.keys(token.spec.methods), ["snapshot", "flow", "skills", "roster", "skillfile", "team", "output", "chat", "side", "setup", "spend", "improve"]);
+  // n24: the improve method (the improvement proposals) joined them.
+  assert.deepEqual(Object.keys(token.spec.methods.improve.input.fields), ["op", "id", "note"]);
+  assert.ok(Object.values(token.spec.methods.improve.input.fields).every((field) => field._tag === "String"), "improve: strings only");
+  assert.ok(typeof impl.improve === "function");
   assert.deepEqual(Object.keys(token.spec.methods.setup.input.fields), ["op", "directory", "name", "record", "replace", "expect"]);
   assert.deepEqual(Object.keys(token.spec.methods.spend.input.fields), ["op", "directory", "limit", "warn"]);
   assert.ok(Object.entries(token.spec.methods.setup.input.fields).every(([key, field]) => key === "expect" ? field._tag === "optionalKey" && field.schema._tag === "String" : field._tag === "String"), "setup: strings and an optional expect");
@@ -3032,6 +3043,86 @@ await check("n10 panel: a session with no folder cannot write setups or the spen
   rendered.dispose();
 });
 // ---- end n10 ----
+
+// ---- n24: the improvement proposals (Learning area) ----
+await check("n24 main: improve runs `python3 -P -m agentgraph.improve list|show|approve|reject|reopen|revert ... --line` in home without a shell, never with --force; ids are checked; bad input and the demo spawn nothing", async () => {
+  const python = path.join(TMP, "fake-improve-python");
+  fs.writeFileSync(python, `#!/bin/sh
+cat > /dev/null
+shift 3
+case "$1" in
+  list) printf 'noise\\n{"proposals": [], "args": "%s"}\\n' "$*";;
+  *) case "$2" in refused) printf '{"error": "proposal refused is applied; only a drafted one can be approved"}\\n'; exit 1;; esac; printf '{"id": "%s", "state": "x", "args": "%s"}\\n' "$2" "$*";;
+esac
+`, { mode: 0o700 });
+  const log = [];
+  const loaded = loadMain(CODE, log);
+  const m = mainContext({ home: ORCHESTRATION, python });
+  resolveDefault(loaded.module.exports).main(m.ctx);
+  const impl = m.provided[0].impl;
+  const improve = async (fields) => JSON.parse(await impl.improve({ op: "read", id: "", note: "", ...fields }));
+  assert.equal((await improve({})).args, "list --line");
+  assert.equal((await improve({ id: "p-1.a_b" })).args, "show p-1.a_b --line");
+  assert.equal((await improve({ op: "approve", id: "p-1" })).args, "approve p-1 --by-user approved in the panel --line");
+  assert.equal((await improve({ op: "approve", id: "p-1", note: " ok then " })).args, "approve p-1 --by-user ok then --line");
+  assert.equal((await improve({ op: "reject", id: "p-1", note: "not now; rm -rf" })).args, "reject p-1 --reason not now; rm -rf --line");
+  assert.equal((await improve({ op: "reopen", id: "p-1" })).args, "reopen p-1 --line");
+  assert.equal((await improve({ op: "revert", id: "p-1", note: "x" })).args, "revert p-1 --note x --line");
+  assert.match((await improve({ op: "approve", id: "refused" })).error, /is applied/);
+  const spawned = log.length;
+  assert.equal(spawned, 8, "one command each");
+  for (const fields of [{ op: "reject", id: "p-1" }, { op: "reject", id: "p-1", note: "  " }, { op: "approve", id: "" }, { op: "approve", id: "-x" }, { op: "approve", id: "../x" }, { op: "show", id: "p" },
+    { op: "read", id: "a b" }, { op: "read", id: "-x" }, { op: "read", id: "p-1", note: "x" }, { op: "revert", id: "a".repeat(65) }, { op: "approve", id: "p-1", note: "x".repeat(301) }, { op: "approve", id: "p-1", note: "a\0b" }])
+    assert.equal(typeof (await improve(fields)).error, "string", JSON.stringify(fields));
+  assert.equal(typeof JSON.parse(await impl.improve({ op: "approve" })).error, "string", "missing fields");
+  assert.equal(log.length, spawned, "invalid proposal requests spawned something");
+  for (const entry of log) assert.ok(!JSON.stringify(entry).includes("--force") && !JSON.stringify(entry).includes("shell\":true"), "a force flag or a shell");
+  const demo = mainContext({ home: ORCHESTRATION, python, demo: true });
+  resolveDefault(loaded.module.exports).main(demo.ctx);
+  assert.match(JSON.parse(await demo.provided[0].impl.improve({ op: "read", id: "", note: "" })).error, /demo/);
+  assert.equal(log.length, spawned, "the demo spawned something");
+});
+
+await check("n24 panel: the view gets actions.improve, which asks main with string fields, answers the list or the proposal as main said, turns a refusal into a rejection with its words, and refuses a bad request before main; the demo has none", async () => {
+  const definition = windowLoad.gui.defined[0];
+  const session = { key: "srv\nses_a", id: "ses_a", directory: ORCHESTRATION };
+  const props = { get session() { return session; }, screen: {} };
+  const w = windowContext(definition, { session });
+  definition.setup(w.ctx);
+  const rendered = windowLoad.solid.runWithOwner(() => value(w.added[1].item).render(props));
+  const { improve } = mountCalls[mountCalls.length - 1].options.actions;
+  assert.equal(typeof improve, "function");
+  assert.equal((await improve({ op: "read" })).proposals[0].id, "p-1");
+  assert.equal((await improve({ op: "read", id: "p-1" })).state, "drafted");
+  assert.equal((await improve({ op: "approve", id: "p-1" })).state, "applied");
+  assert.equal((await improve({ op: "reject", id: "p-1", note: "no" })).state, "rejected");
+  assert.equal((await improve({ op: "reopen", id: "p-1" })).state, "drafted");
+  assert.equal((await improve({ op: "revert", id: "p-1" })).state, "reverted");
+  assert.deepEqual(w.calls.filter((c) => c.op === "improve").map((c) => c.input), [
+    { op: "read", id: "", note: "" }, { op: "read", id: "p-1", note: "" }, { op: "approve", id: "p-1", note: "" },
+    { op: "reject", id: "p-1", note: "no" }, { op: "reopen", id: "p-1", note: "" }, { op: "revert", id: "p-1", note: "" },
+  ]);
+  const failure = async (request) => {
+    try {
+      await improve(request);
+    } catch (error) {
+      return error.message;
+    }
+    return "";
+  };
+  assert.match(await failure({ op: "approve", id: "p-refused" }), /changed since the proposal was drafted/);
+  const asked = w.calls.filter((c) => c.op === "improve").length;
+  for (const bad of [undefined, null, {}, { op: "show" }, { op: "approve" }, { op: "approve", id: "-x" }, { op: "read", id: "a b" }, { op: "approve", id: "p-1", note: 5 }, { op: "reject", id: "p-1", note: "x".repeat(301) }])
+    assert.equal(await failure(bad), "Bad proposal request.", JSON.stringify(bad));
+  assert.equal(w.calls.filter((c) => c.op === "improve").length, asked, "a bad request reached main");
+  rendered.dispose();
+  const demoWindow = windowContext(definition, { session, options: { demo: true } });
+  definition.setup(demoWindow.ctx);
+  const demoRendered = windowLoad.solid.runWithOwner(() => value(demoWindow.added[1].item).render(props));
+  assert.equal(mountCalls[mountCalls.length - 1].options.actions?.improve, undefined, "the demo has an improve action");
+  demoRendered.dispose();
+});
+// ---- end n24 ----
 
 await check("the harness replaces an existing temporary bundle before reading it", () => {
   // build.mjs writes atomically, so even an identical rebuild replaces the existing file.

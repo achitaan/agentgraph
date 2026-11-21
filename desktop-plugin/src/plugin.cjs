@@ -326,6 +326,14 @@ function snapshotIpc(pluginId) {
           output: Schema.String,
         },
         // ---- end n10 ----
+        // ---- n24: improvement proposals (Learning area) ----
+        // improve (`agentgraph.improve`): op ("read", "approve", "reject", "reopen" or "revert"), id ("" for the list) and
+        // note (a rejection's reason; "" otherwise). Output: JSON text, {"proposals": [...]}, the proposal, or {"error": "..."}.
+        improve: {
+          input: Schema.Struct({ op: Schema.String, id: Schema.String, note: Schema.String }),
+          output: Schema.String,
+        },
+        // ---- end n24 ----
       },
     });
     ipcTokens.set(pluginId, token);
@@ -924,6 +932,39 @@ function createSpendRunner(deps) {
 }
 // ---- end n10 ----
 
+// ---- n24 ---- Main process: `python3 -P -m agentgraph.improve list|show|approve|reject|reopen|revert ... --line` without a shell.
+// The proposals of the active preset's ledger and the live config root (the command's own defaults); a proposal's id is checked
+// here as the command checks it, a reason or note is one argument (never a shell word), and nothing but the answer's JSON comes
+// back. `--force` is never given: a changed file refuses the approval, an edited one the revert.
+const PROPOSAL_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const PROPOSAL_NOTE_CHARS = 300;
+function createImproveRunner(deps) {
+  const fail = (message) => ({ error: oneLine(message) });
+  function command(input) {
+    if (!isPlainObject(input) || !["op", "id", "note"].every((key) => typeof input[key] === "string")) return fail("Bad proposal request.");
+    const { op, id, note } = input;
+    const base = ["-P", "-m", "agentgraph.improve"];
+    if (note.length > PROPOSAL_NOTE_CHARS || note.includes("\0")) return fail("The note is longer than " + PROPOSAL_NOTE_CHARS + " characters.");
+    if (op === "read") {
+      if (note) return fail("Bad proposal request.");
+      if (!id) return { args: base.concat(["list", "--line"]), stdin: "" };
+      if (!PROPOSAL_ID.test(id)) return fail("The proposal needs a valid id.");
+      return { args: base.concat(["show", id, "--line"]), stdin: "" };
+    }
+    if (!PROPOSAL_ID.test(id)) return fail("The proposal needs a valid id.");
+    if (op === "approve") return { args: base.concat(["approve", id, "--by-user", note.trim() || "approved in the panel", "--line"]), stdin: "" };
+    if (op === "reject") {
+      if (!note.trim()) return fail("Rejecting needs a reason.");
+      return { args: base.concat(["reject", id, "--reason", note.trim(), "--line"]), stdin: "" };
+    }
+    if (op === "reopen" || op === "revert") return { args: base.concat([op, id].concat(note.trim() ? ["--note", note.trim()] : [], ["--line"])), stdin: "" };
+    return fail("Bad proposal request.");
+  }
+  const accept = (doc) => (Array.isArray(doc.proposals) || typeof doc.id === "string" ? doc : null);
+  return { improve: serialRunner(deps, (input) => command(input), "The proposals command", accept, "The demo has no proposals.") };
+}
+// ---- end n24 ----
+
 // Main process: `python3 -P -m agentgraph.chatfeed --session=ID --json --limit=N [--demo] [--side]` without a shell, read-only. The
 // session id and the limit are checked here as the window checks them; the feed is passed on as the command printed it
 // (it holds no tool input or output), and an error document or a failed command is { error: one line }.
@@ -1043,6 +1084,7 @@ function main(ctx) {
   const outputs = createOutputRunner(commandDeps(SKILL_FILE_MAX_BYTES));
   const setups = createSetupRunner(commandDeps(FLOW_MAX_BYTES)); // n10
   const spends = createSpendRunner(commandDeps(FLOW_MAX_BYTES)); // n10
+  const improves = createImproveRunner(commandDeps(FLOW_MAX_BYTES)); // n24
   // The chat is read as the snapshot is: the same time limit and size cap.
   const chats = createChatRunner(Object.assign(commandDeps(SNAPSHOT_MAX_BYTES), { timeoutMs: SNAPSHOT_TIMEOUT_MS }));
 
@@ -1058,6 +1100,7 @@ function main(ctx) {
     output: (input) => outputs.output(input).then((doc) => JSON.stringify(doc)),
     setup: (input) => setups.setup(input).then((doc) => JSON.stringify(doc)), // n10
     spend: (input) => spends.spend(input).then((doc) => JSON.stringify(doc)), // n10
+    improve: (input) => improves.improve(input).then((doc) => JSON.stringify(doc)), // n24
     chat: (input) => chats.chat(input).then((doc) => JSON.stringify(doc)),
     side: (input) => sides.side(input).then((doc) => JSON.stringify(doc)),
   });
@@ -1424,6 +1467,18 @@ function renderPanel(ctx, solid, props) {
     carryExpect(request, input, "Bad setup request.");
     return askMain("setup", input, "setup", (doc) => typeof doc.message === "string");
   };
+  // ---- n24 ---- The proposals take the page's `{op: "read", id?}` and `{op: "approve"|"reject"|"reopen"|"revert", id, note?}`.
+  const improve = async (request) => {
+    if (!alive) throw new Error("The panel is closed.");
+    const ops = ["read", "approve", "reject", "reopen", "revert"];
+    if (!isPlainObject(request) || !ops.includes(request.op)) throw new Error("Bad proposal request.");
+    const idOk = typeof request.id === "string" && PROPOSAL_ID.test(request.id);
+    if (request.op === "read" ? request.id !== undefined && !idOk : !idOk) throw new Error("Bad proposal request.");
+    if (request.note !== undefined && (typeof request.note !== "string" || request.note.length > PROPOSAL_NOTE_CHARS || (request.op !== "reject" && request.op !== "reopen" && request.op !== "revert" && request.op !== "approve"))) throw new Error("Bad proposal request.");
+    const input = { op: request.op, id: request.id || "", note: request.note || "" };
+    return askMain("improve", input, "proposals", (doc) => Array.isArray(doc.proposals) || typeof doc.id === "string");
+  };
+  // ---- end n24 ----
   const spend = async (request) => {
     if (!alive) throw new Error("The panel is closed.");
     if (!isPlainObject(request) || (request.op !== "limit" && request.op !== "off")) throw new Error("Bad spend request.");
@@ -1528,7 +1583,7 @@ function renderPanel(ctx, solid, props) {
   // The page shows a control only for an action it is given: send and stop only where the host has the call.
   const demoMode = ctx.options && ctx.options.demo === true;
   const hostHas = (name) => typeof sessionClient()?.[name] === "function";
-  const actions = demoMode ? { chat } : { flow, skills, roster, skillfile, team, output, run, chat, side, setup, spend };
+  const actions = demoMode ? { chat } : { flow, skills, roster, skillfile, team, output, run, chat, side, setup, spend, improve };
   if (!demoMode && hostHas("prompt")) actions.send = send;
   if (!demoMode && hostHas("interrupt")) actions.stop = stop;
 

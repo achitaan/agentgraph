@@ -5,7 +5,8 @@
  * selectable rows)
  *   Rows, most actionable first, no blank lines: what needs the user (requests, human gates, stuck or stalled
  *   agents), the hub with the idle count, who works now, the task's progress in one row, spend and context in one
- *   row, and (panel only) one dim row of keys. Empty sections are left out.
+ *   row, and (panel only) one dim row of keys. Empty sections are left out. Improvement proposals waiting or applied
+ *   (`learning.proposals`) are up to 3 rows after the needs list, then the commands that decide them.
  *   Line = Span[], Span = { text, tone }
  *   tone is one of TONES. No line is wider than `width` display columns.
  *
@@ -706,6 +707,36 @@ function needsRow(item, width, now) {
   });
 }
 
+// Improvement proposals (`learning.proposals`: id, title, state, verdict, newest first): the ones waiting for a decision
+// (drafted, evaluated), then the applied, at most PROPOSALS_MAX rows, each "<mark> <title> <state> <verdict>  <id>", then
+// one row with the commands. The rows are not selectable (a select-and-act pattern exists only for sessions and paths):
+// the commands decide, in a shell, with the id the row shows.
+export const PROPOSALS_MAX = 3;
+export const PROPOSAL_COMMANDS = "agentgraph improve show|approve|reject|revert ID";
+function proposalRows(doc, width) {
+  const learning = isObject(doc.learning) ? doc.learning : null;
+  const shown = list(learning && learning.proposals).filter((p) => isObject(p) && typeof p.id === "string" && p.id);
+  const waiting = shown.filter((p) => p.state === "drafted" || p.state === "evaluated");
+  const applied = shown.filter((p) => p.state === "applied");
+  const rows = waiting.concat(applied);
+  if (!rows.length) return [];
+  const out = [];
+  const take = rows.length > PROPOSALS_MAX + 1 ? rows.slice(0, PROPOSALS_MAX) : rows;
+  for (const p of take) {
+    const wait = p.state === "drafted" || p.state === "evaluated";
+    const verdict = clean(p.verdict);
+    out.push(composeRow(width, {
+      head: [sp(wait ? QUESTION : MARK_IDLE, wait ? "accent" : "muted"), sp(" ", "plain")],
+      name: clean(p.title) || clean(p.id),
+      tail: [sp(" " + clean(p.state), wait ? "accent" : "muted"), ...(verdict ? [sp(" " + verdict, "muted")] : [])],
+      what: clean(p.id),
+    }));
+  }
+  if (take.length < rows.length) out.push([sp(`+${rows.length - take.length} more proposals`, "muted")]);
+  out.push([sp(truncate(PROPOSAL_COMMANDS, width), "muted")]);
+  return out;
+}
+
 function hubRow(doc, hub, idle, width, frame) {
   const working = hubWorking(doc, hub);
   const rootName = isObject(doc.root) && typeof doc.root.agent === "string" ? doc.root.agent : "";
@@ -1064,6 +1095,8 @@ export function layout(snapshot, options = {}) {
     if (doing) rows.push({ line: doing });
   }
   if (shownNeeds.length < needs.length) rows.push({ line: [sp(`+${needs.length - shownNeeds.length} more`, "muted")] });
+
+  for (const line of proposalRows(snapshot, inner)) rows.push({ line });
 
   // 2. who works now: the hub, then the others (longest at it first); idle agents are a count on the hub's row
   const flagged = new Set(needs.map((n) => n.agent).filter(Boolean));

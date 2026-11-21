@@ -769,3 +769,59 @@
 .agentgraph .ag-setup-undo { margin: 4px 0 0; font-size: 11px; color: var(--ag-muted); }
 .agentgraph .ag-setup-undo .ag-text-button { padding: 2px 0; }
 .agentgraph .ag-setup-save .ag-form-actions[data-asking="true"] { flex-wrap: wrap; }
+/* n24: improvement proposals (Learning area). Additions and removals differ by the gutter sign, not by colour alone; no green; no motion. */
+.agentgraph .ag-proposals-line[data-waiting="true"] { color: var(--ag-work); }
+.agentgraph .ag-proposal-list { margin: 0; }
+.agentgraph .ag-proposal { border-top: 1px solid var(--ag-row-divider); }
+.agentgraph .ag-proposal:first-child { border-top: 0; }
+.agentgraph .ag-proposal-head { width: 100%; display: block; border: 0; background: none; padding: 7px 0; text-align: left; }
+.agentgraph .ag-proposal-head:hover .ag-proposal-title { color: var(--ag-work); }
+.agentgraph .ag-proposal-head::before { content: '▸'; float: left; width: 1.1em; font-size: 12px; color: var(--ag-muted); }
+.agentgraph .ag-proposal[data-open="true"] > .ag-proposal-head::before { content: '▾'; }
+.agentgraph .ag-proposal-title { display: block; margin-left: 1.1em; font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
+.agentgraph .ag-proposal-meta { display: flex; flex-wrap: wrap; gap: 0 10px; margin: 1px 0 0 1.1em; font-size: 11px; color: var(--ag-muted); font-variant-numeric: tabular-nums; }
+.agentgraph .ag-proposal-state[data-waiting="true"] { color: var(--ag-work); font-weight: 600; }
+.agentgraph .ag-proposal-verdict[data-verdict="worse"] { color: var(--ag-danger); }
+.agentgraph .ag-proposal-verdict[data-verdict="better"] { color: var(--ag-ink); font-weight: 600; }
+.agentgraph .ag-proposal-body { margin: 0 0 8px 1.1em; }
+.agentgraph .ag-proposal-part { margin: 0 0 10px; }
+.agentgraph .ag-proposal-part h4 { margin: 0 0 3px; font-size: 11px; font-weight: 600; color: var(--ag-muted); letter-spacing: .02em; }
+.agentgraph .ag-proposal-why { margin: 0; font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
+.agentgraph .ag-proposal-ref { margin: 0 0 2px; font-size: 11px; white-space: normal; overflow-wrap: anywhere; }
+.agentgraph .ag-proposal-ref-label { display: inline-block; min-width: 4em; color: var(--ag-muted); }
+.agentgraph .ag-eval { border-collapse: collapse; width: 100%; font-size: 11px; font-variant-numeric: tabular-nums; }
+.agentgraph .ag-eval th, .agentgraph .ag-eval td { padding: 3px 8px 3px 0; text-align: left; font-weight: 400; border-bottom: 1px solid var(--ag-row-divider); }
+.agentgraph .ag-eval thead th { color: var(--ag-muted); }
+.agentgraph .ag-eval tbody th { color: var(--ag-ink); }
+.agentgraph .ag-eval-unit { color: var(--ag-muted); }
+.agentgraph .ag-proposal-verdictline { margin: 5px 0 0; font-size: 11px; white-space: normal; }
+.agentgraph .ag-proposal-verdictline[data-verdict="worse"] { color: var(--ag-danger); }
+.agentgraph .ag-proposal-file { display: flex; flex-wrap: wrap; gap: 0 10px; margin: 0 0 3px; font-size: 11px; white-space: normal; }
+.agentgraph .ag-proposal-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; overflow-wrap: anywhere; }
+.agentgraph .ag-proposal-file .ag-proposal-size { color: var(--ag-muted); font-variant-numeric: tabular-nums; }
+.agentgraph .ag-proposal-warn { margin: 0 0 4px; font-size: 11px; color: var(--ag-work); white-space: normal; }
+.agentgraph .ag-diff { max-height: 36em; overflow: auto; border: 1px solid var(--ag-line); border-radius: 5px; background: var(--ag-paper); font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.agentgraph .ag-diff:focus-visible { outline: 2px solid var(--ag-work); outline-offset: -2px; }
+.agentgraph .ag-diff-line { display: flex; }
+.agentgraph .ag-diff-sign { flex: 0 0 2.2em; text-align: center; color: var(--ag-muted); border-right: 1px solid var(--ag-line); user-select: none; }
+.agentgraph .ag-diff-text { flex: 1; min-width: 0; padding: 0 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agentgraph .ag-diff-line[data-kind="add"] { background: var(--ag-highlight); }
+.agentgraph .ag-diff-line[data-kind="add"] .ag-diff-sign { color: var(--ag-ink); font-weight: 700; }
+.agentgraph .ag-diff-line[data-kind="del"] { background: var(--ag-badge-bg); color: var(--ag-muted); }
+.agentgraph .ag-diff-line[data-kind="del"] .ag-diff-sign { color: var(--ag-work); font-weight: 700; }
+.agentgraph .ag-diff-line[data-kind="hunk"], .agentgraph .ag-diff-line[data-kind="note"] { color: var(--ag-muted); font-style: italic; }
+.agentgraph .ag-diff-none { margin: 0; padding: 4px 8px; font: 11px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: var(--ag-muted); white-space: normal; }
+.agentgraph .ag-proposal-backup { margin: 0 0 8px; font-size: 11px; color: var(--ag-muted); white-space: normal; overflow-wrap: anywhere; }
+.agentgraph .ag-proposal-actions { margin: 4px 0 0; }
+.agentgraph .ag-proposal-actions .ag-form-buttons { flex-wrap: wrap; align-items: center; }
+.agentgraph .ag-proposal-actions .ag-text-button { padding: 5px 0; }
+.agentgraph .ag-proposal-ask { padding: 8px 10px; border: 1px solid var(--ag-control-border); border-radius: 6px; background: var(--ag-highlight); font-size: 12px; }
+.agentgraph .ag-proposal-ask p { margin: 0 0 8px; white-space: normal; overflow-wrap: anywhere; }
+.agentgraph .ag-proposal-ask .ag-field { display: block; margin-bottom: 8px; }
+.agentgraph .ag-proposal-ask .ag-input { width: 100%; margin-top: 3px; }
+.agentgraph .ag-proposal-line { margin: 6px 0; font-size: 11px; white-space: normal; overflow-wrap: anywhere; }
+.agentgraph .ag-form-submit[aria-disabled="true"] { cursor: progress; opacity: .6; }
+
+/* n24: the verdict line carries the four counts beside the sentence. */
+.agentgraph .ag-proposal-verdictline .ag-proposal-counts { display: block; margin-top: 2px; color: var(--ag-muted); font-size: 11px; }
+.agentgraph .ag-proposal-verdict[data-verdict="better on tune only"] { color: var(--ag-ink); }

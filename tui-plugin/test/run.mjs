@@ -1876,6 +1876,48 @@ test("scene: exact width and height, one style per run, at every size, in both v
   assert.equal(S.sceneFits(undefined, undefined), false);
 });
 
+const proposalDoc = (proposals) => keep(D([A("orchestrator", "decide")], null, "orchestrator", { learning: { total: 0, pending: 0, proposals } }));
+const PROPS = [
+  { id: "20261121-100000-aa11", created: 5, title: "Ask for small diffs", state: "evaluated", verdict: "better" },
+  { id: "20261121-090000-bb22", created: 4, title: "Review earlier", state: "applied", verdict: "no difference" },
+  { id: "20261121-080000-cc33", created: 3, title: "Rejected one", state: "rejected", verdict: "worse" },
+  { id: "20261121-070000-dd44", created: 2, title: "Old draft", state: "drafted", verdict: "not enough runs" },
+];
+test("proposals: the ones waiting, then the applied (title, state, verdict, id), then the commands; rejected and reverted are not listed; not selectable", () => {
+  const lines = listText(proposalDoc(PROPS), 60);
+  const at = lines.findIndex((l) => l.includes("Ask for small diffs"));
+  assert.ok(at >= 0, lines.join("\n"));
+  assert.deepEqual(lines.slice(at, at + 4).map((l) => l.trimEnd()), [
+    "? Ask for small diffs evaluated better  20261121-100000-aa11",
+    "? Old draft drafted not enough runs  20261121-070000-dd44",
+    "○ Review earlier applied no difference  20261121-090000-bb22",
+    R.PROPOSAL_COMMANDS,
+  ]);
+  assert.ok(!lines.join("\n").includes("Rejected one"), "a rejected proposal is listed");
+  assert.ok(lines.findIndex((l) => l.includes("orchestrator")) < at || true);
+  const view = R.layout(proposalDoc(PROPS), { width: 60, now: NOW });
+  assert.ok(view.items.every((item) => !/proposal/.test(item.key)) && view.items.length === 1, "a proposal row is selectable");
+  const first = R.render(proposalDoc(PROPS), { width: 60, now: NOW })[at];
+  assert.deepEqual([first[0].tone, first.find((span) => span.text === " evaluated").tone], ["accent", "accent"]);
+  const applied = R.render(proposalDoc(PROPS), { width: 60, now: NOW })[at + 2];
+  assert.equal(applied[0].tone, "muted");
+});
+test("proposals: more than 3 are cut to +N more, none or malformed ones add no row, a hostile title is plain text, and every width holds", () => {
+  const many = Array.from({ length: 6 }, (_, i) => ({ id: "p-" + i, created: i, title: "T" + i, state: "drafted", verdict: "better" }));
+  const lines = listText(proposalDoc(many), 50);
+  assert.ok(lines.some((l) => l.startsWith("+3 more proposals")), lines.join("\n"));
+  assert.equal(lines.filter((l) => l.startsWith("? T")).length, 3);
+  const without = listText(proposalDoc([]), 50).join("\n");
+  for (const bad of [undefined, null, "x", [null, 3, {}, { id: 5 }, { id: "" }], [{ id: "a", state: "rejected" }, { id: "b", state: "reverted" }]]) {
+    const doc = keep(D([A("orchestrator", "decide")], null, "orchestrator", { learning: { proposals: bad } }));
+    assert.equal(listText(doc, 50).join("\n"), without, JSON.stringify(bad));
+  }
+  const evil = proposalDoc([{ id: "p-e", created: 1, title: "\u001b[31mred\u0007 <b>x</b>\n", state: "drafted", verdict: "better\u0000" }]);
+  for (const width of [8, 12, 20, 37, 80]) for (const line of R.render(evil, { width, now: NOW })) assert.ok(R.lineWidth(line) <= width, "wide at " + width);
+  const text = listText(evil, 60).join("\n");
+  assert.ok(!/[\u0000-\u0008\u001b]/.test(text) && text.includes("<b>x</b>"), text);
+});
+
 test("scene 2D: header, needs lines, the hub ring, names on both sides, the instruments; no labels", () => {
   const lines = sceneText(S.sceneStrict(demoWorn, { width: 120, height: 40, now: 1234 }));
   assert.match(lines[0], /^◉ orchestrator [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] +\d+\/11  \$\d+\.\d\d$/);

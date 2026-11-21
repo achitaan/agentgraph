@@ -287,6 +287,14 @@ class ImproveEndpointTests(unittest.TestCase):
         self.assertEqual(self.file.read_bytes(), self.original)
         self.assertEqual(self.act("approve")[0], 400)
 
+    def test_reopen_undoes_a_reject(self):
+        self.assertEqual(self.act("reopen")[0], 400)  # not rejected
+        self.act("reject", note="not now")
+        status, body = self.act("reopen")
+        self.assertEqual((status, body["state"], body["history"][-1]["who"]), (200, "drafted", "user"))
+        self.assertEqual(self.act("approve")[0], 200)
+        self.assertEqual(self.file.read_bytes(), b"Be briefer.\n")
+
     def test_bad_requests_and_protections(self):
         for body in ({"action": "approve"}, {"action": "force", "id": self.record["id"]},
                      {"action": "approve", "id": 3}, {"action": "approve", "id": "x", "force": True},

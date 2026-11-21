@@ -638,6 +638,14 @@ def ledger_home(home_root: Path | None = None, config_dir: Path | None = None,
     return home if home.is_dir() else None
 
 
+def _proposals(home: Path) -> list[dict]:
+    try:
+        from . import improve
+        return improve.digest(home)
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def learning_document(home_root: Path | None = None, config_dir: Path | None = None,
                       config_path: Path | None = None) -> dict | None:
     """What the ledger has stored for the active preset: the user's notes in
@@ -668,6 +676,8 @@ def learning_document(home_root: Path | None = None, config_dir: Path | None = N
             "agents": {name: {"steps": stats["nodes"], "first_pass_rate": stats["first_pass_rate"],
                               "mean_attempts": stats["mean_attempts"]}
                        for name, stats in list(report["agents"].items())[:100]},
+            # Improvement proposals (agentgraph.improve): id, created, title, state, verdict; the terminal panel lists them.
+            "proposals": _proposals(home),
         }
     except Exception:  # noqa: BLE001
         return None

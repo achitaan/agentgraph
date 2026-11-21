@@ -1318,7 +1318,7 @@
       if (!sessionID) return;
       try { Promise.resolve(options.onOpenSession({ agent: name, sessionID })).catch(() => {}); } catch (_) { /* the details stay open either way */ }
     }
-    function learningLine(learning) { return [learning.total + (learning.total === 1 ? ' note' : ' notes'), learning.pending ? learning.pending + ' new' : '', learning.due ? 'change due' : '', learning.improvements ? learning.improvements + ' applied' : ''].filter(Boolean).join(' · '); }
+    function learningLine(learning) { return [learning.total + (learning.total === 1 ? ' note' : ' notes'), learning.pending ? learning.pending + ' new' : '', learning.due ? 'change due' : '', learning.improvements ? learning.improvements + ' applied' : '', waitingProposals() ? waitingProposals() + (waitingProposals() === 1 ? ' proposal waiting' : ' proposals waiting') : ''].filter(Boolean).join(' · '); }
     function cells(parent, pairs) {
       const grid = el('div', 'ag-stats');
       pairs.forEach(([label, value]) => { const cell = el('div', 'ag-stat'); cell.append(el('span', 'ag-stat-label', label), el('span', 'ag-stat-value', value)); grid.append(cell); });
@@ -3235,6 +3235,252 @@
     // The three blocks, below the totals of the run details. Not drawn without the snapshot's field.
     function renderSetupPlace() { renderLimitBlock(); renderPresetBlock(); renderSavedBlock(); }
     // ---- end n10 ----
+    // ---- n24: improvement proposals, in the Learning area (actions.improve) ----
+    // One row per proposal, newest first; a row opens to why, the evidence, the evaluation, each change as a unified diff,
+    // the history and the actions its state allows. Everything shown is what the back end last said: a write's answer is
+    // the proposal as it now is, a refusal is said in plain words beside the buttons, and the row is read again after it.
+    // The host's action takes `{ op: 'read' }` (the list), `{ op: 'read', id }` (one, with its diffs) and
+    // `{ op: 'approve' | 'reject' | 'reopen' | 'revert', id, note? }` (WEB_API.md, /api/improve). No timer, no motion.
+    // The page (index.html) passes no `improve` action: on http(s) with a writing host it reads and writes /api/improve itself.
+    const improveFetch = async request => {
+      const path = typeof options.improveUrl === 'string' && options.improveUrl ? options.improveUrl : '/api/improve';
+      const read = request.op === 'read';
+      const response = await fetch(read ? path + (request.id ? '?id=' + encodeURIComponent(request.id) : '') : path, read ? { cache: 'no-store' }
+        : { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: request.op, id: request.id, ...(request.note ? { note: request.note } : {}) }) });
+      let data = null;
+      try { data = await response.json(); } catch (_) { /* the status says it */ }
+      if (!response.ok || !data || data.error) throw Object.assign(new Error(data?.error || 'The proposals could not be read or changed (' + response.status + ')'), { status: response.status });
+      return data;
+    };
+    const improveAction = action('improve') || (options.actions && typeof fetch === 'function' && /^https?:$/.test(typeof location === 'object' ? location.protocol : '') ? improveFetch : null);
+    const PROPOSAL_FRESH_MS = 10000, DIFF_LINES = 300;
+    const proposals = { list: null, at: 0, loading: false, error: '' };
+    const proposalFull = new Map(), proposalNotes = new Map(), proposalDraft = new Map(), proposalReading = new Set(), proposalBusy = new Set();
+    let proposalOpen = '', proposalAsking = null, proposalWanted = '';
+    const proposalWaiting = item => item.state === 'drafted' || item.state === 'evaluated';
+    const waitingProposals = () => (proposals.list || []).filter(proposalWaiting).length;
+    const proposalHere = () => !!improveAction && alive && (selected?.type === 'learning' || selected?.type === 'run');
+    // The list entry a whole proposal stands for.
+    function proposalEntry(full) {
+      return { id: full.id, created: full.created, title: full.title, state: full.state, summary: full.summary, added: full.added, removed: full.removed, files: (full.files || []).map(file => file.path) };
+    }
+    function proposalTake(full) {
+      if (!full || typeof full.id !== 'string') return;
+      proposalFull.set(full.id, full);
+      const list = (proposals.list || []).filter(item => item.id !== full.id); list.push(proposalEntry(full));
+      proposals.list = list.sort((a, b) => (Number(b.created) || 0) - (Number(a.created) || 0));
+    }
+    // The list, read again when it is older than a few seconds (or when asked); drawn again only when it changed.
+    function proposalsLoad(force) {
+      if (!improveAction || proposals.loading || (!force && proposals.list && Date.now() - proposals.at < PROPOSAL_FRESH_MS)) return;
+      proposals.loading = true;
+      const before = JSON.stringify([proposals.list, proposals.error]);
+      ask(improveAction, { op: 'read' }).then(reply => {
+        if (!alive) return;
+        proposals.list = (Array.isArray(reply.proposals) ? reply.proposals : []).filter(item => item && typeof item.id === 'string').sort((a, b) => (Number(b.created) || 0) - (Number(a.created) || 0));
+        proposals.error = '';
+      }, error => {
+        if (!alive) return;
+        proposals.error = sentence(message(error, 'The proposals could not be read'));
+      }).then(() => {
+        proposals.loading = false; proposals.at = Date.now();
+        if (alive && before !== JSON.stringify([proposals.list, proposals.error]) && proposalHere()) forceDetail();
+      });
+    }
+    // One proposal read whole (its diffs are against the files as they are now).
+    function proposalRead(id) {
+      if (!improveAction || proposalReading.has(id)) return;
+      proposalReading.add(id);
+      ask(improveAction, { op: 'read', id }).then(reply => { if (alive) { proposalTake(reply); proposalNotes.delete(id + ':read'); } },
+        error => { if (alive) proposalNotes.set(id + ':read', { kind: 'error', text: sentence(message(error, 'The proposal could not be read')) }); })
+        .then(() => { proposalReading.delete(id); if (alive && proposalHere() && proposalOpen === id) forceDetail(); });
+    }
+    function proposalRedraw(wanted = '') { proposalWanted = wanted; forceDetail(); }
+    // One write: ask, take the answer as the proposal's state, say what happened, read the snapshot again.
+    function proposalWrite(id, op, note, said) {
+      if (!improveAction || proposalBusy.size) return;
+      proposalBusy.add(id); proposalNotes.delete(id);
+      let wanted = id + ':head';
+      proposalRedraw(wanted);
+      ask(improveAction, { op, id, ...(note ? { note } : {}) }).then(async reply => {
+        if (!alive) return;
+        proposalTake(reply); proposalAsking = null; proposalDraft.delete(id);
+        proposalNotes.set(id, { kind: 'ok', text: said(reply) });
+        try { await afterChange(); } catch (_) { /* the refusal of a refresh is said by the next one */ }
+      }, error => {
+        if (!alive) return;
+        proposalNotes.set(id, { kind: 'error', text: sentence(message(error, 'Not changed')) });
+        if (op !== 'reject') proposalAsking = null;
+        wanted = id + ':head';
+        proposalRead(id); proposalsLoad(true); // what the refusal says may be that it changed elsewhere: show it as it is now
+      }).then(() => { proposalBusy.delete(id); if (alive) proposalRedraw(wanted); });
+    }
+    const PROPOSAL_STATE = { drafted: 'drafted', evaluated: 'evaluated', applied: 'applied', rejected: 'rejected', reverted: 'reverted' };
+    const PROPOSAL_VERDICT = {
+      better: 'Better: the held-out pass rate is higher and the tune rate is not lower.',
+      'better on tune only': 'Better on tune only: the tune rate is higher but the held-out rate did not move, so the fix is not confirmed on cases it was not written from.',
+      worse: 'Worse: it passes fewer than before on the tune or the held-out cases.',
+      'no difference': 'No difference in the pass rates.',
+      'not enough runs': 'Not enough runs to judge: at least 2 held-out results before and after are needed.'
+    };
+    // The four counts the verdict rests on, in words: "held-out 3/9 → 3/9 · tune 3/6 → 5/6".
+    function proposalCounts(summary) {
+      const side = (label, pair) => pair && Array.isArray(pair.before) && Array.isArray(pair.after) && (Number(pair.before[1]) > 0 || Number(pair.after[1]) > 0) ? label + ' ' + passes(pair.before).replace(' / ', '/') + ' → ' + passes(pair.after).replace(' / ', '/') : '';
+      return [side('held-out', summary?.held_out), side('tune', summary?.tune)].filter(Boolean).join(' · ');
+    }
+    const passes = pair => Array.isArray(pair) && Number(pair[1]) > 0 ? Number(pair[0]) + ' / ' + Number(pair[1]) : '—';
+    // The unified diff as rows with a sign in a gutter (+ added, - removed), so colour is never the only difference.
+    function diffBox(file) {
+      const lines = String(file.diff || '').split('\n'); if (lines[lines.length - 1] === '') lines.pop();
+      if (lines[0]?.startsWith('--- ') && lines[1]?.startsWith('+++ ')) lines.splice(0, 2);
+      const box = el('div', 'ag-diff'); box.tabIndex = 0; box.setAttribute('role', 'region'); box.setAttribute('aria-label', 'Changes to ' + text(file.path));
+      if (!lines.length) { box.append(el('p', 'ag-diff-none', file.diff_against === 'backup' ? 'The backup and the new text are the same.' : 'No difference from the file as it is now.')); return box; }
+      lines.slice(0, DIFF_LINES).forEach(line => {
+        const kind = line.startsWith('@@') ? 'hunk' : line[0] === '+' ? 'add' : line[0] === '-' ? 'del' : line[0] === '\\' ? 'note' : 'same';
+        const row = el('div', 'ag-diff-line'); row.dataset.kind = kind;
+        row.append(el('span', 'ag-diff-sign', kind === 'add' ? '+' : kind === 'del' ? '-' : ''), el('span', 'ag-diff-text', kind === 'hunk' || kind === 'note' ? line : line.slice(1)));
+        box.append(row);
+      });
+      if (lines.length > DIFF_LINES) box.append(el('p', 'ag-diff-none', '+' + (lines.length - DIFF_LINES) + ' more lines not shown. The whole diff: agentgraph improve show ' + text(file.proposal)));
+      return box;
+    }
+    function proposalTable(full) {
+      const summary = full.summary || {}, rows = full.evaluation || {};
+      const mean = phase => { const known = (Array.isArray(rows[phase]) ? rows[phase] : []).map(row => row?.cost).filter(value => typeof value === 'number' && Number.isFinite(value)); return known.length ? cost(known.reduce((sum, value) => sum + value, 0) / known.length) : ''; };
+      const table = el('table', 'ag-eval'), head = el('tr');
+      head.append(el('th'), el('th', '', 'Before'), el('th', '', 'After')); head.children[1].scope = head.children[2].scope = 'col'; head.firstChild.append(el('span', 'ag-eval-unit', 'passed / total'));
+      const body = el('tbody'), line = (label, before, after) => { const tr = el('tr'), th = el('th', '', label); th.scope = 'row'; tr.append(th, el('td', '', before || '—'), el('td', '', after || '—')); body.append(tr); };
+      line('Tune', passes(summary.tune?.before), passes(summary.tune?.after));
+      line('Held-out', passes(summary.held_out?.before), passes(summary.held_out?.after));
+      if (mean('before') || mean('after')) line('Cost per run', mean('before'), mean('after'));
+      table.append(el('thead'), body); table.firstChild.append(head);
+      return table;
+    }
+    function proposalControl(label, id, kind, onPress, className = 'ag-form-submit') {
+      const button = setupButton(label, { proposalControl: id + ':' + kind, proposalAction: kind }, onPress, className);
+      if (proposalBusy.has(id)) button.setAttribute('aria-disabled', 'true');
+      return button;
+    }
+    function proposalActions(body, full) {
+      const id = full.id, state = full.state, busy = () => proposalBusy.size > 0;
+      const box = el('div', 'ag-proposal-actions'); body.append(box);
+      const writes = (full.files || []).map(file => text(file.path));
+      const open = kind => { if (busy()) return; proposalAsking = { id, kind }; proposalNotes.delete(id); proposalRedraw(id + ':' + (kind === 'approve' ? 'confirm' : 'reason')); };
+      const asking = proposalAsking && proposalAsking.id === id ? proposalAsking.kind : '';
+      const done = (kind, reply) => kind === 'approve' ? 'Approved. ' + plural(writes.length, 'file was', 'files were') + ' written' + (reply.applications?.length ? '; the backup is in ' + text(reply.applications[reply.applications.length - 1].backup) + '.' : '.')
+        : kind === 'reject' ? 'Rejected. No file was changed. Reopen puts it back.' : kind === 'revert' ? 'Reverted. The files are as they were before it was applied. Approve again puts it back.'
+        : 'Reopened: it is ' + text(reply.state) + ' again.';
+      if (asking === 'approve' && (state === 'drafted' || state === 'evaluated' || state === 'reverted')) {
+        const dialog = el('div', 'ag-proposal-ask'); dialog.setAttribute('role', 'group'); dialog.setAttribute('aria-label', 'Confirm approval');
+        dialog.append(el('p', '', 'Approve this? It writes ' + (writes.length === 1 ? 'this file' : 'these ' + writes.length + ' files') + ': ' + writes.join(', ') + '. A backup of each existing file is made first; Revert puts the originals back.'));
+        const buttons = el('span', 'ag-form-buttons');
+        buttons.append(proposalControl('Approve and write', id, 'confirm', () => proposalWrite(id, 'approve', '', reply => done('approve', reply))),
+          proposalControl('Cancel', id, 'cancel', () => { proposalAsking = null; proposalRedraw(id + ':approve'); }, 'ag-text-button'));
+        dialog.append(buttons); box.append(dialog); return;
+      }
+      if (asking === 'reject' && (state === 'drafted' || state === 'evaluated')) {
+        const dialog = el('div', 'ag-proposal-ask'), field = el('label', 'ag-field'), input = el('input', 'ag-input');
+        input.type = 'text'; input.maxLength = 300; input.autocomplete = 'off'; input.dataset.proposalField = id; input.dataset.proposalControl = id + ':reason'; input.value = proposalDraft.get(id) || '';
+        input.addEventListener('input', () => { proposalDraft.set(id, input.value); });
+        field.append(el('span', 'ag-form-label', 'Why reject it? A few words, kept with the proposal.'), input);
+        const send = () => {
+          const reason = input.value.trim();
+          if (!reason) { proposalNotes.set(id, { kind: 'error', text: 'Say in a few words why, so the reason is kept.' }); proposalRedraw(id + ':reason'); return; }
+          proposalWrite(id, 'reject', reason, reply => done('reject', reply));
+        };
+        input.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); send(); } });
+        const buttons = el('span', 'ag-form-buttons');
+        buttons.append(proposalControl('Reject', id, 'send', send), proposalControl('Cancel', id, 'cancel', () => { proposalAsking = null; proposalRedraw(id + ':reject'); }, 'ag-text-button'));
+        dialog.append(field, buttons); box.append(dialog); return;
+      }
+      const buttons = el('span', 'ag-form-buttons');
+      if (state === 'drafted' || state === 'evaluated' || state === 'reverted') {
+        buttons.append(proposalControl(state === 'reverted' ? 'Approve again' : 'Approve', id, 'approve', () => open('approve')));
+        if (state !== 'reverted') buttons.append(proposalControl('Reject', id, 'reject', () => open('reject')));
+      } else if (state === 'applied') buttons.append(proposalControl('Revert', id, 'revert', () => proposalWrite(id, 'revert', '', reply => done('revert', reply))));
+      else if (state === 'rejected') buttons.append(proposalControl('Reopen', id, 'reopen', () => proposalWrite(id, 'reopen', '', reply => done('reopen', reply))));
+      box.append(buttons);
+    }
+    function proposalBody(row, full) {
+      const body = el('div', 'ag-proposal-body');
+      const part = (label, child) => { const item = el('section', 'ag-proposal-part'); item.append(el('h4', '', label)); if (child) item.append(child); body.append(item); return item; };
+      part('Why', el('p', 'ag-proposal-why', text(full.why) || '—'));
+      const evidence = full.evidence || {}, refs = [['Cases', evidence.cases], ['Notes', evidence.notes], ['Runs', evidence.runs]].filter(([, list]) => Array.isArray(list) && list.length);
+      const quotes = Array.isArray(evidence.quotes) ? evidence.quotes.filter(Boolean) : [];
+      const proof = part('Evidence');
+      refs.forEach(([label, list]) => { const line = el('p', 'ag-proposal-ref'); line.append(el('span', 'ag-proposal-ref-label', label), el('span', '', list.map(text).join(', '))); proof.append(line); });
+      quotes.forEach(quote => proof.append(el('p', 'ag-note', text(quote))));
+      if (!refs.length && !quotes.length) proof.append(el('p', 'ag-run-empty', 'None given'));
+      const evaluation = part('Evaluation'); evaluation.append(proposalTable(full));
+      const verdict = el('p', 'ag-proposal-verdictline'); verdict.dataset.verdict = text(full.summary?.verdict);
+      verdict.append(el('span', 'ag-proposal-verdicttext', PROPOSAL_VERDICT[full.summary?.verdict] || text(full.summary?.text)));
+      const tally = proposalCounts(full.summary); if (tally) verdict.append(el('span', 'ag-proposal-counts', tally));
+      evaluation.append(verdict);
+      (full.files || []).forEach(file => {
+        const item = part('Change');
+        const head = el('p', 'ag-proposal-file'); head.append(el('code', 'ag-proposal-path', text(file.path)), el('span', 'ag-proposal-size', '+' + (Number(file.added) || 0) + ' -' + (Number(file.removed) || 0)));
+        item.append(head);
+        if (file.error) item.append(el('p', 'ag-form-error', sentence(plainWords(text(file.error)))));
+        else if (full.state !== 'applied' && file.base_matches === false) item.append(el('p', 'ag-proposal-warn', 'This file changed since the proposal was drafted, so Approve will be refused.'));
+        else if (full.state === 'applied' && file.after_matches === false) item.append(el('p', 'ag-proposal-warn', 'This file was edited after the proposal was applied, so Revert will be refused.'));
+        if (full.state === 'applied' && file.diff_against === 'file' && !file.error) item.append(el('p', 'ag-proposal-warn', 'The backup of this file is gone, so this compares with the file as it is now.'));
+        item.append(diffBox({ ...file, proposal: full.id }));
+      });
+      const history = part('History');
+      (Array.isArray(full.history) ? full.history : []).forEach(entry => {
+        const line = el('div', 'ag-history-row'); line.append(el('span', 'ag-history-when', ago(entry.time)), el('span', 'ag-history-what', text(entry.state) + ' by ' + text(entry.who)), el('span', 'ag-history-note', text(entry.note)));
+        line.title = text(entry.note); history.append(line);
+      });
+      const last = Array.isArray(full.applications) && full.applications.length ? full.applications[full.applications.length - 1] : null;
+      if (last && full.state === 'applied') body.append(el('p', 'ag-proposal-backup', 'Backup of the files before this: ' + text(last.backup)));
+      proposalActions(body, full);
+      row.append(body);
+    }
+    function proposalRow(list, item) {
+      const open = proposalOpen === item.id, full = proposalFull.get(item.id), shown = full || item;
+      const row = el('div', 'ag-proposal'); row.dataset.proposal = item.id; row.dataset.state = shown.state; row.dataset.open = String(open);
+      const head = el('button', 'ag-proposal-head'); head.type = 'button'; head.setAttribute('aria-expanded', String(open)); head.dataset.proposalControl = item.id + ':head';
+      const verdict = text(shown.summary?.verdict);
+      head.append(el('span', 'ag-proposal-title', text(shown.title) || item.id));
+      const meta = el('span', 'ag-proposal-meta'), size = el('span', 'ag-proposal-size', '+' + (Number(shown.added) || 0) + ' -' + (Number(shown.removed) || 0));
+      size.title = plural(Number(shown.added) || 0, 'line', 'lines') + ' added, ' + plural(Number(shown.removed) || 0, 'line', 'lines') + ' removed';
+      const state = el('span', 'ag-proposal-state', PROPOSAL_STATE[shown.state] || text(shown.state)); state.dataset.waiting = String(proposalWaiting(shown));
+      const outcome = el('span', 'ag-proposal-verdict', verdict); outcome.dataset.verdict = verdict;
+      { const tally = proposalCounts(shown.summary); if (tally) outcome.title = tally; }
+      meta.append(state, outcome, size, el('span', 'ag-proposal-age', ago(shown.created)));
+      head.append(meta);
+      head.addEventListener('click', () => {
+        proposalOpen = open ? '' : item.id; proposalAsking = null;
+        if (!open) proposalRead(item.id);
+        proposalRedraw(item.id + ':head');
+      });
+      row.append(head);
+      if (open) {
+        const note = proposalNotes.get(item.id + ':read'), said = proposalNotes.get(item.id);
+        const line = (kind, words) => { const item = el('p', (kind === 'error' ? 'ag-form-error' : 'ag-form-reason') + ' ag-proposal-line', words); item.dataset.proposalLine = kind; item.setAttribute('role', kind === 'error' ? 'alert' : 'status'); return item; };
+        if (full) proposalBody(row, full);
+        else row.append(note ? line('error', note.text) : el('p', 'ag-run-empty ag-proposal-line', 'Reading the proposal…'));
+        const lines = [full && note ? line('error', note.text) : null, said ? line(said.kind, said.text) : proposalBusy.has(item.id) ? el('p', 'ag-form-reason ag-proposal-line', 'Waiting for the answer…') : null].filter(Boolean);
+        const actions = row.querySelector('.ag-proposal-actions');
+        lines.forEach(item => actions ? actions.before(item) : row.append(item));
+      }
+      list.append(row);
+    }
+    // The section: a line that counts what waits, then the rows. Not drawn without the host's action or the ledger.
+    function renderProposals() {
+      if (!improveAction || !snapshot?.learning) return;
+      proposalsLoad(false);
+      const block = runSection('Proposals', 'proposals'), list = proposals.list || [];
+      const waiting = waitingProposals(), applied = list.filter(item => item.state === 'applied').length;
+      const line = el('p', 'ag-learning-line ag-proposals-line', proposals.list ? [waiting ? waiting + ' waiting' : 'none waiting', applied ? applied + ' applied' : '', plural(list.length, 'proposal', 'proposals')].filter(Boolean).join(' · ') : proposals.error ? '' : 'Reading the proposals…');
+      line.dataset.waiting = String(waiting); if (line.textContent) block.append(line);
+      if (proposals.error) { const said = el('p', 'ag-form-error ag-proposal-line', proposals.error); said.setAttribute('role', 'alert'); said.dataset.proposalLine = 'error'; block.append(said); }
+      const rows = el('div', 'ag-proposal-list'); block.append(rows);
+      appendList(rows, list, item => proposalRow(rows, item));
+      if (proposals.list && !list.length) block.append(el('p', 'ag-run-empty', 'No proposals yet'));
+    }
+    const proposalFieldHeld = () => [...detailScroll.querySelectorAll('[data-proposal-field]')].some(box => document.activeElement === box);
+    // ---- end n24 ----
     function renderRunDetail(graph) {
       eyebrow.textContent = '';
       detailScroll.append(el('h2', 'ag-detail-title ag-run-title', 'Run'));
@@ -3254,6 +3500,7 @@
         const line = el('p', 'ag-learning-line', learningLine(learning));
         line.dataset.due = String(!!learning.due); lesson.append(line);
         notes(lesson, (learning.notes || []).slice(0, 3));
+        renderProposals(); // n24
       }
       if (graph) {
         const progressLine = el('div', 'ag-run-progress');
@@ -4102,6 +4349,7 @@
       if (ownBox && ownBox.dataset.agentText === selected.key && agentsByName.has(selected.key) && (document.activeElement === ownBox || ownBox.value !== ownBox.dataset.saved)) return;
       if (outputHeld()) return; // a step's output being edited
       if (!force && setupFieldHeld()) return; // n10: a limit or a setup name being typed
+      if (!force && proposalFieldHeld()) return; // n24: a reason for rejecting being typed
       if (!force && detailScroll.querySelector('[data-form]')?.dataset.form === selected.type + ':' + selected.key) return;
       // Nor the name of an agent being renamed.
       const renaming = selected.type === 'agent' ? detailScroll.querySelector('[data-rename]') : null;
@@ -4114,6 +4362,7 @@
       const focusedStep = detailScroll.contains(focused) ? focused.closest('[data-step]')?.dataset.step : null;
       // A skill control with focus gets it back after the rebuild (the same control of the same skill).
       const focusedSkill = detailScroll.contains(focused) ? SKILL_CONTROLS.find(key => key in focused.dataset) : null, focusedValue = focusedSkill ? focused.dataset[focusedSkill] : null;
+      const focusedProposal = detailScroll.contains(focused) ? focused.closest('[data-proposal-control]')?.dataset.proposalControl : '';
       const focusedSection = detailScroll.contains(focused) ? headingOf(focused.closest('.ag-detail-section')) : '';
       detailScroll.replaceChildren();
       if (selected.type === 'learning') {
@@ -4132,6 +4381,7 @@
           if (learning.changes?.length) { const applied = section(detailScroll, 'Applied'); appendList(applied, learning.changes, change => { const row = el('div', 'ag-history-row'); row.append(el('span', 'ag-history-when', ago(change.time)), el('span', 'ag-history-what', text(change.summary)), el('span', 'ag-history-note', text(change.file))); applied.append(row); }); }
           if (answered.length) rows(section(detailScroll, 'Answered'), answered);
           if (learning.lessons?.length) section(detailScroll, 'Lessons', learning.lessons);
+          renderProposals(); // n24
         } else detailScroll.append(el('p', 'ag-detail-intro', 'None'));
       } else if (selected.type === 'flow') {
         const flow = routeById(selected.key);
@@ -4253,6 +4503,7 @@
       detailScroll.scrollTop = scroll;
       if (side.el.isConnected && focusedChat && side.el.contains(focusedChat) && document.activeElement !== focusedChat) focusedChat.focus({ preventScroll: true });
       if (chat.el.isConnected) { chatScroll(); if (focusedChat?.isConnected && document.activeElement !== focusedChat) focusedChat.focus({ preventScroll: true }); }
+      { const wanted = proposalWanted || focusedProposal; proposalWanted = ''; if (wanted) Array.from(detailScroll.querySelectorAll('[data-proposal-control]')).find(item => item.dataset.proposalControl === wanted)?.focus({ preventScroll: true }); }
       if (focusedStep) Array.from(detailScroll.querySelectorAll('[data-step]')).find(row => row.dataset.step === focusedStep)?.querySelector('summary').focus({ preventScroll: true });
       if (focusedSkill && !detailScroll.contains(document.activeElement)) Array.from(detailScroll.querySelectorAll('button, textarea')).find(item => item.dataset[focusedSkill] === focusedValue)?.focus({ preventScroll: true });
       // Its control gone (a skill deleted, a row taken away): the first control of the same section.

@@ -37,7 +37,7 @@ _SETUP_PATH = "/api/setup"  # the default preset and saved setups: switch, save,
 _SETUP_BODY_LIMIT = 4096
 _SPEND_PATH = "/api/spend"  # the project's spend limit: set or remove (agentgraph.spend)
 _SPEND_BODY_LIMIT = 4096
-_IMPROVE_PATH = "/api/improve"  # improvement proposals: GET list or one, POST approve|reject|revert (agentgraph.improve)
+_IMPROVE_PATH = "/api/improve"  # improvement proposals: GET list or one, POST approve|reject|reopen|revert (agentgraph.improve)
 _IMPROVE_BODY_LIMIT = 4096
 _POSTS = (_FLOW_PATH, _SKILLS_PATH, _ROSTER_PATH, _SKILLFILE_PATH, _TEAM_PATH, _OUTPUT_PATH, _SETUP_PATH, _SPEND_PATH)
 _LOOPBACK = frozenset({"127.0.0.1", "::1"})
@@ -580,17 +580,17 @@ def make_server(
             self._reply(200, "application/json", json.dumps(answer, allow_nan=False).encode("utf-8"))
 
         def _improve_post(self):
-            # Approve (the user's own click: who is "user"), reject or revert a proposal (agentgraph.improve). An
+            # Approve (the user's own click: who is "user"), reject, reopen or revert a proposal (agentgraph.improve). An
             # approval is refused when a file changed since drafting, a revert when a file was edited after applying;
             # neither can be forced from here.
             request = self._json_body("the proposals", _IMPROVE_BODY_LIMIT)
             if request is None:
                 return
             valid = (isinstance(request, dict) and {"action", "id"} <= set(request) <= {"action", "id", "note"}
-                     and request["action"] in ("approve", "reject", "revert") and isinstance(request["id"], str)
+                     and request["action"] in ("approve", "reject", "revert", "reopen") and isinstance(request["id"], str)
                      and isinstance(request.get("note", ""), str))
             if not valid:
-                self._refuse(400, 'expected {"action": "approve"|"reject"|"revert", "id": proposal, "note"?: text} '
+                self._refuse(400, 'expected {"action": "approve"|"reject"|"revert"|"reopen", "id": proposal, "note"?: text} '
                                   '(a rejection needs a "note": the reason)')
                 return
             if demo:
@@ -604,6 +604,8 @@ def make_server(
                     improve.approve(home, root, request["id"], who="user", note=note or "approved in the view")
                 elif action == "reject":
                     improve.reject(home, request["id"], note, who="user")
+                elif action == "reopen":
+                    improve.reopen(home, request["id"], who="user", note=note)
                 else:
                     improve.revert(home, root, request["id"], who="user", note=note)
                 return improve.show(home, root, request["id"])

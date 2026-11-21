@@ -52,6 +52,28 @@ class Base(unittest.TestCase):
         return code, out.getvalue(), err.getvalue()
 
 
+class DigestTests(Base):
+    def test_digest_is_short_newest_first_and_needs_no_file(self):
+        self.assertEqual(improve.digest(self.home), [])
+        first = self.propose(now=1000.0)
+        second = improve.propose(self.home, self.root, "Second", "why", [(self.rel, "x\n")], now=2000.0)
+        improve.reject(self.home, first["id"], "no")
+        self.file.unlink()  # the digest reads the records alone
+        digest = improve.digest(self.home)
+        self.assertEqual([(item["id"], item["state"], item["verdict"]) for item in digest],
+                         [(second["id"], "drafted", "not enough runs"), (first["id"], "rejected", "not enough runs")])
+        self.assertEqual(set(digest[0]), {"id", "created", "title", "state", "verdict"})
+        self.assertEqual(len(improve.digest(self.home, limit=1)), 1)
+
+    def test_the_snapshots_learning_document_carries_it(self):
+        from agentgraph import snapshot_json
+        self.home = self.tmp / "memory"  # where the snapshot looks for the active ledger
+        record = self.propose()
+        (self.home / "feedback.jsonl").write_text(json.dumps({"time": 1.0, "text": "n", "agent": "a", "task": "t"}) + "\n")
+        learning = snapshot_json.learning_document(self.tmp, config_path=self.tmp / "none.json")
+        self.assertEqual([(item["id"], item["state"]) for item in learning["proposals"]], [(record["id"], "drafted")])
+
+
 class CycleTests(Base):
     def test_propose_records_base_hash_and_state(self):
         record = self.propose(cases_=["abc123"], notes=["1795000000"])
@@ -132,6 +154,69 @@ class CycleTests(Base):
         with self.assertRaises(improve.ImproveError):
             self.approve(record)
         self.assertFalse((self.home / "improvements.jsonl").exists())
+
+    def test_reopen_undoes_a_rejection(self):
+        record = self.propose()
+        with self.assertRaisesRegex(improve.ImproveError, "only a rejected"):
+            improve.reopen(self.home, record["id"])
+        improve.reject(self.home, record["id"], "not now")
+        with self.assertRaises(improve.ImproveError):
+            self.approve(record)
+        self.assertEqual(self.cli("reopen", record["id"])[0], 0)
+        saved = improve._load(self.home, record["id"])
+        self.assertEqual((saved["state"], saved["history"][-1]["who"], saved["history"][-1]["note"]),
+                         ("drafted", "command", "reopened"))
+        self.assertEqual(self.file.read_bytes(), self.original)
+        # with a result recorded it comes back as evaluated
+        improve.add_result(self.home, record["id"], "before", "case-a", "pass")
+        improve.reject(self.home, record["id"], "again")
+        done = improve.reopen(self.home, record["id"], note="changed my mind")
+        self.assertEqual((done["state"], done["history"][-1]["who"]), ("evaluated", "user"))
+        self.assertEqual(self.approve(record)["state"], "applied")
+
+    def test_the_size_and_diff_of_the_change_are_its_own_in_every_state(self):
+        record = self.propose()
+        def sizes():
+            shown = improve.show(self.home, self.root, record["id"])
+            listed = improve.list_proposals(self.home, self.root)[0]
+            self.assertEqual((listed["added"], listed["removed"]), (shown["added"], shown["removed"]))
+            entry = shown["files"][0]
+            self.assertEqual((entry["added"], entry["removed"]), (shown["added"], shown["removed"]))
+            return (shown["added"], shown["removed"]), entry
+        drafted, entry = sizes()
+        self.assertEqual((drafted, entry["diff_against"]), ((1, 2), "file"))
+        self.approve(record)
+        applied, entry = sizes()  # the file now holds the new text, the change is still +1 -2
+        self.assertEqual((applied, entry["diff_against"]), ((1, 2), "backup"))
+        self.assertIn("-Be brief.", entry["diff"])
+        self.assertIn("+Be briefer.", entry["diff"])
+        self.assertTrue(entry["after_matches"])
+        text = improve._show_text(improve.show(self.home, self.root, record["id"]))
+        self.assertIn("+1 -2", text)
+        self.assertNotIn("no difference from the file now", text)
+        # edited by hand afterwards: still the proposal's own change, and the edit is still flagged
+        self.file.write_bytes(self.newtext.encode() + b"hand edit\n")
+        edited, entry = sizes()
+        self.assertEqual((edited, entry["diff_against"], entry["after_matches"]), ((1, 2), "backup", False))
+        self.file.write_bytes(self.newtext.encode())
+        # the backup gone or changed: the diff falls back to the file now and says so
+        backup = Path(improve._load(self.home, record["id"])["applications"][-1]["backup"]) / self.rel
+        backup.write_bytes(b"not what was saved\n")
+        fallback, entry = sizes()
+        self.assertEqual((fallback, entry["diff_against"]), ((0, 0), "file"))
+        backup.write_bytes(self.original)
+        self.assertEqual(sizes()[0], (1, 2))
+        improve.revert(self.home, self.root, record["id"])
+        reverted, entry = sizes()
+        self.assertEqual((reverted, entry["diff_against"]), ((1, 2), "file"))
+        improve.reject(self.home, record["id"], "no")
+        self.assertEqual(sizes()[0], (1, 2))
+
+    def test_a_file_the_proposal_created_diffs_against_nothing_once_applied(self):
+        new = improve.propose(self.home, self.root, "New file", "w", [("oh-my-opencode-slim/fast/extra.md", "one\ntwo\n")])
+        improve.approve(self.home, self.root, new["id"], who="user", note="yes")
+        shown = improve.show(self.home, self.root, new["id"])
+        self.assertEqual((shown["added"], shown["removed"], shown["files"][0]["diff_against"]), (2, 0, "backup"))
 
     def test_revert_restores_exact_bytes(self):
         record = self.propose()
@@ -248,10 +333,10 @@ class EvaluationTests(Base):
     def test_better_same_worse(self):
         self.rows("before", "held-out", ["pass", "fail"])
         self.rows("before", "tune", ["fail", "fail"])
-        self.rows("after", "held-out", ["pass", "fail"])
+        self.rows("after", "held-out", ["pass", "pass"])
         self.rows("after", "tune", ["pass", "fail"])
         self.assertEqual(self.verdict()["verdict"], "better")
-        self.assertEqual(self.verdict()["held_out"], {"before": [1, 2], "after": [1, 2]})
+        self.assertEqual(self.verdict()["held_out"], {"before": [1, 2], "after": [2, 2]})
 
         same = improve.propose(self.home, self.root, "same", "w", [(self.rel, "other\n")])
         for phase in ("before", "after"):
@@ -265,6 +350,27 @@ class EvaluationTests(Base):
         for i, outcome in enumerate(["pass", "fail"]):
             improve.add_result(self.home, worse["id"], "after", case_id("held-out", 500 * (i + 1)), outcome)
         self.assertEqual(improve.summary(improve._load(self.home, worse["id"])["evaluation"])["verdict"], "worse")
+
+    def test_better_on_tune_only_when_held_out_did_not_move(self):
+        # The real cycle that showed the old rule misleading: held-out 3/9 -> 3/9, tune 3/6 -> 5/6.
+        self.rows("before", "held-out", ["pass"] * 3 + ["fail"] * 6)
+        self.rows("after", "held-out", ["pass"] * 3 + ["fail"] * 6)
+        self.rows("before", "tune", ["pass"] * 3 + ["fail"] * 3)
+        self.rows("after", "tune", ["pass"] * 5 + ["fail"])
+        verdict = self.verdict()
+        self.assertEqual(verdict["verdict"], "better on tune only")
+        self.assertEqual((verdict["held_out"], verdict["tune"]),
+                         ({"before": [3, 9], "after": [3, 9]}, {"before": [3, 6], "after": [5, 6]}))
+        self.assertIn("better on tune only", verdict["text"])
+
+    def test_held_out_up_with_tune_down_is_worse_and_held_out_up_with_tune_level_is_better(self):
+        self.rows("before", "held-out", ["fail", "fail"])
+        self.rows("after", "held-out", ["pass", "fail"])
+        self.rows("before", "tune", ["pass", "fail"])
+        self.rows("after", "tune", ["pass", "fail"])
+        self.assertEqual(self.verdict()["verdict"], "better")
+        self.rows("after", "tune", ["fail"])  # tune now 1/3 after against 1/2 before
+        self.assertEqual(self.verdict()["verdict"], "worse")
 
     def test_tune_drop_alone_is_worse_and_rates_not_counts_are_compared(self):
         self.rows("before", "held-out", ["pass", "fail"])
@@ -340,6 +446,34 @@ class CommandTests(Base):
         code, _, err = self.cli("show", "nope")
         self.assertEqual(code, 1)
         self.assertIn("no proposal", err)
+
+    def test_line_mode_answers_one_line_of_json_for_the_desktop_panel(self):
+        code, out, _ = self.cli("propose", "--title", "Shorter", "--why", "too long", "--change", f"{self.rel}={self.newfile}")
+        proposal_id = out.split()[1].rstrip(":")
+
+        def line(*argv):
+            code, out, err = self.cli(*argv, "--line")
+            self.assertEqual(len(out.strip().splitlines()), 1, out)
+            return code, json.loads(out), err
+
+        code, listed, _ = line("list")
+        self.assertEqual((code, [item["id"] for item in listed["proposals"]]), (0, [proposal_id]))
+        code, shown, _ = line("show", proposal_id)
+        self.assertEqual((code, shown["state"], shown["files"][0]["path"]), (0, "drafted", self.rel))
+        code, rejected, _ = line("reject", proposal_id, "--reason", "not now")
+        self.assertEqual((code, rejected["state"], rejected["history"][-1]["who"]), (0, "rejected", "user"))
+        code, reopened, _ = line("reopen", proposal_id)
+        self.assertEqual((code, reopened["state"]), (0, "drafted"))
+        code, applied, _ = line("approve", proposal_id, "--by-user", "approved in the panel")
+        self.assertEqual((code, applied["state"], applied["history"][-1]["who"]), (0, "applied", "user"))
+        self.assertEqual(self.file.read_bytes(), self.newtext.encode())
+        code, refused, err = line("approve", proposal_id, "--by-user", "again")
+        self.assertEqual(code, 1)
+        self.assertIn("applied", refused["error"])
+        self.assertEqual(err, "")
+        code, reverted, _ = line("revert", proposal_id)
+        self.assertEqual((code, reverted["state"]), (0, "reverted"))
+        self.assertEqual(self.file.read_bytes(), self.original)
 
     def test_ids_cannot_escape_the_proposals_folder(self):
         for bad in ("../x", "a/b", ".hidden"):
