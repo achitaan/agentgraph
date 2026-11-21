@@ -33,7 +33,7 @@
  */
 import {
   SPINNER, MARK_HUB, MARK_IDLE, SENT_BACK, ATTENTION, LOOP_MARK, BAR_FULL, BAR_EMPTY, ELLIPSIS,
-  charWidth, displayWidth, truncate, clean, clipLine, lineWidth, formatDollars, formatTokens, seatName, isAnimated, sideBusy, sideChatOf, SIDE_NAME,
+  charWidth, displayWidth, truncate, clean, clipLine, lineWidth, formatDollars, spendForms, formatTokens, seatName, isAnimated, sideBusy, sideChatOf, SIDE_NAME,
   isObject, list, busyCount, finiteNumber, rounds, validAgents, findHub, hubWorking, currentGoal, agentCost,
   numberSpans, spinnerGlyph, wearParts, needsEntries, needsLine, flowsOf,
 } from "./render.js";
@@ -1015,9 +1015,26 @@ function headerLine(doc, hub, width, frame) {
   const cost = totals ? finiteNumber(totals.cost) : null;
   const right = [];
   if (total) right.push(sp(String(passed), "plain"), sp("/" + total, "muted"));
-  if (cost !== null) right.push(...(right.length ? [sp("  ", "plain")] : []), sp(formatDollars(cost), "plain"));
+  const lead = right.length ? [sp("  ", "plain")] : [];
+  if (cost !== null) right.push(...lead, sp(formatDollars(cost), "plain"));
   let rightW = lineWidth(right);
   const tail = working ? 2 : 0;
+  // the spend stats after the count, as on the list view's spend line: the richest form that leaves the name 12 columns
+  // (or its whole length); the rate, the split and the limit give way in that order, before the old rule below
+  const forms = cost !== null ? spendForms(doc, cost) : null;
+  if (forms) {
+    const keep = Math.min(12, displayWidth(name));
+    const head = right.length - 1 - lead.length;
+    for (const form of forms) {
+      const candidate = [...right.slice(0, head), ...lead, ...form];
+      if (width - 2 - tail - 1 - lineWidth(candidate) >= keep) {
+        right.length = 0;
+        right.push(...candidate);
+        rightW = lineWidth(right);
+        break;
+      }
+    }
+  }
   if (rightW && width - 2 - tail - 1 - rightW < 3) {
     right.length = 0;
     rightW = 0;

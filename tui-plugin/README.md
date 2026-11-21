@@ -147,6 +147,8 @@ view, the list opens as a session panel:
   new colour); at or over the limit it says so in the same place (`$50.00 / $50 at limit`, `$51.20 / $50 over limit`).
   Where there is width the rate (`$22/h`) and the split (`chat $3.10 · workers $4.55`) follow; they go in this order as
   the line narrows: the rate first, then the split, the limit last.
+  The graph view's top line (2D and 3D) shows the same spend after the `4/11` count, in the same forms and tones, as far as
+  the hub's name keeps 12 columns (or its whole length): the rate goes first, then the split, then the limit.
 - The preset name. `setup.preset` shows as one quiet word at the right end of the spend line where there is width
   (`normal`); with `setup.override` set it reads `normal (overridden)` (`normal*` where that does not fit). It is
   display only: the panel does not switch presets (the host has its own command for that).
@@ -171,7 +173,7 @@ terminal). Smaller than 36x14, and until the panel's height is known, it draws t
 list.
 
 **Small panels.** The orbit compresses instead of giving up. As space shrinks it gives way in this order: the three
-instruments (c, b, a), then the needs lines, then the header (its right side `4/11  $7.65` goes, then the hub's name
+instruments (c, b, a), then the needs lines, then the header (its spend extras go first, then its right side `4/11  $7.65` goes, then the hub's name
 is cut), then the ring itself gets smaller (always a circle: one radius in dots across and up, never stretched to the
 panel's shape; the largest circle that lets every name show whole, a name moves inside the ring beside its glyph when
 there is no room outside it, and a name over 12 characters is still cut with an ellipsis; only when even a small ring

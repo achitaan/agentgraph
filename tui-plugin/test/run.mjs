@@ -5953,6 +5953,71 @@ test("demo side: AGENTGRAPH_TUI_DEMO=side adds the side chat, the spend limit, r
   assert.equal((await DM.createDemoRunner({ fs, file, now: () => 1000 }).snapshot()).sidechat, undefined);
 });
 
+test("graph view's top line: the spend stats after the count, the same forms and tones as the list line; the rate, the split, the limit give way in order; the name keeps its room", () => {
+  const SIDE = { limit: 50, warn: 40, rate: 22, chat: 3.1, workers: 4.55 };
+  const top = (doc, width, height, extra) => sceneText(S.sceneStrict(doc, Object.assign({ width, height, now: 1 }, extra || {})))[0];
+  for (const [label, extra] of [["2D", {}], ["3D", V3]]) {
+    const l160 = top(withSpend(SIDE, 7.65), 160, 45, extra);
+    assert.ok(l160.endsWith("4/11  $7.65 / $50  $22/h  chat $3.10 · workers $4.55"), label + " 160: " + l160);
+    assert.equal(R.displayWidth(l160), 160);
+    const l42 = top(withSpend(SIDE, 7.65), 42, 38, extra);
+    assert.ok(l42.startsWith("◉ orchestrator") && l42.trimEnd().endsWith("4/11  $7.65 / $50"), label + " 42: " + l42);
+    // over the limit: the words where they fit (else the limit alone), the amount in the attention tone; from warn: tone only
+    const over = top(withSpend(SIDE, 51), 160, 45, extra);
+    assert.ok(over.endsWith("4/11  $51.00 / $50 over limit  $22/h  chat $3.10 · workers $4.55"), label + " over: " + over);
+    const warn = top(withSpend(SIDE, 41), 160, 45, extra);
+    assert.ok(warn.endsWith("4/11  $41.00 / $50  $22/h  chat $3.10 · workers $4.55") && !/limit/.test(warn), label + " warn: " + warn);
+    const tone = (doc, text) => S.sceneStrict(doc, Object.assign({ width: 160, height: 45, now: 1 }, extra))[0].find((x) => x.text.includes(text));
+    assert.equal(tone(withSpend(SIDE, 51), "$51.00").tone, "accent");
+    assert.equal(tone(withSpend(SIDE, 41), "$41.00").tone, "accent");
+    assert.equal(tone(withSpend(SIDE, 7.65), "$7.65").tone, "plain");
+    assert.equal(tone(withSpend(SIDE, 7.65), "/ $50").tone, "muted");
+    assert.equal(tone(withSpend(SIDE, 51), " over limit").tone, "accent");
+  }
+  // the order of giving way, with the width: rate, split, limit; the count stays; never wider than the panel
+  const seen = [];
+  for (let w = 160; w >= 20; w -= 1) {
+    for (const h of [14, 45]) {
+      const line = top(withSpend(SIDE, 51), w, h);
+      assert.ok(R.displayWidth(line) <= w, w + ": " + line);
+      const nameCols = R.displayWidth(line.slice(2).split(/ {2,}/)[0].replace(/ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]$/, ""));
+      if (/\$51\.00 \/ \$50/.test(line)) assert.ok(nameCols >= 12 || line.includes("orchestrator"), w + " name kept: " + line);
+      if (h === 45) seen.push(/workers/.test(line) ? "split" : /\/h/.test(line) ? "rate" : /over limit/.test(line) ? "limit+words" : /\$50/.test(line) ? "limit" : /\$51/.test(line) ? "bare" : "none");
+      if (/\$51\.00/.test(line)) assert.match(line, /4\/11/);
+    }
+  }
+  const order = [...new Set(seen)];
+  assert.deepEqual(order, ["split", "limit+words", "limit", "bare", "none"].filter((x) => order.includes(x)), order.join(","));
+  assert.ok(order.includes("split") && order.includes("limit+words") && order.includes("limit"));
+  // over the limit in a narrow panel the words go before the limit does: the limit is not lost just when it is passed
+  for (const [label, extra] of [["2D", {}], ["3D", V3]]) {
+    const narrow = top(withSpend(SIDE, 51), 42, 38, extra).trimEnd();
+    assert.ok(narrow.endsWith("4/11  $51.00 / $50") && narrow.includes("orchestrator"), label + " 42 over: " + narrow);
+  }
+  // a name that is whole without the extras is never cut by them
+  for (let w = 20; w <= 60; w += 1) {
+    const bare = top(withSpend(undefined, 7.65), w, 45);
+    const rich = top(withSpend(SIDE, 7.65), w, 45);
+    if (bare.includes("orchestrator")) assert.ok(rich.includes("orchestrator"), w + ": " + rich);
+  }
+  // no usable spend: the header is exactly the one without a spend
+  for (const spend of [undefined, null, {}, { warn: 40 }, { limit: "50", rate: NaN, chat: -1, workers: Infinity }, { limit: -5, rate: "x", chat: null, workers: [] }, "spend", 7]) {
+    for (const [w, h] of [[160, 45], [42, 38], [36, 14], [24, 14]]) {
+      assert.deepEqual(S.sceneStrict(withSpend(spend, 7.65), { width: w, height: h, now: 1 })[0], S.sceneStrict(withSpend(undefined, 7.65), { width: w, height: h, now: 1 })[0], JSON.stringify(spend) + " " + w);
+    }
+  }
+  // hostile values show nothing extra and never widen the line
+  for (const spend of [{ limit: 1e308, rate: 1e308, chat: 1e308, workers: 1e308 }, { limit: 50, rate: -1, chat: "9", workers: NaN }, { limit: 50, rate: "\u001b[31m22", chat: {}, workers: [1] }]) {
+    for (const w of [160, 80, 42, 36, 24]) {
+      const line = top(withSpend(spend, 7.65), w, 45);
+      assert.ok(R.displayWidth(line) <= w, w + ": " + line);
+      assert.ok(!/[\u0000-\u001f\u007f]/.test(line), "no control characters");
+    }
+  }
+  const odd = top(withSpend({ limit: 50, rate: -1, chat: "9", workers: NaN }, 7.65), 160, 45);
+  assert.ok(odd.endsWith("4/11  $7.65 / $50"), odd);
+});
+
 let failed = 0;
 for (const t of tests) {
   try {

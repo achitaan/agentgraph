@@ -792,14 +792,36 @@ function spendParts(doc, cost) {
   const amount = cost !== null ? [sp(formatDollars(cost), hot ? "accent" : "plain")] : [];
   const plain = amount;
   let withLimit = amount;
+  let limitOnly = amount; // without the words: for a line too narrow for them
   if (cost !== null && limit !== null && limit > 0) {
-    withLimit = [...amount, sp(" / " + limitText(limit), "muted")];
-    if (cost >= limit) withLimit.push(sp(cost > limit ? " over limit" : " at limit", "accent"));
+    limitOnly = [...amount, sp(" / " + limitText(limit), "muted")];
+    withLimit = cost >= limit ? [...limitOnly, sp(cost > limit ? " over limit" : " at limit", "accent")] : limitOnly;
   }
   const split = [];
   if (chat !== null) split.push(`chat ${formatDollars(chat)}`);
   if (workers !== null) split.push(`workers ${formatDollars(workers)}`);
-  return { plain, withLimit, rate: rate !== null ? [sp(rateText(rate), "muted")] : null, split: split.length ? [sp(split.join(" · "), "muted")] : null };
+  return { plain, withLimit, limitOnly, rate: rate !== null ? [sp(rateText(rate), "muted")] : null, split: split.length ? [sp(split.join(" · "), "muted")] : null };
+}
+
+// The spend forms of a graph view's top line, richest first (limit + rate + split, limit + split, limit, the limit
+// without its "over limit" words, the bare total), built on spendParts so the amounts, tones and number checks are the list line's. Null when the spend has
+// nothing usable (no limit, rate, chat or workers) or there is no total: the caller then shows the bare total as before.
+export function spendForms(doc, cost) {
+  const spend = spendParts(doc, cost);
+  if (!spend.plain.length || (spend.withLimit === spend.plain && !spend.rate && !spend.split)) return null;
+  const join = (...parts) => {
+    const out = [];
+    for (const part of parts) {
+      if (!part || !part.length) continue;
+      if (out.length) out.push(sp(SECTION_GAP, "plain"));
+      out.push(...part);
+    }
+    return out;
+  };
+  const forms = [];
+  for (const set of [[spend.rate, spend.split], [spend.split], []]) forms.push(join(spend.withLimit, ...set.filter(Boolean)));
+  forms.push(spend.limitOnly, spend.plain);
+  return forms.filter((f, i) => i === 0 || lineWidth(f) < lineWidth(forms[i - 1]));
 }
 
 function presetSpans(doc, room) {
