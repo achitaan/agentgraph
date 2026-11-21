@@ -1,0 +1,7 @@
+{
+  "agent": "orchestrator",
+  "prompt": "I need a complete inventory of every function in the `lib/` package: one line each with the function name, its file and a one-line purpose. Have the explorer subagent produce it and report it back to me.",
+  "check": "python3 p4check.py artifact --files 28 --names p4names.txt",
+  "timeout": 600,
+  "check_timeout": 60
+}
