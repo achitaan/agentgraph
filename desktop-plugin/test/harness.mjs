@@ -3229,6 +3229,69 @@ await check("v4 panel: the view gets actions.loops, which asks main with the ses
   assert.equal(mountCalls[mountCalls.length - 1].options.actions?.loops, undefined, "the demo has a loops action");
   demoRendered.dispose();
 });
+// ---- v7: loops between agents, a person and recovery, versions and trials ----
+await check("v7 main: loops passes pause, resume (with a choice), answer (with a note), restore and a start with settings through, nothing else; bad values spawn nothing", async () => {
+  const python = path.join(TMP, "fake-loops7-python");
+  const stdin = path.join(TMP, "fake-loops7-stdin.json");
+  fs.writeFileSync(python, `#!/bin/sh
+cat > "${stdin}"
+printf '{"ok": true}\\n'
+`, { mode: 0o700 });
+  const log = [];
+  const loaded = loadMain(CODE, log);
+  const m = mainContext({ home: ORCHESTRATION, python });
+  resolveDefault(loaded.module.exports).main(m.ctx);
+  const impl = m.provided[0].impl;
+  const loops = async (request) => JSON.parse(await impl.loops({ directory: "/work/project", request: JSON.stringify(request) }));
+  const sent = () => JSON.parse(fs.readFileSync(stdin, "utf8"));
+  const run = "20261121-043755-90a7", version = "20261121T060000-000001", rev = "ab".repeat(32);
+  const good = [
+    { op: "pause", run },
+    { op: "resume", run },
+    { op: "resume", run, choice: "redo" },
+    { op: "resume", run, choice: "accept" },
+    { op: "answer", run, answer: "approve" },
+    { op: "answer", run, answer: "reject", note: "the counter is never reset" },
+    { op: "answer", run, answer: "stop" },
+    { op: "restore", flow: "review-loop", version, rev },
+    { op: "start", flow: "review-loop", goal: "g", settings: { version: 1, flow: "review-loop", limits: { attempts: 2 } } },
+    { op: "save", flow: "review-loop", settings: { version: 1, approval: "before_pass", artifacts: ["a.md"], steps: { verifier: { retries: 2 } } }, rev: "" }
+  ];
+  for (const request of good) {
+    assert.equal((await loops({ ...request, extra: "dropped" })).ok, true, JSON.stringify(request));
+    assert.deepEqual(sent(), request, "what reached the command");
+  }
+  const spawned = log.length;
+  assert.equal(spawned, good.length, "one command each");
+  const bad = [{ op: "pause" }, { op: "pause", run: "../x" }, { op: "resume" }, { op: "resume", run, choice: "maybe" }, { op: "resume", run, choice: 5 },
+    { op: "answer", run }, { op: "answer", run, answer: "maybe" }, { op: "answer", run, answer: "reject", note: 5 }, { op: "answer", run, answer: "reject", note: "x".repeat(4001) }, { op: "answer", run, answer: "reject", note: "a\0b" },
+    { op: "restore", flow: "f", rev }, { op: "restore", flow: "f", version: "../x", rev }, { op: "restore", flow: "f", version, rev: "zz" }, { op: "restore", version, rev },
+    { op: "start", flow: "f", settings: [] }, { op: "start", flow: "f", settings: "x" }];
+  for (const request of bad) assert.equal(typeof (await loops(request)).error, "string", JSON.stringify(request));
+  assert.equal(log.length, spawned, "a bad request spawned something");
+});
+
+await check("v7 panel: the view's loops action carries pause, resume, answer, restore and a trial start to main unchanged, and refuses a bad one before main", async () => {
+  const definition = windowLoad.gui.defined[0];
+  const session = { key: "srv\nses_a", id: "ses_a", directory: ORCHESTRATION };
+  const props = { get session() { return session; }, screen: {} };
+  const w = windowContext(definition, { session });
+  definition.setup(w.ctx);
+  const rendered = windowLoad.solid.runWithOwner(() => value(w.added[1].item).render(props));
+  const { loops } = mountCalls[mountCalls.length - 1].options.actions;
+  const run = "20261121-043755-90a7", version = "20261121T060000-000001", rev = "ab".repeat(32);
+  const requests = [{ op: "pause", run }, { op: "resume", run, choice: "redo" }, { op: "answer", run, answer: "reject", note: "again" }, { op: "restore", flow: "fix-loop", version, rev }, { op: "start", flow: "fix-loop", goal: "g", settings: { version: 1 } }];
+  for (const request of requests) assert.equal((await loops(request)).ok, true, JSON.stringify(request));
+  assert.deepEqual(w.calls.filter((c) => c.op === "loops").map((c) => c.input.request), requests.map((request) => JSON.stringify(request)));
+  const asked = w.calls.filter((c) => c.op === "loops").length;
+  for (const bad of [{ op: "pause" }, { op: "resume", run, choice: "maybe" }, { op: "answer", run, answer: "maybe" }, { op: "restore", flow: "f", version: "../x", rev }, { op: "start", flow: "f", settings: [] }]) {
+    let failure = null;
+    try { await loops(bad); } catch (error) { failure = error; }
+    assert.equal(failure && failure.message, "Bad loop request.", JSON.stringify(bad));
+  }
+  assert.equal(w.calls.filter((c) => c.op === "loops").length, asked, "a bad request reached main");
+  rendered.dispose();
+});
 // ---- end v4 ----
 
 await check("the harness replaces an existing temporary bundle before reading it", () => {

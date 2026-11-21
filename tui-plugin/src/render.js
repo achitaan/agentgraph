@@ -744,11 +744,15 @@ function proposalRows(doc, width) {
 // Not selectable, like the proposals: the commands decide, in a shell, with the id the row shows.
 export const LOOPS_MAX = 3;
 export const LOOP_COMMANDS = "agentgraph loop status|cancel RUN";
+// A run that waits for a person, or is paused or interrupted, is answered or resumed in a shell with its id: one more row says how.
+export const LOOP_PERSON_COMMANDS = "agentgraph loop answer|resume RUN";
 const LOOP_STATUS = {
   running: ["running", "accent"], passed: ["passed", "plain"], failed: ["failed", "danger"], limit: ["at its limit", "muted"],
   invalid: ["not started", "danger"], check_error: ["check error", "danger"], inconclusive: ["inconclusive", "muted"],
   stalled: ["stalled", "danger"], agent_error: ["agent error", "danger"], cancelled: ["cancelled", "muted"], interrupted: ["interrupted", "muted"],
+  waiting: ["waiting for you", "accent"], paused: ["paused", "muted"],
 };
+const LOOP_PERSON = new Set(["waiting", "paused", "interrupted"]);
 function loopRows(doc, width) {
   const shown = list(doc.loops).filter((r) => isObject(r) && typeof r.run === "string" && r.run && typeof r.flow === "string" && r.flow && typeof r.status === "string");
   if (!shown.length) return [];
@@ -762,14 +766,15 @@ function loopRows(doc, width) {
     const spent = isObject(r.totals) ? r.totals.cost : r.cost;
     const known = spent !== null && spent !== undefined && spent !== "" && Number.isFinite(Number(spent));
     out.push(composeRow(width, {
-      head: [sp(r.status === "running" ? LOOP_MARK : r.status === "passed" ? "✓" : "–", tone), sp(" ", "plain")],
+      head: [sp(r.status === "running" ? LOOP_MARK : r.status === "passed" ? "✓" : r.status === "waiting" ? "?" : "–", tone), sp(" ", "plain")],
       name: clean(r.flow),
-      tail: [sp(" " + words, tone), sp(` ${used}/${limit} ${known ? formatDollars(spent) : "cost unknown"}`, "muted")],
+      tail: [sp(" " + words, tone), ...(r.trial === true ? [sp(" (trial)", "muted")] : []), sp(` ${used}/${limit} ${known ? formatDollars(spent) : "cost unknown"}`, "muted")],
       what: clean(r.run),
     }));
   }
   if (take.length < rows.length) out.push([sp(`+${rows.length - take.length} more loop runs`, "muted")]);
   out.push([sp(truncate(LOOP_COMMANDS, width), "muted")]);
+  if (take.some((r) => LOOP_PERSON.has(r.status))) out.push([sp(truncate(LOOP_PERSON_COMMANDS, width), "muted")]);
   return out;
 }
 

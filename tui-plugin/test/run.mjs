@@ -1967,6 +1967,30 @@ test("loops: every contract status reads differently in words and only passed re
   assert.ok(!/[\u0000-\u0008\u001b]/.test(text) && text.includes("<b>x</b>"), text);
 });
 const { createLoopRunner } = await import(src("runner.js"));
+test("loops (v7): a run waiting for a person, a paused one and an interrupted one read in words with the command to answer or resume; a trial is marked; the extra command row appears only when a shown run needs it", () => {
+  const needs = [
+    loopRun("r-wait", "review-loop", "waiting", { attempts: [{ n: 1 }] }),
+    loopRun("r-pause", "review-loop", "paused", { attempts: [{ n: 1 }] }),
+    loopRun("r-gone", "review-loop", "interrupted", { attempts: [{ n: 1 }] }),
+  ];
+  const lines = listText(loopDoc(needs), 80).map((l) => l.trimEnd());
+  const find = (id) => lines.find((l) => l.includes(id));
+  assert.match(find("r-wait"), /waiting for you/);
+  assert.match(find("r-pause"), / paused /);
+  assert.match(find("r-gone"), /interrupted/);
+  assert.ok(lines.includes(R.LOOP_PERSON_COMMANDS), lines.join("\n"));
+  assert.equal(R.LOOP_PERSON_COMMANDS, "agentgraph loop answer|resume RUN");
+  assert.ok(lines.includes(R.LOOP_COMMANDS), "the status and cancel commands stay");
+  const said = ["waiting", "paused", "interrupted", "running", "passed", "failed"].map((status) => listText(loopDoc([loopRun("r-" + status, "f", status)]), 80).find((l) => l.includes("r-" + status)).trim().replace(/ \d+\/\d+.*$/, ""));
+  assert.equal(new Set(said).size, 6, said.join(" | "));
+  for (const status of ["waiting", "paused", "interrupted"]) assert.ok(!listText(loopDoc([loopRun("r-" + status, "f", status)]), 80).some((l) => l.includes("r-" + status) && (l.startsWith("✓") || /pass/i.test(l.replace("r-" + status, "")))), status);
+  const quiet = listText(loopDoc(LOOPS), 80);
+  assert.ok(!quiet.includes(R.LOOP_PERSON_COMMANDS), "an answer or resume command with nothing to answer or resume");
+  const trial = listText(loopDoc([loopRun("r-try", "review-loop", "failed", { trial: true })]), 80).find((l) => l.includes("r-try"));
+  assert.match(trial, /trial/, trial);
+  assert.ok(!/trial/.test(listText(loopDoc([loopRun("r-real", "review-loop", "failed")]), 80).find((l) => l.includes("r-real"))), "a saved loop's run marked as a trial");
+  for (const width of [8, 12, 20, 37, 80]) for (const line of R.render(loopDoc(needs.concat([loopRun("r-try", "review-loop", "failed", { trial: true })])), { width, now: NOW })) assert.ok(R.lineWidth(line) <= width, "wide at " + width);
+});
 test("loop runner: `agentgraph.looprun list --json --project DIR`, no shell, only when the project has a loops folder; any failure is an empty list", async () => {
   const project = fs.mkdtempSync(path.join(tmp, "loop-project-"));
   const argvs = [];

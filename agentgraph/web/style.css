@@ -866,4 +866,55 @@
 .agentgraph .ag-loopbox .ag-loop-final-status { font-weight: 600; }
 .agentgraph .ag-loopbox .ag-loop-final-reason { flex: 1 1 10em; min-width: 0; color: var(--ag-muted); overflow-wrap: anywhere; }
 .agentgraph .ag-loopbox .ag-loop-orphans { margin-top: 10px; }
+/* v7: worker-and-judge runs, a person's answers, recovery, history, compare, trial and versions. No colour carries meaning alone; nothing animates. */
+.agentgraph .ag-loopbox .ag-loop-path { margin: 0 0 4px; padding-left: 18px; }
+.agentgraph .ag-loopbox .ag-loop-path li { margin: 0 0 1px; }
+.agentgraph .ag-loopbox .ag-loop-more, .agentgraph .ag-loopbox .ag-loop-versions, .agentgraph .ag-loopbox .ag-loop-fold { margin: 6px 0; min-width: 0; }
+.agentgraph .ag-loopbox .ag-loop-more > summary, .agentgraph .ag-loopbox .ag-loop-versions > summary, .agentgraph .ag-loopbox .ag-loop-fold > summary { cursor: pointer; font-size: 11px; font-weight: 600; color: var(--ag-ink); }
+.agentgraph .ag-loopbox summary:focus-visible { outline: 2px solid var(--ag-work); outline-offset: 2px; }
+.agentgraph .ag-loopbox .ag-loop-agentbox { margin: 6px 0; padding: 4px 0 4px 8px; border-left: 2px solid var(--ag-row-divider); min-width: 0; }
+.agentgraph .ag-loopbox .ag-loop-agent-title { margin: 0 0 3px; font-size: 11px; font-weight: 600; color: var(--ag-ink); }
+.agentgraph .ag-loopbox select, .agentgraph .ag-loopbox textarea { max-width: 100%; box-sizing: border-box; font-size: 11px; }
+.agentgraph .ag-loopbox .ag-loop-run-tools { padding: 0 0 4px 10px; }
+.agentgraph .ag-loopbox .ag-loop-tool, .agentgraph .ag-loopbox .ag-loop-chip { font-size: 11px; }
+.agentgraph .ag-loopbox .ag-loop-trial { font-size: 11px; font-weight: 600; padding: 0 5px; border: 1px solid var(--ag-control-border); border-radius: 4px; color: var(--ag-ink); }
+.agentgraph .ag-loopbox .ag-loop-trialnote { padding: 6px 8px; margin: 0 0 8px; border: 1px dashed var(--ag-control-border); border-radius: 6px; }
+.agentgraph .ag-loopbox .ag-loop-trialnote p { margin: 0 0 6px; }
+.agentgraph .ag-loopbox .ag-loop-attempt-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 8px; }
+.agentgraph .ag-loopbox .ag-loop-attempt h4, .agentgraph .ag-loopbox .ag-loop-try h5, .agentgraph .ag-loopbox .ag-loop-history h4, .agentgraph .ag-loopbox .ag-loop-compare h4 { margin: 0 0 3px; font-size: 11px; font-weight: 600; color: var(--ag-ink); }
+.agentgraph .ag-loopbox .ag-loop-step { padding: 3px 0 5px; min-width: 0; }
+.agentgraph .ag-loopbox .ag-loop-step[data-outcome="fail"], .agentgraph .ag-loopbox .ag-loop-step[data-outcome="agent_error"], .agentgraph .ag-loopbox .ag-loop-step[data-outcome="check_error"] { border-left: 2px solid var(--ag-danger); padding-left: 6px; }
+.agentgraph .ag-loopbox .ag-loop-chip { margin-right: 6px; font-weight: 600; }
+.agentgraph .ag-loopbox .ag-loop-chip[aria-pressed="true"] { text-decoration: underline; }
+.agentgraph .ag-loopbox .ag-loop-step-text { overflow-wrap: anywhere; color: var(--ag-ink); }
+.agentgraph .ag-loopbox .ag-loop-history, .agentgraph .ag-loopbox .ag-loop-compare, .agentgraph .ag-loopbox .ag-loop-waiting, .agentgraph .ag-loopbox .ag-loop-paused { margin: 6px 0 8px; padding: 8px 10px; border: 1px solid var(--ag-control-border); border-radius: 6px; background: var(--ag-highlight); min-width: 0; }
+.agentgraph .ag-loopbox .ag-loop-try { padding: 5px 0; border-top: 1px solid var(--ag-row-divider); min-width: 0; }
+.agentgraph .ag-loopbox .ag-loop-waiting-q, .agentgraph .ag-loopbox .ag-loop-paused-why { margin: 0 0 6px; font-weight: 600; overflow-wrap: anywhere; white-space: normal; }
+.agentgraph .ag-loopbox .ag-loop-paused-why strong { font-weight: 700; }
+.agentgraph .ag-loopbox .ag-loop-passedby { margin: 2px 0 0; font-weight: 600; }
+.agentgraph .ag-loopbox .ag-loop-cmp-row { display: grid; grid-template-columns: minmax(4.5em, .7fr) minmax(0, 1fr) minmax(0, 1fr); gap: 2px 8px; padding: 3px 0 3px 6px; border-left: 2px solid transparent; font-size: 11px; font-weight: 400; min-width: 0; }
+.agentgraph .ag-loopbox .ag-loop-cmp-row > * { min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.agentgraph .ag-loopbox .ag-loop-cmp-row[data-differs="true"] { border-left: 3px solid var(--ag-ink); font-weight: 700; }
+.agentgraph .ag-loopbox .ag-loop-cmp-row[data-differs="true"] .ag-loop-cmp-mark { grid-column: 2 / -1; }
+.agentgraph .ag-loopbox .ag-loop-cmp-row[data-differs="false"] .ag-loop-cmp-mark { display: none; }
+.agentgraph .ag-loopbox .ag-loop-cmp-head { font-weight: 600; }
+.agentgraph .ag-loopbox .ag-loop-cmp-label { color: var(--ag-muted); }
+.agentgraph .ag-loopbox .ag-loop-version-list { margin: 4px 0; padding: 0; list-style: none; }
+.agentgraph .ag-loopbox .ag-loop-version { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding: 3px 0; border-top: 1px solid var(--ag-row-divider); }
+.agentgraph .ag-loopbox .ag-loop-version-text { flex: 1 1 12em; min-width: 0; overflow-wrap: anywhere; }
+.agentgraph .ag-loopbox .ag-loop-version-table { width: 100%; max-width: 100%; table-layout: fixed; border-collapse: collapse; margin: 6px 0; font-size: 11px; }
+.agentgraph .ag-loopbox .ag-loop-version-table th, .agentgraph .ag-loopbox .ag-loop-version-table td { padding: 3px 4px; text-align: left; vertical-align: top; font-size: 11px; overflow-wrap: anywhere; border-top: 1px solid var(--ag-row-divider); }
+.agentgraph .ag-loopbox .ag-loop-version-table thead th { font-weight: 600; color: var(--ag-muted); border-top: 0; }
+/* the panel is always narrow, so each settings group reads as its own short list, not a table with squeezed columns */
+.agentgraph .ag-loopbox .ag-loop-version-table, .agentgraph .ag-loopbox .ag-loop-version-table tbody, .agentgraph .ag-loopbox .ag-loop-version-table tr, .agentgraph .ag-loopbox .ag-loop-version-table td, .agentgraph .ag-loopbox .ag-loop-version-table th { display: block; width: auto; }
+.agentgraph .ag-loopbox .ag-loop-version-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.agentgraph .ag-loopbox .ag-loop-version-table tbody tr { padding: 4px 0; border-top: 1px solid var(--ag-row-divider); }
+.agentgraph .ag-loopbox .ag-loop-version-table td::before { content: attr(data-label) ': '; font-weight: 600; color: var(--ag-muted); }
+.agentgraph .ag-loopbox .ag-loop-version-table th[scope="row"] { font-weight: 700; color: var(--ag-ink); }
+@media (max-width: 640px) {
+  .agentgraph .ag-loopbox .ag-loop-cmp-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .agentgraph .ag-loopbox .ag-loop-cmp-label { grid-column: 1 / -1; font-weight: 600; }
+  .agentgraph .ag-loopbox .ag-loop-cmp-head .ag-loop-cmp-label { display: none; }
+  .agentgraph .ag-loopbox .ag-loop-cmp-row[data-differs="true"] .ag-loop-cmp-mark { grid-column: 1 / -1; }
+}
 .agentgraph .ag-loopbox button { max-width: 100%; }

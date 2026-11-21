@@ -984,6 +984,7 @@ function createImproveRunner(deps) {
 // folder; the answer's JSON comes back as the command printed it.
 const LOOP_RUN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const LOOP_FLOW = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const LOOP_VERSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/; // a kept version's id, e.g. 20261121T060000-000001
 const LOOP_REQUEST_MAX = 65536;
 const LOOP_GOAL_MAX = 4000;
 const LOOP_DIR_MAX = 4096;
@@ -1000,8 +1001,21 @@ function loopRequest(request) {
   if (request.op === "cancel") return run ? { op: "cancel", run: request.run } : null;
   if (request.op === "start") {
     if (!flow || (request.goal !== undefined && !looseText(request.goal, LOOP_GOAL_MAX)) || (request.workdir !== undefined && !looseText(request.workdir, LOOP_DIR_MAX))) return null;
-    return Object.assign({ op: "start", flow: request.flow }, request.goal === undefined ? {} : { goal: request.goal }, request.workdir === undefined ? {} : { workdir: request.workdir });
+    if (request.settings !== undefined && !isPlainObject(request.settings)) return null; // a trial: the form's values, not saved
+    return Object.assign({ op: "start", flow: request.flow }, request.goal === undefined ? {} : { goal: request.goal }, request.workdir === undefined ? {} : { workdir: request.workdir }, request.settings === undefined ? {} : { settings: request.settings });
   }
+  // v7: pause a live run; resume a paused, interrupted or waiting one (redo or accept for a turn nobody could vouch for); answer a person's question;
+  // go back to a kept version of a loop's settings.
+  if (request.op === "pause") return run ? { op: "pause", run: request.run } : null;
+  if (request.op === "resume") {
+    if (!run || (request.choice !== undefined && request.choice !== "redo" && request.choice !== "accept")) return null;
+    return request.choice === undefined ? { op: "resume", run: request.run } : { op: "resume", run: request.run, choice: request.choice };
+  }
+  if (request.op === "answer") {
+    if (!run || !["approve", "reject", "stop"].includes(request.answer) || (request.note !== undefined && !looseText(request.note, LOOP_GOAL_MAX))) return null;
+    return Object.assign({ op: "answer", run: request.run, answer: request.answer }, request.note === undefined ? {} : { note: request.note });
+  }
+  if (request.op === "restore") return flow && rev && typeof request.version === "string" && LOOP_VERSION.test(request.version) ? { op: "restore", flow: request.flow, version: request.version, rev: request.rev } : null;
   return null;
 }
 function createLoopsRunner(deps) {

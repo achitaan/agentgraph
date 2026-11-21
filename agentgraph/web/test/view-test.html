@@ -170,6 +170,7 @@
     // v4: loop fixtures (the sweep's fake uses them; the v4 checks are at the end)
     const LOOP_SAVED = { version: 1, flow: 'fix-loop', goal: 'Make check.sh exit 0.', check: { command: 'sh check.sh', timeout: 300, inconclusive_codes: [75] }, session: 'reuse', limits: { attempts: 4, attempt_seconds: 240, seconds: 900, cost: 1.5 }, allow_asks: false };
     const LOOP_STATUSES = ['running', 'passed', 'failed', 'limit', 'invalid', 'check_error', 'inconclusive', 'stalled', 'agent_error', 'cancelled', 'interrupted'];
+    const LOOP_TEAM_SAVED = { version: 1, flow: 'review-loop', goal: 'Fix the counter.', session: 'reuse', limits: { attempts: 4 }, allow_asks: false };
     function loopDetail(id, flow, status, spec = {}) {
     const now = Date.now() / 1000, created = spec.created ?? now - 600, attempts = spec.attempts ?? [];
     const run = { run: id, flow, status, reason: spec.reason ?? '', live: status === 'running', created, ended: status === 'running' ? null : created + 20, goal: 'Make check.sh exit 0.', limits: { attempts: spec.limit ?? 4 },
@@ -9515,13 +9516,60 @@
 
 
     // ==== v4: loops (configure, run and read a self-loop; actions.loops, the contract in agentgraph-loops/v1/r1/api.md) ====
+    // v7: a worker-and-judge loop (impl-openai -> verifier -> impl-openai): its runs as the controller records them (attempt.steps[]) and as the page reads them
+    const TEAM_STEPS = [{ id: 'work', kind: 'agent', role: 'work', agent: 'impl-openai' }, { id: 'check', kind: 'check' }, { id: 'judge:verifier', kind: 'agent', role: 'judge', agent: 'verifier' }];
+    function teamStep(n, id, outcome, route, extra = {}) {
+      const kind = id === 'check' ? 'check' : 'agent';
+      return { step: id, kind, role: id === 'work' ? 'work' : id === 'check' ? null : 'judge', agent: id === 'work' ? 'impl-openai' : kind === 'check' ? null : id.split(':')[1], try: extra.try ?? 1, seconds: extra.seconds ?? 5, cost: extra.cost === undefined ? 0.02 : extra.cost,
+        exit: extra.exit === undefined ? (kind === 'check' ? 0 : null) : extra.exit, outcome, route, verdict: extra.verdict ?? null, message: 'attempt-' + n + '/' + id.replace(':', '-') + '.message.md', reply: kind === 'agent' ? 'r' : null, findings: extra.verdict ? 'f' : null, error: extra.error ?? null };
+    }
+    function teamRun(id, status, spec = {}) {
+      const now = Date.now() / 1000, created = spec.created ?? now - 600;
+      const attempts = (spec.attempts || []).map(a => {
+        const steps = a.steps.map(([sid, outcome, route, extra = {}]) => teamStep(a.n, sid, outcome, route, extra)), work = steps.find(item => item.step === 'work'), check = steps.find(item => item.step === 'check');
+        return { n: a.n, steps, agent: work ? { outcome: work.outcome, seconds: work.seconds, cost: work.cost, error: null } : null, check: check ? { outcome: check.outcome, exit: check.exit, seconds: check.seconds, timed_out: false, error: null } : null,
+          feedback: a.feedback ?? null, feedback_from: a.from ?? null, started: created, ended: created + 5 };
+      });
+      const over = ['passed', 'failed', 'limit', 'cancelled', 'invalid'].includes(status);
+      const run = { run: id, flow: 'review-loop', status, reason: spec.reason ?? '', live: spec.live ?? false, created, ended: over ? created + 40 : null, goal: 'Fix the counter.', limits: { attempts: 4 }, trial: !!spec.trial, settings_sha256: spec.sha ?? 'aa11bb22cc33dd44',
+        passed_by: spec.passed_by ?? null, waiting: spec.waiting ?? null, cursor: spec.cursor ?? null, recoveries: spec.recoveries ?? [], answers: [], totals: { attempts: attempts.length, cost: spec.cost === undefined ? 0.1 : spec.cost, seconds: spec.seconds ?? 30 }, attempts };
+      return { run, definition: { settings: spec.settings ?? { ...LOOP_TEAM_SAVED }, path: ['impl-openai', 'verifier', 'impl-openai'], steps: TEAM_STEPS, steps_sha256: 'abc', goal: 'Fix the counter.', workdir: '/work/project', created },
+        attempts: (spec.attempts || []).map(a => ({ n: a.n, message: '', check_output: a.output ?? 'ok\n', check_output_truncated: false, steps: a.steps.map(([sid, , , extra = {}]) => ({ step: sid, try: extra.try ?? 1, ...((a.texts || {})[sid] || { message: '', reply: '', findings: '' }) })) })) };
+    }
+    const TEAM_ONE = '20261121-070000-1111', TEAM_WAIT = '20261121-070100-2222', TEAM_AMBIG = '20261121-070200-3333', TEAM_JUDGE = '20261121-070300-4444', TEAM_ASKED = '20261121-070400-5555', TEAM_GONE = '20261121-070500-6666', TEAM_TRIAL = '20261121-070600-7777', TEAM_FAILED = '20261121-070700-8888', TEAM_LIVE = '20261121-070800-9999';
+    function teamRuns(now) {
+      const work = (route = 'check') => ['work', 'returned', route], check = (exit = 0, route = 'judge:verifier') => ['check', exit === 0 ? 'pass' : 'fail', exit === 0 ? route : 'work', { exit, seconds: 0.2, cost: null }];
+      const judge = (verdict, route, extra = {}) => ['judge:verifier', verdict, route, { verdict, seconds: 4, cost: 0.01, ...extra }];
+      const texts = (find = '') => ({ work: { message: 'Fix the counter.', reply: 'Changed counter.js.', findings: '' }, check: { message: '', reply: '', findings: '' }, 'judge:verifier': { message: 'Judge the work.', reply: find + '\nVERDICT: ' + (find ? 'FAIL' : 'PASS'), findings: find } });
+      return [
+        teamRun(TEAM_ONE, 'passed', { created: now - 3000, passed_by: 'check+judges', reason: 'the check exited 0 and the judges passed', cost: 0.12, seconds: 30, attempts: [
+          { n: 1, steps: [work(), check(), judge('fail', 'work', { findings: 1 })], from: 'verifier', feedback: 'attempt-2/message.md', texts: texts('The counter is never reset (line 12).') },
+          { n: 2, steps: [work(), check(), judge('pass', 'done')], texts: texts() }] }),
+        teamRun(TEAM_WAIT, 'waiting', { created: now - 400, live: true, cost: 0.05, attempts: [{ n: 1, steps: [work(), check(), judge('pass', 'human')], texts: texts() }],
+          waiting: { step: 'judge:verifier', outcome: 'pass', since: now - 20, question: 'judge:verifier ended with pass: every check and judge passed. Answer approve to carry on and finish the run as passed, reject (with a note) to send the work back to the worker, or stop to end the run.' } }),
+        teamRun(TEAM_AMBIG, 'paused', { created: now - 500, cost: null, reason: 'cannot tell whether work of attempt 1 ran: the session is still busy; nothing was sent. Resume with --redo to send it again, or --accept to take it as returned and go on', attempts: [{ n: 1, steps: [['work', null, null]] }],
+          cursor: { attempt: 1, step: 'work', try: 1, phase: 'started' }, recoveries: [{ attempt: 1, step: 'work', answer: 'unknown', action: 'pause', reason: 'the session is still busy' }] }),
+        teamRun(TEAM_JUDGE, 'paused', { created: now - 520, cost: null, reason: 'cannot tell whether judge:verifier of attempt 1 ran: the database is unreadable; nothing was sent. Resume with --redo to send it again', attempts: [{ n: 1, steps: [work(), check(), ['judge:verifier', null, null]] }],
+          cursor: { attempt: 1, step: 'judge:verifier', try: 1, phase: 'started' }, recoveries: [{ attempt: 1, step: 'judge:verifier', answer: 'unknown', action: 'pause', reason: 'the database is unreadable' }] }),
+        teamRun(TEAM_ASKED, 'paused', { created: now - 540, reason: 'paused on request after check of attempt 1; the run goes on at judge:verifier', attempts: [{ n: 1, steps: [work(), check()] }], cursor: { attempt: 1, step: 'check', phase: 'done', next: 'judge:verifier' } }),
+        teamRun(TEAM_GONE, 'interrupted', { created: now - 560, reason: '', attempts: [{ n: 1, steps: [work()] }], cursor: { attempt: 1, step: 'work', phase: 'done', next: 'check' } }),
+        teamRun(TEAM_TRIAL, 'failed', { created: now - 100, trial: true, sha: 'ee55ff66ee55ff66', reason: 'the attempt limit (4) was reached and the last judge failed', cost: null, seconds: 61, settings: { ...LOOP_TEAM_SAVED, limits: { attempts: 2 } },
+          attempts: [{ n: 1, steps: [work(), check(1)], output: 'FAIL: counter is 1\nexit 1\n' }, { n: 2, steps: [work(), check(), judge('fail', 'work', { findings: 1 })], texts: texts('Still not reset.') }] }),
+        teamRun(TEAM_FAILED, 'failed', { created: now - 200, reason: 'the attempt limit (4) was reached and the last check failed', cost: 0.2, seconds: 44, attempts: [{ n: 1, steps: [work(), check(2)], output: 'FAIL: counter is 1\nexit 2\n' }] }),
+        teamRun(TEAM_LIVE, 'running', { created: now - 30, live: true, cost: 0.02, seconds: 12, attempts: [{ n: 1, steps: [work()] }] })
+      ];
+    }
     function loopFakes(options = {}) {
       const calls = [], now = Date.now() / 1000;
-      const entry = (flow, path, extra = {}) => ({ flow, name: '', path, agent: path[0], runnable: path[0] === path[1], reason: path[0] === path[1] ? '' : 'loops between several agents arrive in the next release', settings: null, problem: '', rev: '', ...extra });
+      const LOOP_BACK = 'this path does not loop back to its first agent: a loop is A -> A or A -> J1 -> ... -> Jk -> A';
+      const loops_ = path => path[0] === path.at(-1) && path.length >= 2;
+      const entry = (flow, path, extra = {}) => ({ flow, name: '', path, agent: path[0], runnable: loops_(path), reason: loops_(path) ? '' : LOOP_BACK, settings: null, problem: '', rev: '', versions: [], ...extra });
       const state = { revs: 1, orphans: options.orphans ?? ['old-flow'], loops: [
         entry('fix-loop', ['impl-openai', 'impl-openai'], { settings: JSON.parse(JSON.stringify(LOOP_SAVED)), rev: 'rev-1' }),
         entry('fresh-loop', ['impl-claude', 'impl-claude']),
-        entry('two-step', ['researcher', 'oracle'])] };
+        entry('two-step', ['researcher', 'oracle']),
+        entry('review-loop', ['impl-openai', 'verifier', 'impl-openai'], { settings: JSON.parse(JSON.stringify(LOOP_TEAM_SAVED)), rev: 'rev-t1' })] };
+      if (options.versions) { state.loops[0].versions = JSON.parse(JSON.stringify(options.versions)); state.loops[3].versions = JSON.parse(JSON.stringify(options.versions)); }
       if (options.problem) state.loops[1].problem = options.problem;
       if (options.noCheck) delete state.loops[0].settings.check;
       const details = new Map(), order = [], lag = new Map();
@@ -9533,8 +9581,9 @@
         if (options.live) add(loopDetail('20261121-051500-0002', 'fix-loop', 'running', { created: now - 30, reason: '', cost: 0.01, attempts: [{ n: 1, agent: { outcome: 'returned', exit: 0, seconds: 5, cost: 0.01, error: null }, check: { outcome: 'fail', exit: 1, seconds: 0.1, timed_out: false, error: null }, feedback: 'attempt-2/message.md', message: 'm1', output: 'still failing\n' }, { n: 2, message: 'm2' }] }));
         add(loopDetail('20261121-040000-0003', 'fresh-loop', 'cancelled', { created: now - 9000, reason: 'cancelled' }));
       }
+      if (options.team) teamRuns(now).filter(item => options.team === true || options.team.includes(item.run.run)).forEach(add);
       if (options.queued) add(loopDetail('20261121-052000-0004', 'fix-loop', 'queued', { created: now - 5, reason: '', cost: null, attempts: [] }));
-      const listed = () => order.map(id => details.get(id).run).sort((a, b) => b.created - a.created).map(run => ({ run: run.run, flow: run.flow, status: run.status, reason: run.reason, live: run.live, attempts: run.attempts.length, limit: run.limits.attempts, cost: run.totals.cost, seconds: run.totals.seconds, created: run.created, ended: run.ended, goal: run.goal, check: 'sh check.sh', last_check: run.attempts.length ? run.attempts.at(-1).check || null : null }));
+      const listed = () => order.map(id => details.get(id).run).sort((a, b) => b.created - a.created).map(run => ({ run: run.run, flow: run.flow, status: run.status, reason: run.reason, live: run.live, attempts: run.attempts.length, limit: run.limits.attempts, cost: run.totals.cost, seconds: run.totals.seconds, created: run.created, ended: run.ended, goal: run.goal, check: 'sh check.sh', last_check: run.attempts.length ? run.attempts.at(-1).check || null : null, passed_by: run.passed_by ?? null, waiting: run.waiting ?? null, trial: !!run.trial, settings_sha256: run.settings_sha256 ?? null }));
       const fail = (message, status = 400, extra = {}) => { throw Object.assign(new Error(message), { status, ...extra }); };
       let readsFailed = 0, listReads = 0;
       const loops = async request => {
@@ -9548,6 +9597,7 @@
           lag.forEach((left, id) => { if (left > 0) lag.set(id, left - 1); });
           return JSON.parse(JSON.stringify({ project: '/work/project', scratch: false, loops: first ? state.loops.filter(item => item.flow !== options.missingFirst) : state.loops, orphans: state.orphans, runs: rows }));
         }
+        if (options.refuseOp?.[request.op]) fail(options.refuseOp[request.op][0], options.refuseOp[request.op][1]);
         if (options.refuse) fail(options.refuse, options.status || 400, options.staleRev ? { rev: options.staleRev } : {});
         const found = state.loops.find(item => item.flow === request.flow);
         if (request.op === 'save' || request.op === 'remove') {
@@ -9560,11 +9610,25 @@
         }
         if (request.op === 'start') {
           if (!found) fail('unknown flow ' + request.flow);
-          if (!request.goal && !found.settings?.goal) fail('there is no goal');
+          if (!request.goal && !(request.settings || found.settings)?.goal) fail('there is no goal');
           const id = '20261121-06' + String(state.revs++).padStart(2, '0') + '00-bbbb';
-          add(loopDetail(id, request.flow, options.startQueued ? 'queued' : 'running', { created: Date.now() / 1000, cost: null, attempts: [] }));
+          const made = request.flow === 'review-loop' ? teamRun(id, 'running', { created: Date.now() / 1000, live: true, cost: null, attempts: [], settings: request.settings || found.settings, trial: !!request.settings, sha: request.settings ? 'trial' + id.slice(-9) : undefined })
+            : loopDetail(id, request.flow, options.startQueued ? 'queued' : 'running', { created: Date.now() / 1000, cost: null, attempts: [] });
+          if (!made.run.trial && request.settings) { made.run.trial = true; made.run.settings_sha256 = 'trial' + id.slice(-9); made.definition.settings = JSON.parse(JSON.stringify(request.settings)); }
+          add(made);
           if (options.lagReads) lag.set(id, options.lagReads);
           return { ok: true, run: id, status: 'running', reason: '' };
+        }
+        if (request.op === 'pause') { const found = details.get(request.run); if (!found) fail('no such run', 404); return { ok: true, run: request.run }; }
+        if (request.op === 'resume') { const found = details.get(request.run); if (!found) fail('no such run', 404); found.run.status = 'running'; found.run.live = true; found.run.reason = ''; return { ok: true, run: request.run, status: 'running' }; }
+        if (request.op === 'answer') { const found = details.get(request.run); if (!found) fail('no such run', 404); found.run.status = 'running'; found.run.waiting = null; return { ok: true, run: request.run }; }
+        if (request.op === 'restore') {
+          if (!found) fail('unknown flow ' + request.flow);
+          if (request.rev !== found.rev) fail('the settings changed since you read them', 409, { rev: found.rev });
+          if (!found.versions.some(item => item.version === request.version)) fail('flow ' + request.flow + ' has no kept version ' + request.version);
+          const before = found.settings ? JSON.parse(JSON.stringify(found.settings)) : null;
+          found.settings = JSON.parse(JSON.stringify(options.restored || { ...(request.flow === 'review-loop' ? LOOP_TEAM_SAVED : LOOP_SAVED), limits: { attempts: 2 } })); found.rev = 'rev-' + (++state.revs);
+          return { ok: true, settings: JSON.parse(JSON.stringify(found.settings)), rev: found.rev, before };
         }
         if (request.op === 'cancel') { if (!details.has(request.run)) fail('no such run', 404); return { ok: true, run: request.run }; }
         fail('unknown op ' + request.op);
@@ -9574,7 +9638,8 @@
     const selfLoopFixture = () => worldFixture([
       { id: 'fix-loop', path: ['impl-openai', 'impl-openai'], text: 'Fix it.', source: 'drawn' },
       { id: 'fresh-loop', path: ['impl-claude', 'impl-claude'], text: 'Fix it too.', source: 'drawn' },
-      { id: 'two-step', path: ['researcher', 'oracle'], text: 'Ask.', source: 'drawn' }]);
+      { id: 'two-step', path: ['researcher', 'oracle'], text: 'Ask.', source: 'drawn' },
+      { id: 'review-loop', path: ['impl-openai', 'verifier', 'impl-openai'], text: 'Review.', source: 'drawn' }]);
     const loopUntil = async (condition, ms = 2500) => { const end = performance.now() + ms; while (!condition() && performance.now() < end) await sleep(25); return condition(); };
     const loopSection = (root, id = 'fix-loop') => root.querySelector('.ag-detail [data-loop-for="' + id + '"]');
     const loopField = (root, name, id) => loopSection(root, id)?.querySelector('[data-loop-field="' + name + '"]');
@@ -9667,7 +9732,7 @@
     await test('v4 loops flows that cannot loop: a flow that is not a self-loop shows the server\'s reason and no form; a problem and an orphan are said plainly', async () => {
       await loopMount({}, async root => {
         const section = loopSection(root, 'two-step');
-        assert(section.querySelector('[data-loop-reason]')?.textContent === 'loops between several agents arrive in the next release', 'reason: ' + section.textContent);
+        assert(section.querySelector('[data-loop-reason]')?.textContent === 'this path does not loop back to its first agent: a loop is A -> A or A -> J1 -> ... -> Jk -> A', 'reason: ' + section.textContent);
         assert(!section.querySelector('[data-loop-form], [data-loop-field], [data-loop-control="save"], [data-loop-control="run"]'), 'a form for a flow that cannot loop');
         assert(/old-flow/.test(section.querySelector('[data-loop-orphans]')?.textContent || ''), 'the orphan is not said');
       }, {}, 'two-step');
@@ -9952,6 +10017,353 @@
       }
     });
 
+
+    // ==== v7: loops between agents (release 2), a person and recovery (2, 3), inspection (4), trial and versions (3, 4) ====
+    const TF = 'review-loop', canon = value => JSON.stringify(value, (key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.keys(item).sort().map(name => [name, item[name]])) : item);
+    const tsec = root => loopSection(root, TF), tfield = (root, name) => loopField(root, name, TF);
+    const tclick = (root, control) => loopClick(root, control, TF);
+    const trow = (root, id) => tsec(root)?.querySelector('[data-loop-run="' + id + '"]');
+    const tmount = (options, run, mount = {}) => loopMount({ team: true, ...options }, run, mount, TF);
+    const topen = async (root, id) => { const row = trow(root, id); assert(row, 'no run ' + id); if (row.dataset.open !== 'true') row.querySelector('.ag-loop-run-head').click(); assert(await loopUntil(() => trow(root, id)?.querySelector('.ag-loop-body')), 'the run did not open'); await settled(); };
+    const tposts = (fakes, op) => fakes.calls.filter(call => call.op === op);
+    const TEAM_VERSIONS = () => { const now = Date.now() / 1000; return [{ version: '20261121T060000-000001', time: now - 3000, sha256: 'aa11bb22cc33dd44' }, { version: '20261121T050000-000002', time: now - 9000, sha256: 'rev-t1' }]; };
+
+    await test('v7 team form: a worker-and-judge path shows the Loop section for its drawn order (worker first, judges between), the check is optional with a judge and the need-a-check line follows the path; a path that does not loop back shows the server\'s reason and no form', async () => {
+      await tmount({}, async root => {
+        const section = tsec(root); assert(section.dataset.loopRunnable === 'true' && !section.querySelector('[data-loop-reason]'), 'not runnable');
+        const roles = [...section.querySelectorAll('[data-loop-path] [data-loop-role]')].map(item => item.dataset.loopRole + ':' + item.dataset.loopAgent);
+        assert(roles.join() === 'work:impl-openai,judge:verifier', 'drawn order ' + roles.join());
+        assert(!section.querySelector('[data-loop-need]'), 'a need-a-check line on a path with a judge');
+        assert(/optional/i.test(tfield(root, 'check').closest('label').textContent), 'the check is not marked optional');
+        const run = section.querySelector('[data-loop-control="run"]'); assert(run && run.getAttribute('aria-disabled') !== 'true', 'Run is off on a path with a judge and no check');
+        ['save', 'trial', 'run'].forEach(control => assert(section.querySelector('[data-loop-control="' + control + '"]'), 'no ' + control));
+      });
+      await loopMount({}, async root => { assert(loopSection(root, 'fresh-loop').querySelector('[data-loop-need="check"]'), 'a self-loop without a check does not say it needs one'); assert(!loopSection(root, 'fresh-loop').querySelector('[data-loop-path], [data-loop-more], [data-loop-field="approval"]'), 'team parts on a self-loop'); }, {}, 'fresh-loop');
+    });
+
+    await test('v7 team form: Save posts exactly the keys the API accepts (version, flow, goal, check, session, limits, allow_asks, approval, artifacts, steps.<agent> with session, handoff, retries, on, escalate); unset fields are left out; "Ask me before it passes" is approval before_pass', async () => {
+      await tmount({}, async (root, fakes) => {
+        const more = tsec(root).querySelector('details[data-loop-more]'); assert(more && !more.open, 'the More disclosure is missing or open'); more.open = true;
+        typeIn(tfield(root, 'check'), 'npm test');
+        tfield(root, 'approval').click();
+        typeIn(tfield(root, 'artifacts'), 'a.md\n\nnotes/b.md\n');
+        typeIn(tfield(root, 'steps.verifier.retries'), '2'); tfield(root, 'steps.verifier.session').value = 'reuse'; tfield(root, 'steps.verifier.session').dispatchEvent(new Event('change', { bubbles: true }));
+        tfield(root, 'steps.verifier.handoff').value = 'report'; tfield(root, 'steps.verifier.handoff').dispatchEvent(new Event('change', { bubbles: true }));
+        tfield(root, 'steps.verifier.fail').value = 'human'; tfield(root, 'steps.verifier.fail').dispatchEvent(new Event('change', { bubbles: true }));
+        typeIn(tfield(root, 'steps.impl-openai.retries'), '1'); typeIn(tfield(root, 'steps.impl-openai.escalate_after'), '2'); typeIn(tfield(root, 'steps.impl-openai.escalate_to'), 'impl-hard');
+        tfield(root, 'steps.check.fail').value = 'stop'; tfield(root, 'steps.check.fail').dispatchEvent(new Event('change', { bubbles: true }));
+        await tclick(root, 'save');
+        const posts = tposts(fakes, 'save'); assert(posts.length === 1, 'posts ' + posts.length);
+        const body = posts[0], expected = { op: 'save', flow: TF, rev: 'rev-t1', settings: { version: 1, flow: TF, goal: 'Fix the counter.', check: { command: 'npm test', timeout: 300, inconclusive_codes: [75] }, session: 'reuse', limits: { attempts: 4 }, allow_asks: false, approval: 'before_pass', artifacts: ['a.md', 'notes/b.md'],
+          steps: { 'impl-openai': { retries: 1, escalate: { after: 2, to: 'impl-hard' } }, verifier: { session: 'reuse', handoff: 'report', retries: 2, on: { fail: 'human' } }, check: { on: { fail: 'stop' } } } } };
+        assert(canon(body) === canon(expected), 'body ' + canon(body));
+        // WEB_API.md / looprun.validate: the keys and shapes the API accepts
+        const top = ['version', 'flow', 'goal', 'check', 'session', 'limits', 'allow_asks', 'steps', 'artifacts', 'approval'], block = ['session', 'handoff', 'retries', 'on', 'escalate'];
+        assert(Object.keys(body.settings).every(key => top.includes(key)), 'a key the API refuses');
+        Object.entries(body.settings.steps).forEach(([name, one]) => { assert(['impl-openai', 'verifier', 'check'].includes(name), 'steps.' + name); assert(Object.keys(one).every(key => name === 'check' ? key === 'on' : block.includes(key)), 'steps.' + name + ' keys'); if ('retries' in one) assert(Number.isInteger(one.retries) && one.retries >= 0 && one.retries <= 3, 'retries'); });
+        assert(typeof body.rev === 'string' && Object.values(body).every(value => typeof value === 'string' || (typeof value === 'object' && value !== null)), 'value types');
+      });
+      await tmount({}, async (root, fakes) => {  // nothing set in the details: no steps, artifacts or approval keys at all
+        await tclick(root, 'save');
+        assert(canon(tposts(fakes, 'save')[0].settings) === canon(LOOP_TEAM_SAVED), 'a default form saved more than it was: ' + canon(tposts(fakes, 'save')[0].settings));
+      });
+    });
+
+    await test('v7 team form: the More disclosure states the defaults in words; a saved steps block fills its fields back; an on route the form does not edit survives a save', async () => {
+      await tmount({}, async root => {
+        const more = tsec(root).querySelector('details[data-loop-more]'), said = more.querySelector('[data-loop-defaults]')?.textContent || '';
+        assert(/one session/i.test(said) && /not tried again|no retr|not retried/i.test(said) && /fresh/i.test(said) && /once/i.test(said) && /sent back to impl-openai/i.test(said), 'defaults not stated: ' + said);
+      });
+      const kept = { ...LOOP_TEAM_SAVED, steps: { verifier: { retries: 2, on: { inconclusive: 'human', fail: 'stop' } }, 'impl-openai': { retries: 1 } } };
+      await tmount({}, async (root, fakes) => {
+        fakes.state.loops[3].settings = JSON.parse(JSON.stringify(kept)); await loopUntil(() => false, 50);
+      });
+      const fakes2 = loopFakes({ team: true }); fakes2.state.loops[3].settings = JSON.parse(JSON.stringify(kept));
+      await using(selfLoopFixture(), async root => {
+        openStep(root, TF); await settle(); assert(await loopUntil(() => tfield(root, 'steps.verifier.retries')), 'no form');
+        assert(tfield(root, 'steps.verifier.retries').value === '2' && tfield(root, 'steps.impl-openai.retries').value === '1' && tfield(root, 'steps.verifier.fail').value === 'stop', 'values not read back');
+        await tclick(root, 'save');
+        assert(canon(tposts(fakes2, 'save')[0].settings.steps) === canon(kept.steps), 'a save changed the steps: ' + canon(tposts(fakes2, 'save')[0].settings.steps));
+      }, { actions: { loops: fakes2.loops }, loopPollMs: 60 });
+    });
+
+    await test('v7 team run: an opened run shows, per attempt, every step in order (work, check, judge) with its outcome in words, the judge\'s verdict and findings, the route taken, time and cost; passed_by in words; unknown cost never reads as nothing', async () => {
+      await tmount({}, async root => {
+        await topen(root, TEAM_ONE);
+        const body = trow(root, TEAM_ONE).querySelector('.ag-loop-body');
+        const first = body.querySelector('[data-attempt="1"]'), order = [...first.querySelectorAll('[data-loop-step-row]')].map(item => item.dataset.loopStepRow);
+        assert(order.join() === 'work,check,judge:verifier', 'step order ' + order.join());
+        const judge = first.querySelector('[data-loop-step-row="judge:verifier"]');
+        assert(/failed the work|found a problem|did not pass/i.test(judge.textContent) && /sent back to impl-openai/i.test(judge.textContent), 'judge outcome/route: ' + judge.textContent);
+        assert(/never reset/.test(first.textContent), 'the findings are not shown: ' + first.textContent.slice(0, 300));
+        assert(/sent back to impl-openai/i.test(first.querySelector('[data-loop-step-row="check"]').textContent) === false && /went on to verifier|went on to the judge/i.test(first.querySelector('[data-loop-step-row="check"]').textContent), 'check route: ' + first.querySelector('[data-loop-step-row="check"]').textContent);
+        assert(/\d s/.test(judge.textContent) && /\$/.test(judge.textContent), 'time and cost of the judge: ' + judge.textContent);
+        assert(/cost unknown/.test(first.querySelector('[data-loop-step-row="work"]').textContent) === false, 'work has a cost');
+        const second = body.querySelector('[data-attempt="2"]'); assert(/passed/i.test(second.querySelector('[data-loop-step-row="judge:verifier"]').textContent) && /finished|done/i.test(second.querySelector('[data-loop-step-row="judge:verifier"]').textContent), 'last judge: ' + second.textContent);
+        assert(/passed by the check and the judge/i.test(body.querySelector('[data-loop-passedby]')?.textContent || ''), 'passed_by: ' + body.textContent.slice(-300));
+        assert(!/check\+judges|passed_by|before_pass|agent_error/.test(body.textContent), 'a raw token: ' + body.textContent.slice(0, 200));
+      });
+      await tmount({}, async root => {
+        await topen(root, TEAM_AMBIG); assert(/cost unknown/.test(trow(root, TEAM_AMBIG).querySelector('.ag-loop-cost').textContent), 'unknown cost'); assert(!/\$0(\.00)?\b/.test(trow(root, TEAM_AMBIG).textContent), 'cost 0');
+        const approved = JSON.parse(JSON.stringify({})); void approved;
+      }, {});
+      await tmount({ team: [TEAM_ONE] }, async (root, fakes) => {
+        fakes.details.get(TEAM_ONE).run.passed_by = 'check+approval'; await loopUntil(() => false, 50); await topen(root, TEAM_ONE); await sleep(150);
+        fakes.details.get(TEAM_ONE).run.passed_by = 'check+approval';
+      });
+    });
+
+    await test('v7 team run: a route to a person reads "asked you", a route to stop "stopped"; passed_by with approval reads "with your approval"', async () => {
+      const fakes = loopFakes({ team: [TEAM_WAIT, TEAM_ONE] });
+      fakes.details.get(TEAM_ONE).run.passed_by = 'check+judges+approval';
+      await using(selfLoopFixture(), async root => {
+        openStep(root, TF); await settle(); assert(await loopUntil(() => trow(root, TEAM_ONE)), 'no rows');
+        await topen(root, TEAM_ONE); assert(/with your approval/i.test(trow(root, TEAM_ONE).querySelector('[data-loop-passedby]')?.textContent || ''), 'approval words: ' + trow(root, TEAM_ONE).textContent.slice(-200));
+        await topen(root, TEAM_WAIT); assert(/asked you/i.test(trow(root, TEAM_WAIT).querySelector('[data-loop-step-row="judge:verifier"]')?.textContent || ''), 'asked you: ' + trow(root, TEAM_WAIT).textContent.slice(0, 400));
+      }, { actions: { loops: fakes.loops }, loopPollMs: 60 });
+    });
+
+    await test('v7 a person: a waiting run says the question in words with Approve / Send back / Stop, each confirmed in place; each posts its answer once (send back with its note); nothing is said about undo', async () => {
+      await tmount({}, async (root, fakes) => {
+        await topen(root, TEAM_WAIT);
+        const box = trow(root, TEAM_WAIT).querySelector('[data-loop-waiting]'); assert(box, 'no waiting box');
+        assert(/verifier/.test(box.textContent) && /passed/i.test(box.textContent) && !/answer approve|--|reject \(with a note\)/.test(box.textContent), 'the question: ' + box.textContent);
+        ['approve', 'reject', 'stop'].forEach(kind => assert(box.querySelector('[data-loop-control="' + kind + ':' + TEAM_WAIT + '"]'), 'no ' + kind));
+        assert(/Approve/.test(box.textContent) && /Send back/.test(box.textContent) && /Stop/.test(box.textContent), 'labels');
+        assert(!/undo/i.test(box.textContent), 'undo is mentioned');
+        await tclick(root, 'approve:' + TEAM_WAIT);
+        assert(tposts(fakes, 'answer').length === 0, 'an answer posted before the confirmation');
+        assert(trow(root, TEAM_WAIT).querySelector('[data-loop-ask]'), 'no confirmation in place');
+        await tclick(root, 'not-yet:' + TEAM_WAIT); assert(!trow(root, TEAM_WAIT).querySelector('[data-loop-ask]') && tposts(fakes, 'answer').length === 0, 'Not yet did not close it');
+        await tclick(root, 'approve:' + TEAM_WAIT); await tclick(root, 'confirm-approve:' + TEAM_WAIT);
+        const posts = tposts(fakes, 'answer'); assert(posts.length === 1 && canon(posts[0]) === canon({ op: 'answer', run: TEAM_WAIT, answer: 'approve' }), 'approve post ' + canon(posts));
+      });
+      await tmount({}, async (root, fakes) => {
+        await topen(root, TEAM_WAIT); await tclick(root, 'reject:' + TEAM_WAIT);
+        const note = tfield(root, 'note'); assert(note && note.tagName === 'TEXTAREA' && /optional/i.test(note.closest('label').textContent), 'no optional note');
+        typeIn(note, 'Reset it in the loop too.'); await tclick(root, 'confirm-reject:' + TEAM_WAIT);
+        const posts = tposts(fakes, 'answer'); assert(posts.length === 1 && canon(posts[0]) === canon({ op: 'answer', run: TEAM_WAIT, answer: 'reject', note: 'Reset it in the loop too.' }), 'reject post ' + canon(posts));
+      });
+      await tmount({}, async (root, fakes) => {
+        await topen(root, TEAM_WAIT); await tclick(root, 'reject:' + TEAM_WAIT); await tclick(root, 'confirm-reject:' + TEAM_WAIT);
+        assert(canon(tposts(fakes, 'answer')[0]) === canon({ op: 'answer', run: TEAM_WAIT, answer: 'reject' }), 'a send back with no note must not send a note: ' + canon(tposts(fakes, 'answer')));
+      });
+      await tmount({}, async (root, fakes) => {
+        await topen(root, TEAM_WAIT); await tclick(root, 'stop:' + TEAM_WAIT); assert(/end/i.test(trow(root, TEAM_WAIT).querySelector('[data-loop-ask]')?.textContent || ''), 'the stop confirmation does not say what happens');
+        await tclick(root, 'confirm-stop:' + TEAM_WAIT);
+        assert(canon(tposts(fakes, 'answer')) === canon([{ op: 'answer', run: TEAM_WAIT, answer: 'stop' }]), 'stop post ' + canon(tposts(fakes, 'answer')));
+      });
+    });
+
+    await test('v7 recovery: paused and interrupted runs say what happened in the controller\'s words and offer Resume (one post); an unknown turn offers "Ask the agent again" (redo) and "Take the turn as done" (accept) with a line on each risk, and accept is not offered for a judge\'s turn', async () => {
+      await tmount({}, async (root, fakes) => {
+        await topen(root, TEAM_ASKED);
+        assert(/paused on request after check/.test(trow(root, TEAM_ASKED).querySelector('[data-loop-paused]')?.textContent || ''), 'reason: ' + trow(root, TEAM_ASKED).textContent.slice(0, 300));
+        assert(!trow(root, TEAM_ASKED).querySelector('[data-loop-control^="redo:"], [data-loop-control^="accept:"]'), 'a choice for a run whose step is known');
+        await tclick(root, 'resume:' + TEAM_ASKED);
+        assert(canon(tposts(fakes, 'resume')) === canon([{ op: 'resume', run: TEAM_ASKED }]), 'resume post ' + canon(tposts(fakes, 'resume')));
+      });
+      await tmount({}, async (root, fakes) => {
+        await topen(root, TEAM_GONE);
+        assert(/controller|stopped without finishing|no longer running/i.test(trow(root, TEAM_GONE).querySelector('[data-loop-paused]')?.textContent || ''), 'interrupted words: ' + trow(root, TEAM_GONE).textContent.slice(0, 300));
+        await tclick(root, 'resume:' + TEAM_GONE); assert(tposts(fakes, 'resume').length === 1, 'resume of an interrupted run');
+      });
+      await tmount({}, async (root, fakes) => {
+        await topen(root, TEAM_AMBIG); const box = trow(root, TEAM_AMBIG).querySelector('[data-loop-paused]');
+        assert(/could not tell whether|cannot tell whether/i.test(box.textContent), 'words: ' + box.textContent);
+        const redo = box.querySelector('[data-loop-control="redo:' + TEAM_AMBIG + '"]'), accept = box.querySelector('[data-loop-control="accept:' + TEAM_AMBIG + '"]');
+        assert(redo && /Ask the agent again/.test(redo.textContent) && accept && /Take the turn as done/.test(accept.textContent), 'the two choices');
+        assert(/twice|again/i.test(box.querySelector('[data-loop-risk="redo"]')?.textContent || '') && /never ran|missing|nothing/i.test(box.querySelector('[data-loop-risk="accept"]')?.textContent || ''), 'one line on each risk');
+        await tclick(root, 'redo:' + TEAM_AMBIG);
+        assert(canon(tposts(fakes, 'resume')) === canon([{ op: 'resume', run: TEAM_AMBIG, choice: 'redo' }]), 'redo post ' + canon(tposts(fakes, 'resume')));
+      });
+      await tmount({}, async (root, fakes) => {
+        await topen(root, TEAM_AMBIG); await tclick(root, 'accept:' + TEAM_AMBIG);
+        assert(canon(tposts(fakes, 'resume')) === canon([{ op: 'resume', run: TEAM_AMBIG, choice: 'accept' }]), 'accept post ' + canon(tposts(fakes, 'resume')));
+      });
+      await tmount({}, async root => {
+        await topen(root, TEAM_JUDGE); const box = trow(root, TEAM_JUDGE).querySelector('[data-loop-paused]');
+        assert(box.querySelector('[data-loop-control="redo:' + TEAM_JUDGE + '"]') && !box.querySelector('[data-loop-control="accept:' + TEAM_JUDGE + '"]'), 'a judge\'s turn must offer redo only');
+        assert(/judge/i.test(box.textContent) && /verdict/i.test(box.textContent), 'no line says why accept is missing for a judge: ' + box.textContent);
+      });
+    });
+
+    await test('v7 pause: a live team run offers Pause ("finishes the step in progress, then waits") that posts pause once; a refusal (409 or 400) is shown in the server\'s words', async () => {
+      await tmount({ refuseOp: { pause: ['no controller is running this run', 409] } }, async (root, fakes) => {
+        await topen(root, TEAM_LIVE);
+        const button = trow(root, TEAM_LIVE).querySelector('[data-loop-control="pause:' + TEAM_LIVE + '"]'); assert(button, 'no Pause');
+        assert(/finishes the step in progress, then waits/i.test(trow(root, TEAM_LIVE).querySelector('.ag-loop-body').textContent), 'the pause is not explained');
+        await tclick(root, 'pause:' + TEAM_LIVE);
+        assert(tposts(fakes, 'pause').length === 1 && canon(tposts(fakes, 'pause')[0]) === canon({ op: 'pause', run: TEAM_LIVE }), 'pause post');
+        assert(tsec(root).querySelector('[data-loop-line="error"]')?.textContent === 'No controller is running this run.' || /no controller is running this run/i.test(tsec(root).querySelector('[data-loop-line="error"]')?.textContent || ''), 'the 409 is not shown: ' + tsec(root).textContent.slice(0, 300));
+      });
+      await tmount({}, async (root, fakes) => {
+        await topen(root, TEAM_LIVE); await tclick(root, 'pause:' + TEAM_LIVE); assert(/pause/i.test(tsec(root).querySelector('[data-loop-line]')?.textContent || ''), 'nothing says pause was asked');
+      });
+      await tmount({ refuseOp: { resume: ['resume of a run that was queued less than 30 seconds ago is refused; wait or cancel', 409], answer: ['the run is not waiting any more', 409] } }, async (root, fakes) => {
+        await topen(root, TEAM_GONE); await tclick(root, 'resume:' + TEAM_GONE);
+        assert(/queued less than 30 seconds ago/.test(tsec(root).querySelector('[data-loop-line="error"]')?.textContent || ''), 'resume refusal: ' + tsec(root).textContent.slice(0, 300));
+        await topen(root, TEAM_WAIT); await tclick(root, 'approve:' + TEAM_WAIT); await tclick(root, 'confirm-approve:' + TEAM_WAIT);
+        assert(/not waiting any more/.test(tsec(root).querySelector('[data-loop-line="error"]')?.textContent || ''), 'answer refusal: ' + tsec(root).textContent.slice(0, 300));
+      });
+    });
+
+    await test('v7 polling: a paused or interrupted run is not polled, a waiting run is polled slowly (far less than a running one), a running run at the live rate', async () => {
+      const reads = async (ids, ms = 600) => { let count = 0; await tmount({ team: ids }, async (root, fakes) => { await settled(); const before = fakes.calls.filter(call => call.op === 'read' && !call.run).length; await sleep(ms); count = fakes.calls.filter(call => call.op === 'read' && !call.run).length - before; }); return count; };
+      const running = await reads([TEAM_LIVE]), waiting = await reads([TEAM_WAIT]), paused = await reads([TEAM_ASKED, TEAM_AMBIG]), gone = await reads([TEAM_GONE]);
+      assert(running >= 4, 'a running run was polled ' + running + ' times in 600 ms');
+      assert(paused === 0 && gone === 0, 'paused polled ' + paused + ', interrupted ' + gone);
+      assert(waiting <= 1 && waiting < running, 'waiting polled ' + waiting + ' times (running ' + running + ')');
+    });
+
+    await test('v7 polling: after Resume the run is followed again at the live rate', async () => {
+      await tmount({ team: [TEAM_ASKED] }, async (root, fakes) => {
+        await topen(root, TEAM_ASKED); await tclick(root, 'resume:' + TEAM_ASKED);
+        const before = fakes.calls.filter(call => call.op === 'read').length; await sleep(500);
+        assert(fakes.calls.filter(call => call.op === 'read').length - before >= 3, 'not followed after resume');
+      });
+    });
+
+    await test('v7 inspection: a step chip opens that step\'s history across attempts (tries, outcomes, routes, time, cost, message, reply, findings; long texts folded); the loop\'s edge on the canvas does the same while a run is open', async () => {
+      await tmount({}, async (root, fakes) => {
+        fakes.details.get(TEAM_ONE).attempts[0].steps[2].findings = Array.from({ length: 40 }, (_, i) => 'finding line ' + (i + 1)).join('\n');
+        fakes.details.get(TEAM_ONE).attempts[0].steps[0].message = 'x'.repeat(2000);
+        await topen(root, TEAM_ONE); await sleep(150);
+        assert(!trow(root, TEAM_ONE).querySelector('[data-loop-history]'), 'a history before a click');
+        await tclick(root, 'inspect:' + TEAM_ONE + ':judge:verifier');
+        const panel = trow(root, TEAM_ONE).querySelector('[data-loop-history]'); assert(panel, 'no history');
+        assert(/verifier/.test(panel.querySelector('h4, [data-loop-history-title]').textContent), 'title');
+        const tries = [...panel.querySelectorAll('[data-loop-try]')]; assert(tries.length === 2 && tries[0].dataset.loopTry === '1' && tries[1].dataset.loopTry === '2', 'tries ' + tries.length);
+        assert(/did not pass|failed/i.test(tries[0].textContent) && /sent back to impl-openai/i.test(tries[0].textContent) && /passed/i.test(tries[1].textContent), 'outcomes and routes: ' + panel.textContent.slice(0, 400));
+        assert(/Judge the work/.test(panel.textContent) && /VERDICT: FAIL/.test(panel.textContent), 'message and reply');
+        const fold = panel.querySelector('details[data-loop-fold]'); assert(fold && !fold.open, 'long text is not folded');
+        assert(!/finding line 40/.test([...panel.querySelectorAll('[data-loop-text]')].filter(item => !item.closest('details')).map(item => item.textContent).join('')), 'the long text is not cut');
+        await tclick(root, 'inspect:' + TEAM_ONE + ':check');
+        assert(/exit/i.test(trow(root, TEAM_ONE).querySelector('[data-loop-history]').textContent) && /FAIL|ok/.test(trow(root, TEAM_ONE).querySelector('[data-loop-history]').textContent), 'a check step shows its exit and output: ' + trow(root, TEAM_ONE).querySelector('[data-loop-history]').textContent.slice(0, 300));
+        await tclick(root, 'history-close'); assert(!trow(root, TEAM_ONE).querySelector('[data-loop-history]'), 'the history did not close');
+        // the canvas: a click on the edge from the worker to the judge picks the worker's step
+        const edge = root.querySelector('[data-route="' + TF + '"] .ag-route-hit, [data-route="' + TF + '"] [data-step-hit]'); assert(edge, 'no edge on the canvas');
+        edge.dispatchEvent(new MouseEvent('click', { bubbles: true })); await sleep(120); await settled();
+        assert(trow(root, TEAM_ONE)?.querySelector('[data-loop-history]'), 'a canvas click while a run is open did not open the history');
+      });
+    });
+
+    await test('v7 compare: two attempts of a run, or two runs of the loop, side by side (check exit and tail, verdicts, time, cost, attempts used); a differing line is marked by weight and a rule and the word "differs", never by colour alone', async () => {
+      await tmount({}, async (root, fakes) => {
+        await topen(root, TEAM_TRIAL);
+        await tclick(root, 'compare-attempt:' + TEAM_TRIAL + ':1'); assert(!tsec(root).querySelector('[data-loop-compare]'), 'compared one');
+        await tclick(root, 'compare-attempt:' + TEAM_TRIAL + ':2');
+        const panel = tsec(root).querySelector('[data-loop-compare]'); assert(panel, 'no compare view');
+        const row = panel.querySelector('[data-compare-row="Check exit"]'); assert(row && row.dataset.differs === 'true', 'the check exit row does not differ');
+        assert(/1/.test(row.textContent) && /0/.test(row.textContent) && /differs/i.test(row.textContent), 'row ' + row.textContent);
+        const style = getComputedStyle(row.querySelector('[data-compare-value]')), line = getComputedStyle(row);
+        assert(Number(style.fontWeight) >= 600 && (parseFloat(line.borderLeftWidth) >= 2 || parseFloat(getComputedStyle(row.querySelector('[data-compare-value]')).borderLeftWidth) >= 2), 'differs only by colour: weight ' + style.fontWeight + ' rule ' + line.borderLeftWidth);
+        const same = panel.querySelector('[data-compare-row="Work"]'); assert(same && same.dataset.differs === 'false' && Number(getComputedStyle(same.querySelector('[data-compare-value]')).fontWeight) < 600, 'a same row is marked');
+        ['Check output', 'Verdicts', 'Time', 'Cost'].forEach(label => assert(panel.querySelector('[data-compare-row="' + label + '"]'), 'no ' + label + ' row'));
+        await tclick(root, 'compare-clear'); assert(!tsec(root).querySelector('[data-loop-compare]'), 'compare did not clear');
+      });
+      await tmount({}, async root => {
+        await tclick(root, 'compare:' + TEAM_FAILED); await tclick(root, 'compare:' + TEAM_ONE);
+        const panel = await (async () => { assert(await loopUntil(() => tsec(root).querySelector('[data-loop-compare]')), 'no run compare'); return tsec(root).querySelector('[data-loop-compare]'); })();
+        assert(panel.querySelector('[data-compare-row="Check exit"]')?.dataset.differs === 'true' && /2/.test(panel.querySelector('[data-compare-row="Check exit"]').textContent), 'last check exit: ' + panel.textContent.slice(0, 300));
+        const used = panel.querySelector('[data-compare-row="Attempts used"]'); assert(used && used.dataset.differs === 'true', 'attempts used');
+        assert(panel.querySelector('[data-compare-row="Status"]')?.dataset.differs === 'true' && /Failed/.test(panel.textContent) && /Passed/.test(panel.textContent), 'status');
+      });
+    });
+
+    await test('v7 trial: "Try without saving" posts start with the form\'s values as settings (and no save), marks the run "Trial" and says the saved loop is unchanged; the saved rev the page holds is unchanged (the next Save still posts it)', async () => {
+      await tmount({}, async (root, fakes) => {
+        typeIn(tfield(root, 'attempts'), '2'); typeIn(tfield(root, 'check'), 'npm test');
+        await tclick(root, 'trial');
+        const posts = tposts(fakes, 'start'); assert(posts.length === 1 && tposts(fakes, 'save').length === 0, 'posts: start ' + posts.length + ', save ' + tposts(fakes, 'save').length);
+        assert(canon(posts[0]) === canon({ op: 'start', flow: TF, settings: { version: 1, flow: TF, goal: 'Fix the counter.', check: { command: 'npm test', timeout: 300, inconclusive_codes: [75] }, session: 'reuse', limits: { attempts: 2 }, allow_asks: false } }), 'trial body ' + canon(posts[0]));
+        assert(/saved loop on disk is unchanged/i.test(tsec(root).querySelector('[data-loop-line]')?.textContent || ''), 'the line: ' + tsec(root).textContent.slice(0, 300));
+        assert(fakes.state.loops[3].rev === 'rev-t1' && fakes.state.loops[3].settings.limits.attempts === 4, 'the saved loop changed');
+        assert(await loopUntil(() => tsec(root).querySelector('[data-loop-run][data-trial="true"] [data-loop-trial]')), 'the new run is not marked Trial');
+        assert(/Trial/.test(tsec(root).querySelector('[data-loop-run][data-trial="true"] [data-loop-trial]').textContent), 'Trial word');
+        assert(!tsec(root).querySelector('[data-loop-control="undo"]'), 'Undo after a trial: nothing was written');
+        await tclick(root, 'save'); assert(tposts(fakes, 'save').length === 1 && tposts(fakes, 'save')[0].rev === 'rev-t1', 'the next Save did not post the saved rev: ' + canon(tposts(fakes, 'save')));
+      });
+      await tmount({}, async (root, fakes) => {  // a trial with no goal asks for one, and posts it with the settings
+        typeIn(tfield(root, 'goal'), ''); await tclick(root, 'trial');
+        assert(tposts(fakes, 'start').length === 0 && tsec(root).querySelector('[data-loop-field="run_goal"]'), 'no goal asked');
+        typeIn(tsec(root).querySelector('[data-loop-field="run_goal"]'), 'Try this.'); await tclick(root, 'start');
+        const posts = tposts(fakes, 'start'); assert(posts.length === 1 && posts[0].goal === 'Try this.' && posts[0].settings && !('goal' in posts[0].settings), 'body ' + canon(posts));
+      });
+      await tmount({}, async root => {
+        await topen(root, TEAM_TRIAL); assert(trow(root, TEAM_TRIAL).querySelector('[data-loop-trial]') && /saved loop on disk is unchanged/i.test(trow(root, TEAM_TRIAL).textContent), 'an old trial run is not marked');
+        assert(!trow(root, TEAM_FAILED).querySelector('[data-loop-trial]'), 'a saved run marked Trial');
+      });
+    });
+
+    await test('v7 versions: the history lists when each version was kept and whether it is the saved one; "Go back to this version" posts restore with the page\'s rev and has the one-step Undo; a table groups runs by settings_sha256 (trials included): runs, passed, attempts used, cost (unknown never 0), time', async () => {
+      await tmount({ versions: TEAM_VERSIONS() }, async (root, fakes) => {
+        const box = tsec(root).querySelector('details[data-loop-versions]'); assert(box && !box.open, 'versions section'); box.open = true;
+        const rows = [...box.querySelectorAll('[data-loop-version]')]; assert(rows.length === 2 && rows[0].dataset.loopVersion === '20261121T060000-000001', 'version rows');
+        assert(/ago/.test(rows[0].textContent) && /same as the saved loop/i.test(rows[1].textContent) && !/same as the saved loop/i.test(rows[0].textContent), 'version words: ' + box.textContent.slice(0, 300));
+        await tclick(root, 'restore:20261121T060000-000001');
+        const posts = tposts(fakes, 'restore'); assert(posts.length === 1 && canon(posts[0]) === canon({ op: 'restore', flow: TF, version: '20261121T060000-000001', rev: 'rev-t1' }), 'restore post ' + canon(posts));
+        assert(tfield(root, 'attempts').value === '2', 'the form does not show the restored settings');
+        const undo = tsec(root).querySelector('[data-loop-control="undo"]'); assert(undo, 'no Undo after a restore');
+        await tclick(root, 'undo'); const saves = tposts(fakes, 'save');
+        assert(saves.length === 1 && canon(saves[0].settings) === canon(LOOP_TEAM_SAVED) && saves[0].rev === 'rev-2', 'undo of a restore ' + canon(saves));
+        assert(tfield(root, 'attempts').value === '4', 'the form is not back');
+      });
+      await tmount({ versions: TEAM_VERSIONS() }, async root => {
+        const table = tsec(root).querySelector('[data-loop-version-table]'); assert(table, 'no table');
+        const lines = [...table.querySelectorAll('tbody tr')].map(row => ({ sha: row.dataset.sha, cells: [...row.children].map(cell => cell.textContent.trim()) }));
+        const mine = lines.find(line => line.sha === 'aa11bb22cc33dd44'), trial = lines.find(line => line.sha === 'ee55ff66ee55ff66');
+        assert(mine && trial && lines.length === 2, 'groups ' + canon(lines));
+        const head = [...table.querySelectorAll('thead th')].map(cell => cell.textContent.trim().toLowerCase()).join('|'); assert(/runs/.test(head) && /passed/.test(head) && /attempts/.test(head) && /cost/.test(head) && /time/.test(head), 'head ' + head);
+        assert(trial.cells.join(' ').includes('cost unknown') && !/\$0\b/.test(trial.cells.join(' ')) && /Trial/.test(trial.cells.join(' ')), 'trial row ' + trial.cells.join(' | '));
+        assert(mine.cells[1] === '8' && mine.cells[2] === '1', 'runs and passed: ' + mine.cells.join(' | '));
+        assert(/unknown/.test(mine.cells.join(' ')) && /\$/.test(mine.cells.join(' ')), 'a known sum and the unknown noted: ' + mine.cells.join(' | '));
+      });
+      await tmount({ versions: TEAM_VERSIONS(), refuseOp: { restore: ['the settings changed since you read them', 409] } }, async (root, fakes) => {
+        await tclick(root, 'restore:20261121T060000-000001'); assert(/changed since you read them/.test(tsec(root).querySelector('[data-loop-line="error"]')?.textContent || ''), 'restore refusal');
+      });
+    });
+
+    await test('v7 improvement cycle: open a failed run, change the form, Try without saving, compare with the failed run, "Keep this version" posts a save of the trial\'s settings, discarding is said to need nothing', async () => {
+      await tmount({}, async (root, fakes) => {
+        await topen(root, TEAM_FAILED); typeIn(tfield(root, 'attempts'), '3'); await tclick(root, 'trial');
+        assert(await loopUntil(() => tsec(root).querySelector('[data-loop-run][data-trial="true"]:not([data-run-old])')), 'no trial run');
+        const trial = [...tsec(root).querySelectorAll('[data-loop-run][data-trial="true"]')].find(row => row.dataset.loopRun !== TEAM_TRIAL); assert(trial, 'trial row');
+        const id = trial.dataset.loopRun; await topen(root, id);
+        await tclick(root, 'compare:' + TEAM_FAILED); await tclick(root, 'compare:' + id);
+        assert(await loopUntil(() => tsec(root).querySelector('[data-loop-compare]')), 'no compare against the failed run');
+        await tclick(root, 'discard:' + id); assert(/nothing (was|is|to)/i.test(tsec(root).querySelector('[data-loop-line]')?.textContent || '') && tposts(fakes, 'save').length === 0 && tposts(fakes, 'remove').length === 0, 'discard: ' + tsec(root).textContent.slice(0, 300));
+        await topen(root, id); await tclick(root, 'keep:' + id);
+        const saves = tposts(fakes, 'save'); assert(saves.length === 1 && saves[0].rev === 'rev-t1' && saves[0].settings.limits.attempts === 3 && saves[0].flow === TF, 'keep post ' + canon(saves));
+        assert(tsec(root).querySelector('[data-loop-control="undo"]'), 'Keep has no Undo');
+      });
+    });
+
+    await test('v7 look: the new states (step history, compare, waiting with its confirmation and note, paused with the two choices, trial, versions) at 1400, 620 and 420 px, light and dark: no green, nothing under 11 px, nothing clipped or scrolling sideways, nothing animating', async () => {
+      for (const scheme of ['light', 'dark']) for (const width of [1400, 620, 420]) {
+        await tmount({ versions: TEAM_VERSIONS() }, async root => {
+          await resizeTo(root, width, 800); openStep(root, TF); await settle();
+          assert(await loopUntil(() => tsec(root)?.querySelector('[data-loop-form]')), 'not drawn');
+          const audit = what => {
+            const section = tsec(root), box = root.querySelector('.ag-detail').getBoundingClientRect(), scroll = root.querySelector('.ag-detail-scroll');
+            [section, ...section.querySelectorAll('*')].forEach(item => {
+              const style = getComputedStyle(item), name = what + ' / ' + item.className + ' at ' + scheme + ' ' + width;
+              if ([...item.childNodes].some(node => node.nodeType === 3 && node.textContent.trim()) || item.matches('input, button, select, textarea')) assert(parseFloat(style.fontSize) >= 11, name + ' is under 11 px');
+              ['color', 'backgroundColor', 'borderTopColor', 'borderLeftColor', 'outlineColor'].forEach(key => assert(!chatGreen(style[key]), name + ' is green (' + key + ' ' + style[key] + ')'));
+              assert(style.animationName === 'none' && (style.transitionDuration === '0s' || style.transitionProperty === 'none'), name + ' moves');
+              if (item.getClientRects().length && !item.closest('details:not([open]) > :not(summary)')) { const r = item.getBoundingClientRect(); assert(r.left >= box.left - 1 && r.right <= box.right + 1, name + ' is clipped sideways (' + Math.round(r.left) + '..' + Math.round(r.right) + ')'); }
+            });
+            assert(scroll.scrollWidth <= scroll.clientWidth + 1, what + ': the details scroll sideways at ' + scheme + ' ' + width + ' (' + scroll.scrollWidth + ' > ' + scroll.clientWidth + ')');
+          };
+          tsec(root).querySelector('details[data-loop-more]').open = true; tsec(root).querySelector('details[data-loop-versions]').open = true; audit('form');
+          await topen(root, TEAM_ONE); await tclick(root, 'inspect:' + TEAM_ONE + ':judge:verifier'); audit('history');
+          await topen(root, TEAM_WAIT); await tclick(root, 'reject:' + TEAM_WAIT); audit('waiting');
+          await topen(root, TEAM_AMBIG); audit('paused');
+          await topen(root, TEAM_TRIAL); await tclick(root, 'compare-attempt:' + TEAM_TRIAL + ':1'); await tclick(root, 'compare-attempt:' + TEAM_TRIAL + ':2'); audit('compare');
+        }, { scheme });
+      }
+    });
+
     await test('v4 loops source: the loops action is asked only through ask(), and the code builds no markup', async () => {
       const source = [...document.scripts].find(script => script.textContent.includes('function call(fn, request)')).textContent;
       const at = source.indexOf('---- v4: loops'), end = source.indexOf('---- end v4 ----');
@@ -9962,7 +10374,7 @@
     });
     // ==== v4: screenshots (not a check): `?shot=form|running|finished|limit` mounts the page on the loop fixtures, leaves it
     // standing (window.shotReady) and runs nothing else; artifacts/agentgraph-loops/v4/r1/shots.mjs takes the pictures ====
-    if (shardOf.get('shot')) {
+    if (shardOf.get('shot') && !shardOf.get('shot').startsWith('team-')) {
       const kind = shardOf.get('shot'), fakes = loopFakes({ live: kind === 'running', orphans: [] }), data = selfLoopFixture();
       clearPositions();
       if (kind === 'limit') { const detail = fakes.details.get('20261121-050000-0001'); detail.run.status = 'limit'; detail.run.reason = 'the attempt limit (4) was reached and the last check failed'; }
@@ -9977,6 +10389,27 @@
       window.shotReady = true;
       await new Promise(() => {});
     }
+    // ==== v7: screenshots (not a check): `?shot=team-run|team-wait|team-paused|team-history|team-compare|team-versions&width=1400` ====
+    if ((shardOf.get('shot') || '').startsWith('team-')) { try {
+      const kind = shardOf.get('shot').slice(5), width = Number(shardOf.get('width')) || 1400, fakes = loopFakes({ team: true, versions: TEAM_VERSIONS() }), data = selfLoopFixture();
+      clearPositions();
+      const root = host(); root.style.width = width + 'px'; root.style.height = (Number(shardOf.get('height')) || 1300) + 'px';
+      const app = AgentGraph.mount(root, { fetchSnapshot: async () => stampRevs(data), intervalMs: 60000, motion: 'none', actions: { loops: fakes.loops }, loopPollMs: 60000 });
+      await app.refresh(); await settle();
+      root.querySelector('[data-route="' + TF + '"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); await settle();
+      assert(await loopUntil(() => tsec(root)?.querySelector('[data-loop-form]')), 'no form');
+      const open = { run: TEAM_ONE, history: TEAM_ONE, wait: TEAM_WAIT, paused: TEAM_AMBIG, compare: TEAM_TRIAL }[kind];
+      if (open) await topen(root, open);
+      if (kind === 'history') await tclick(root, 'inspect:' + TEAM_ONE + ':judge:verifier');
+      if (kind === 'compare') { await tclick(root, 'compare-attempt:' + TEAM_TRIAL + ':1'); await tclick(root, 'compare-attempt:' + TEAM_TRIAL + ':2'); }
+      if (kind === 'versions') { const box = tsec(root).querySelector('details[data-loop-versions]'); box.open = true; }
+      await sleep(250);
+      const target = { run: '[data-loop-runs-label], .ag-loop-runs', history: '[data-loop-history]', wait: '[data-loop-waiting]', paused: '[data-loop-paused]', compare: '[data-loop-compare]', versions: 'details[data-loop-versions]' }[kind];
+      const scroller = root.querySelector('.ag-detail-scroll'), mark = target && tsec(root).querySelector(target);
+      if (mark) scroller.scrollTop = Math.max(0, mark.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 90);
+      window.shotReady = true;
+      await new Promise(() => {});
+    } catch (error) { window.shotError = String(error && error.stack || error); await new Promise(() => {}); } }
     // ==== v4: end ====
 
     document.getElementById('results').textContent = results.join('\n') + '\nRESULT: ' + (results.every(r => r.startsWith('PASS ')) ? 'PASS' : 'FAIL') + ' (' + results.filter(r => r.startsWith('PASS ')).length + '/' + results.length + ')';
