@@ -13,7 +13,7 @@ Measured on one long orchestration chat (659 turns, context up to 848k tokens) w
 - 21 of the 39 cold turns followed a pause of more than five minutes, which is the cache lifetime: $133. A pause costs about $1 for every 100k tokens of context.
 - 5 followed a settings or model change in the middle of the chat ($13); 11 have no cause the records show ($33).
 - Turns with more than 400k tokens of context cost $0.59 each; turns under 200k cost about $0.20.
-- The workers were cheap by comparison. Five verifier rounds cost $0.08.
+- In that chat the workers were cheap by comparison: five verifier rounds cost $0.08. That does not hold in general. In a later chat with many long implementer lanes the workers cost more than the chat itself ($821 against $457), and 7 long worker sessions alone cost $415 (`bin/agentgraph cost`, 2026-11-21).
 - The orchestrator's prompt and rules are about 8k tokens, around 1 percent of a large context. Shortening them saves almost nothing.
 
 ## Changed

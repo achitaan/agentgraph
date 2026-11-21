@@ -1,27 +1,32 @@
-# Architecture improvement: progress
+# Architecture improvement and executable loops: progress
 
-Resume from here after an interruption. The checkpoint for the work itself is the task graph
-`.opencode/graph/agentgraph-improve.json` (validate with `bin/agentgraph check --task agentgraph-improve`); its
-artifacts are under `.opencode/artifacts/agentgraph-improve/` (git-ignored, local only).
+Resume from here after an interruption. The checkpoints for the work itself are two task graphs, validated with
+`bin/agentgraph check --task <name>`:
+
+- `.opencode/graph/agentgraph-improve.json`: the architecture improvement plan (Phases 0-5).
+- `.opencode/graph/agentgraph-loops.json`: executable visual workflows (releases vNext.1 to vNext.5).
+
+Their artifacts are under `.opencode/artifacts/<graph name>/` (git-ignored, local only).
 
 Spend stop: $1,600 for the whole chat, including its workers and bench runs (user, 2026-11-21); no new lanes
-from $1,550. Prompt, settings and model changes are built and measured on scratch copies of the config and
-installed into the live config only after the user approves.
+from $1,550. Prompt, settings, skill and model changes are built and measured on scratch copies of the config and
+installed into the live config only after the user approves. Lanes run on Sonnet 5.5.
 
-## Phases
+## Part 1: architecture improvement
 
 | Phase | Graph nodes | Status |
 |---|---|---|
 | 0. Audit and baselines | n0-n7 | passed: four audits, the bench (`bin/agentgraph bench`), baseline runs, nine ranked problems |
-| 1. Context and cost | n22 (cost visibility), n8 (measured proposals), n9 (after-measurements) | n22 and n8 passed; n9 runs once the code lanes land |
+| 1. Context and cost | n22 (cost visibility), n8 (measured proposals), n9 (after-measurements) | passed. The 20% target is met for worker context and not for whole runs (see below) |
 | 2. Orchestration | n10 | passed: solo vs delegated measured, drawn flow followed in 3 of 3 runs |
-| 3. Execution reliability | n11 (transitions), n19 (liveness, status), n20 (view labels), n21 (flows, shared problems) | n11 and n19 passed; n20 and n21 running |
-| 4. Self-improvement in the views | n23 (proposal records, approve/reject/revert, API), n24 (view controls), n12 (one demonstrated cycle) | n23 running; n24 after n20; n12 last |
+| 3. Execution reliability | n11 (transitions), n19 (liveness, status), n20 (view labels), n21 (flows, shared problems) | passed |
+| 4. Self-improvement in the views | n23 (proposal records and API), n24 (view controls), n25 (a real cycle from the command line), n12 (the same proposals driven through the page) | passed, on a scratch config only |
 | 5. Install and customization | n13 | passed |
-| Review and final report | n16, n17 | not started |
+| Review | n16 (independent review), n26 and n27 (its minor findings) | n16 passed: confirmed, no critical or major defect, twelve minor findings. n26 and n27 running |
+| Final suites and report | n17 | after n26 and n27 |
 | Approval and install | n14, n15 | waits for the user; nothing below "Waiting for your review" is installed |
 
-## Starting numbers (measured, 2026-11-21, before any change)
+### Starting numbers (measured, 2026-11-21, before any change)
 
 - Fixed text per turn (`bin/agentgraph bloat`, characters / 4): orchestrator 37,525 chars (~9.4k tokens) in the
   `normal` preset; workers 12,425-21,718 chars. `AGENTS.md` (12,042 chars) is loaded into every agent, though it
@@ -32,37 +37,39 @@ installed into the live config only after the user approves.
 - Cost trend (`bin/agentgraph cost --trend`): $0.305 a turn before the cost settings changes, $0.109 a turn after
   the one-hour cache (Fable models only) and the compaction buffer change.
 
-## Ranked problems (from the audits; details in `.opencode/artifacts/agentgraph-improve/n7/r1/ranked.md`)
+### Ranked problems (from the audits; details in `.opencode/artifacts/agentgraph-improve/n7/r1/ranked.md`)
 
 1. Graph rules live only in prompts: `check` accepted 38 of 51 invalid edits (n2 experiment); the real
-   `agentgraph-desktop` graph has 17 nodes passed before a dependency. Fix: n11, n21.
+   `agentgraph-desktop` graph has 17 nodes passed before a dependency. Fixed in code: n11, n21.
 2. Re-running `install.sh` resets the chosen preset, drops added agents, deletes the user's own prompt files and
-   replaces edited skills (n3 scratch install). Fix: n13.
+   replaces edited skills (n3 scratch install). Fixed in code: n13.
 3. Five long Opus `impl-claude` sessions (400+ turns) cost $309, 43% of worker spend; worker context is 13% fixed
-   text and 87% growth (n1). Fix: proposal n8 (needs approval).
-4. Compaction summary calls cost about $119 (9%) and are not shown by `cost` (n1). Fix: n22.
+   text and 87% growth (n1). Proposal C (needs approval; estimate only).
+4. Compaction summary calls cost about $119 (9%) and are not shown by `cost` (n1). Fixed in code: n22.
 5. The improvement cycle has never completed on real data (0 cases, 0 improvements) and no view or command can
-   approve, reject or revert (n3). Fix: n12.
-6. Reported `running` is drawn as live; resume is prompt-only (n2). Fix: n19, n20.
+   approve, reject or revert (n3). Built and demonstrated on a scratch config: n23, n24, n25, n12.
+6. Reported `running` is drawn as live; resume is prompt-only (n2). Fixed in code: n19, n20.
 7. Drawn flows can be bypassed by retyping or reassigning a node; `check`, `record` and the views disagree (n2).
-   Fix: n21.
+   Fixed in code: n21.
 8. 9-12k tokens of each worker's first prompt are not counted by `bloat` (tool schemas, built-in prompt) (n1).
-   Measure with bench probes, then proposal n8.
+   Measured with bench probes; proposal B.
 9. `AGENTS.md` (the orchestrator policy) is in every worker's system prompt, about 3k tokens a turn, est $5.8
-   (n1, confirmed). Proposal n8.
+   (n1, confirmed). Proposal A.
 
 Measured not to matter: orchestrator prompt text (~2% of root cost), skills (<$2), delegation briefs (~2% a lane).
 
-## Measured changes
+### Measured changes
 
 Code (committed on `design-lab`, tests rerun by the orchestrator):
 
 - Graph rules in code (n11, `9f91822`): on the n2 experiment of invalid graph edits, `check` rejects 40 of 52
   with its new history (before: 11 of 51). The five real graphs give the same result before and after.
   `agentgraph graph set|event` changes one node under the lock and refuses a write `check` would reject.
-  Still accepted: three flow-bypass edits (n21).
-- Liveness (n19, `18e7a05`): every running node is `live`, `quiet`, `orphan` or `unreported` from the session
-  database, not from the graph file's word; `agentgraph status --task T` prints confirmed vs inferred state.
+- Flow enforcement and one problem list (n21, `0f44192`): the flow-bypass edits n11 still accepted are rejected;
+  `check`, `record` and the views read the same problem list.
+- Liveness (n19, `18e7a05`; views n20, `5e3c141`): every running node is `live`, `quiet`, `orphan` or
+  `unreported` from the session database, not from the graph file's word; `agentgraph status --task T` prints
+  confirmed vs inferred state; the views label each running step the same way.
 - Cost visibility (n22, `4bc3ea0`): `cost` shows billed vs messages vs unreported. On this chat: $40.65 of
   compaction calls over 19 compactions that no message row reports; 7 long worker sessions cost $415.09.
 - Install and update (n13, `d5af126`): in a scratch home, a reinstall kept the chosen preset, an added agent,
@@ -70,30 +77,46 @@ Code (committed on `design-lab`, tests rerun by the orchestrator):
   `--restore`; personal folder `~/.config/opencode/agentgraph-personal/`; `docs/CUSTOMIZE.md`.
 - Bench (n5, n6, `3fdba9b`, `4ecbf7b`): isolated scratch config, first-turn probes for 12 agents, three
   scenarios, recovery run (interrupted at 50 s, resumed with 0 nodes redone).
+- Improvement proposals (n23 `3668aa3`, n24 `073554d`): a proposal is a record with its change, its tune and
+  held-out results, and a verdict computed by code; `agentgraph improve` and the page can approve (with a
+  backup), reject, revert and reopen. The verdict says "better on tune only" when held-out did not move.
 
 Measured on scratch configs only (not installed):
 
-- Context (n8, `7fc7639`): with proposals A+B a worker's first turn falls from 15,915 to 6,886 tokens
-  (impl-openai, -56.7%); verifier -63.2%, oracle -66.5%, every worker role -25% or more. Worker context per
-  turn inside a delegated run: 17.2k to 9.5k (n=2). The 20% target is met for workers. It is not met for the
-  orchestrator (first turn -6.8%) or for whole delegated runs, where the orchestrator's own turns are 75-85%
-  of the context and vary more than the saving.
+- Context, first turn (n8, `7fc7639`): with proposals A+B a worker's first turn falls from 15,915 to 6,886 tokens
+  (impl-openai, -56.7%); verifier -63.2%, oracle -66.5%, every worker role -25% or more.
+- Context, whole runs (n9, `45909ea`, scenario `p2-s3-deleg`, n=3 each): with A+B worker context falls from 234k
+  to 96k (-58.9%), and per worker turn from 18.4k to 8.8k (-52.4%). The whole run falls 6.5% in context and 3.0%
+  in cost, because the orchestrator's own turns are 81-92% of a delegated run and its first turn falls only
+  6.8%. So the 20% target is met for worker context and is not met for whole runs. The code changes alone move
+  context by +0.4%. All 24 runs pass; recovery 1 of 1 in both configs with 0 nodes dispatched again.
 - Delegation (n10, `94949b6`): on two small tasks (n=3 each, one model) delegating cost 2.0-2.2x and took
   1.5-1.8x as long as solo, same pass rate. A flow drawn in the scratch structure folder and never mentioned
   in the task was applied and run in 3 of 3 runs; following it cost 1.5x.
+- One real improvement cycle (n25, `7923c82`; $6.11 of runs; write-up `n25/r1/cycle.md`): five new scenarios,
+  split into tune and held-out. No behaviour met the failure rule, so the pre-registered cost criterion was
+  used. Proposal "do small steps solo": tune 3/6 to 5/6, held-out 3/9 to 3/9, median cost of `p4-kv-steps`
+  $0.401 to $0.247, p = 0.2. Verdict: better on tune only. A padding proposal showed no difference (n=2).
+  Approve and revert were verified by file hash from the command line (n25) and by clicking in the page in
+  headless Chrome (n12, `n12/r1/visual-cycle.md`): approve writes nothing before its confirm step; revert
+  restores the original bytes; a reject changes no file.
 
-## Waiting for your review
+### Waiting for your review
 
 Nothing here is in the live config. Each item names the file to read. Say "approve <letter>" or "reject".
 
 | | Change | Evidence | File |
 |---|---|---|---|
-| A | Move the delegation policy out of the global `AGENTS.md` into the four `orchestrator_append.md` files, byte for byte. Workers stop reading it. | Workers' first turn -23% to -33%; orchestrator +0.3%; orchestrator still quotes the policy, a worker answers NONE. | `n8/r1/proposal-A.diff` |
+| A | Move the delegation policy out of the global `AGENTS.md` into the four `orchestrator_append.md` files, byte for byte. Workers stop reading it. | Workers' first turn -23% to -33%; orchestrator +0.3%; orchestrator still quotes the policy, a worker answers NONE. With B, in whole runs: worker context -58.9%, run cost -3.0% (n=3). | `n8/r1/proposal-A.diff` |
 | B | Per-agent tool denies in the plugin settings (e.g. implementers lose web, image and `execute` tools). | impl-* -33%, verifier -31.5%, oracle -40%, orchestrator -7%. Risk: a denied tool a lane turns out to need. | `n8/r1/proposal-B.diff` (A+B: `proposal-AB.diff`) |
 | C | A round budget for long lanes (new session after N rounds). | Estimate only, not measured: 7-19% of the six long Opus sessions' $380.79. | `n8/r1/proposal-C.diff` |
 | D | `AGENTS.md` line 9: the orchestrator may do work itself when the change fits in context it holds and has a check it can run (about 150 lines), instead of "under ~20 lines". | Delegating such tasks cost 2x, 1.5-1.8x time, same pass rate (n=3, small tasks, one model). | `n10/r1/comparison.md`, section "Proposal" |
+| J | The n25 proposal "do small steps solo" (one line in `normal/orchestrator_append.md`). Overlaps D. | Better on tune only: tune 3/6 to 5/6, held-out unchanged at 3/9, p = 0.2. By its own rule this is not enough to recommend. | `n25/r1/cycle.md` |
+| K | Point the two improvement skills at the `agentgraph improve` commands; they still describe the older chat ritual. | No measurement; a consistency change. | not drafted |
+| L | Three lines for `config/AGENTS.md` on `graph set`, `status` and flows, so the orchestrator uses the commands instead of editing the graph file whole. | No measurement. | not drafted |
 
 Paths are under `.opencode/artifacts/agentgraph-improve/`.
+Letters E to I are not used here: they name sections of the earlier review list (side chat round).
 
 Behaviour changes already in the code, for your information (undo: `git revert` of the named commit):
 
@@ -102,15 +125,48 @@ Behaviour changes already in the code, for your information (undo: `git revert` 
 - `sync.sh` reads personal exclusions from the git-ignored `sync.conf` (yours was created with today's values).
 - `check` (`9f91822`) keeps `.opencode/graph/.history/` and rejects edits that undo passed work.
 
-## Unresolved
+### Unresolved
 
-- Whole-run token totals cannot show a saving at n=2-3: the orchestrator's turn count varies more than the
-  workers' share. A paired comparison needs a scenario that always delegates.
+- Whole-run context: the orchestrator's own turns dominate a delegated run, so worker savings barely move the
+  total. Nothing measured so far lowers the orchestrator's share by 20%.
 - The solo-vs-delegated result covers small, well-specified tasks on one model only.
+- Two behaviours fail in 3 of 3 runs and have no proposal yet: no task graph for a two-part task done directly
+  (`p4-graph-two`), and a long explorer report not saved as a file (`p4-report-file`).
+- `improve revert` appends no ledger row; `improve import-bench` has no option for a cost criterion; a case in
+  `cases` arises only from a failed worker node.
+- `/api/improve` has no confirm on the server side (the page asks first), the same as the other POST endpoints.
 - `busy` uses the root's session tree only and can disagree with `liveness`; `sources.CONFIG_DIR` ignores
   `OPENCODE_CONFIG_DIR`; the bench's config hash does not cover `structure/`.
 
+## Part 2: executable visual workflows
+
+Aim: the saved drawing, not the orchestrator's reading of it, decides execution order and loop conditions; code
+owns the control flow. Design: `.opencode/artifacts/agentgraph-loops/v1/r1/design.md`.
+
+Audit (v0, real probes on OpenCode 2.3.2, $0.364): `run --session ID` continues one session and the next turn
+recalls the earlier one at cached prices; a hung turn is stopped with SIGTERM and the session still takes the
+next message; cost is final when the process exits. Native `/goal` has no headless entry (it is a slash command
+of the terminal and Desktop apps). Plugin hooks were not tested; the idle hook is not in the installed plugin
+types. A self-loop `A -> A` today is text for the orchestrator only, and flow files drop extra keys on rewrite.
+
+Decision (v1): loop settings live in `structure/loops/<flow id>.json` beside the unchanged flow file; one
+detached controller process per run calls `opencode run` once per attempt, runs the check command itself and
+routes on its exit code; each run keeps its own pinned definition and record under `.opencode/loops/<run id>/`.
+
+| Release | Graph nodes | Status |
+|---|---|---|
+| vNext.1 single-agent loop | v0 audit, v1 design, v2 controller, v3 settings and page API, v4 views, v5 demonstration (tests A-D on real sessions and through the page) | v0 and v1 passed; v2 running |
+| vNext.2 loops between agents | v6 controller, v7 views | not started |
+| vNext.3 recovery, pause, cost | v8 | not started |
+| vNext.4 inspect and improve | v7 views, v10 demonstration | not started |
+| vNext.5 | none | not built unless an earlier release shows the need |
+| Benchmark | v9 | not started |
+| Review, final suites, docs | v11, v12 | not started |
+
+No release is called complete until it has been run through the real page and real OpenCode sessions.
+
 ## Next
 
-n20, n21 and n23 are running. Then n24 (view controls), n12 (the demonstrated cycle), n9 (after-measurements),
-the reviewer gate n16 and the final report n17.
+n26, n27 and v2 are running. Then n17 (final suites and report for Part 1); v3, v4, v5 for vNext.1; later
+releases in order as the spend limit allows. If money runs short the cuts are, in order: the vNext.4 extras,
+view polish for loops between agents, benchmark repetitions.
