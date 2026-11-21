@@ -381,13 +381,16 @@ def prepare_work(scenario_dir: Path | None, work: Path) -> None:
     _git(work, "commit", "-q", "-m", "fixture")
 
 
-def run_check(scenario: dict, work: Path) -> dict:
+def run_check(scenario: dict, work: Path, env: dict, db_path: Path | None = None) -> dict:
+    """Run the scenario's check in the run's scratch environment (`run_env`), never the real one; the one real path it
+    needs, the OpenCode database (read-only, by the p4 checks), goes in as `P4_DB`."""
+    env = {**env, "PYTHONDONTWRITEBYTECODE": "1", **({"P4_DB": str(db_path)} if db_path is not None else {})}
     hidden = scenario["dir"] / "hidden"
     if hidden.is_dir():
         shutil.copytree(hidden, work, dirs_exist_ok=True)
     try:
         done = subprocess.run(scenario["check"], shell=True, cwd=work, capture_output=True, text=True, errors="replace",
-                              timeout=scenario["check_timeout"], env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+                              timeout=scenario["check_timeout"], env=env)
     except subprocess.TimeoutExpired:
         return {"passed": False, "detail": "check timed out"}
     lines = [ln.strip() for ln in (done.stdout + "\n" + done.stderr).splitlines() if ln.strip()]
@@ -591,7 +594,7 @@ def one_rep(*, scenario: dict | None, agent: str, prompt: str, label: str, rep: 
             ev2 = sidechat._events(last["stdout"])
             error = ev2["error"] or ("timed out" if last["timed_out"] else "") or (_first_line(last["stderr"]) if last["code"] else "")
             recovery = {"_before": before, "_at": at}
-    check = run_check(scenario, work) if scenario else {"passed": None, "detail": "no check"}
+    check = run_check(scenario, work, env, db_path) if scenario else {"passed": None, "detail": "no check"}
     if recovery is not None:
         after = graph_state(work)
         recovery = recovery_row(recovery["_before"], after, recovery["_at"],
@@ -611,9 +614,10 @@ def one_rep(*, scenario: dict | None, agent: str, prompt: str, label: str, rep: 
 
 
 def append_row(row: dict, results: Path | None = None) -> Path:
+    label = _label(row.get("label"))
     results = Path(results) if results is not None else RESULTS
     results.mkdir(parents=True, exist_ok=True)
-    path = results / f"{row['label']}.jsonl"
+    path = results / f"{label}.jsonl"
     with path.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(row, sort_keys=True) + "\n")
     return path

@@ -8,6 +8,7 @@ import sqlite3
 import stat
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from agentgraph import bench
@@ -318,6 +319,26 @@ class RunTests(Base):
                                    results=self.results, scenarios_root=self.scenarios, live=self.live)
         self.assertEqual((rows[0]["sessions"], rows[0]["cost"]), (0, 0.0))
         self.assertIn("not found in the database", rows[0]["error"])
+
+    def test_the_check_runs_in_the_scratch_environment_with_only_the_database_path_passed_through(self):
+        t2 = self.scenarios / "t2"
+        t2.mkdir()
+        (t2 / "scenario.json").write_text(json.dumps({
+            "agent": "orchestrator", "prompt": "x", "timeout": 20,
+            "check": 'echo "${HOME#*/temp/}|${OPENCODE_CONFIG_DIR-unset}|${P4_DB##*/}|${AGENTGRAPH_HOME#*/temp/}"'}))
+        self.plan([{}])
+        with unittest.mock.patch.dict(os.environ, {"OPENCODE_CONFIG_DIR": "/real/config"}):
+            rows = bench.run_scenarios(["t2"], label="lab", config=self.scratch_dir, executable=str(self.cli), db_path=self.db,
+                                       results=self.results, scenarios_root=self.scenarios, live=self.live)
+        name = Path(self.scratch_dir).name
+        self.assertEqual(rows[0]["check"]["detail"], f"{name}/home|unset|opencode.db|{name}/home/.config/opencode/orchestration/memory")
+
+    def test_append_row_refuses_a_label_that_is_not_a_plain_name(self):
+        for label in ("../x", "a/b", "", None, "-x"):
+            with self.subTest(label=label), self.assertRaises(bench.BenchError):
+                bench.append_row({"label": label, "scenario": "s"}, self.results)
+        self.assertFalse(self.results.exists() and any(self.results.iterdir()))
+        self.assertFalse((self.base / "x.jsonl").exists())
 
     def test_probe_rows_have_first_turn_tokens_and_no_check(self):
         make_db(self.base / "p.db", [("ses_root", None, "explorer", "agentgraph-bench: probe-explorer pl r1", 0.01, 1)],

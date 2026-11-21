@@ -610,7 +610,7 @@ def make_server(
                     improve.revert(home, root, request["id"], who="user", note=note)
                 return improve.show(home, root, request["id"])
 
-            self._answer(run, improve.ImproveError)
+            self._answer(run, improve.ImproveError, ValueError)
 
         def _reply(self, status: int, content_type: str, body: bytes):
             self.send_response(status)

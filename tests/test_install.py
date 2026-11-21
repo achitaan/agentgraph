@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from agentgraph import installer
 
@@ -232,14 +233,30 @@ class Edges(InstallCase):
         self.assertTrue((self.t / (PRESET + ".toolkit-new")).is_file())
         self.assertIn("left alone", proc.stdout)
 
-    def test_symlinked_target_folder_is_refused(self):
+    def test_target_folder_that_is_a_link_is_installed_into(self):
         real = self.base / "real"
         real.mkdir()
         (self.home / ".config").mkdir()
         os.symlink(real, self.t)
-        proc = self.sh(check=False)
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertEqual(list(real.iterdir()), [])
+        self.sh()
+        self.assertTrue((real / "commands" / "flow.md").is_file())
+        self.assertTrue((real / installer.MANIFEST).is_file())
+        self.assertIn("Nothing to change.", self.sh().stdout)
+
+    def test_a_linked_parent_of_the_target_is_installed_through(self):
+        real = self.base / "dotfiles"
+        real.mkdir()
+        os.symlink(real, self.home / ".config")
+        self.sh()
+        self.assertTrue((real / "opencode" / "commands" / "flow.md").is_file())
+
+    def test_links_below_the_target_are_still_refused(self):
+        outside = self.base / "outside"
+        outside.mkdir()
+        self.t.mkdir(parents=True)
+        os.symlink(outside, self.t / "skills")
+        self.assertNotEqual(self.sh(check=False).returncode, 0)
+        self.assertEqual(list(outside.iterdir()), [])
 
     def test_restore_refuses_other_folders(self):
         self.sh()
@@ -252,6 +269,111 @@ class Edges(InstallCase):
     def test_unknown_option_is_refused(self):
         self.assertNotEqual(self.sh("--bogus", check=False).returncode, 0)
         self.assertFalse(self.t.exists())
+
+
+class Safety(InstallCase):
+    """Writes land whole or not at all; a file the user started merging is never overwritten; restore is honest."""
+
+    def setUp(self):
+        super().setUp()
+        self.sh()
+        self.edit_kit("commands/flow.md", "\nnew flow text\n")
+
+    def run_installer(self):
+        return installer.Installer(self.kit, self.t, ["flow"], out=lambda *_: None).run()
+
+    def fail_replace(self, only=None):
+        real = os.replace
+
+        def replace(src, dst, *args, **kw):
+            if only is None or str(dst).endswith(only):
+                raise OSError("injected")
+            return real(src, dst, *args, **kw)
+        return mock.patch.object(installer.os, "replace", replace)
+
+    def names(self, folder):
+        return sorted(p.name for p in folder.iterdir())
+
+    def test_a_failed_file_write_leaves_the_old_file_whole(self):
+        flow = self.t / "commands" / "flow.md"
+        before, listing = flow.read_bytes(), self.names(flow.parent)
+        with self.fail_replace(), self.assertRaises(OSError):
+            self.run_installer()
+        self.assertEqual(flow.read_bytes(), before)
+        self.assertEqual(self.names(flow.parent), listing)
+
+    def test_a_failed_manifest_write_leaves_the_old_manifest_whole(self):
+        manifest = self.t / installer.MANIFEST
+        before = manifest.read_bytes()
+        with self.fail_replace(installer.MANIFEST), self.assertRaises(OSError):
+            self.run_installer()
+        self.assertEqual(manifest.read_bytes(), before)
+        self.assertEqual([n for n in self.names(self.t) if n.startswith(".toolkit-install")], [installer.MANIFEST])
+
+    def test_a_failed_merge_write_leaves_the_preset_file_whole(self):
+        self.kit_json(lambda d: d.update(new_key=1))
+        preset = self.t / PRESET
+        before = preset.read_bytes()
+        with self.fail_replace(PRESET), self.assertRaises(OSError):
+            self.run_installer()
+        self.assertEqual(preset.read_bytes(), before)
+
+    def test_a_merge_keeps_the_file_mode(self):
+        self.kit_json(lambda d: d.update(new_key=1))
+        os.chmod(self.t / PRESET, 0o600)
+        self.run_installer()
+        self.assertEqual((self.t / PRESET).stat().st_mode & 0o777, 0o600)
+        self.assertEqual(read_json(self.t / PRESET)["new_key"], 1)
+
+    def test_a_failed_restore_write_leaves_the_file_whole(self):
+        self.sh()
+        name = self.sh("--list-backups").stdout.split()[0]
+        flow = self.t / "commands" / "flow.md"
+        before = flow.read_bytes()
+        with self.fail_replace(), self.assertRaises(OSError):
+            installer.restore(self.t, name, out=lambda *_: None)
+        self.assertEqual(flow.read_bytes(), before)
+
+    def test_a_toolkit_copy_you_started_merging_is_backed_up_not_replaced(self):
+        flow = self.t / "commands" / "flow.md"
+        append(flow, "my edit\n")
+        self.sh()
+        beside = self.t / "commands" / "flow.md.toolkit-new"
+        append(beside, "my merge in progress\n")
+        self.edit_kit("commands/flow.md", "\nthird version\n")
+        out = self.sh().stdout
+        self.assertIn("third version", beside.read_text())
+        self.assertNotIn("my merge in progress", beside.read_text())
+        kept = [p for p in (self.t / "backups").rglob("flow.md.toolkit-new")]
+        self.assertEqual(len(kept), 1)
+        self.assertIn("my merge in progress", kept[0].read_text())
+        self.assertIn("backups", out)
+        self.assertIn("flow.md.toolkit-new", out)
+
+    def test_restore_then_install_keeps_the_restored_file_and_brings_the_toolkit_version(self):
+        self.sh()  # flow.md is now the toolkit's new version; the old one is in a backup
+        flow = self.t / "commands" / "flow.md"
+        name = self.sh("--list-backups").stdout.split()[0]
+        old_text = (self.t / "backups" / name / "commands" / "flow.md").read_text()
+        out = self.sh("--restore", name).stdout
+        self.assertEqual(flow.read_text(), old_text)
+        self.assertIn("differ from the toolkit", out)
+        self.assertIn(".toolkit-new", out)
+        out = self.sh().stdout
+        self.assertEqual(flow.read_text(), old_text)
+        self.assertEqual((self.t / "commands" / "flow.md.toolkit-new").read_bytes(),
+                         (self.kit / "commands" / "flow.md").read_bytes())
+        self.assertIn("flow.md.toolkit-new", out)
+
+    def test_restore_refuses_a_backups_folder_that_is_a_link(self):
+        self.sh()
+        name = self.sh("--list-backups").stdout.split()[0]
+        moved = self.base / "elsewhere"
+        shutil.move(str(self.t / "backups"), str(moved))
+        os.symlink(moved, self.t / "backups")
+        proc = self.sh("--restore", name, check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("symlink", proc.stderr)
 
 
 @unittest.skipUnless(shutil.which("rsync"), "sync.sh needs rsync")

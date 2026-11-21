@@ -280,6 +280,12 @@ class ImproveEndpointTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(self.file.read_bytes(), b"hand edit\n")
 
+    def test_a_valueerror_from_the_proposal_code_is_answered_not_dropped(self):
+        with patch.object(self.improve, "approve", side_effect=ValueError("surrogates not allowed")):
+            status, body = self.act("approve", note="yes")
+        self.assertEqual(status, 400)
+        self.assertIn("surrogates", body["error"])
+
     def test_reject_changes_no_file_and_needs_a_reason(self):
         self.assertEqual(self.act("reject")[0], 400)
         status, body = self.act("reject", note="not now")

@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from agentgraph import cases, improve, ledger
@@ -308,6 +309,143 @@ class PathTests(Base):
         with self.assertRaisesRegex(improve.ImproveError, "symlink"):
             self.approve(record)
         self.assertEqual(target.read_bytes(), self.original)
+
+
+class FaultTests(Base):
+    """Fault injection into approve and revert (a failing write or record save, a damaged record, a symlinked backups folder)."""
+
+    def setUp(self):
+        super().setUp()
+        self.second = self.root / "AGENTS.md"
+        self.second.write_bytes(b"old agents\n")
+        self.fresh = "skills/new-skill/SKILL.md"
+
+    def two(self):
+        return improve.propose(self.home, self.root, "Two", "both", [(self.rel, self.newtext), ("AGENTS.md", "new agents\n")])
+
+    def failing_write(self, fail, real=improve._write_atomic):
+        """A `_write_atomic` that raises OSError for the Nth write to each of the named files (1-based, counting only those files)."""
+        seen = {}
+
+        def write(path, data):
+            name = Path(path).name
+            if name in fail and "backups" not in Path(path).parts:
+                seen[name] = seen.get(name, 0) + 1
+                if seen[name] in fail[name]:
+                    raise OSError(f"disk full writing {name}")
+            return real(path, data)
+        return write
+
+    def untouched(self):
+        self.assertEqual(self.file.read_bytes(), self.original)
+        self.assertEqual(self.second.read_bytes(), b"old agents\n")
+
+    def test_a_text_that_cannot_be_encoded_is_refused_before_anything_is_written(self):
+        record = self.two()
+        path = improve._path(self.home, record["id"])
+        path.write_text(path.read_text().replace("new agents\\n", "\\ud800").replace('"new agents\n"', '"\\ud800"'))
+        self.assertIn("ud800", path.read_text())
+        with self.assertRaises(improve.ImproveError):
+            self.approve(record)
+        self.untouched()
+        self.assertFalse((self.root / "backups").exists())
+        self.assertEqual(improve._load(self.home, record["id"])["state"], "drafted")
+
+    def test_a_failure_that_is_not_an_oserror_rolls_back_too(self):
+        record = self.two()
+        calls = []
+
+        def boom(path, data, real=improve._write_atomic):
+            calls.append(path)
+            if Path(path).name == "AGENTS.md" and "backups" not in Path(path).parts:
+                raise ValueError("odd failure")
+            return real(path, data)
+        with unittest.mock.patch.object(improve, "_write_atomic", boom), self.assertRaises(ValueError):
+            self.approve(record)
+        self.untouched()
+
+    def test_a_rollback_step_that_fails_is_named_and_the_others_still_run(self):
+        record = self.two()
+        # the 2nd file fails to write; putting the 1st (designer.md) back fails as well (its 2nd write)
+        with unittest.mock.patch.object(improve, "_write_atomic", self.failing_write({"AGENTS.md": {1}, "designer.md": {2}})):
+            with self.assertRaises(improve.ImproveError) as caught:
+                self.approve(record)
+        self.assertIn(self.rel, str(caught.exception))
+        self.assertIn("could not be put back", str(caught.exception))
+        self.assertEqual(self.second.read_bytes(), b"old agents\n")
+
+    def test_folders_the_apply_made_are_removed_when_it_is_rolled_back(self):
+        record = improve.propose(self.home, self.root, "Fresh", "w", [(self.fresh, "# new\n"), ("AGENTS.md", "new agents\n")])
+        with unittest.mock.patch.object(improve, "_write_atomic", self.failing_write({"AGENTS.md": {1}})):
+            with self.assertRaisesRegex(improve.ImproveError, "put back"):
+                self.approve(record)
+        self.assertFalse((self.root / "skills").exists())
+        self.assertEqual(self.second.read_bytes(), b"old agents\n")
+
+    def test_a_failed_record_save_puts_the_files_back_and_approve_can_be_retried(self):
+        record = self.two()
+        real = improve._save
+
+        def save(home, rec):
+            if rec["state"] == "applied":
+                raise OSError("disk full saving the record")
+            return real(home, rec)
+        with unittest.mock.patch.object(improve, "_save", save), self.assertRaises(improve.ImproveError):
+            self.approve(record)
+        self.untouched()
+        self.assertEqual(improve._load(self.home, record["id"])["state"], "drafted")
+        self.assertEqual(self.approve(record)["state"], "applied")
+        self.assertEqual(self.file.read_bytes(), self.newtext.encode())
+
+    def test_a_revert_that_failed_halfway_can_be_retried(self):
+        record = self.two()
+        self.approve(record)
+        # revert writes designer.md back first, then AGENTS.md fails
+        with unittest.mock.patch.object(improve, "_write_atomic", self.failing_write({"AGENTS.md": {1}})):
+            with self.assertRaises(OSError):
+                improve.revert(self.home, self.root, record["id"])
+        self.assertEqual(self.file.read_bytes(), self.original)
+        self.assertEqual(improve._load(self.home, record["id"])["state"], "applied")
+        done = improve.revert(self.home, self.root, record["id"])
+        self.assertEqual(done["state"], "reverted")
+        self.untouched()
+
+    def applied_record_edit(self, edit):
+        record = self.propose()
+        self.approve(record)
+        path = improve._path(self.home, record["id"])
+        data = json.loads(path.read_text())
+        edit(data["applications"][-1])
+        path.write_text(json.dumps(data))
+        return record
+
+    def test_a_created_folder_outside_the_root_is_not_removed_on_revert(self):
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        record = self.applied_record_edit(lambda app: app.update(created_dirs=["../outside"]))
+        with self.assertRaises(improve.ImproveError):
+            improve.revert(self.home, self.root, record["id"])
+        self.assertTrue(outside.is_dir())
+        self.assertEqual(self.file.read_bytes(), self.newtext.encode())  # nothing was restored either
+
+    def test_a_backup_outside_the_backups_folder_is_not_read_on_revert(self):
+        other = self.tmp / "other"
+        (other / "oh-my-opencode-slim" / "fast").mkdir(parents=True)
+        (other / self.rel).write_bytes(self.original)
+        record = self.applied_record_edit(lambda app: app.update(backup=str(other)))
+        with self.assertRaises(improve.ImproveError):
+            improve.revert(self.home, self.root, record["id"])
+        self.assertEqual(self.file.read_bytes(), self.newtext.encode())
+
+    def test_a_symlinked_backups_folder_is_refused(self):
+        record = self.propose()
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        os.symlink(elsewhere, self.root / "backups")
+        with self.assertRaisesRegex(improve.ImproveError, "symlink"):
+            self.approve(record)
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        self.assertEqual(self.file.read_bytes(), self.original)
 
 
 class EvaluationTests(Base):

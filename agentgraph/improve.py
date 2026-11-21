@@ -119,6 +119,40 @@ def _write_atomic(path: Path, data: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _backups_folder(root: Path) -> Path:
+    """`<root>/backups`, refused when it is a symlink (a write through it would land outside the root)."""
+    folder = Path(os.path.realpath(root)) / "backups"
+    if folder.is_symlink():
+        raise ImproveError("the backups folder is a symlink; refused")
+    return folder
+
+
+def _inside(base: Path, path: Path) -> bool:
+    try:
+        return Path(os.path.realpath(path)).is_relative_to(Path(os.path.realpath(base)))
+    except (OSError, ValueError):
+        return False
+
+
+def _put_back(written: list, created: list, base: Path) -> list[str]:
+    """Undo the writes (newest first) and remove the folders the apply made; the paths that could not be put back."""
+    failed = []
+    for target, current in reversed(written):
+        try:
+            if current is None:
+                target.unlink(missing_ok=True)
+            else:
+                _write_atomic(target, current)
+        except OSError:
+            failed.append(str(target.relative_to(base)))
+    for relative in sorted(created, key=len, reverse=True):
+        try:
+            (base / relative).rmdir()
+        except OSError:
+            pass
+    return failed
+
+
 def config_root(value=None) -> Path:
     root = Path(value).expanduser() if value is not None else sources.CONFIG_DIR
     if not root.is_dir():
@@ -351,13 +385,16 @@ def _current_text(target: Path) -> tuple[str, str | None]:
     return (data.decode("utf-8", "replace") if data is not None else ""), _sha(data)
 
 
-def _backup_text(application: dict, item: dict) -> str | None:
+def _backup_text(root: Path, application: dict, item: dict) -> str | None:
     """The text the file had before the application ("" for a file it created); None when the backup is gone or no
     longer what was saved (the caller then diffs against the file now)."""
     if item.get("before_sha256") is None:
         return ""
     try:
-        data = _read_file(Path(application["backup"]) / item["path"])
+        folder = Path(application["backup"])
+        if not _inside(_backups_folder(root), folder):
+            return None
+        data = _read_file(folder / item["path"])
     except (OSError, ImproveError, KeyError):
         return None
     return data.decode("utf-8", "replace") if data is not None and _sha(data) == item["before_sha256"] else None
@@ -385,7 +422,7 @@ def describe(home: Path, root: Path, record: dict, *, full: bool = True) -> dict
         # now already holds the new text. Otherwise (drafted, evaluated, rejected, reverted) the file now against it.
         base, entry["diff_against"] = text, "file"
         if change["path"] in applied:
-            before = _backup_text(last, applied[change["path"]])
+            before = _backup_text(root, last, applied[change["path"]])
             if before is not None:
                 base, entry["diff_against"] = before, "backup"
         plus, minus = outputs._line_counts(base, change["new_text"])
@@ -457,46 +494,50 @@ def approve(home: Path, root: Path, proposal_id: str, *, who: str, note: str, fo
             if _sha(current) != change["base_sha256"] and not force:
                 raise ImproveError(f"{change['path']} changed since the proposal was drafted (its hash is no longer "
                                    f"the one the change was made against); nothing was written. Propose again, or --force")
-            plan.append((change, target, current))
+            try:
+                data = change["new_text"].encode("utf-8")
+            except (UnicodeEncodeError, AttributeError):
+                raise ImproveError(f"the new text of {change['path']} cannot be written as UTF-8; nothing was written") from None
+            plan.append((change, target, current, data))
         when = ledger._now(now)
-        folder = Path(os.path.realpath(root)) / "backups" / (
-            time.strftime("%Y%m%d-%H%M%S", time.localtime(when)) + f"-improve-{record['id']}")
+        folder = _backups_folder(root) / (time.strftime("%Y%m%d-%H%M%S", time.localtime(when)) + f"-improve-{record['id']}")
         suffix = 1
-        while folder.exists():
+        while folder.exists() or folder.is_symlink():
             suffix += 1
             folder = folder.with_name(f"{folder.name.split('~')[0]}~{suffix}")
         files = []
-        for change, target, current in plan:
+        for change, target, current, data in plan:
             if current is not None:
                 _write_atomic(folder / change["path"], current)
         folder.mkdir(parents=True, exist_ok=True)
         _write_atomic(folder / "manifest.json", (json.dumps({"proposal": record["id"], "files": [
             {"path": change["path"], "existed": current is not None, "sha256": _sha(current)}
-            for change, _, current in plan]}, indent=2) + "\n").encode("utf-8"))
+            for change, _, current, _ in plan]}, indent=2) + "\n").encode("utf-8"))
+        base = Path(os.path.realpath(root))
         written, created = [], []
         try:
-            for change, target, current in plan:
-                data = change["new_text"].encode("utf-8")
+            for change, target, current, data in plan:
                 if current is None:
                     cursor = target.parent
                     while not cursor.exists():
-                        created.append(str(cursor.relative_to(Path(os.path.realpath(root)))))
+                        created.append(str(cursor.relative_to(base)))
                         cursor = cursor.parent
                 _write_atomic(target, data)
                 written.append((target, current))
                 files.append({"path": change["path"], "before_sha256": _sha(current), "after_sha256": _sha(data)})
-        except OSError as exc:
-            for target, current in reversed(written):
-                if current is None:
-                    target.unlink(missing_ok=True)
-                else:
-                    _write_atomic(target, current)
-            raise ImproveError(f"could not write {exc}; the files written so far were put back") from None
-        record["applications"].append({"time": when, "backup": str(folder), "files": files, "created_dirs": created,
-                                       "forced": bool(force), "evaluation": summary(record["evaluation"]),
-                                       "reverted": None, "ledger_time": None})
-        _move(record, "applied", who, note if who == "user" else (note or "approved"), when)
-        _save(home, record)
+            record["applications"].append({"time": when, "backup": str(folder), "files": files, "created_dirs": created,
+                                           "forced": bool(force), "evaluation": summary(record["evaluation"]),
+                                           "reverted": None, "ledger_time": None})
+            _move(record, "applied", who, note if who == "user" else (note or "approved"), when)
+            _save(home, record)
+        except BaseException as exc:
+            failed = _put_back(written, created, base)
+            if failed:
+                raise ImproveError(f"could not write {exc}; {', '.join(failed)} could not be put back (the originals are in "
+                                   f"{folder})") from exc
+            if isinstance(exc, OSError):
+                raise ImproveError(f"could not write {exc}; the files written so far were put back") from None
+            raise
     # `ledger.improved` takes the same lock itself, so it runs after ours is released.
     row = None
     try:
@@ -548,10 +589,21 @@ def revert(home: Path, root: Path, proposal_id: str, *, who: str = "command", no
             raise ImproveError(f"proposal {proposal_id} is {record['state']}; only an applied one can be reverted")
         application = record["applications"][-1]
         folder = Path(application["backup"])
+        base = Path(os.path.realpath(root))
+        if not _inside(_backups_folder(root), folder):
+            raise ImproveError(f"the backup folder {folder} is not inside the config root's backups; nothing was restored")
+        created = []
+        for relative in application.get("created_dirs", []):
+            parts = relative.split("/") if isinstance(relative, str) else [""]
+            if any(part in ("", ".", "..") for part in parts) or relative.startswith("/") or not _inside(base, base / relative) or (base / relative).is_symlink():
+                raise ImproveError(f"the record names a created folder ({relative!r}) that is not inside the config root; nothing was restored")
+            created.append(relative)
         plan = []
         for item in application["files"]:
             target = safe_path(root, item["path"])
             current = _read_file(target) if target.is_file() or not target.exists() else None
+            if _sha(current) == item["before_sha256"]:
+                continue  # already put back by an earlier attempt that failed halfway
             if _sha(current) != item["after_sha256"] and not force:
                 raise ImproveError(f"{item['path']} was changed after the proposal was applied; nothing was restored. "
                                    f"Look at it, or --force to put the original back anyway")
@@ -566,8 +618,7 @@ def revert(home: Path, root: Path, proposal_id: str, *, who: str = "command", no
                 target.unlink(missing_ok=True)
             else:
                 _write_atomic(target, original)
-        base = Path(os.path.realpath(root))
-        for relative in sorted(application.get("created_dirs", []), key=len, reverse=True):
+        for relative in sorted(created, key=len, reverse=True):
             try:
                 (base / relative).rmdir()
             except OSError:

@@ -32,7 +32,7 @@ last time, and what is in your folder now.
 |---|---|
 | You never changed it | Replaced by the toolkit's new version (the old one goes to `backups/`). |
 | You changed it, the toolkit did not | Kept, nothing printed. |
-| You changed it and the toolkit did too | **Yours is kept.** The toolkit's version is written beside it as `<name>.toolkit-new` and listed at the end. Merge what you want, then delete the `.toolkit-new` file. Once your file equals the toolkit's, the copy beside it is removed on the next run. |
+| You changed it and the toolkit did too | **Yours is kept.** The toolkit's version is written beside it as `<name>.toolkit-new` and listed at the end. Merge what you want, then delete the `.toolkit-new` file. Once your file equals the toolkit's, the copy beside it is removed on the next run. If a `<name>.toolkit-new` is already there with other text (you may be merging into it), it is not overwritten: it is copied to that run's backup folder first, and the install says so. |
 | You made it (your own skill, your own `*_append.md`, a file inside a toolkit skill) | Never touched, never deleted. |
 | You deleted a toolkit file | Not brought back, unless the toolkit changes it: then the new version arrives as `<name>.toolkit-new`. |
 | A file that differs and the manifest has no entry for (the first run over an install from before the manifest) | Treated as yours: kept, with `<name>.toolkit-new` beside it. |
@@ -57,8 +57,10 @@ sh install.sh --restore <name>                  # put them back
 ```
 
 A restore first copies what it replaces to a `<time>-pre-restore.*` backup, so a restore can be undone the same
-way. Only `-pre-toolkit` and `-pre-restore` backups can be restored; backups made by the editors in the view
-have their own Undo there.
+way. A restored file now differs from the toolkit's current version, so the next install keeps it and writes the
+toolkit's version beside it as `<name>.toolkit-new` (the restore says so). The install writes each file whole or not
+at all, and the config folder itself may be a symlink (links inside it are refused). Only `-pre-toolkit` and `-pre-restore` backups can be restored; backups made by
+the editors in the view have their own Undo there.
 
 ## What is personal and what is the toolkit's
 

@@ -21,7 +21,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -43,13 +45,39 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def no_links(path: Path) -> None:
-    """Refuse a path with a symlink in it (the same rule as commands/.toolkit.sh)."""
+def no_links(path: Path, root: Path | None = None) -> None:
+    """Refuse a path with a symlink in it (the same rule as commands/.toolkit.sh). With `root` (the config
+    folder, already resolved) the check stops there: the folder itself and what is above it may be links."""
     for part in (path, *path.parents):
-        if str(part) in ("", ".", "/"):
+        if str(part) in ("", ".", "/") or part == root:
             break
         if part.is_symlink():
             raise InstallError(f"refusing symlink: {part}")
+
+
+def atomic_write(path: Path, data: bytes) -> None:
+    """Write beside the file, then swap it in: a failure leaves the old file whole. Keeps an existing file's mode."""
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.chmod(name, stat.S_IMODE(path.stat().st_mode) if path.is_file() else 0o644)
+        os.replace(name, path)
+    except BaseException:
+        Path(name).unlink(missing_ok=True)
+        raise
+
+
+def atomic_copy(src: Path, dst: Path) -> None:
+    """`shutil.copy2` that swaps the finished copy in, so a failure leaves the old file whole."""
+    fd, name = tempfile.mkstemp(prefix=f".{dst.name}.", dir=dst.parent)
+    os.close(fd)
+    try:
+        shutil.copy2(src, name)
+        os.replace(name, dst)
+    except BaseException:
+        Path(name).unlink(missing_ok=True)
+        raise
 
 
 def merge3(base, theirs, mine):
@@ -100,6 +128,7 @@ def _tree(folder: Path, rel: str) -> list[tuple[str, Path]]:
 
 class Installer:
     def __init__(self, source: Path, target: Path, commands: list[str], dry: bool = False, out=print):
+        target = target.resolve()  # the config folder may be a link (a dotfiles repo); links below it are refused
         self.source, self.target, self.commands, self.dry, self.out = source, target, commands, dry, out
         self.backup_root = target / "backups"
         self.backup: Path | None = None
@@ -131,29 +160,29 @@ class Installer:
         if data == self.manifest:
             return
         path = self.target / MANIFEST
-        no_links(path)
-        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        no_links(path, self.target)
+        atomic_write(path, (json.dumps(data, indent=2) + "\n").encode("utf-8"))
 
     # -- writing
     def _backup(self, rel: str, dst: Path) -> None:
         if self.dry:
             return
         if self.backup is None:
-            no_links(self.backup_root)
+            no_links(self.backup_root, self.target)
             self.backup_root.mkdir(parents=True, exist_ok=True)
             self.backup = Path(tempfile.mkdtemp(prefix=time.strftime("%Y-%m-%d-%H%M%S") + "-pre-toolkit.",
                                                 dir=self.backup_root))
         keep = self.backup / rel
-        no_links(keep)
+        no_links(keep, self.target)
         keep.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(dst, keep)
 
     def _copy(self, src: Path, dst: Path) -> None:
         if self.dry:
             return
-        no_links(dst)
+        no_links(dst, self.target)
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
+        atomic_copy(src, dst)
 
     def _say(self, verb: str, dst: Path) -> None:
         self.out(f"{verb:<7} {dst}")
@@ -172,6 +201,9 @@ class Installer:
         self.beside.append(new)
         if new.is_file() and digest(new) == digest(src):
             return
+        if new.is_file():  # an earlier copy you may have started merging into: keep it in this run's backup
+            self._backup(new.relative_to(self.target).as_posix(), new)
+            self.out(f"note    {new} held other text; your earlier copy goes to backups/ with the replaced files")
         self._say("new", new)
         self._copy(src, new)
 
@@ -184,7 +216,7 @@ class Installer:
     # -- one file
     def file(self, rel: str, src: Path) -> None:
         dst = self.target / rel
-        no_links(dst)
+        no_links(dst, self.target)
         sh = digest(src)
         old = self.files.get(rel)
         if not dst.exists():
@@ -215,7 +247,7 @@ class Installer:
     def preset_file(self) -> object:
         src = self.source / "config" / PRESET_FILE
         dst = self.target / PRESET_FILE
-        no_links(dst)
+        no_links(dst, self.target)
         sh = digest(src)
         try:
             theirs = json.loads(src.read_text(encoding="utf-8"))
@@ -242,12 +274,11 @@ class Installer:
             self._say("merge", dst)
             self._backup(PRESET_FILE, dst)
             if not self.dry:
-                dst.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                atomic_write(dst, (json.dumps(merged, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
         self.files[PRESET_FILE] = sh
         return theirs
 
     def run(self) -> int:
-        no_links(self.target)
         items = toolkit_files(self.source, self.commands)
         if not (self.source / "config" / PRESET_FILE).is_file():
             raise InstallError(f"missing toolkit file: config/{PRESET_FILE}")
@@ -281,7 +312,7 @@ class Installer:
 
 
 def backups(target: Path) -> list[Path]:
-    root = target / "backups"
+    root = target.resolve() / "backups"
     if not root.is_dir() or root.is_symlink():
         return []
     return sorted(p for p in root.iterdir() if p.is_dir() and not p.is_symlink()
@@ -304,28 +335,30 @@ def list_backups(target: Path, out=print) -> int:
 
 
 def restore(target: Path, name: str, dry: bool = False, out=print) -> int:
+    target = target.resolve()
     root = target / "backups"
+    if root.is_symlink():
+        raise InstallError(f"refusing symlink: {root}")
     folder = Path(name) if "/" in name else root / name
     if folder.is_symlink():
         raise InstallError(f"refusing symlink: {folder}")
     folder = folder.resolve() if folder.exists() else folder
-    if not folder.is_dir() or folder.parent != root.resolve() or not any(m in folder.name for m in RESTORABLE):
+    if not folder.is_dir() or folder.parent != root or not any(m in folder.name for m in RESTORABLE):
         raise InstallError(f"not a toolkit backup of {root}: {name} (see --list-backups)")
-    no_links(target)
     saved: Path | None = None
-    count = 0
+    restored: list[str] = []
     for path in _files(folder):
         if path.is_symlink():
             raise InstallError(f"refusing symlink in backup: {path}")
         rel = path.relative_to(folder)
         dst = target / rel
-        no_links(dst)
+        no_links(dst, target)
         if dst.exists() and (not dst.is_file() or digest(dst) == digest(path)):
             if not dst.is_file():
                 raise InstallError(f"refusing non-regular file: {dst}")
             continue
         out(f"restore {dst}")
-        count += 1
+        restored.append(rel.as_posix())
         if dry:
             continue
         if dst.exists():
@@ -335,7 +368,8 @@ def restore(target: Path, name: str, dry: bool = False, out=print) -> int:
             keep.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(dst, keep)
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, dst)
+        atomic_copy(path, dst)
+    count = len(restored)
     if count == 0:
         out("Nothing to restore: every file already matches the backup.")
     elif dry:
@@ -344,7 +378,27 @@ def restore(target: Path, name: str, dry: bool = False, out=print) -> int:
         out(f"{count} file(s) restored from {folder.name}.")
         if saved is not None:
             out(f"What they replaced is in {saved}.")
+        _forget(target, restored)
+    if count:
+        out("Restored files now differ from the toolkit's current version. The next install keeps them and puts")
+        out("the toolkit's version beside each one as <name>.toolkit-new" +
+            (" (oh-my-opencode-slim.json is merged instead)." if PRESET_FILE in restored else "."))
     return 0
+
+
+def _forget(target: Path, restored: list[str]) -> None:
+    """Drop the manifest entries of restored files: the install then counts them as yours, as the output says."""
+    path = target / MANIFEST
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        files = data["files"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    if not isinstance(files, dict) or not any(rel in files for rel in restored):
+        return
+    data["files"] = {rel: value for rel, value in files.items() if rel not in restored}
+    no_links(path, target)
+    atomic_write(path, (json.dumps(data, indent=2) + "\n").encode("utf-8"))
 
 
 def main(argv=None) -> int:
