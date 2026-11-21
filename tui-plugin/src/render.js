@@ -266,10 +266,28 @@ export function isAnimated(doc) {
   return hubWorking(doc, findHub(doc, agents)) || agents.some((a) => busyCount(a) > 0);
 }
 
+// What the database confirms about a node (WEB_API.md `nodes[].liveness`): "live", "quiet", "orphan", "unreported",
+// or nothing (an older snapshot, or no database). Only a live node, or one the snapshot says nothing about, is drawn
+// as working; a quiet or orphan one is reported running only, and an unreported one is working though not marked.
+export const unconfirmed = (node) => isObject(node) && node.status === "running" && (node.liveness === "quiet" || node.liveness === "orphan");
+export const moves = (node) => isObject(node) && node.status === "running" && !unconfirmed(node);
+
+// The plain words for a node that is not simply working, "" for any other. `generated` (epoch ms) is the snapshot's
+// time, which the idle time is counted to.
+export function liveWords(node, generated = null) {
+  if (!isObject(node)) return "";
+  if (unconfirmed(node)) {
+    if (node.liveness === "orphan") return "reported running · no session";
+    const since = epochMs(node.idle_since);
+    return since !== null && generated !== null && generated >= since ? `reported running · idle ${formatElapsed(generated - since)}` : "reported running · idle";
+  }
+  return node.liveness === "unreported" ? "working · not marked running" : "";
+}
+
 function currentGoal(graph, name) {
   if (!isObject(graph)) return "";
   const nodes = list(graph.nodes).filter((n) => isObject(n) && n.agent === name);
-  const node = nodes.find((n) => n.busy === true) || nodes.find((n) => n.status === "running");
+  const node = nodes.find((n) => n.busy === true) || nodes.find(moves);
   return node ? clean(node.goal) : "";
 }
 
@@ -406,6 +424,12 @@ function needsEntries(doc, listed) {
     if (!isObject(loop) || loop.state !== "waiting" || !listed.has(loop.agent)) continue;
     take(3, loop.agent, () => ({ kind: "waiting", agent: loop.agent, n: rounds(loop) }));
   }
+  // 4: reported running with no live session, or working without being marked running (a quiet line, not an alarm)
+  for (const node of list(graph.nodes)) {
+    if (!isObject(node) || !listed.has(node.agent) || node.stalled === true) continue;
+    const words = liveWords(node, epochMs(doc.generated));
+    if (words) take(4, node.agent + "\0" + node.id, () => ({ kind: "reported", agent: node.agent, words }));
+  }
   return entries.sort((a, b) => a.rank - b.rank).map((e) => e.make());
 }
 
@@ -433,6 +457,10 @@ function needsLine(entry, width) {
   if (entry.kind === "sent_back") {
     const [worker, by] = fitNames([entry.agent, seatName(entry.by)], 2 + 10 + displayWidth(loop) + 4, width);
     return [sp(`${SENT_BACK} ${worker} sent back${loop} by ${by}`, "accent")];
+  }
+  if (entry.kind === "reported") {
+    const [name] = fitNames([entry.agent], 2 + 1 + displayWidth(entry.words), width, 1);
+    return [sp(`${MARK_IDLE} ${name} ${entry.words}`, "muted")];
   }
   const [name] = fitNames([entry.agent], 2 + 8, width, 1);
   return [sp(`${WAITING} ${name} waiting`, "plain")];
@@ -526,7 +554,7 @@ function graphOf(doc) {
 function busyNodeOf(graph, name) {
   if (!graph) return null;
   const nodes = list(graph.nodes).filter((n) => isObject(n) && n.agent === name);
-  return nodes.find((n) => n.busy === true) || nodes.find((n) => n.status === "running") || null;
+  return nodes.find((n) => n.busy === true) || nodes.find(moves) || null;
 }
 
 function roundsOf(graph, name) {
@@ -631,6 +659,15 @@ function needsItems(doc, agents, hub, requests) {
       rounds: Math.max(roundsOf(graph, node.agent), attempts),
     }));
   }
+  for (const node of list(graph.nodes)) {
+    if (!isObject(node) || node.stalled === true) continue;
+    const words = liveWords(node, epochMs(doc.generated));
+    if (!words) continue;
+    push("unconfirmed:" + node.id, {
+      key: `unconfirmed:${node.id}`, kind: "unconfirmed", mark: MARK_IDLE, tone: "muted", agent: null, name: clean(node.agent) || "?", label: words,
+      what: clean(node.goal), open: (typeof node.session === "string" && node.session) || rootId, busy: null, since: null, hub: false,
+    });
+  }
   return items;
 }
 
@@ -715,14 +752,14 @@ function currentGate(graph) {
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const producing = (gate) => [...list(gate.depends_on), ...list(gate.feedback_to)].some((id) => {
     const n = byId.get(id);
-    return !!n && (n.status === "running" || n.status === "returned" || n.busy === true);
+    return !!n && (moves(n) || n.status === "returned" || n.busy === true);
   });
   const open = nodes.filter((n) => (n.type === "gate" || n.type === "human") && n.status !== "passed");
   const gate = open.find(producing) || open[0] || null;
   return gate ? { gate, reworked: producing(gate) } : null;
 }
 
-function gateSpans(graph, passed, total, label = true) {
+function gateSpans(graph, passed, total, label = true, generated = null) {
   if (graph.status === "passed" || (total > 0 && passed >= total)) return [sp("done", "muted")];
   const found = currentGate(graph);
   if (!found) return [];
@@ -734,7 +771,9 @@ function gateSpans(graph, passed, total, label = true) {
     const tone = gate.status === "failed" && verdict === "refuted" && reworked ? "accent" : "danger";
     return [...word("gate "), sp(who, "plain"), sp(" " + verdict, tone)];
   }
+  if (unconfirmed(gate)) return [...word("gate "), sp(who, "plain"), sp(" " + liveWords(gate, generated), "muted")];
   if (gate.status === "running" || gate.status === "returned" || gate.busy === true) return [...word("gate "), sp(who, "plain"), sp(" checking", "accent")];
+  if (gate.liveness === "unreported") return [...word("next gate "), sp(who, "plain"), sp(" " + liveWords(gate), "muted")];
   return [...word("next gate "), sp(who, "plain")];
 }
 
@@ -753,7 +792,8 @@ function progressRow(doc, width) {
   if (filled > 0) bar.push(sp(BAR_FULL.repeat(filled), "accent"));
   if (PROGRESS_BAR_CELLS - filled > 0) bar.push(sp(BAR_EMPTY.repeat(PROGRESS_BAR_CELLS - filled), "muted"));
   const count = [sp(String(passed), "plain"), sp("/" + total, "muted")];
-  const gate = gateSpans(graph, passed, total);
+  const generated = epochMs(doc.generated);
+  const gate = gateSpans(graph, passed, total, true, generated);
   const task = clean(graph.task);
   const join = (...parts) => {
     const out = [];
@@ -766,7 +806,7 @@ function progressRow(doc, width) {
     const taskRoom = width - lineWidth(join(withBar, gate)) - SECTION_GAP.length;
     if (taskRoom >= 8) candidates.push(join(withBar, [sp(truncateMiddle(task, taskRoom), "muted")], gate));
   }
-  candidates.push(join(withBar, gate), join(count, gate), join(count, gateSpans(graph, passed, total, false)), withBar, count);
+  candidates.push(join(withBar, gate), join(count, gate), join(count, gateSpans(graph, passed, total, false, generated)), withBar, count);
   return candidates.find((c) => lineWidth(c) <= width) || count;
 }
 

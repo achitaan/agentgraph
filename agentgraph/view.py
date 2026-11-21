@@ -15,7 +15,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 
-from .contract import ESCALATION, GROUPS, GROUP_TITLES, POOL, Snapshot, group_of, validate
+from .contract import ESCALATION, GROUPS, GROUP_TITLES, POOL, Snapshot, graph_liveness, group_of, validate
 from .viewstate import KEY_HELP, PANELS, ViewState
 
 Color = tuple[int, int, int]
@@ -580,6 +580,10 @@ class _N:
     wave: int = 1
     pos: int = 0
     wave_size: int = 1
+    # What the database confirms (live, quiet, orphan, unreported, or None: not known). Set for each frame by
+    # _context, never stored in the graph; None draws a running node as it always was.
+    liveness: str | None = None
+    idle: float | None = None   # seconds the session has been idle, when quiet and known
 
 
 @dataclass
@@ -919,6 +923,34 @@ class _Ctx:
     warnings: list
 
 
+def _apply_liveness(graph, raw, snap: Snapshot, now: float) -> None:
+    """Mark each node of the derived graph with what the database confirms (`contract.node_liveness`), the same
+    rule the snapshot uses. A graph or snapshot that cannot say leaves every node unmarked."""
+    if graph is None:
+        return
+    for n in graph.nodes:
+        n.liveness, n.idle = None, None
+    try:
+        known = getattr(snap, "known", None)
+        if known is None:  # a snapshot made without the whole database: the sessions it lists
+            listed = ([snap.root] if snap.root is not None else []) + [r for r in _seq(snap.sessions) if r is not None]
+            known = {r.id: r for r in listed if isinstance(getattr(r, "id", None), str)} or None
+        found = graph_liveness(raw, known)
+    except Exception:  # loose or partial data: draw as before
+        return
+    by_id = {}
+    for n in graph.nodes:
+        by_id.setdefault(n.id, n)
+    for node_id, (state, since) in found.items():
+        n = by_id.get(_s(node_id))
+        if n is None or state is None:
+            continue
+        n.liveness = state
+        if state == "quiet":
+            moment = _time_or_none(since)
+            n.idle = max(0.0, now - moment) if moment is not None else None
+
+
 def _context(snap: Snapshot, source: str, hint: str, state: ViewState) -> _Ctx:
     root = _session(snap.root, root=True) if snap.root is not None else None
     children = []
@@ -933,7 +965,9 @@ def _context(snap: Snapshot, source: str, hint: str, state: ViewState) -> _Ctx:
     first = next((g for g in _seq(snap.graphs) if g is not None), None)
     graph = _derive_graph(first) if first is not None else None
     hub, groups, others = _roster(snap, graph, sessions, root)
-    return _Ctx(snap=snap, now=_clock(snap.now), source=_s(source), hint=_s(hint), state=state,
+    now = _clock(snap.now)
+    _apply_liveness(graph, first, snap, now)
+    return _Ctx(snap=snap, now=now, source=_s(source), hint=_s(hint), state=state,
                 graph=graph, hub=hub, groups=groups, agents=others, sessions=sessions,
                 root=root, running=sum(1 for s in sessions if s.busy),
                 warnings=[_flat(w) for w in _seq(snap.warnings) if _flat(w)])
@@ -969,8 +1003,31 @@ def _no_roster(c: Canvas, ctx: _Ctx, x: int, y: int, w: int, h: int) -> bool:
 # --- node vocabulary: status is always the real status; stalled is its own marker ---------
 
 
+def _moves(n: _N) -> bool:
+    """A running node is drawn as working only while the database confirms it (or says nothing at all)."""
+    return n.status == "running" and n.liveness in (None, "live")
+
+
+def _unconfirmed(n: _N) -> bool:
+    """Reported running, but its session is idle or missing."""
+    return n.status == "running" and n.liveness in ("quiet", "orphan")
+
+
+def _idle_text(seconds) -> str:
+    if seconds is None:
+        return "idle"
+    seconds = max(0, int(seconds))
+    if seconds >= 3600:
+        return f"idle {seconds // 3600}h {(seconds % 3600) // 60:02}m"
+    if seconds >= 60:
+        return f"idle {seconds // 60}m"
+    return f"idle {seconds}s"
+
+
 def _glyph(n: _N, now: float) -> str:
     if n.status == "running":
+        if not _moves(n):
+            return "▷"
         return "▶" if int(now * 2) % 2 == 0 else "▷"
     return STATUS_GLYPH.get(n.status, "?")
 
@@ -979,7 +1036,21 @@ def _label(n: _N) -> str:
     return n.status.upper()
 
 
+def _state_text(n: _N, short: bool = False) -> str:
+    """The status word, and for a node the database does not confirm, what it does confirm: reported running
+    (idle for a while, or with no session), or working although not marked running. `short` is for narrow cards."""
+    if _unconfirmed(n):
+        if n.liveness == "quiet":
+            return _idle_text(n.idle).upper() if short else ("reported running · " + _idle_text(n.idle)).upper()
+        return "NO SESSION" if short else "REPORTED RUNNING · NO SESSION"
+    if n.liveness == "unreported":
+        return "NOT MARKED" if short else "WORKING · NOT MARKED RUNNING"
+    return _label(n)
+
+
 def _status_colour(n: _N) -> Color:
+    if _unconfirmed(n):
+        return MUTED
     return STATUS_COLOR.get(n.status, MUTED)
 
 
@@ -1001,11 +1072,13 @@ def _try_colour(n: _N) -> Color:
 def _value_colour(n: _N) -> Color:
     if _alarm(n):
         return RED
+    if _unconfirmed(n):
+        return MUTED
     return {"passed": GREEN, "returned": LIME, "blocked": AMBER, "running": INK}.get(n.status, MUTED)
 
 
 def _goal_colour(n: _N) -> Color:
-    if n.status in ("running", "returned") or _alarm(n):
+    if _moves(n) or n.status == "returned" or _alarm(n):
         return INK
     return {"pending": FAINT}.get(n.status, MUTED)
 
@@ -1013,7 +1086,7 @@ def _goal_colour(n: _N) -> Color:
 def _row_bg(n: _N, now: float):
     if _alarm(n):
         return mix(PANEL, RED, 0.16)
-    if n.status == "running":
+    if _moves(n):
         return mix(PANEL, TEAL, 0.05 + 0.05 * _pulse(now))
     return None
 
@@ -1067,7 +1140,7 @@ def _label_rows(label: str, text, fg: Color, width: int, lines=None):
 def _loop_header(n: _N, now: float):
     colour = _status_colour(n)
     segs = [("▍ ", colour, True), (f"{n.id}  ", INK, True),
-            (f"{_glyph(n, now)} {_label(n)}", colour, True)]
+            (f"{_glyph(n, now)} {_state_text(n)}", colour, True)]
     if n.stalled:
         segs.append(("  STALLED ", RED, True, True))
     segs.append((f"  {n.type} · {n.agent or '—'}", MUTED))
@@ -1539,9 +1612,12 @@ def _task_head(ctx: _Ctx, n: _N, width: int, goal: bool):
     narrow = width < 64
     id_w, status_w, type_w, agent_w = (4, 8, 6, 10) if narrow else (5, 9, 9, 13)
     colour = _status_colour(n)
+    word = _state_text(n, short=narrow)
+    if word != _label(n):  # an unconfirmed state keeps its whole sentence; only this card's columns shift
+        status_w = max(status_w, len(word))
     segs = [(_fit(n.id, id_w), RED if _alarm(n) else INK, True),
             (f"{_glyph(n, ctx.now)} ", colour, True),
-            (_fit(_label(n), status_w), colour, True)]
+            (_fit(word, status_w), colour, True)]
     if n.stalled:
         segs += [(" STALLED ", RED, True, True), (" ", MUTED)]
     segs += [(" " + _fit(n.type, type_w) + " ", MUTED),
@@ -1638,7 +1714,7 @@ def _loops_summary(g: _G, width: int):
         if i:
             segs.append(("  ·  ", FAINT))
         segs.append((f"{n.id} ", INK, True))
-        segs.append((_label(n), _status_colour(n)))
+        segs.append((_state_text(n), _status_colour(n)))
         if n.stalled:
             segs.append((" STALLED", RED, True))
         if n.attempts:
@@ -2206,7 +2282,7 @@ def _focus_rows(ctx: _Ctx, focus: str, width: int):
             for n in g.flat:
                 colour = _status_colour(n)
                 head = [(f"W{n.wave:02}  ", BLUE, True), (f"{n.id}  ", INK, True),
-                        (f"{_glyph(n, ctx.now)} {_label(n)}", colour, True)]
+                        (f"{_glyph(n, ctx.now)} {_state_text(n)}", colour, True)]
                 if n.stalled:
                     head.append(("  STALLED ", RED, True, True))
                 head.append((f"  {n.type} · {n.agent or '—'}", MUTED))

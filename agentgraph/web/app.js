@@ -64,6 +64,19 @@
   function amount(value) { const n = Number(value) || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(n >= 1e5 ? 0 : 1) + 'k' : String(Math.round(n)); }
   function named(labels, value) { return Object.hasOwn(labels, value) ? labels[value] : text(value); }
   function state(value) { return named(STATES, value); }
+  // What the database confirms about a step (WEB_API.md `nodes[].liveness`), against the status the graph reports. Only
+  // `live`, or no liveness at all (an older snapshot), reads as working; the others say what they are, in plain words.
+  const unconfirmed = node => node?.status === 'running' && (node.liveness === 'quiet' || node.liveness === 'orphan');
+  function idleFor(since, generated) {
+    const at = Number.isFinite(Number(generated)) && Number(generated) > 0 ? Number(generated) : Date.now() / 1000;
+    const seconds = Number(since) > 0 ? Math.max(0, Math.floor(at - Number(since))) : null;
+    if (seconds === null) return 'idle';
+    return 'idle ' + (seconds >= 3600 ? Math.floor(seconds / 3600) + 'h ' + Math.floor(seconds % 3600 / 60) + 'm' : seconds >= 60 ? Math.floor(seconds / 60) + 'm' : seconds + 's');
+  }
+  function liveWords(node, generated) {
+    if (unconfirmed(node)) return node.liveness === 'orphan' ? 'Reported running · no session' : 'Reported running · ' + idleFor(node.idle_since, generated);
+    return node?.liveness === 'unreported' && node.status !== 'running' ? 'Working · not marked running' : '';
+  }
   function ago(time) { const s = Math.max(0, Date.now() / 1000 - (Number(time) || 0)); return s < 90 ? 'now' : s < 5400 ? Math.round(s / 60) + 'm' : s < 129600 ? Math.round(s / 3600) + 'h' : Math.round(s / 86400) + 'd'; }
   function clamp(value, min, max) { return Math.min(max, Math.max(min, value)); }
   function shorten(value) {
@@ -2885,10 +2898,10 @@
       });
     }
     function stepRow(parent, step, compact = false) {
-      const row = el('details', 'ag-step' + (compact ? ' ag-step-compact' : '')); row.dataset.step = step.id; row.dataset.status = step.status;
+      const row = el('details', 'ag-step' + (compact ? ' ag-step-compact' : '')); row.dataset.step = step.id; row.dataset.status = step.status; if (step.liveness) row.dataset.liveness = step.liveness;
       row.dataset.highlighted = String(step.id === highlightedStep); row.open = openSteps.has(step.id);
       const summary = el('summary');
-      const meta = el('span', 'ag-step-meta'); meta.append(el('span', '', step.id), el('span', 'ag-status', state(step.status)));
+      const meta = el('span', 'ag-step-meta'); meta.append(el('span', '', step.id), el('span', 'ag-status', liveWords(step, snapshot?.generated) || state(step.status)));
       summary.append(meta, el('span', 'ag-step-goal', step.goal || step.id)); row.append(summary);
       let built = false;
       const build = () => {
@@ -3290,8 +3303,8 @@
         });
 
         const steps = runSection('Steps', 'steps');
-        const states = ['In progress', 'Ready for review', 'Needs attention', 'Waiting', 'Passed'];
-        const groupOf = node => node.status === 'running' ? states[0] : node.status === 'returned' ? states[1] : ['failed', 'blocked'].includes(node.status) ? states[2] : node.status === 'passed' ? states[4] : states[3];
+        const states = ['In progress', 'Reported running', 'Ready for review', 'Needs attention', 'Waiting', 'Passed'];
+        const groupOf = node => unconfirmed(node) ? states[1] : node.status === 'running' ? states[0] : node.status === 'returned' ? states[2] : ['failed', 'blocked'].includes(node.status) ? states[3] : node.status === 'passed' ? states[5] : states[4];
         const ordered = [...graph.nodes].sort((a, b) => states.indexOf(groupOf(a)) - states.indexOf(groupOf(b)));
         const highlighted = ordered.findIndex(node => node.id === highlightedStep);
         if (highlighted >= LIST_LIMIT) ordered.unshift(...ordered.splice(highlighted, 1));

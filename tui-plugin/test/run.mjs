@@ -6018,6 +6018,52 @@ test("graph view's top line: the spend stats after the count, the same forms and
   assert.ok(odd.endsWith("4/11  $7.65 / $50"), odd);
 });
 
+// n20: confirmed against reported state. Only a live node moves; a quiet or orphan one is "reported running", still.
+const LIV_AT = 1_000_000;
+const livDoc = (liveness) => keep({
+  version: 1, source: "live", warnings: [], generated: LIV_AT, root: { agent: "orchestrator" }, groups: [],
+  agents: [A("orchestrator", "hub"), A("impl", "build", 1), A("ev", "verify")],
+  graph: G({
+    progress: { passed: 0, total: 4 },
+    nodes: [
+      { id: "a", agent: "impl", status: "running", busy: true, goal: "live work", liveness: liveness[0] },
+      { id: "b", agent: "impl", status: "running", goal: "idle work", liveness: liveness[1], idle_since: LIV_AT - 720 },
+      { id: "c", agent: "impl", status: "running", goal: "lost work", liveness: liveness[2] },
+      { id: "d", agent: "ev", type: "gate", status: "pending", goal: "busy but pending", liveness: liveness[3], depends_on: [] },
+    ],
+  }),
+});
+const livScene = (doc, now) => sceneText(S.sceneStrict(doc, { width: 100, height: 30, now, colors: DARK }));
+
+test("n20 list: a quiet, orphan or unreported node says what it is, a live one or a snapshot without the field is as before", () => {
+  const rows = R.toText(R.render(livDoc(["live", "quiet", "orphan", "unreported"]), { width: 70, now: LIV_AT * 1000 })).split("\n");
+  assert.ok(rows.some((r) => r.startsWith("○ impl reported running · idle 12m")), rows.join("\n"));
+  assert.ok(rows.some((r) => r.startsWith("○ impl reported running · no session")), rows.join("\n"));
+  assert.ok(rows.some((r) => r.startsWith("○ ev working · not marked running")), rows.join("\n"));
+  assert.ok(rows.some((r) => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] impl/.test(r)), "the busy agent still spins");
+  const plain = R.toText(R.render(livDoc([undefined, undefined, undefined, undefined]), { width: 70, now: LIV_AT * 1000 }));
+  assert.ok(!/reported running|not marked/.test(plain), plain);
+  // the gate line: a running gate that is quiet is not "checking"
+  const gate = (liveness, status = "running") => R.toText(R.render(D([A("orchestrator", "hub")], G({ progress: { passed: 2, total: 5 }, nodes: [{ id: "g", type: "gate", agent: "verifier", status, liveness, idle_since: LIV_AT - 300 }] }), "orchestrator", { generated: LIV_AT }), { width: 70 })).split("\n").find((r) => r.includes("2/5"));
+  assert.equal(gate("live"), "━━━━────── 2/5  gate verifier checking");
+  assert.equal(gate(undefined), "━━━━────── 2/5  gate verifier checking");
+  assert.equal(gate("quiet"), "━━━━────── 2/5  gate verifier reported running · idle 5m");
+  assert.equal(gate("orphan"), "━━━━────── 2/5  gate verifier reported running · no session");
+});
+
+test("n20 scene: the step marks of a quiet or orphan node stand still, a live one turns; each says so above the picture", () => {
+  const live = livDoc(["live", "quiet", "orphan", "unreported"]);
+  const marks = (now) => livScene(live, now).find((l) => /0\/4/.test(l) && SPIN.test(l)).trim();
+  assert.notEqual(marks(0), marks(120), "the live node's mark turns");
+  assert.equal(marks(0).slice(1, 3), marks(240).slice(1, 3), "the quiet and orphan marks do not move");
+  const text0 = livScene(live, 0).join("\n");
+  assert.ok(text0.includes("○ impl reported running · idle 12m") && text0.includes("○ impl reported running · no session"), text0);
+  const old = livDoc([undefined, undefined, undefined, undefined]);
+  const oldMarks = (now) => livScene(old, now).find((l) => /0\/4/.test(l) && SPIN.test(l)).trim();
+  assert.notEqual(oldMarks(0).slice(1, 3), oldMarks(120).slice(1, 3), "without the field every running mark turns, as before");
+  assert.ok(!livScene(old, 0).join("\n").includes("reported running"));
+});
+
 let failed = 0;
 for (const t of tests) {
   try {

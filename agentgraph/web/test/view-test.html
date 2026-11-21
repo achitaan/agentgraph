@@ -9212,6 +9212,52 @@
       }, { mount: { motion } });
     });
 
+    await test('n20 liveness: only a live step reads as working; a quiet, orphan or unreported one says what it is; no field, as before', async () => {
+      const make = (field = true) => {
+        const data = fixture();
+        data.generated = 1_000_000;
+        const extra = (live, more = {}) => field ? { liveness: live, ...more } : {};
+        data.graph.nodes = [
+          step('s-live', 'impl-openai', { session: 's1', busy: true, goal: 'Busy work', ...extra('live') }),
+          step('s-quiet', 'impl-openai', { session: 's2', goal: 'Idle work', ...extra('quiet', { idle_since: 1_000_000 - 720 }) }),
+          step('s-orphan', 'impl-openai', { goal: 'Lost work', ...extra('orphan') }),
+          step('s-silent', 'impl-claude', { status: 'pending', session: 's3', goal: 'Busy but pending', ...extra('unreported') })
+        ];
+        return data;
+      };
+      const label = (root, id) => root.querySelector('[data-step="' + id + '"] .ag-status');
+      const group = (root, id) => { const row = root.querySelector('[data-step="' + id + '"]'); assert(row, id + ' is not listed in: ' + root.textContent.slice(root.textContent.indexOf('Steps'), root.textContent.indexOf('Steps') + 400)); return row.closest('.ag-step-group')?.dataset.state; };
+      await using(make(), async root => {
+        root.querySelector('.ag-run-button').click(); await settle();
+        assert(group(root, 's-live') === 'In progress', 'a live step is not In progress: ' + group(root, 's-live'));
+        assert(group(root, 's-quiet') === 'Reported running' && group(root, 's-orphan') === 'Reported running', 'quiet and orphan steps are in ' + group(root, 's-quiet') + ' and ' + group(root, 's-orphan'));
+        assert(group(root, 's-silent') === 'Waiting', 'an unreported step moved out of Waiting: ' + group(root, 's-silent'));
+        assert(label(root, 's-quiet').textContent === 'Reported running · idle 12m', 'quiet: ' + label(root, 's-quiet').textContent);
+        assert(label(root, 's-orphan').textContent === 'Reported running · no session', 'orphan: ' + label(root, 's-orphan').textContent);
+        assert(label(root, 's-silent').textContent === 'Working · not marked running', 'unreported: ' + label(root, 's-silent').textContent);
+        assert(label(root, 's-live').textContent === 'Working', 'live: ' + label(root, 's-live').textContent);
+        for (const id of ['s-quiet', 's-orphan', 's-silent']) {
+          const status = label(root, id), style = getComputedStyle(status);
+          assert(status.getClientRects().length > 0, id + ' hides its words in the compact list');
+          assert(parseFloat(style.fontSize) >= 11, id + ' words are under 11 px');
+        }
+        const colour = id => getComputedStyle(label(root, id)).color;
+        assert(colour('s-quiet') !== colour('s-live') && colour('s-orphan') !== colour('s-live'), 'a quiet or orphan step is drawn in the working colour');
+        for (const id of ['s-live', 's-quiet', 's-orphan', 's-silent']) assert(getComputedStyle(label(root, id)).animationName === 'none', id + ' animates');
+      });
+      await using(make(), async root => {
+        open(root, 'impl-openai'); await settle();
+        const rows = [...root.querySelectorAll('.ag-detail [data-step]')].map(row => row.dataset.step + ':' + row.querySelector('.ag-status').textContent);
+        assert(rows.includes('s-quiet:Reported running · idle 12m') && rows.includes('s-live:Working'), 'the agent details: ' + rows.join(' | '));
+      });
+      await using(make(false), async root => {
+        root.querySelector('.ag-run-button').click(); await settle();
+        for (const id of ['s-live', 's-quiet', 's-orphan']) {
+          assert(group(root, id) === 'In progress' && label(root, id).textContent === 'Working', id + ' without the field: ' + group(root, id) + ' / ' + label(root, id).textContent);
+        }
+        assert(!/Reported running|not marked/.test(root.textContent), 'a snapshot without the field names a liveness');
+      });
+    });
     await test('n10 source: the setup and spend actions are asked only through ask() and call(), and the code builds no markup', async () => {
       const source = [...document.scripts].find(script => script.textContent.includes('function call(fn, request)')).textContent;
       const at = source.indexOf('---- n10: the spend limit'), end = source.indexOf('---- end n10 ----');

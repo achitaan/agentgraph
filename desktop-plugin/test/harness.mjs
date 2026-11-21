@@ -2845,6 +2845,14 @@ await check("the bundle carries the chat: the main command, the window's actions
   assert.equal(body(fs.readFileSync(LIVE_BUNDLE, "utf8")), body(CODE), "gui-experimental.cjs is not the build of src/plugin.cjs, app.js and style.css: run node desktop-plugin/build.mjs");
 });
 
+await check("n20 bundle: the page code in the panel tells a quiet or orphan step from a live one (plain words, no animation), as the web page does", () => {
+  assert.match(CODE, /Reported running · no session/);
+  assert.match(CODE, /Reported running · ' \+ idleFor\(/);
+  assert.match(CODE, /Working · not marked running/);
+  assert.match(CODE, /data-status=\\"running\\"\]:is\(\[data-liveness=\\"quiet\\"\], \[data-liveness=\\"orphan\\"\]\) \.ag-status/);
+  assert.doesNotMatch(CODE, /data-liveness=\\"(?:quiet|orphan)\\"[^}]*animation/, "a quiet or orphan step animates");
+});
+
 await check("placeholder build (no app.js/style.css): builds, loads in both modes, draws names and busy counts as text", async () => {
   const out = path.join(TMP, "placeholder.cjs");
   const stdout = childProcess.execFileSync(

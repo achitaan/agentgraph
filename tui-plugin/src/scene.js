@@ -35,7 +35,7 @@ import {
   SPINNER, MARK_HUB, MARK_IDLE, SENT_BACK, ATTENTION, LOOP_MARK, BAR_FULL, BAR_EMPTY, ELLIPSIS,
   charWidth, displayWidth, truncate, clean, clipLine, lineWidth, formatDollars, spendForms, formatTokens, seatName, isAnimated, sideBusy, sideChatOf, SIDE_NAME,
   isObject, list, busyCount, finiteNumber, rounds, validAgents, findHub, hubWorking, currentGoal, agentCost,
-  numberSpans, spinnerGlyph, wearParts, needsEntries, needsLine, flowsOf,
+  numberSpans, spinnerGlyph, wearParts, needsEntries, needsLine, flowsOf, unconfirmed,
 } from "./render.js";
 
 export const SCENE_MIN_WIDTH = 36;
@@ -1120,6 +1120,7 @@ function stepsInstrument(doc, frame, animated) {
   }
   const marks = nodes.map((n, i) => {
     if (n.status === "passed") return sp(MARK_DONE, "plain");
+    if (unconfirmed(n)) return sp(SPINNER[0], "muted"); // reported running, not confirmed: still
     if (n.status === "running") return sp(animated ? spinnerGlyph(frame, i) : SPINNER[0], "accent");
     if (n.status === "failed" || n.status === "blocked") return sp(MARK_FAILED, "danger");
     if (sentBack.has(n)) return sp(SENT_BACK, "accent");
