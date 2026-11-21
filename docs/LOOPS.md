@@ -176,7 +176,7 @@ the sha256 of the message) and after the step is recorded (`phase: done`, with t
 - `answer` is decided and written under `answer.lock` (a `flock`, so a stale file wedges nothing): a run that is no longer `waiting` refuses it, and an answer taken
   by a controller that is killed before it saved is not lost. A `cancel` with no controller and a controller ending the run take the same lock, so an answer is
   either decided before the run ends or is refused; one that lost is removed, and `answer.json` is never left in a run that is no longer `waiting`.
-- A `cancel` answered "requested" always comes true: a controller that is pausing when it is asked ends the run `cancelled` instead of `paused`. For a run that is not plainly
+- A `cancel` answered "requested" comes true, at the latest on the next `resume`: a controller that is pausing when it is asked ends the run `cancelled` instead of `paused`; if the controller takes longer than the 2 second wait to exit after it wrote `paused`, the run reads `paused` until it is resumed and then ends `cancelled` before any step is sent. A run the controller ended `cancelled` during the wait is also answered "requested", not "cancelled". For a run that is not plainly
   running (paused, waiting, or with a `pause` asked) `cancel` waits up to 2 seconds for the controller's lock after it has written the request; if the run then reads `paused`
   it is marked `cancelled` there and the answer is `cancelled`, so no request is left behind. A `cancel` file that still reaches a run that paused (the lock stayed held)
   ends its next `resume` `cancelled` before any step is sent. Every writer of `paused` (the controller pausing on `pause`, an unsure step, a step whose fate is `unknown`) is

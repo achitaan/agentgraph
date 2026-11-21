@@ -36,20 +36,22 @@ Task graphs: Part 1 is `.opencode/graph/agentgraph-improve.json`, Part 2 is `.op
 |---|---|---|---|
 | vNext.1 single-agent loop | v0 to v5 | done, demonstrated from the command line and through the real page | Tests A to D on real sessions: 38 checks, 0 failed, $0.0837 (`.opencode/artifacts/agentgraph-loops/v5a/r1/real-sessions.md`). |
 | vNext.2 loops between agents | v6, v7 | done, demonstrated | Real judge FAIL then PASS through the page (run `20261121-074032-bdf5`); real FAIL then PASS in the benchmark (`.opencode/artifacts/agentgraph-loops/v10/r1/page-demo.md`). |
-| vNext.3 recovery, pause, cost | v8 (passed), v8b (running again) | built; demonstrated in part; reopened by the final review | A real killed controller resumed through the page; a real `not_sent` answered by the real database. The adopt path and `redo` were not shown on a real session (`.opencode/graph/agentgraph-loops.json#v8`). |
-| vNext.4 inspect and improve | v10 (passed), v7 (running again) | built; demonstrated through the page, except what is listed in section 5; reopened by the final review | Failed run, trial, compare, keep, go back, undo: all PASS in `.opencode/artifacts/agentgraph-loops/v10/r1/page-demo.md`. |
+| vNext.3 recovery, pause, cost | v8, v8b | done; demonstrated in part | A real killed controller resumed through the page; a real `not_sent` answered by the real database. The adopt path and `redo` were not shown on a real session (`.opencode/graph/agentgraph-loops.json#v8`). |
+| vNext.4 inspect and improve | v7, v10 | done; demonstrated through the page, except what is listed in section 5 | Failed run, trial, compare, keep, go back, undo: all PASS in `.opencode/artifacts/agentgraph-loops/v10/r1/page-demo.md`. That demonstration ran before the final review's fixes; `.opencode/graph/agentgraph-loops.json#v10` records no real-session run after them (section 3.4). |
 | vNext.5 | none | not built | Six items, none built (section 3.7). |
 | Benchmark | v9 | done | 36 real runs, every method passed every check: it does not rank them on correctness (`.opencode/artifacts/agentgraph-loops/v9/r2/results.md`). |
 | Controller review | v11a | done, two rounds | Round 1 refuted, round 2 confirmed; the reviewer ran nothing (`.opencode/artifacts/agentgraph-loops/v11a/r2/review.md`). |
-| Final review | v11 | failed: verdict `unverifiable`, 12 findings (2 major, 10 minor), the reviewer ran nothing | The first major finding says the Desktop loop section spawns a command that does not exist (`.opencode/artifacts/agentgraph-loops/v11/r1/review.md`). Fixes are in progress in v8b and v7 (`.opencode/graph/agentgraph-loops.json#v11`). `PENDING(final review v11)` (section 6). |
-| Final suites, docs | v12 | in progress | This document; final suite counts `PENDING(final suite counts)`. |
+| Final review | v11 | done, three rounds; round 3 `confirmed` at `bb3bb31`; reading only | Round 1 found that the Desktop loop section spawned a command that did not exist. Fixed. Six minor findings left unfixed (section 3.6, `.opencode/artifacts/agentgraph-loops/v11/r3/review.md`). |
+| Final suites, docs | v12 | final suites run, see section 7 | This document and the final suite runs in `.opencode/artifacts/agentgraph-loops/v12/r1/final-values.md`. |
 
 ### What waits for you
 
 - Decisions on review items A, B, C, D, J, K, L and the earlier pending sections (section 6). Nothing in them is installed.
 - The install into the live configuration after you approve (n14, n15).
-- The final review of Part 2 (v11) failed; its findings and the new review are in the graph (v7, v8b, v11), not decided here (section 3.6).
-- Five placeholders in this report: `PENDING(final suite counts)`, `PENDING(final review v11)`, `PENDING(desktop bundle rebuild)`, `PENDING(total spend)`, `PENDING(temp folders safe to remove)`.
+- The six minor findings of the final review stay unfixed (section 3.6).
+- Nothing in the temporary folders was deleted (section 7).
+- Item K is not drafted (section 6).
+- No placeholder is left in this report. Total spend is in section 7.
 
 ## 2. Part 1: architecture improvement
 
@@ -206,9 +208,9 @@ Fixture only: a session that exists but holds no user message since the send; an
 
 ### 3.4 vNext.4: inspect and improve
 
-Built: click a step or edge for its history across attempts; compare two attempts or two runs; "Try without saving" runs changed settings for one run only; compare versions of the saved loop; "Keep this version", "Go back", "Undo" (`.opencode/artifacts/agentgraph-loops/v1/r1/design2.md`). Views tested: web 402 of 402 checks, terminal 194 (`.opencode/graph/agentgraph-loops.json#v7`).
+Built: click a step or edge for its history across attempts; compare two attempts or two runs; "Try without saving" runs changed settings for one run only; compare versions of the saved loop; "Keep this version", "Go back", "Undo" (`.opencode/artifacts/agentgraph-loops/v1/r1/design2.md`). Views tested at the end of the work: web 414 of 414 checks, terminal 194 (`.opencode/artifacts/agentgraph-loops/v12/r1/final-values.md`). Before the final review the web count was 402 (`.opencode/artifacts/agentgraph-loops/v7/r3/findings.md`).
 
-Through the real page, real sessions, 10 runs, $0.6446 in all (`.opencode/artifacts/agentgraph-loops/v10/r1/page-demo.md`). Round 1 failed steps 6 and 7 on one view defect: after Resume or "Take the turn as done" the page read once, still saw paused, and never read again. It was fixed in `agentgraph/web/app.js` (a test went red on the old code first, 401 of 402) and the two steps were redone in round 2 with PASS. Steps 1 to 5 and 8 to 12 were not redone.
+Through the real page, real sessions, 10 runs, $0.6446 in all (`.opencode/artifacts/agentgraph-loops/v10/r1/page-demo.md`). Round 1 failed steps 6 and 7 on one view defect: after Resume or "Take the turn as done" the page read once, still saw paused, and never read again. It was fixed in `agentgraph/web/app.js` (a test went red on the old code first, 401 of 402) and the two steps were redone in round 2 with PASS. Steps 1 to 5 and 8 to 12 were not redone. The page changed again after this demonstration, in the fixes for the final review; those fixes were tested by web checks, Desktop checks 75 and 76 and screenshots, and no later real-session run is recorded (`.opencode/artifacts/agentgraph-loops/v7/r3/findings.md`, `.opencode/artifacts/agentgraph-loops/v7/r4/findings.md`).
 
 | Step | Shown | Result |
 |---|---|---|
@@ -249,18 +251,30 @@ Reviewer: Sonnet 5.5, read-only. `shell` was denied in both rounds, so nothing w
 
 The first round's two major findings: (1) a status probe could take the lock a starting controller needed, leaving a started run `queued` forever; (2) a `queued` run with no controller could not be recovered from the page or the command line (`.opencode/artifacts/agentgraph-loops/v11a/r1/review.md`). Both were fixed in v8 round 2, and the reviewer's round 2 rows for them read "fixed" (finding 1) and "fixed but" (finding 2; `.opencode/artifacts/agentgraph-loops/v11a/r2/review.md`).
 
-Consequences accepted in v8b: one additive key, `steps_sha256`, in `run.json` and the API; a run started before it has no pin and cannot be resumed (only scratch runs exist); eight older assertions changed where they had encoded a defect (`.opencode/graph/agentgraph-loops.json#v8b`). The final-message rule for a verdict was checked on 315 of 315 stored turns with a verdict line (`.opencode/graph/agentgraph-loops.json#v8b`). The final review (v11) read the v8b diff next.
+Consequences accepted in v8b: one additive key, `steps_sha256`, in `run.json` and the API; a run started before it has no pin and cannot be resumed (only scratch runs exist); eight older assertions changed where they had encoded a defect (`.opencode/graph/agentgraph-loops.json#v8b`). The final-message rule for a verdict was checked on 315 of 315 stored turns with a verdict line (`.opencode/artifacts/agentgraph-loops/v8b/r1/verdict-stream.md`). The final review (v11) read the v8b diff next.
 
-**Round 3 (v11, final review).** Verdict `unverifiable` (the reviewer's `shell` tool was denied again, so nothing was run; it did not finish: it did not open `style.css`, `docs/LOOPS.md`, the three view test files except part of `harness.mjs`, the `/api/loop*` code in `server.py`) (`.opencode/artifacts/agentgraph-loops/v11/r1/review.md`). It marked the eight v8b rows as fixed, with four gaps that became findings 3 to 6. The graph records v11 as `failed` with the work sent back to v2, v3, v4, v6, v7, v8 and v8b (`.opencode/graph/agentgraph-loops.json#v11`).
+**Final review (v11), three rounds.** A fresh reviewer session, Sonnet 5.5, read-only. Its `shell` tool was denied in every round, so it ran nothing; the orchestrator ran the suites and told it the results (`.opencode/graph/agentgraph-loops.json#v11`). Reports: `.opencode/artifacts/agentgraph-loops/v11/r1/review.md`, `.opencode/artifacts/agentgraph-loops/v11/r2/review.md`, `.opencode/artifacts/agentgraph-loops/v11/r3/review.md`. Each finding is by reading.
 
-| Finding | Severity | Statement (by reading; one confirmed by grep) |
-|---|---|---|
-| 1 | major | `desktop-plugin/src/plugin.cjs` spawns `python3 -P -m agentgraph.loopapi`; `agentgraph/loopapi.py` has no entry point, so every Desktop loop read, save and run would fail. The Desktop test uses a fake interpreter, so it passes. |
-| 2 | major | A `waiting` run whose controller is gone cannot be resumed or cancelled from the page; Approve, Send back and Stop appear to work and the run stays `waiting`. |
-| 3 to 11 | minor | A queued run can end with no written reason; `not_sent` in an equal-count case; verdict read from all messages when `final` is absent; a cancel shown as effective while the run ends `paused`; a Cancel confirm dropped silently; a stale list overwriting a just-saved write; Keep drops the form's edits; version-table numbers; Run ignores unsaved form edits without saying so. |
-| 12 | minor | Tests: nothing runs the real `python3 -m agentgraph.loopapi`; no test of a `waiting` run with no controller. |
+| Round | Verdict | Findings | Fixed, each with a test that failed first | Decided or documented instead of coded |
+|---|---|---|---|---|
+| 1, at `a14a2e5` | `unverifiable`, unfinished | 2 major, 10 minor | v8b round 2: six items, new tests that failed on the old code; suite 1695 to 1719 (`.opencode/artifacts/agentgraph-loops/v8b/r2/findings.md`). v7 round 3: eight rows, 8 web checks red before the edit, web 402 to 410, and Desktop check 75 (`.opencode/artifacts/agentgraph-loops/v7/r3/findings.md`). | Cancel of a paused, waiting or pausing run can wait up to 2 s; documented in `WEB_API.md` (`.opencode/artifacts/agentgraph-loops/v8b/r2/findings.md`). |
+| 2, at `3421221` | `refuted` | 1 new major, 5 new minor | v8b round 3: 165 tests of `tests.test_looprun3` and `tests.test_loopapi` gave 6 failures and 3 errors on the old code; suite 1719 to 1732, 13 new tests (`.opencode/artifacts/agentgraph-loops/v8b/r3/findings.md`). v7 round 4: web 410 to 414 and Desktop check 76 (`.opencode/artifacts/agentgraph-loops/v7/r4/findings.md`). | A cursor from an earlier build is compared by count only; `docs/LOOPS.md` says so (`.opencode/artifacts/agentgraph-loops/v8b/r3/findings.md`). One finding did not reproduce: "A change is still being made" staying on screen; its check was kept (`.opencode/artifacts/agentgraph-loops/v7/r4/findings.md`). |
+| 3, at `bb3bb31` | `confirmed` | no critical or major; 6 minor | none | The six minor findings were left unfixed on purpose: the reviewed commit is the shipped one (`.opencode/graph/agentgraph-loops.json#v11`). |
 
-At the time of writing the graph shows v7 and v8b as `running` again and the working tree has uncommitted changes in `agentgraph/loopapi.py`, `agentgraph/looprun.py`, `tests/test_loopapi.py` and `tests/test_looprun3.py`. This report did not read them and does not claim they fix any finding. `PENDING(final review v11)`.
+**The defect every earlier test had missed.** The Desktop loop section runs `python3 -P -m agentgraph.loopapi` (`desktop-plugin/src/plugin.cjs`). `agentgraph/loopapi.py` had no entry point, so the command printed nothing. The Desktop test harness used a fake interpreter, so every test passed. Round 1 found it by reading and the orchestrator confirmed it: at `a14a2e5` the command printed nothing and exited 0 (`.opencode/artifacts/agentgraph-loops/v7/r3/findings.md`). From the bridge code, a person would have seen "The loops command failed." for every loop request in Desktop. That is derived from the code and the empty output; no Desktop session was run to see it. The fix added the entry point; Desktop checks 75 and 76 now run the real `python3` and the real `agentgraph.loopapi` (`.opencode/artifacts/agentgraph-loops/v7/r4/findings.md`).
+
+The other major findings: a `waiting` run with no controller could not be resumed or cancelled from the page (round 1); after a saved answer the page could lose its Resume button on a reload and show a 409 on every click (round 2). Both were fixed; round 3 marked both fixed (`.opencode/artifacts/agentgraph-loops/v11/r3/review.md`).
+
+**The six minor findings left** (`.opencode/artifacts/agentgraph-loops/v11/r3/review.md`):
+
+- A live waiting run with a just-saved answer shows the three answer buttons for an instant; a second click gets a 409 (`.opencode/artifacts/agentgraph-loops/v11/r3/review.md`).
+- `cancel` can answer "requested" for a run that just ended `cancelled` (`.opencode/artifacts/agentgraph-loops/v11/r3/review.md`).
+- A controller that takes more than 2 s to exit after pausing leaves the cancel to the next resume (`.opencode/artifacts/agentgraph-loops/v11/r3/review.md`).
+- A note says "not started" when a controller started between the page's read and the answer (`.opencode/artifacts/agentgraph-loops/v11/r3/review.md`).
+- The answer lock goes on unlocked after 5 s (`.opencode/artifacts/agentgraph-loops/v11/r3/review.md`).
+- An error message in the entry point's reply has no length cap (`.opencode/artifacts/agentgraph-loops/v11/r3/review.md`).
+
+**Limits of the final review.** Nothing was run by the reviewer. It is the same model family as the implementers. No round read a test file, except the fake-interpreter part of `harness.mjs` in round 1. Round 3 did not read `style.css`, `WEB_API.md`, the terminal view's loop rows, `looprun.start` and `restore`, or Desktop checks 75 and 76 (it had only their map) (`.opencode/artifacts/agentgraph-loops/v11/r3/review.md`). The reviewed commit is `bb3bb31`. The only later code commit is the rebuilt Desktop bundle (`.opencode/artifacts/agentgraph-loops/v12/r1/final-values.md`).
 
 ### 3.7 vNext.5: not built
 
@@ -317,16 +331,16 @@ Grouped. None softened.
 - Proposal C is an estimate, not a measurement (`.opencode/artifacts/agentgraph-improve/n8/r1/proposals.md`).
 - The benchmark has a ceiling effect, the fixtures are 2 to 5 files written by the same author as the checks, and no loop-1 retry occurred (`.opencode/artifacts/agentgraph-loops/v9/r2/results.md`).
 - Wall seconds in the benchmark are not clean: three runs shared the machine (`.opencode/artifacts/agentgraph-loops/v9/r2/results.md`).
-- All three reviews of Part 2 (v11a rounds 1 and 2, v11) were by reading only, by the same model family as the implementer; Part 1's review also ran nothing (`.opencode/graph/agentgraph-loops.json#v11a`, `.opencode/graph/agentgraph-improve.json#n16`).
+- All five reviews of Part 2 (v11a rounds 1 and 2, v11 rounds 1 to 3) were by reading only, by the same model family as the implementer; Part 1's review also ran nothing (`.opencode/graph/agentgraph-loops.json#v11a`, `.opencode/graph/agentgraph-improve.json#n16`).
 - Part 1 review limit: `check.py`, `contract.py`, `cost.py`, `ledger.py`, `snapshot_json.py`, `view.py` and the shell scripts were read only as a diff (`.opencode/graph/agentgraph-improve.json#n16`).
-- Changed assertions: six older assertions in v8, eight in v8b, three release 1 tests moved by the orchestrator in v6 (`.opencode/graph/agentgraph-loops.json#v8`, `.opencode/graph/agentgraph-loops.json#v8b`, `.opencode/graph/agentgraph-loops.json#v6`).
+- Changed assertions: six older assertions in v8, eight in v8b round 1, three release 1 tests moved by the orchestrator in v6, three changes in v8b round 2 (one assertion replaced because it asserted the defect, one test that lost a last line with no assertion, one key set that gained `changed`), and one older view check in v7 round 3 whose expectation changed (the paused line shows the reason once) (`.opencode/graph/agentgraph-loops.json#v8`, `.opencode/graph/agentgraph-loops.json#v8b`, `.opencode/graph/agentgraph-loops.json#v6`, `.opencode/artifacts/agentgraph-loops/v8b/r2/findings.md`, `.opencode/artifacts/agentgraph-loops/v7/r3/findings.md`).
 - Fixture only: a session that exists but holds no user message since the send; an HTTP test for the new 400 and 409 answers; the adopt path, `redo` and a real compaction on a real session (`.opencode/graph/agentgraph-loops.json#v8`, `docs/LOOPS.md`).
 - Not shown through the page: Undo pressed in the release 1 demo, a saved goal, a fresh session per attempt, allow-asks, the spend limit stopping a run, narrow widths (`.opencode/graph/agentgraph-loops.json#v5`); the slow poll rate of a waiting run on a real run; the hash check after the two round-2 runs; "ask the agent again" on a real run (`.opencode/graph/agentgraph-loops.json#v10`).
 - Not run: a paid bench session with the new check environment after n26 (`.opencode/graph/agentgraph-improve.json#n26`).
-- The final review (v11) is `unverifiable` and unfinished (list of unread files in section 3.6); nothing reviews the changes made after it (`.opencode/artifacts/agentgraph-loops/v11/r1/review.md`).
-- The Desktop loop section has been tested only with a fake interpreter. No real Desktop session drove it; the v11 review says the command it spawns does not exist (finding 1, section 3.6) (`.opencode/artifacts/agentgraph-loops/v11/r1/review.md`).
+- The final review was by reading, found no critical or major defect in round 3, and left six minor findings unfixed (section 3.6). No round read a test file (`.opencode/artifacts/agentgraph-loops/v11/r3/review.md`).
+- No real Desktop app session drove the Loop section. Desktop checks 75 and 76 drive the bridge's loop command on the real `python3`, and a person has not looked at the panel (`.opencode/artifacts/agentgraph-loops/v12/r1/final-values.md`, `.opencode/graph/agentgraph-loops.json#v7`).
 - Disagreeing sources, both kept: baseline spend ($1.73 and about $2.2); n8 and n9 worker context per turn; benchmark direct cost ($0.589 and $0.588) (`.opencode/artifacts/agentgraph-improve/n6/r1/baseline.md`, `.opencode/graph/agentgraph-improve.json#n6`, `.opencode/artifacts/agentgraph-loops/v9/r2/results.md`, `.opencode/graph/agentgraph-loops.json#v9`).
-- The real-host check and the Desktop panel were not run by this item (section 7).
+- The real-host check ran once, at the end, by the orchestrator, with `--size 160x45 --demo` (one tiny model call); it was not run at `--size 120x40` (`.opencode/artifacts/agentgraph-loops/v12/r1/final-values.md`).
 
 ### 5.2 Behaviour limits
 
@@ -339,7 +353,10 @@ Grouped. None softened.
 - Loops are `A -> A` or `A -> J1 -> ... -> Jk -> A` only. A judge is a model. A fresh judge can read everything in the work folder. `no_artifact` proves only that a file exists. `allow_asks` lets the agent do anything its agent file does not deny. Each attempt starts a private OpenCode server (about 3 s). A stopped controller leaves its agent session in OpenCode (`docs/LOOPS.md`).
 - A run started before v8b has no pin and cannot be resumed (`.opencode/graph/agentgraph-loops.json#v8b`).
 - "Take the turn as done" after a kill leaves the spend unknown, so with a cost limit the run ends `limit` straight away and does not reach the verifier (`.opencode/artifacts/agentgraph-loops/v10/r1/page-demo.md`).
-- View limits left: the flow's Cost block under the loop shows dashes; the no-check rule is derived in the page; the version list repeats one sentence per row and cannot say what changed; "Resumed. The run goes on." can sit above a paused explanation; the paused reason repeats command-line flags; a click on the loop's edge opens the flow panel, the history opens from the step chips (`.opencode/graph/agentgraph-loops.json#v4`, `.opencode/graph/agentgraph-loops.json#v7`, `.opencode/artifacts/agentgraph-loops/v10/r1/page-demo.md`).
+- View limits left: the flow's Cost block under the loop shows dashes; the no-check rule is derived in the page; a click on the loop's edge opens the flow panel, the history opens from the step chips (`.opencode/graph/agentgraph-loops.json#v4`, `.opencode/graph/agentgraph-loops.json#v7`, `.opencode/artifacts/agentgraph-loops/v10/r1/page-demo.md`). Fixed since: each version row says which settings differ from the saved loop; "Resumed. The run goes on." is replaced by a note when the run stops again; a paused reason is shown once, without command-line flags (`.opencode/artifacts/agentgraph-loops/v7/r3/findings.md`).
+- `cancel` of a paused, waiting or pausing run can take up to 2 s; a plainly running run answers at once. A controller slower than 2 s leaves the cancel to the next resume (`WEB_API.md`, `.opencode/artifacts/agentgraph-loops/v8b/r2/findings.md`, `.opencode/artifacts/agentgraph-loops/v11/r3/review.md`).
+- A cursor written by an earlier build has a count of user messages and no last message; reconcile compares the count only, so an equal-count case answers `not_sent` and one message can be sent again. Only runs left by an earlier build have such a cursor (`docs/LOOPS.md`, `.opencode/artifacts/agentgraph-loops/v8b/r3/findings.md`).
+- The six minor findings of the final review (section 3.6).
 - Part 1 review findings: 12 minor, 1 to 11 fixed, number 12 is a known limit above (`.opencode/graph/agentgraph-improve.json#n16`).
 
 ### 5.3 Not built
@@ -360,6 +377,9 @@ Grouped. None softened.
 - `agentgraph cost` shows billed against messages against unreported spend.
 - `agentgraph improve` and the page can approve, reject, revert and reopen proposals.
 - `agentgraph loop ...` and the loop page (see `docs/LOOPS.md`). A flow `A -> A` without a saved loop behaves as before.
+- Loop API, additive only: `answered` (boolean) on a run document and on each run row, true for a waiting run that holds a saved answer no controller has taken; `changed` on each version, the setting paths that differ from the saved loop (`WEB_API.md`, `docs/LOOPS.md`, `.opencode/artifacts/agentgraph-loops/v8b/r3/findings.md`, `.opencode/artifacts/agentgraph-loops/v8b/r2/findings.md`).
+- A new entry point for the Desktop bridge: `python3 -P -m agentgraph.loopapi [--project DIR] [--structure DIR]` reads one JSON line on stdin and writes one on stdout (`WEB_API.md`, `.opencode/artifacts/agentgraph-loops/v8b/r2/findings.md`).
+- `cancel` can wait up to 2 s on a run that is paused, waiting or pausing (section 5.2). A run's end is written by one code path, which also removes `cancel` and `pause` (`.opencode/artifacts/agentgraph-loops/v8b/r3/findings.md`).
 - New files: `docs/CUSTOMIZE.md`, `docs/LOOPS.md`, this report, `docs/ARCHITECTURE.md`.
 
 Nothing has been installed into the live configuration. No prompt, skill, setting or model was changed there.
@@ -378,28 +398,25 @@ Nothing has been installed into the live configuration. No prompt, skill, settin
 
 Letters E to I name sections of an earlier review list (side chat round); `PROGRESS.md` holds no more detail on them.
 
-Owner placeholders:
-
-- `PENDING(final suite counts)`
-- `PENDING(final review v11)`
-- `PENDING(desktop bundle rebuild)`
-- `PENDING(total spend)`
-- `PENDING(temp folders safe to remove)`
+Item K is not drafted. Nothing in this table is installed.
 
 ## 7. Tests
 
-Commands, from the repository root. Counts are those the nodes recorded when they ran; the final counts are the owner's placeholder.
+Final runs by the orchestrator, from the repository root, at the commit after the rebuilt Desktop bundle (`.opencode/artifacts/agentgraph-loops/v12/r1/final-values.md`). The reviewed code commit is `bb3bb31`.
 
-| Suite | Command | Last recorded count | Source |
-|---|---|---|---|
-| Python | `python3 -m unittest discover -s tests -t .` | 1695 OK after v8b (Part 1 ended at 1444, n26) | `.opencode/graph/agentgraph-loops.json#v8b`, `.opencode/graph/agentgraph-improve.json#n26` |
-| Web view | `sh agentgraph/web/test/run.sh` (headless Chrome) | 402 of 402 after v7 | `.opencode/graph/agentgraph-loops.json#v7` |
-| Terminal view | `node tui-plugin/test/run.mjs` | 194 after v7 | `.opencode/graph/agentgraph-loops.json#v7` |
-| Desktop harness | `node desktop-plugin/test/harness.mjs` | all pass except check 63, which fails because the built bundle is stale against the sources | `.opencode/graph/agentgraph-loops.json#v7` |
-| Real host | `python3 tui-plugin/test/real-host.py --size 120x40` (drives the real OpenCode terminal app) | not run by this item | |
+| Suite | Command | Final result |
+|---|---|---|
+| Python | `python3 -m unittest discover -s tests -t .` | 1732 tests, OK |
+| Web view | `AGENTGRAPH_VIEW_SHARDS=4 sh agentgraph/web/test/run.sh` (headless Chrome) | PASS, 414 of 414 |
+| Terminal view | `node tui-plugin/test/run.mjs` | 194 passed, 0 failed |
+| Desktop harness | `node desktop-plugin/test/harness.mjs` | 78 ok, 0 not ok |
+| Real host | `python3 tui-plugin/test/real-host.py --size 160x45 --demo` (drives the real OpenCode terminal app; one small model call) | exit 0 |
+| Fingerprint | `bin/agentgraph bench fingerprint` | config `86f9673fc3ff6a77` (347 files), ledger `e3340c0e1d2cbb5b` (11 files), unchanged |
 
-Counts by node, for the Python suite: 1490 (v2), 1522 (v3), 1584 (v6), 1679 (v8), 1695 (v8b) (`.opencode/graph/agentgraph-loops.json#v2`; `.opencode/graph/agentgraph-loops.json#v3`; `.opencode/graph/agentgraph-loops.json#v6`; `.opencode/graph/agentgraph-loops.json#v8`; `.opencode/graph/agentgraph-loops.json#v8b`).
+Part 1 ended at 1444 Python tests (`.opencode/graph/agentgraph-improve.json#n26`). Counts by node, for the Python suite: 1490 (v2), 1522 (v3), 1584 (v6), 1679 (v8), 1695 (v8b round 1), 1719 (v8b round 2), 1732 (v8b round 3) (`.opencode/graph/agentgraph-loops.json#v2`; `.opencode/graph/agentgraph-loops.json#v3`; `.opencode/graph/agentgraph-loops.json#v6`; `.opencode/graph/agentgraph-loops.json#v8`; `.opencode/graph/agentgraph-loops.json#v8b`; `.opencode/artifacts/agentgraph-loops/v8b/r2/findings.md`; `.opencode/artifacts/agentgraph-loops/v8b/r3/findings.md`). Web: 402 (v7 round 1), 410 (round 3), 414 (round 4) (`.opencode/artifacts/agentgraph-loops/v7/r3/findings.md`, `.opencode/artifacts/agentgraph-loops/v7/r4/findings.md`).
 
-`PENDING(final suite counts)` and `PENDING(desktop bundle rebuild)`: the Desktop bundle is rebuilt once at the end; until then check 63 fails by design. Other placeholders: `PENDING(total spend)` and `PENDING(temp folders safe to remove)`.
+Desktop bundle: rebuilt once with `node desktop-plugin/build.mjs` from the reviewed sources, 807,261 bytes, in the commit `038ef58` (`desktop-plugin/gui-experimental.cjs`). Check 63 failed before the rebuild because the bundle was stale; it passes after it. An open Desktop panel reloads the bundle. No person looked at the Loop section in the Desktop app (`.opencode/artifacts/agentgraph-loops/v12/r1/final-values.md`).
 
-Recorded spend per part, from the nodes (not a total): benchmark $2.4506 (`.opencode/artifacts/agentgraph-loops/v9/r2/results.md`), demonstrations $0.098 (`.opencode/graph/agentgraph-loops.json#v5`), $0.6446 (`.opencode/artifacts/agentgraph-loops/v10/r1/page-demo.md`), $0.0837 (`.opencode/graph/agentgraph-loops.json#v5a`), $0.123 (v8 real runs, `.opencode/graph/agentgraph-loops.json#v8`), and the Part 1 items in section 2.
+Temporary folders: the OpenCode temporary folder holds 33.5 GB in 1095 entries. Keep three until the review is decided: `p4-before` (a scratch config and ledger holding the proposals' state), `p4-after` and `p4-pad`. Everything else is leftover scratch from tests, trials and demonstrations; its evidence was copied into `.opencode/artifacts`. The largest are `trial-5` (8.6 GB), `trial-4` (6.1 GB) and `orbit-trial` (4.1 GB). Nothing was deleted (`.opencode/artifacts/agentgraph-loops/v12/r1/temp-folders.txt`).
+
+Recorded spend per part, from the nodes (not a total): benchmark $2.4506 (`.opencode/artifacts/agentgraph-loops/v9/r2/results.md`), demonstrations $0.098 (`.opencode/graph/agentgraph-loops.json#v5`), $0.6446 (`.opencode/artifacts/agentgraph-loops/v10/r1/page-demo.md`), $0.0837 (`.opencode/graph/agentgraph-loops.json#v5a`), $0.123 (v8 real runs, `.opencode/graph/agentgraph-loops.json#v8`), and the Part 1 items in section 2. Total spend: $1440.38 billed at the closing sample, against a hard stop of $1600 (chat messages $476.04, 152 worker sessions $886.40, benchmark $27.48; average $15.18 an hour over the 1916 minutes since the first sample; per-lane amounts in the same file: `.opencode/artifacts/agentgraph-loops/v12/r1/spend.txt`). The sample was taken before the closing commit and the closing message, so the last few turns of the orchestrator are not in it.

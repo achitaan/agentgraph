@@ -29,7 +29,7 @@ Everything is Python standard library (`agentgraph/`), launched by `bin/agentgra
                        bench (scratch config) <------ evidence        +-> desktop-plugin / tui-plugin
                                                                       |
                           saved loop (structure/.loops) -> looprun controller -> run record (.opencode/loops/<run>/)
-                                                           (one detached process per run)  ^ loopapi <- server.py
+                                                           (one detached process per run)  ^ loopapi <- server.py / Desktop bridge
 ```
 
 | Part | Lives in | What it does |
@@ -42,7 +42,7 @@ Everything is Python standard library (`agentgraph/`), launched by `bin/agentgra
 | Bench | `agentgraph/bench.py`, `bench/scenarios/`, `bench/results/` | Runs fixed tasks on a scratch copy of the config and measures tokens, cost, time, calls, correctness and recovery. `bench fingerprint` hashes the live config and ledgers to show they did not change. |
 | Improve cycle | `agentgraph/improve.py` | A proposed prompt edit is one JSON file in `<ledger home>/proposals/` with evidence, results and a verdict computed by code. Approve (backup first), reject, revert by hash and reopen are commands and page buttons. |
 | Loop controller | `agentgraph/looprun.py` | See below. |
-| Page server and API | `agentgraph/server.py` (HTTP, localhost), `agentgraph/loopapi.py` (loop answers) | `server.py` parses a request and replies; `loopapi.py` holds pure functions over folders. Routes under `/api/`: snapshot, chat, improve, loop, loop/run, loops, output, roster, setup, skillfile, skills, spend, structure/flow, structure/team. Reference: `WEB_API.md`. |
+| Page server and API | `agentgraph/server.py` (HTTP, localhost), `agentgraph/loopapi.py` (loop answers) | `server.py` parses a request and replies; `loopapi.py` holds pure functions over folders and, run as `python3 -P -m agentgraph.loopapi`, answers one JSON request line on stdin with one JSON line on stdout (the Desktop panel's bridge to the same answers). Routes under `/api/`: snapshot, chat, improve, loop, loop/run, loops, output, roster, setup, skillfile, skills, spend, structure/flow, structure/team. Reference: `WEB_API.md`. |
 | Structure, flows, teams, routing | `agentgraph/structure.py`, `agentgraph/flowrun.py`, `agentgraph/flowcommands.py`, `agentgraph/teams.py`, `agentgraph/routing.py`; data in `structure/` | The hub and groups the user draws, and the paths (flows) between agents. A flow is one file in `structure/flows/`; loop settings sit beside it in `structure/.loops/<flow>.json`, a folder made when a loop is saved. |
 | Roster, setups, skills, outputs | `agentgraph/roster.py`, `agentgraph/agentfiles.py`, `agentgraph/setups.py`, `agentgraph/skillfiles.py`, `agentgraph/skillset.py`, `agentgraph/outputs.py`, `agentgraph/models.py` | What the views edit: agents, presets, saved setups, skills and step outputs. Their writes are undoable from the views (`WEB_API.md`). |
 | Install and sync | `install.sh` (work in `agentgraph/installer.py`), `sync.sh` | `install.sh` copies commands, skills, presets and prompts into `~/.config/opencode`, keeping user changes (`--dry-run`, `--list-backups`, `--restore`, `<name>.toolkit-new`). `sync.sh` copies installed files back into the checkout; personal exclusions are in the git-ignored `sync.conf`. See `docs/CUSTOMIZE.md`. |
@@ -112,7 +112,7 @@ Run record, in `<project>/.opencode/loops/<run id>/`: `definition.json`, `run.js
 | View | Lives in | Notes |
 |---|---|---|
 | Web page | `agentgraph/web/app.js`, `style.css`, `index.html`; served by `agentgraph serve` | The reference view. Checks run in headless Chrome: `sh agentgraph/web/test/run.sh`. |
-| OpenCode Desktop side panel | `desktop-plugin/` (plugin `agentgraph-desktop`, built by `desktop-plugin/build.mjs`) | The same page inside the panel. The built bundle must be rebuilt after the sources change; the harness fails check 63 until then. |
+| OpenCode Desktop side panel | `desktop-plugin/` (plugin `agentgraph-desktop`, built by `desktop-plugin/build.mjs`) | The same page inside the panel. Loop requests go through `plugin.cjs` to the `agentgraph.loopapi` entry point above. The built bundle must be rebuilt after the sources change; the harness fails check 63 while it is stale (it was rebuilt at the end of the work). |
 | Terminal sidebar and terminal view | `tui-plugin/` (sidebar), `agentgraph/view.py`, `agentgraph/viewstate.py` (terminal view) | `view.py` draws a Snapshot; `viewstate.py` holds keys and state. Neither imports the other. |
 
 All three read the same Snapshot and, for loops, the same run record through `loopapi.py` or the command line.
