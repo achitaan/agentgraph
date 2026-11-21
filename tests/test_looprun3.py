@@ -11,6 +11,8 @@ import json
 import os
 import signal
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -711,6 +713,26 @@ class ProbeTests(Base):
             loopapi.run_detail(self.project, "20990101-000000-abcd")
 
 
+class LockHolder:
+    """A real process that holds a file with an exclusive flock until it is closed: the lock of a live controller, as another process sees it."""
+
+    def __init__(self, path, seconds=60):
+        self.proc = subprocess.Popen([sys.executable, "-c", "import fcntl,sys,time;f=open(sys.argv[1],'a+');fcntl.flock(f,fcntl.LOCK_EX);print('held',flush=True);time.sleep(float(sys.argv[2]))",
+                                      str(path), str(seconds)], stdout=subprocess.PIPE, text=True)
+        self.proc.stdout.readline()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.proc.kill()
+        self.proc.wait()
+        self.proc.stdout.close()
+
+
+lock_holder = LockHolder
+
+
 class QueuedRunTests(Base):
     def test_f02_cancel_of_a_queued_run_with_no_controller_marks_it_cancelled(self):
         self.save()
@@ -733,17 +755,26 @@ class QueuedRunTests(Base):
             lock.close()
         self.assertEqual(self.record(run)["status"], "queued")
 
-    def test_f02_a_run_command_that_cannot_take_its_lock_writes_a_final_status_with_the_reason(self):
+    def test_f02_a_run_command_that_finds_the_lock_busy_writes_nothing(self):  # v8b 1: a held lock means a controller exists, and it owns the record
         self.save()
         run = queue(self)
-        with open(self.folder(run) / "lock", "a+") as held:
-            fcntl.flock(held, fcntl.LOCK_EX)
+        before = tree_hash(self.folder(run))
+        with lock_holder(self.folder(run) / "lock"), mock.patch.object(looprun, "LOCK_WAIT", 0.1):
             code, _, err = self.cli("run", "--run-dir", str(self.folder(run)))
-        record = self.record(run)
         self.assertEqual(code, 1)
-        self.assertIn(record["status"], looprun.FINAL)
-        self.assertIn("lock", record["reason"])
-        self.assertIsNotNone(record.get("ended"))
+        self.assertIn("already running", err)
+        self.assertEqual(self.record(run)["status"], "queued")
+        self.assertEqual({k: v for k, v in tree_hash(self.folder(run)).items() if k != "lock"}, {k: v for k, v in before.items() if k != "lock"})
+
+    def test_f02_a_failed_start_is_written_only_under_the_lock(self):  # v8b 1
+        self.save()
+        run = queue(self)
+        before = tree_hash(self.folder(run))
+        with lock_holder(self.folder(run) / "lock"), mock.patch.object(looprun, "LOCK_WAIT", 0.1):
+            looprun._never_ran(self.folder(run), None, looprun.LoopError("the definition cannot be read"))
+        self.assertEqual({k: v for k, v in tree_hash(self.folder(run)).items() if k != "lock"}, {k: v for k, v in before.items() if k != "lock"})
+        looprun._never_ran(self.folder(run), None, looprun.LoopError("the definition cannot be read"))  # with nobody holding it, the reason is written
+        self.assertEqual((self.record(run)["status"], "definition" in self.record(run)["reason"]), ("invalid", True))
 
     def test_f02_an_executor_that_cannot_be_made_is_written_as_invalid_with_the_reason(self):
         self.save()
@@ -843,7 +874,7 @@ class ReconcileRowsTests(unittest.TestCase):
         self.sid = "ses_aaaaaaaaaaaa1111111111"
         self.addCleanup(self.fx.db.close)
 
-    def ask(self, text="hello", sent_at=None, users=None):
+    def ask(self, text="hello", sent_at=None, users=0):  # `users=None`: the cursor holds no count of the user messages before the send
         kw = {k: v for k, v in (("sent_at", sent_at), ("users", users)) if v is not None}
         return looprun.OpenCodeExecutor._reconcile_rows(self.fx.db, self.sid, sha(text), lambda why: {"answer": "unknown", "reason": why}, **kw)
 
@@ -855,6 +886,28 @@ class ReconcileRowsTests(unittest.TestCase):
         self.assertEqual(self.ask()["answer"], "not_sent")
         self.assertEqual(self.ask(sent_at=5.0, users=0)["answer"], "not_sent")
 
+    def test_v8b2_a_missing_session_after_a_recorded_user_count_above_zero_is_unknown(self):
+        answer = self.ask(users=3, sent_at=5.0)
+        self.assertEqual(answer["answer"], "unknown")
+        self.assertIn("3", answer["reason"])
+        self.assertEqual(self.ask(users=0)["answer"], "not_sent")  # a first send into a session that was never made
+
+    def test_v8b3_with_no_recorded_count_not_sent_only_when_the_session_row_is_missing(self):
+        self.assertEqual(self.ask(users=None, sent_at=5.0)["answer"], "not_sent")  # no row: nothing was ever sent
+        self.fx.session(self.sid)
+        for kw in ({}, {"sent_at": 5.0}, {"sent_at": 1e12}):  # a session that exists is never decided by the clock
+            self.assertEqual(self.ask(users=None, **kw)["answer"], "unknown", kw)
+        self.fx.user(self.sid, "hello", 1_000)
+        self.fx.reply(self.sid, ["r"], 1_100)
+        self.fx.idle(self.sid, "succeeded", 1_200)
+        self.assertEqual(self.ask(users=None, sent_at=0.5)["answer"], "unknown")
+        self.assertEqual(self.ask(users=None, sent_at=1e12)["answer"], "unknown")
+
+    def test_v8b3_fewer_user_messages_than_before_the_send_is_unknown(self):
+        self.fx.session(self.sid)
+        self.fx.user(self.sid, "a", 1_000)
+        self.assertEqual(self.ask(users=2)["answer"], "unknown")
+
     def test_a_newer_user_message_with_other_text_is_unknown_never_not_sent(self):
         self.fx.session(self.sid)
         self.fx.user(self.sid, "someone typed this", 10_000)
@@ -863,15 +916,15 @@ class ReconcileRowsTests(unittest.TestCase):
             self.assertEqual(answer["answer"], "unknown", kw)
             self.assertIn("new", answer["reason"])
 
-    def test_a_user_message_older_than_the_send_does_not_count(self):
+    def test_a_user_message_older_than_the_send_does_not_count(self):  # v8b 3: the clock-only branches of this test encoded the defect; the count decides
         self.fx.session(self.sid)
         self.fx.user(self.sid, "hello", 1_000)
         self.fx.reply(self.sid, ["old reply"], 1_100)
         self.fx.idle(self.sid, "succeeded", 1_200)
-        self.assertEqual(self.ask(sent_at=100.0)["answer"], "not_sent")  # sent at 100 s: the message at 1 s is long before it
-        self.assertEqual(self.ask(sent_at=100.0, users=1)["answer"], "not_sent")
-        self.assertEqual(self.ask(sent_at=0.5)["answer"], "finished")  # a message after the send time is the sent one
-        self.assertEqual(self.ask(sent_at=2.0)["answer"], "finished")  # inside the clock margin: counted as possibly sent
+        self.assertEqual(self.ask(sent_at=100.0, users=1)["answer"], "not_sent")  # one user message before the send, none since
+        self.assertEqual(self.ask(sent_at=0.5, users=0)["answer"], "finished")  # the count says the message is new
+        for at in (100.0, 0.5, 2.0):
+            self.assertEqual(self.ask(sent_at=at, users=None)["answer"], "unknown", at)  # no count: the clock alone decides nothing
 
     def test_the_matching_message_with_no_reply_is_unknown(self):
         self.fx.session(self.sid)
@@ -1074,7 +1127,7 @@ class VerdictTests(Base):
         run = self.start(executor, "duo")
         self.assertEqual(self.record(run)["status"], "passed")
 
-    def test_f08_the_live_stream_is_split_into_messages_and_the_last_one_with_text_is_the_verdict(self):
+    def test_f08_the_live_stream_is_split_into_messages_and_the_last_message_is_the_verdict(self):  # v8b 4: the `final` assertion below said "last message with text"
         def event(message, text):
             return json.dumps({"type": "text", "sessionID": "ses_x", "part": {"type": "text", "messageID": message, "text": text}})
         out = "\n".join([event("m1", "first part VERDICT: PASS"), event("m1", " ends here"), json.dumps({"type": "tool_use", "part": {}}), event("m2", "see you\nlater"),
@@ -1083,9 +1136,54 @@ class VerdictTests(Base):
         executor._seen = {}
         with mock.patch.object(looprun.OpenCodeExecutor, "_tree", return_value=None):
             result = executor._result("ses_x", "returned", 0, time.monotonic(), out)
-        self.assertEqual(result["final"], "see you\nlater")
+        self.assertEqual(result["final"], "")  # the last message (m3) has no text
         self.assertEqual(looprun.read_verdict(result["final"])[0], "inconclusive")
         self.assertIn("VERDICT: PASS", result["text"])
+
+    def test_v8b4_a_verdict_in_an_earlier_message_followed_by_text_less_messages_is_not_a_verdict(self):
+        def event(kind, message, **part):
+            return json.dumps({"type": kind, "sessionID": "ses_x", "part": {"messageID": message, "type": kind.replace("_", "-"), **part}})
+        out = "\n".join([event("step_start", "m1"), event("text", "m1", text="all good\nVERDICT: PASS"), event("step_finish", "m1", reason="tool-calls"),
+                         event("step_start", "m2"), event("tool_use", "m2", tool="bash"), event("step_finish", "m2", reason="stop")])
+        self.assertEqual(looprun._final_message(out), "")
+        executor = object.__new__(looprun.OpenCodeExecutor)
+        executor._seen = {}
+        with mock.patch.object(looprun.OpenCodeExecutor, "_tree", return_value=None):
+            result = executor._result("ses_x", "returned", 0, time.monotonic(), out)
+        self.assertEqual(looprun.read_verdict(result["final"])[0], "inconclusive")
+        self.assertIn("VERDICT: PASS", result["text"])
+
+    def test_v8b4_a_final_message_with_text_is_the_verdict_even_when_an_earlier_one_said_otherwise(self):
+        def event(kind, message, **part):
+            return json.dumps({"type": kind, "sessionID": "ses_x", "part": {"messageID": message, "type": kind.replace("_", "-"), **part}})
+        out = "\n".join([event("text", "m1", text="VERDICT: FAIL"), event("tool_use", "m2", tool="bash"), event("step_start", "m3"), event("text", "m3", text="fixed.\nVERDICT: PASS")])
+        self.assertEqual(looprun.read_verdict(looprun._final_message(out))[0], "pass")
+        self.assertEqual(looprun._final_message("not json\n" + json.dumps({"type": "text", "part": {"text": "no ids"}})), "no ids")  # a stream without message ids is one message
+
+    def test_v8b4_the_adopted_reply_ending_on_a_text_less_message_is_not_a_verdict(self):
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        fx = FixtureDb(tmp / "o.db")
+        self.addCleanup(fx.db.close)
+        sid = "ses_aaaaaaaaaaaa1111111111"
+        fx.session(sid)
+        fx.user(sid, "hello", 1_000)
+        fx.reply(sid, ["checked.\nVERDICT: PASS"], 1_100)
+        fx.add(sid, "assistant", {"cost": 0.01, "content": [{"type": "tool", "name": "bash"}]}, 1_200)
+        fx.idle(sid, "succeeded", 1_300)
+        answer = looprun.OpenCodeExecutor._reconcile_rows(fx.db, sid, sha("hello"), lambda why: {"answer": "unknown", "reason": why}, users=0)
+        self.assertEqual((answer["answer"], answer["final"]), ("finished", ""))
+        self.assertIn("VERDICT: PASS", answer["text"])
+        self.assertEqual(looprun.read_verdict(answer["final"])[0], "inconclusive")
+
+    def test_v8b4_both_paths_end_inconclusive_when_the_final_message_has_no_text(self):
+        self.save("duo", check="exit 0", attempts=1, steps={"reviewer": {"retries": 0}})
+        run = self.start(self.executor({"worker": [{}], "reviewer": [{"text": PASS, "final": ""}]}), "duo")
+        self.assertEqual(self.record(run)["status"], "inconclusive")
+        executor = self.executor({"worker": [{}], "reviewer": [{"text": PASS}]}, hook=lambda n, call: (_ for _ in ()).throw(Kill()) if call["agent"] == "reviewer" else None,
+                                 answer="finished", text=PASS, final="")
+        run = self.crash(executor, "duo")
+        looprun.resume(self.folder(run), wait=True, executor=executor)
+        self.assertEqual(self.record(run)["status"], "inconclusive")
 
     def test_f08_the_adopted_reply_of_a_finished_turn_is_read_the_same_way(self):
         self.save("duo", check="exit 0", attempts=1, steps={"reviewer": {"retries": 0}})
@@ -1183,6 +1281,60 @@ class PinTests(Base):
         self.assertEqual((code, record["status"]), (2, "invalid"))
         self.assertIn("settings_sha256", record["reason"])
 
+    def edit_record(self, run, **fields):
+        path = self.folder(run) / "run.json"
+        data = json.loads(path.read_text())
+        data.update(fields)
+        path.write_text(json.dumps(data, indent=2, sort_keys=True))
+
+    def test_v8b6_a_definition_that_was_re_pinned_in_its_own_file_alone_is_refused_against_the_pin_in_run_json(self):
+        run, executor = self.interrupted()
+        data = json.loads((self.folder(run) / "definition.json").read_text())
+        data["steps"][0]["on"]["returned"] = "done"
+        self.edit(run, "steps", data["steps"])
+        self.edit(run, "steps_sha256", looprun.steps_hash(data["steps"]))  # the hash agrees with the new steps, in definition.json only
+        data["settings"]["limits"]["attempts"] = 40
+        before = tree_hash(self.folder(run))
+        for wait in (True, False):
+            with self.assertRaises(looprun.LoopError) as raised:
+                looprun.resume(self.folder(run), wait=wait, executor=executor)
+            self.assertIn("steps_sha256", str(raised.exception))
+            self.assertIn("run.json", str(raised.exception))
+        self.edit(run, "steps", json.loads((self.folder(run) / "definition.json").read_text())["steps"])
+        self.edit(run, "settings", data["settings"])
+        self.edit(run, "settings_sha256", hashlib.sha256(looprun._json(data["settings"])).hexdigest())
+        with self.assertRaises(looprun.LoopError) as raised:
+            looprun.resume(self.folder(run), wait=True, executor=executor)
+        self.assertIn("run.json", str(raised.exception))
+        self.assertEqual(self.record(run)["status"], "running")
+
+    def test_v8b6_run_json_keeps_the_steps_pin_from_the_start_and_both_pins_match_the_definition(self):
+        self.save()
+        run = queue(self)
+        record, definition = self.record(run), json.loads((self.folder(run) / "definition.json").read_text())
+        self.assertEqual(record["steps_sha256"], definition["steps_sha256"])
+        self.assertEqual(record["steps_sha256"], looprun.steps_hash(definition["steps"]))
+        self.assertEqual(record["settings_sha256"], definition["settings_sha256"])
+
+    def test_v8b6_a_run_with_no_pin_is_refused_in_words_that_say_so_and_is_left_as_it_was(self):
+        run, executor = self.interrupted()
+        for where, key in (("run.json", "steps_sha256"), ("run.json", "settings_sha256"), ("definition.json", "steps_sha256"), ("definition.json", "settings_sha256")):
+            path = self.folder(run) / where
+            original = path.read_text()
+            data = json.loads(original)
+            del data[key]
+            path.write_text(json.dumps(data))
+            before = tree_hash(self.folder(run))
+            with self.assertRaises(looprun.LoopError) as raised:
+                looprun.resume(self.folder(run), wait=True, executor=executor)
+            message = str(raised.exception)
+            self.assertIn("no", message)
+            self.assertIn(f"{key} pin in {where}", message)
+            self.assertNotIn("was changed", message)
+            path.write_text(original)
+            self.assertEqual({k: v for k, v in tree_hash(self.folder(run)).items() if k not in ("lock", where)}, {k: v for k, v in before.items() if k not in ("lock", where)})
+        self.assertEqual(self.resume(run, executor), "passed")
+
     def test_f05_an_untouched_definition_resumes(self):
         run, executor = self.interrupted()
         self.assertEqual(self.resume(run, executor), "passed")
@@ -1232,6 +1384,48 @@ class ClockTests(Base):
         after = self.record(run)["totals"]["seconds"]
         self.assertGreaterEqual(after, before)
         self.assertLess(after, before + 1.2)
+
+
+class CancelWhilePausingTests(Base):
+    def pausing(self, cancel_after_pause: bool):
+        """A controller that has been asked to pause and, at the moment it pauses (its lock still held), is asked to cancel by the real `cancel`."""
+        self.save(check="exit 1", attempts=3)
+        box = {"calls": 0}
+        original = looprun.Controller._pause
+
+        def hook(count, call):
+            box["calls"] = count
+            looprun.pause(self.folder(looprun.list_runs(self.project)[0]))
+
+        def pause(controller, reason):
+            if cancel_after_pause:
+                result = original(controller, reason)
+                box["result"] = looprun.cancel(controller.folder)  # past its pause check: the file is left for whoever resumes
+                return result
+            box["result"] = looprun.cancel(controller.folder)
+            return original(controller, reason)
+        executor = self.executor(hook=hook)
+        with mock.patch.object(looprun.Controller, "_pause", pause):
+            run = self.start(executor)
+        return run, executor, box
+
+    def test_v8b7_a_cancel_that_arrives_while_the_controller_pauses_ends_the_run_cancelled_at_once(self):
+        run, executor, box = self.pausing(False)
+        self.assertEqual(box["result"], "requested")
+        self.assertEqual(self.record(run)["status"], "cancelled")  # "requested" came true
+        self.assertEqual(len(executor.calls), 1)
+        self.assertFalse((self.folder(run) / "pause").exists())
+
+    def test_v8b7_a_cancel_left_behind_by_a_pausing_controller_ends_the_next_resume_without_running_a_step(self):
+        run, executor, box = self.pausing(True)
+        self.assertEqual(box["result"], "requested")
+        self.assertEqual(self.record(run)["status"], "paused")
+        self.assertTrue((self.folder(run) / "cancel").exists())
+        calls = len(executor.calls)
+        self.assertEqual(self.resume(run, executor), "cancelled")
+        self.assertEqual(len(executor.calls), calls)  # no step was sent
+        self.assertIsNone(self.record(run)["attempts"][-1].get("check"))  # nor was the check run
+        self.assertIn("cancel", self.record(run)["reason"])
 
 
 class CancelInCheckTests(Base):
@@ -1324,6 +1518,58 @@ class AnswerTests(Base):
         lock.close()
         thread.join(10)
         self.assertIn("not waiting", box.get("error", ""))
+        self.assertFalse((folder / "answer.json").exists())
+
+    def race(self, run, end):
+        """The real `answer()` is held at the moment it writes `answer.json` (it has read `waiting` and holds the answer lock), `end` is run in
+        another thread (the real `cancel`, or a controller ending the run), and only then does the answer go on: whoever lost must leave nothing."""
+        folder = self.folder(run)
+        at_write, go, box = threading.Event(), threading.Event(), {}
+        original = looprun._write_atomic
+
+        def write(path, data):
+            if Path(path).name == "answer.json":
+                at_write.set()
+                go.wait(10)
+            return original(path, data)
+
+        def give():
+            try:
+                looprun.answer(folder, "approve")
+            except looprun.Busy as exc:
+                box["refused"] = str(exc)
+        with mock.patch.object(looprun, "_write_atomic", write):
+            giver = threading.Thread(target=give)
+            giver.start()
+            self.assertTrue(at_write.wait(10))
+            ender = threading.Thread(target=end)
+            ender.start()
+            time.sleep(0.5)  # a transition that does not take the answer lock is over by now
+            go.set()
+            giver.join(20)
+            ender.join(20)
+        return box
+
+    def test_v8b5_a_cancel_that_races_an_answer_never_leaves_answer_json_in_a_cancelled_run(self):
+        run, executor = self.waiting()
+        folder = self.folder(run)
+        self.race(run, lambda: self.assertEqual(looprun.cancel(folder), "cancelled"))
+        self.assertEqual(self.record(run)["status"], "cancelled")
+        self.assertFalse((folder / "answer.json").exists())
+
+    def test_v8b5_a_controller_that_ends_the_run_while_an_answer_is_being_written_never_leaves_answer_json_behind(self):
+        self.save("duo", check="exit 0", approval="before_pass")
+        executor = self.executor({"worker": [{}], "reviewer": [{"text": PASS}]})
+        thread = threading.Thread(target=lambda: self.start(executor, "duo"))
+        thread.start()
+        end = time.monotonic() + 20
+        while time.monotonic() < end and not (looprun.list_runs(self.project) and self.record(looprun.list_runs(self.project)[0]).get("status") == "waiting"):
+            time.sleep(0.02)
+        run, = looprun.list_runs(self.project)
+        folder = self.folder(run)
+        self.race(run, lambda: looprun.request_cancel(folder))
+        thread.join(20)
+        self.assertEqual(self.record(run)["status"], "cancelled")
         self.assertFalse((folder / "answer.json").exists())
 
     def test_f11_a_cancelled_waiting_controller_refuses_a_later_answer(self):

@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from agentgraph import looprun
+from tests.test_looprun3 import LockHolder
 
 CHECK_SECOND = 'n=$(cat .count 2>/dev/null || echo 0); n=$((n+1)); echo $n > .count; echo "check call $n"; [ "$n" -ge 2 ]'
 
@@ -220,8 +221,7 @@ class AlsoTests(Base):
             run_id = looprun.start(self.project, "self", structure=self.structure, goal="g", executor=looprun.ScriptedExecutor([{}]))
             other = looprun.start(self.project, "self", structure=self.structure, goal="g", executor=looprun.ScriptedExecutor([{}]))
         folder = self.folder(run_id)
-        with open(folder / "lock", "a+") as held:
-            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)  # another controller holds the run
+        with LockHolder(folder / "lock"):  # another process (a controller) holds the run
             with mock.patch.object(looprun, "LOCK_WAIT", 0.1), self.assertRaises(looprun.LoopError) as caught:
                 looprun.execute(folder, looprun.ScriptedExecutor([{}]))
             self.assertIn("already", str(caught.exception))
@@ -230,7 +230,7 @@ class AlsoTests(Base):
                 code, _, err = self.cli("run", "--run-dir", str(folder))
             self.assertEqual(code, 1)
             self.assertIn("already", err)
-        self.assertEqual(looprun.read_run(folder)["status"], "agent_error")  # the detached command says why it did not run, instead of leaving `queued`
+        self.assertEqual(looprun.read_run(folder)["status"], "queued")  # v8b 1: a held lock means a controller exists and owns the record, so the command writes nothing
         folder = self.folder(other)
         looprun.execute(folder, looprun.ScriptedExecutor([{}, {}]))
         self.assertEqual(looprun.read_run(folder)["status"], "passed")
@@ -540,6 +540,9 @@ class RecordTests(Base):
         definition["steps"][0]["on"]["returned"] = "done"  # a hand-edited definition (re-pinned: the walk's own guard is what is tested here)
         definition["steps_sha256"] = looprun.steps_hash(definition["steps"])
         (folder / "definition.json").write_text(json.dumps(definition))
+        record = json.loads((folder / "run.json").read_text())
+        record["steps_sha256"] = definition["steps_sha256"]  # a deliberate edit of both files: the pins do not stop it, the walk's guard does
+        (folder / "run.json").write_text(json.dumps(record))
         looprun.execute(folder, looprun.ScriptedExecutor([{}]))
         self.assertNotEqual(looprun.read_run(folder)["status"], "passed")
 

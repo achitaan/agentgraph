@@ -671,6 +671,9 @@ class GuardTests(Base):
         edit(definition["steps"])
         definition["steps_sha256"] = looprun.steps_hash(definition["steps"])  # re-pinned: the walk's own guard is what is tested here
         (folder / "definition.json").write_text(json.dumps(definition))
+        record = json.loads((folder / "run.json").read_text())
+        record["steps_sha256"] = definition["steps_sha256"]  # a deliberate edit of both files: the pins do not stop it, the walk's guard does
+        (folder / "run.json").write_text(json.dumps(record))
         looprun.execute(folder, ex)
         return looprun.read_run(folder), ex
 
@@ -698,6 +701,9 @@ class GuardTests(Base):
         definition["steps"][1]["on"]["pass"] = "done"
         definition["steps_sha256"] = looprun.steps_hash(definition["steps"])  # re-pinned: the walk's own guard is what is tested here
         (folder / "definition.json").write_text(json.dumps(definition))
+        record = json.loads((folder / "run.json").read_text())
+        record["steps_sha256"] = definition["steps_sha256"]  # a deliberate edit of both files: the pins do not stop it, the walk's guard does
+        (folder / "run.json").write_text(json.dumps(record))
         looprun.execute(folder, ex)
         self.assertNotEqual(looprun.read_run(folder)["status"], "passed")
         self.assertEqual(by(ex, "verifier"), [])
@@ -713,6 +719,9 @@ class GuardTests(Base):
         edit(definition["steps"])
         definition["steps_sha256"] = looprun.steps_hash(definition["steps"])  # re-pinned: the walk's own guard is what is tested here
         (folder / "definition.json").write_text(json.dumps(definition))
+        record = json.loads((folder / "run.json").read_text())
+        record["steps_sha256"] = definition["steps_sha256"]  # a deliberate edit of both files: the pins do not stop it, the walk's guard does
+        (folder / "run.json").write_text(json.dumps(record))
         looprun.execute(folder, ex)
         self.assertNotEqual(looprun.read_run(folder)["status"], "passed")
 

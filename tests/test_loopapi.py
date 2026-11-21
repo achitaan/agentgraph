@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from agentgraph import loopapi, looprun
+from tests.test_looprun3 import LockHolder
 
 CHECK_SECOND = 'n=$(cat .count 2>/dev/null || echo 0); n=$((n+1)); echo $n > .count; echo "check call $n"; [ "$n" -ge 2 ]'
 GOOD = {"check": {"command": "true"}, "limits": {"attempts": 3}}
@@ -421,6 +422,18 @@ class QueuedNeverStartedTests(Base):
         row = next(r for r in loopapi.listing(self.structure, self.project, None)["runs"] if r["run"] == run)
         self.assertEqual(row["status"], "queued")
         self.assertEqual(self.refused(lambda: loopapi.resume(self.project, run), 409).status, 409)
+
+    def test_v8b8_resume_and_cancel_of_a_run_a_controller_holds_answer_at_once_and_do_not_wait_for_the_lock(self):
+        run, folder = self.queued(age=60)
+        with LockHolder(folder / "lock"), mock.patch.object(looprun, "LOCK_WAIT", 8.0):  # a wait that is long enough to be seen on a loaded machine
+            started = time.monotonic()
+            self.refused(lambda: loopapi.resume(self.project, run), 409)
+            self.assertLess(time.monotonic() - started, 4.0)
+            started = time.monotonic()
+            self.assertEqual(loopapi.cancel(self.project, run), {"run": run})
+            self.assertLess(time.monotonic() - started, 4.0)
+        self.assertTrue((folder / "cancel").exists())
+        self.assertEqual(looprun.read_run(folder)["status"], "queued")
 
     def test_cancel_of_a_never_started_run_answers_cancelled(self):
         run, folder = self.queued(age=60)

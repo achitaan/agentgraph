@@ -92,7 +92,6 @@ TAIL_CHARS = 6000
 GOAL_LIMIT = 20000
 HEARTBEAT = 5.0
 LOCK_WAIT = 1.0  # seconds a controller (or a cancel) waits for the run lock: a probe holds it for an instant
-CLOCK_MARGIN = 10.0  # seconds: a user message this close before the recorded send time still counts as possibly the sent one
 ANSWER_WAIT = 5.0  # seconds a person's answer (or the controller taking it) waits for the other
 QUEUED_GRACE = 30.0  # seconds after which a queued run that no controller took shows `interrupted`
 RUN_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{4}")
@@ -968,11 +967,12 @@ class OpenCodeExecutor:
             return None
 
     def reconcile(self, session: str, message_sha256: str, sent_at: float | None = None, users: int | None = None) -> dict:
-        """What became of a message that may have been sent to `session` (read-only; never sends). `sent_at` (epoch seconds) and `users` (the
-        user-message count, see `mark`) were recorded just before the send and tell this send's message from earlier ones. `not_sent`: no
-        process of this session is alive and the session holds no user message since that send. `finished`: exactly one new user message
+        """What became of a message that may have been sent to `session` (read-only; never sends). `users` (the user-message count, see `mark`)
+        was recorded just before the send and tells this send's message from earlier ones; `sent_at` is kept for the record and decides nothing.
+        `not_sent`: no process of this session is alive and either the session row is missing (with no count above 0) or the session holds
+        no user message since that send. With no count in the cursor, a session that exists is `unknown`. `finished`: exactly one new user message
         has this text, an idle row with outcome `succeeded` follows an assistant reply, and nothing of this turn is still busy; `text`,
-        `final` (the last assistant message that has text) and `cost` are read from the turn's own rows. Anything else, including a process
+        `final` (the text of the turn's last assistant message, "" when it has none) and `cost` are read from the turn's own rows. Anything else, including a process
         still alive, a new message with other text and a database that cannot be read, is `unknown` with the reason."""
         unknown = lambda why: {"answer": "unknown", "reason": why}  # noqa: E731
         if not bench.SESSION.fullmatch(session or ""):
@@ -991,15 +991,16 @@ class OpenCodeExecutor:
     @staticmethod
     def _reconcile_rows(db, session: str, sha: str, unknown, sent_at: float | None = None, users: int | None = None) -> dict:
         if db.execute("SELECT 1 FROM session_v2 WHERE id=?", (session,)).fetchone() is None:
+            if isinstance(users, int) and not isinstance(users, bool) and users > 0:
+                return unknown(f"the session row is missing although it held {users} user message(s) before the send, so it cannot be told what became of this one")
             return {"answer": "not_sent", "reason": "the session does not exist"}
         every = [(seq, created, text) for seq, created, text in db.execute(
             "SELECT seq, time_created, CASE WHEN json_valid(data) THEN json_extract(data, '$.text') END FROM session_message WHERE session_id=? AND type='user' ORDER BY seq", (session,))]
-        if isinstance(users, int) and not isinstance(users, bool) and users >= 0 and len(every) >= users:
-            new = every[users:]  # the count before the send is exact: what came after it is this send's (or someone else's)
-        elif _number(sent_at):
-            new = [u for u in every if u[1] >= (sent_at - CLOCK_MARGIN) * 1000]  # the margin errs towards counting a message as new
-        else:
-            new = every  # nothing was recorded about the send: every message may be the sent one
+        if not (isinstance(users, int) and not isinstance(users, bool) and users >= 0):
+            return unknown("the cursor holds no count of the user messages before the send, and a clock alone cannot tell this send's message from an earlier one")
+        if len(every) < users:
+            return unknown(f"the session holds {len(every)} user message(s), fewer than the {users} it held before the send, so it was changed")
+        new = every[users:]  # the count before the send is exact: what came after it is this send's (or someone else's)
         if not new:
             return {"answer": "not_sent", "reason": "the session holds no user message since the send"}
         mine = [(seq, created) for seq, created, text in new if isinstance(text, str) and hashlib.sha256(text.encode("utf-8")).hexdigest() == sha]
@@ -1033,8 +1034,7 @@ class OpenCodeExecutor:
             mine_texts = [part["text"] for part in ((data.get("content") or []) if isinstance(data, dict) and isinstance(data.get("content"), list) else [])
                           if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)]
             texts += mine_texts
-            if any(t.strip() for t in mine_texts):
-                final = "\n".join(mine_texts)
+            final = "\n".join(mine_texts) if any(t.strip() for t in mine_texts) else ""  # the last message only: an earlier message's words never stand in
         found, queue, seen = 0.0, [session], {session}
         children = 0
         while queue:
@@ -1063,21 +1063,26 @@ class OpenCodeExecutor:
 
 
 def _final_message(out: str) -> str:
-    """The text of the last assistant message that has text, from a `--format json` stream: its text parts are told apart by `messageID`
-    and joined with a newline. An earlier message's words (a verdict line among them) are never part of it."""
-    last: dict = {}
+    """The text of the last assistant message of a `--format json` stream ("" when that message has no text): the parts are told apart by
+    `messageID` (every event of a message carries it) and the last id seen is the final message. An earlier message's words (a verdict line
+    among them) are never part of it. A stream whose events carry no ids is read as one message."""
+    words: dict = {}
+    final = None
     for line in (out or "").splitlines():
         try:
             event = json.loads(line)
         except ValueError:
             continue
         part = event.get("part") if isinstance(event, dict) and isinstance(event.get("part"), dict) else {}
-        if isinstance(event, dict) and event.get("type") == "text" and isinstance(part.get("text"), str):
-            last.setdefault(part.get("messageID"), []).append(part["text"])
-    for texts in reversed(list(last.values())):
-        if any(t.strip() for t in texts):
-            return "\n".join(texts)
-    return ""
+        is_text = isinstance(event, dict) and event.get("type") == "text" and isinstance(part.get("text"), str)
+        message = part.get("messageID") if isinstance(part.get("messageID"), str) else None
+        if message is None and not is_text:
+            continue
+        final = message
+        if is_text:
+            words.setdefault(message, []).append(part["text"])
+    texts = words.get(final, [])
+    return "\n".join(texts) if any(t.strip() for t in texts) else ""
 
 
 def make_executor(spec: dict):
@@ -1379,6 +1384,8 @@ class Controller:
             self.state.update(status="running", pid=os.getpid(), started=round(time.time(), 3))
         self.save()
         _event(self.folder, attempt=len(self.state["attempts"]), step="-", outcome="resumed" if resumed else "started", route=step_id if resumed else self.head)
+        if resumed and self.cancelled():  # a cancel was answered "requested" while the last controller was pausing: it ends the run before any step
+            return self.finish("cancelled", "cancel requested while the run was pausing; no step was run after it", step_id)
         try:
             while True:
                 step = self.steps[step_id]
@@ -1412,6 +1419,9 @@ class Controller:
             return self._pause(paused.reason)
 
     def _pause(self, reason: str) -> str:
+        if (self.folder / "cancel").exists():  # a cancel that was answered "requested" while the run paused comes true now
+            (self.folder / "pause").unlink(missing_ok=True)
+            return self.finish("cancelled", "cancel requested while the run was pausing", (self.state.get("cursor") or {}).get("step", "-"))
         (self.folder / "pause").unlink(missing_ok=True)
         self.state.update(status="paused", reason=reason, waiting=None)
         self.save()
@@ -1724,7 +1734,9 @@ class Controller:
         if self.attempt is not None and self.attempt.get("ended") is None:
             self.attempt["ended"] = round(time.time(), 3)
         self.state.update(status=status, reason=reason, ended=round(time.time(), 3), waiting=None)
-        self.save()
+        with _answer_lock(self.folder, 5.0, strict=False):  # an answer being given right now is decided before the run ends; one that lost is removed
+            self.save()
+            (self.folder / "answer.json").unlink(missing_ok=True)
         _event(self.folder, attempt=len(self.state["attempts"]), step=step_id, outcome=status, route="end", reason=reason)
         return status
 
@@ -2033,7 +2045,7 @@ def start(project, flow_id: str, *, structure=None, goal: str | None = None, wor
     state = {"version": VERSION, "run": run_id, "flow": flow_id, "status": "queued", "reason": None, "goal": goal, "workdir": str(work),
              "pid": None, "heartbeat": now, "created": now, "sessions": [], "attempts": [],
              "limits": settings.get("limits"), "totals": {"cost": None, "seconds": 0, "sessions": None, "attempts": 0, "cost_unknown_steps": 0},
-             "trial": trial, "settings_sha256": definition["settings_sha256"], "cursor": None, "recoveries": [], "session_costs": {}}
+             "trial": trial, "settings_sha256": definition["settings_sha256"], "steps_sha256": definition["steps_sha256"], "cursor": None, "recoveries": [], "session_costs": {}}
     if problem is not None:
         state.update(status="invalid", reason=problem, ended=now)
         _write_atomic(folder / "run.json", _json(state))
@@ -2077,7 +2089,7 @@ def execute(folder, executor=None, resume: str | None = None, check_only: bool =
             resume = None
         elif status in FINAL or status == "queued" or status not in ("running", "paused", "waiting"):
             raise Busy(f"run {folder.name} is {status}: " + ("it is over and cannot be resumed" if status in FINAL else f"it was created less than {QUEUED_GRACE:g}s ago and may still be starting; cancel it, or resume it later"))
-        _verify_pins(definition)
+        _verify_pins(definition, state)
         if executor is None and not check_only:
             executor = make_executor(definition["executor"])
         controller = Controller(folder, definition, state, executor, executor.env(definition["workdir"]) if executor is not None else {})
@@ -2101,20 +2113,33 @@ def execute(folder, executor=None, resume: str | None = None, check_only: bool =
         lock.close()
 
 
-def _verify_pins(definition: dict) -> None:
-    """The definition is pinned when the run starts: refuse (LoopError, nothing written) one whose settings or steps no longer match their hashes."""
+def _verify_pins(definition: dict, state: dict) -> None:
+    """The definition is pinned when the run starts: refuse (LoopError, nothing written) one whose settings or steps no longer match the hash
+    kept in `definition.json` and the copy kept in `run.json`. A record with no pin (a run made before `run.json` kept both) is refused too,
+    in words that say it has no pin: refusing is the safe default. The pins catch an accidental change; a person who edits both files on
+    purpose is not stopped."""
+    name = definition.get("run")
     for key, now in (("settings_sha256", lambda: hashlib.sha256(_json(definition.get("settings"))).hexdigest()), ("steps_sha256", lambda: steps_hash(definition.get("steps")))):
-        if definition.get(key) != now():
-            raise LoopError(f"the definition of run {definition.get('run')} was changed after the run started ({key} does not match): it is not run; start again")
+        pins = {"definition.json": definition.get(key), "run.json": state.get(key)}
+        for where, pin in pins.items():
+            if not isinstance(pin, str) or not pin:
+                raise LoopError(f"run {name} has no {key} pin in {where} (it was made before the pin was kept there), so it cannot be told whether its definition still is the one it started with: it is not run; start again")
+        if len(set(pins.values())) != 1:
+            raise LoopError(f"the pins of run {name} disagree ({key} in definition.json and in run.json differ): a file was changed after the run started; it is not run; start again")
+        if pins["definition.json"] != now():
+            raise LoopError(f"the definition of run {name} was changed after the run started ({key} does not match): it is not run; start again")
 
 
 def resume(folder, choice: str | None = None, wait: bool = False, executor=None) -> str | None:
     """Go on with a run whose controller is gone (`interrupted`), `paused` or `waiting`, from its cursor and its pinned definition.
     `choice` is for a paused step whose fate is not known: `redo` sends it again, `accept` takes it as returned. Detached by default (returns
-    None once the new controller is started); with `wait`, in this process (returns the status). Refusals are checked first and write nothing."""
+    None once the new controller is started); with `wait`, in this process (returns the status). Refusals are checked first and write nothing;
+    a run whose lock a controller holds is refused at once."""
     folder = Path(folder)
     if choice not in (None, "", *CHOICES):
         raise LoopError(f"the choice must be one of {', '.join(CHOICES)}, not {str(choice)[:40]!r}")
+    if _held(folder):  # a live controller: refused at once, without waiting for the lock (a page request must not hang)
+        raise Busy(f"run {folder.name} is already running in another process: a controller holds its lock, so it is alive")
     if wait:
         return execute(folder, executor, resume=choice or "")
     execute(folder, resume=choice or "", check_only=True)
@@ -2165,7 +2190,9 @@ def cancel(folder) -> str:
         if attempts and attempts[-1].get("ended") is None:
             attempts[-1]["ended"] = now
         state.update(status="cancelled", reason=f"cancelled by a person while no controller was running it (it was {state.get('status')}" + (", and its controller never started)" if state.get("status") == "queued" else ")"), ended=now, waiting=None)
-        _write_atomic(folder / "run.json", _json(state))
+        with _answer_lock(folder, 5.0, strict=False):  # an answer being given right now is decided before the run ends; one that lost is removed
+            _write_atomic(folder / "run.json", _json(state))
+            (folder / "answer.json").unlink(missing_ok=True)
         _event(folder, attempt=len(attempts), step=(state.get("cursor") or {}).get("step", "-"), outcome="cancelled", route="end", reason=state["reason"])
         for name in ("pause", "cancel"):
             (folder / name).unlink(missing_ok=True)
@@ -2175,9 +2202,9 @@ def cancel(folder) -> str:
 
 
 @contextmanager
-def _answer_lock(folder: Path, wait: float = ANSWER_WAIT):
-    """The lock an answer is decided and taken under: a `flock` on `answer.lock`, so a file left by a killed command never blocks anyone.
-    Busy when it is still held after `wait` seconds."""
+def _answer_lock(folder: Path, wait: float = ANSWER_WAIT, strict: bool = True):
+    """The lock an answer is decided and taken under, and a waiting run is ended under: a `flock` on `answer.lock`, so a file left by a
+    killed command never blocks anyone. Busy when it is still held after `wait` seconds (with `strict` False the caller goes on instead)."""
     fd = os.open(folder / "answer.lock", os.O_CREAT | os.O_RDWR, 0o644)
     try:
         end = time.monotonic() + wait
@@ -2187,6 +2214,8 @@ def _answer_lock(folder: Path, wait: float = ANSWER_WAIT):
                 break
             except OSError:
                 if time.monotonic() >= end:
+                    if not strict:
+                        break
                     raise Busy(f"run {Path(folder).name}: an answer is being taken or given right now; try again") from None
                 time.sleep(0.01)
         yield
@@ -2395,17 +2424,22 @@ def _run_folder(args) -> Path:
 
 def _never_ran(folder: Path, resume, exc: Exception) -> None:
     """The detached `run` command failed before its controller loop: a queued run gets a final status with the reason in words (the person
-    would otherwise read `queued` for ever). A resumed run keeps the record it had; the reason goes to the command's stderr and `run.log`."""
-    if resume is not None:
+    would otherwise read `queued` for ever). It is written only under the run's lock: a lock that is held means a controller exists and owns
+    the record, so a `Busy` (and a lock that stays busy) writes nothing. A resumed run keeps the record it had; the reason goes to the
+    command's stderr and `run.log`."""
+    if resume is not None or isinstance(exc, Busy):
         return
     try:
-        state = read_run(folder)
-        if state.get("status") != "queued":
-            return
-        reason = f"the controller could not start: {exc}"[:300]
-        state.update(status="agent_error" if isinstance(exc, Busy) else "invalid", reason=reason, ended=round(time.time(), 3))
-        _write_atomic(folder / "run.json", _json(state))
-        _event(folder, attempt=0, step="-", outcome=state["status"], route="end", reason=reason)
+        with open(folder / "lock", "a+") as lock:
+            if not _flock(lock):
+                return
+            state = read_run(folder)
+            if state.get("status") != "queued":
+                return
+            reason = f"the controller could not start: {exc}"[:300]
+            state.update(status="invalid", reason=reason, ended=round(time.time(), 3))
+            _write_atomic(folder / "run.json", _json(state))
+            _event(folder, attempt=0, step="-", outcome=state["status"], route="end", reason=reason)
     except (LoopError, OSError):
         pass
 
