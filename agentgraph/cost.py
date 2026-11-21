@@ -85,6 +85,71 @@ def load_turns(session: str | None = None, db_path: Path = sources.DB_PATH) -> t
     return session, turns, {"sessions": int(workers[0]), "cost": float(workers[1])}
 
 
+LONG_TURNS, LONG_COST = 300, 25.0
+UNREPORTED = "compaction and other calls not stored as messages"
+
+
+def _model_name(value) -> str:
+    """The model id of a session_v2.model cell (a JSON object with an id, or a plain name)."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return value or "unknown"
+    if isinstance(value, dict) and isinstance(value.get("id"), str):
+        return value["id"]
+    return "unknown"
+
+
+def _session_row(db, session: str, billed, agent, model) -> dict:
+    """One session: what it was billed, what its messages add up to, and the difference."""
+    turns = _read_turns(db, session)
+    counts = dict(db.execute("SELECT type, count(*) FROM session_message WHERE session_id=? AND type IN ('user', 'compaction') GROUP BY type",
+                             (session,)).fetchall())
+    billed = _number(billed)
+    messages = sum(turn["cost"] for turn in turns)
+    return {
+        "id": session, "agent": agent if isinstance(agent, str) and agent else "unknown", "model": _model_name(model),
+        "turns": len(turns), "billed": billed, "messages": messages, "unreported": billed - messages,
+        "cold_turns": sum(is_cold(turn) for turn in turns), "user_messages": int(counts.get("user", 0)),
+        "compactions": int(counts.get("compaction", 0)),
+    }
+
+
+def _sum_rows(rows: list[dict]) -> dict:
+    return {"sessions": len(rows), "turns": sum(row["turns"] for row in rows), "billed": sum(row["billed"] for row in rows),
+            "messages": sum(row["messages"] for row in rows), "unreported": sum(row["unreported"] for row in rows),
+            "cold_turns": sum(row["cold_turns"] for row in rows), "compactions": sum(row["compactions"] for row in rows)}
+
+
+def _split(rows: list[dict], key: str) -> dict:
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        groups.setdefault(row[key], []).append(row)
+    ordered = sorted(groups.items(), key=lambda item: -sum(row["billed"] for row in item[1]))
+    return {name: {**_sum_rows(part), "per_turn": sum(row["billed"] for row in part) / max(1, sum(row["turns"] for row in part))}
+            for name, part in ordered}
+
+
+def load_billing(session: str, db_path: Path = sources.DB_PATH, long_turns: int = LONG_TURNS, long_cost: float = LONG_COST) -> dict:
+    """What the database billed for a chat against what its messages add up to, for the chat itself and
+    each worker session it started (session_v2.cost also holds calls that are not messages)."""
+    with closing(_connect(db_path)) as db:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(session_v2)")}
+        agent, model = ("agent" if "agent" in columns else "NULL"), ("model" if "model" in columns else "NULL")
+        query = f"SELECT id, cost, {agent}, {model} FROM session_v2 WHERE "
+        root = db.execute(query + "id=?", (session,)).fetchone()
+        children = db.execute(query + "parent_id=? ORDER BY time_created, id" if "time_created" in columns else query + "parent_id=? ORDER BY id",
+                              (session,)).fetchall()
+        root_row = _session_row(db, *root) if root else _session_row(db, session, 0, None, None)
+        rows = [_session_row(db, *child) for child in children]
+    root_row.pop("agent"), root_row.pop("model")
+    long = sorted((row for row in rows if row["turns"] > long_turns or row["billed"] > long_cost), key=lambda row: -row["billed"])
+    return {"root": root_row,
+            "workers": {**_sum_rows(rows), "by_agent": _split(rows, "agent"), "by_model": _split(rows, "model"),
+                        "long": long, "long_limits": {"turns": long_turns, "cost": long_cost}, "list": rows}}
+
+
 # ---- the cost settings in force, and how chats cost under each ----
 
 def _default_settings() -> dict:
@@ -171,14 +236,18 @@ def trend(db_path: Path, history: list[dict], *, days: int = 30, min_cost: float
     periods: dict[int, dict] = {}
     with closing(_connect(db_path)) as db:
         # session_v2.time_updated is in milliseconds
-        sessions = db.execute("SELECT id FROM session_v2 WHERE parent_id IS NULL AND time_updated >= ? AND cost >= ? ORDER BY time_updated",
+        sessions = db.execute("SELECT id, cost FROM session_v2 WHERE parent_id IS NULL AND time_updated >= ? AND cost >= ? ORDER BY time_updated",
                               (int((now - days * 86400) * 1000), min_cost)).fetchall()
-        for (session,) in sessions:
-            for turn in _read_turns(db, session):
+        for session, billed in sessions:
+            chat = _read_turns(db, session)
+            # what the chat was billed beyond its messages is spread over its turns by their cost
+            extra, recorded = _number(billed) - sum(turn["cost"] for turn in chat), sum(turn["cost"] for turn in chat)
+            for turn in chat:
                 index = bisect_right(starts, turn["time"])
-                period = periods.setdefault(index, {"turns": [], "chats": set()})
+                period = periods.setdefault(index, {"turns": [], "chats": set(), "unreported": 0.0})
                 period["turns"].append(turn)
                 period["chats"].add(session)
+                period["unreported"] += extra * (turn["cost"] / recorded if recorded else 1 / len(chat))
     result = []
     for index in sorted(periods):
         turns, config = periods[index]["turns"], settings[index]
@@ -189,6 +258,7 @@ def trend(db_path: Path, history: list[dict], *, days: int = 30, min_cost: float
         result.append({
             "since": since[index], "settings": config, "chats": len(periods[index]["chats"]), "turns": len(turns),
             "cost": sum(turn["cost"] for turn in turns), "billed": total, "per_turn": total / len(turns),
+            "unreported": periods[index]["unreported"],
             "cold_share": sum(price for _, price in cold) / total if total else 0,
             "pauses": {"turns": len(pauses), "cost": sum(price for _, price in pauses)},
             "context": statistics.median(_context(turn) for turn in turns),
@@ -216,7 +286,8 @@ def trend_report(periods: list[dict]) -> str:
             f"{started}: {describe_settings(period['settings'])}",
             f"    {period['chats']} chats, {period['turns']} turns, median context {_k(int(period['context']))}",
             f"    ${period['per_turn']:.3f} a turn (${period['billed']:.2f} billed, ${period['cost']:.2f} recorded), cold share {period['cold_share']:.0%}",
-            f"    pauses: {pauses['turns']} turns, ${pauses['cost']:.2f}"]))
+            f"    pauses: {pauses['turns']} turns, ${pauses['cost']:.2f}",
+            f"    not stored as messages (est, spread over the turns): ${period['unreported']:.2f}"]))
     return "\n\n".join(blocks)
 
 
@@ -301,7 +372,7 @@ def _k(tokens: int) -> str:
     return f"{tokens // 1000}k"
 
 
-def report(session: str, result: dict, workers: dict) -> str:
+def report(session: str, result: dict, workers: dict, billing: dict | None = None) -> str:
     def line(label, entry, indent=4):
         each = entry["cost"] / entry["turns"] if entry["turns"] else 0
         return f"{' ' * indent}{label:<{40 - indent}}{entry['turns']:>5} turns  ${entry['cost']:>8.2f}  ${each:.2f} a turn"
@@ -318,7 +389,34 @@ def report(session: str, result: dict, workers: dict) -> str:
     for label, key in ((f"compaction at {_k(what['cap'])} ({what['extra_compactions']} more summaries)", "compact_at_cap"),
                        ("one-hour cache", "one_hour_cache"), ("both", "both")):
         lines.append(f"    {label:<47}${what[key]:>8.2f}  {'saves' if what[key] <= total else 'adds'} ${abs(total - what[key]):.2f}")
+    if billing:
+        lines += _billing_lines(billing)
     return "\n".join(lines)
+
+
+def _billing_lines(billing: dict) -> list[str]:
+    root, workers = billing["root"], billing["workers"]
+
+    def sums(label, entry):
+        return (f"    {label:<8}billed ${entry['billed']:>8.2f} = messages ${entry['messages']:>8.2f} + not in messages ${entry['unreported']:>7.2f}"
+                f"  ({entry['compactions']} compactions)")
+    lines = ["", f"Billed against stored messages (the difference is {UNREPORTED})",
+             sums("chat", root), sums("workers", workers)]
+
+    def table(title, groups):
+        out = ["", title, f"    {'':<28}{'sessions':>8}{'turns':>7}{'billed':>10}{'messages':>10}{'a turn':>8}{'cold':>6}"]
+        for name, entry in groups.items():
+            out.append(f"    {name[:27]:<28}{entry['sessions']:>8}{entry['turns']:>7}  ${entry['billed']:>7.2f}  ${entry['messages']:>7.2f}"
+                       f" ${entry['per_turn']:>6.3f}{entry['cold_turns']:>6}")
+        return out
+    if workers["sessions"]:
+        lines += table("Worker sessions by agent", workers["by_agent"]) + table("Worker sessions by model", workers["by_model"])
+        limits, long = workers["long_limits"], workers["long"]
+        lines += ["", f"Long worker sessions (over {limits['turns']} turns or ${limits['cost']:g}): {len(long)}, ${sum(row['billed'] for row in long):.2f} billed"
+                  + (f" of ${workers['billed']:.2f}" if workers["billed"] else "")]
+        lines += [f"    {row['id']}  {row['agent']:<12}{row['model'][:20]:<21}{row['turns']:>5} turns  ${row['billed']:>7.2f}"
+                  f"  {row['user_messages']} user messages  {row['compactions']} compactions" for row in long]
+    return lines
 
 
 def note_current_settings(log_path: Path = SETTINGS_LOG, config_path: Path = CONFIG_PATH) -> bool:
@@ -335,6 +433,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cap", type=int, default=250_000, help="context size to compact at in the what-if (default 250000)")
     parser.add_argument("--db", type=Path, default=sources.DB_PATH, help="OpenCode session database")
     parser.add_argument("--json", action="store_true", help="print the numbers as JSON")
+    parser.add_argument("--long-turns", type=int, default=LONG_TURNS, help="list worker sessions over this many turns (default 300)")
+    parser.add_argument("--long-cost", type=float, default=LONG_COST, help="list worker sessions billed over this many dollars (default 25)")
     parser.add_argument("--trend", action="store_true", help="cost per turn of root chats, split by the cost settings in force")
     parser.add_argument("--days", type=int, default=30, help="with --trend: chats updated in the last N days (default 30)")
     parser.add_argument("--settings-log", type=Path, default=SETTINGS_LOG, help="log of the cost settings over time")
@@ -350,7 +450,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     session, turns, workers = load_turns(args.session, args.db)
     result = analyse(turns, max(KEPT_AFTER_COMPACTION * 2, args.cap))
-    print(json.dumps({"session": session, "workers": workers, **result}) if args.json else report(session, result, workers))
+    billing = load_billing(session, args.db, args.long_turns, args.long_cost)
+    if args.json:
+        print(json.dumps({"session": session, "workers": {**workers, **billing["workers"], "cost": workers["cost"], "sessions": workers["sessions"]},
+                          "root": billing["root"], **result}))
+    else:
+        print(report(session, result, workers, billing))
     return 0
 
 

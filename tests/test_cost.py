@@ -233,5 +233,112 @@ class TrendTests(unittest.TestCase):
         self.assertEqual(period["turns"], 9)   # the old chat is inside this window
 
 
+class BillingTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.db = Path(temporary.name) / "opencode.db"
+        db = sqlite3.connect(self.db)
+        db.execute("CREATE TABLE session_v2 (id TEXT, parent_id TEXT, cost REAL, time_updated INTEGER, time_created INTEGER, agent TEXT, model TEXT)")
+        db.execute("CREATE TABLE session_message (session_id TEXT, type TEXT, seq INTEGER, data TEXT)")
+        opus, sonnet = '{"id":"claude-opus-5-5","providerID":"anthropic","variant":"high"}', '{"id":"claude-sonnet-5-5"}'
+        db.executemany("INSERT INTO session_v2 VALUES (?, ?, ?, ?, ?, ?, ?)", [
+            ("ses_root", None, 10.0, 5, 1, "build", opus),
+            ("ses_a", "ses_root", 30.0, 5, 2, "impl-claude", opus),     # long by cost: 3 turns, $30 billed, $27 in messages
+            ("ses_b", "ses_root", 2.0, 5, 3, "impl-openai", sonnet),
+            ("ses_c", "ses_root", 1.0, 5, 4, "impl-openai", sonnet),     # no messages: all of it unreported
+            ("ses_other", None, 99.0, 5, 5, "build", opus)])
+        self.seq = 0
+
+        def add(session, kind, **data):
+            self.seq += 1
+            db.execute("INSERT INTO session_message VALUES (?, ?, ?, ?)", (session, kind, self.seq, json.dumps(data)))
+
+        def assistant(session, dollars, write=0, when=1000):
+            add(session, "assistant", cost=dollars, time={"created": when}, tokens={"cache": {"write": write, "read": 0}})
+        add("ses_root", "user"), assistant("ses_root", 4.0), add("ses_root", "compaction"), assistant("ses_root", 3.0)
+        add("ses_a", "user"), add("ses_a", "user")
+        for n in range(3):
+            assistant("ses_a", 9.0, write=60_000 if n == 0 else 0, when=1000 + n)
+        add("ses_b", "user"), assistant("ses_b", 1.5), add("ses_b", "compaction"), add("ses_b", "compaction")
+        assistant("ses_other", 50.0)
+        db.commit()
+        db.close()
+
+    def test_a_chat_and_its_workers_are_billed_against_their_messages(self):
+        billing = cost.load_billing("ses_root", self.db)
+        root, workers = billing["root"], billing["workers"]
+        self.assertEqual((root["billed"], root["messages"], root["unreported"], root["compactions"], root["user_messages"]), (10.0, 7.0, 3.0, 1, 1))
+        self.assertEqual((workers["sessions"], workers["turns"], workers["billed"], workers["messages"], workers["unreported"], workers["compactions"], workers["cold_turns"]),
+                         (3, 4, 33.0, 28.5, 4.5, 2, 1))
+        # the other chat is not counted, and every session adds up to its parts
+        self.assertAlmostEqual(sum(row["unreported"] for row in workers["list"]), workers["unreported"])
+        self.assertEqual([row["id"] for row in workers["list"]], ["ses_a", "ses_b", "ses_c"])
+
+    def test_workers_are_split_by_agent_and_model(self):
+        workers = cost.load_billing("ses_root", self.db)["workers"]
+        self.assertEqual(list(workers["by_agent"]), ["impl-claude", "impl-openai"])   # dearest first
+        openai = workers["by_agent"]["impl-openai"]
+        self.assertEqual((openai["sessions"], openai["turns"], openai["billed"], openai["messages"], openai["compactions"]), (2, 1, 3.0, 1.5, 2))
+        self.assertAlmostEqual(openai["per_turn"], 3.0)
+        self.assertEqual(workers["by_agent"]["impl-claude"]["cold_turns"], 1)
+        self.assertEqual({name: entry["sessions"] for name, entry in workers["by_model"].items()},
+                         {"claude-opus-5-5": 1, "claude-sonnet-5-5": 2})
+
+    def test_long_sessions_are_those_over_the_turn_or_the_cost_limit(self):
+        long = cost.load_billing("ses_root", self.db)["workers"]
+        self.assertEqual([row["id"] for row in long["long"]], ["ses_a"])
+        self.assertEqual((long["long"][0]["user_messages"], long["long"][0]["turns"]), (2, 3))
+        self.assertEqual(long["long_limits"], {"turns": 300, "cost": 25.0})
+        by_turns = cost.load_billing("ses_root", self.db, long_turns=2, long_cost=1000)["workers"]["long"]
+        self.assertEqual([row["id"] for row in by_turns], ["ses_a"])
+        self.assertEqual(cost.load_billing("ses_root", self.db, long_turns=0, long_cost=1.5)["workers"]["long"][0]["id"], "ses_a")
+        self.assertEqual([row["id"] for row in cost.load_billing("ses_root", self.db, long_turns=0, long_cost=1.5)["workers"]["long"]], ["ses_a", "ses_b"])
+        self.assertEqual(cost.load_billing("ses_root", self.db, long_turns=5, long_cost=1000)["workers"]["long"], [])
+
+    def test_a_database_without_agent_and_model_columns_still_works(self):
+        plain = self.db.parent / "plain.db"
+        db = sqlite3.connect(plain)
+        db.execute("CREATE TABLE session_v2 (id TEXT, parent_id TEXT, cost REAL, time_updated INTEGER)")
+        db.execute("CREATE TABLE session_message (session_id TEXT, type TEXT, seq INTEGER, data TEXT)")
+        db.executemany("INSERT INTO session_v2 VALUES (?, ?, ?, ?)", [("r", None, 1.0, 1), ("w", "r", 2.0, 1)])
+        db.commit()
+        db.close()
+        workers = cost.load_billing("r", plain)["workers"]
+        self.assertEqual((workers["sessions"], workers["billed"], list(workers["by_agent"]), list(workers["by_model"])), (1, 2.0, ["unknown"], ["unknown"]))
+
+    def test_the_command_prints_and_the_json_keeps_its_old_keys(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cost.main(["--session", "ses_root", "--db", str(self.db), "--json", "--settings-log", str(self.db.parent / "log"),
+                                        "--config", str(self.db.parent / "none.json")]), 0)
+        data = json.loads(out.getvalue())
+        self.assertEqual((data["cost"], data["turns"], data["cold"]["turns"], data["cold"]["cost"]), (7.0, 2, 0, 0))
+        self.assertEqual((data["workers"]["cost"], data["workers"]["sessions"]), (33.0, 3))
+        self.assertEqual((data["workers"]["billed"], data["workers"]["unreported"], data["root"]["unreported"]), (33.0, 4.5, 3.0))
+        self.assertEqual(data["workers"]["long"][0]["id"], "ses_a")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cost.main(["--session", "ses_root", "--db", str(self.db), "--settings-log", str(self.db.parent / "log"),
+                       "--config", str(self.db.parent / "none.json"), "--long-cost", "1.5"])
+        text = out.getvalue()
+        for expected in ("not stored as messages", "Worker sessions by agent", "Worker sessions by model", "impl-claude", "claude-opus-5-5",
+                         "Long worker sessions (over 300 turns or $1.5): 2", "ses_a", "2 user messages"):
+            self.assertIn(expected, text)
+
+    def test_the_trend_spreads_the_unreported_part_over_a_chat_s_turns(self):
+        base = NOW - 10 * 24 * HOUR
+        path = self.db.parent / "trend.db"
+        make_db(path, [("ses_a", None, 5.0, NOW - HOUR)], [("ses_a", n, base + n * HOUR, "m", 60_000, 0) for n in range(4)])
+        recorded = 4 * (60_000 * 1.25 + 5000) * 5e-6
+        (period,) = cost.trend(path, [], now=NOW)
+        self.assertAlmostEqual(period["unreported"], 5.0 - recorded)
+        split = [{"time": base + 1.5 * HOUR, "settings": {"compaction_buffer": None, "cache_ttl": {}}}]
+        before, after = cost.trend(path, split, now=NOW)
+        self.assertAlmostEqual(before["unreported"] + after["unreported"], 5.0 - recorded)
+        self.assertAlmostEqual(before["unreported"], after["unreported"])
+        self.assertIn("not stored as messages", cost.trend_report([before]))
+
+
 if __name__ == "__main__":
     unittest.main()
