@@ -201,6 +201,116 @@ the sha256 of the message) and after the step is recorded (`phase: done`, with t
 - `loop start --settings-file F` (or `{"op": "start", "settings": {...}}`) is a trial run: the settings (checked like a saved loop) are pinned in the run, the saved loop is neither read
   nor changed, and `run.json` says `trial: true`. Every run, trial or not, records `settings_sha256` (the sha256 of the pinned settings as JSON).
 
+## Timed loops
+
+A loop with a `timing` block is run by the same controller, with the same check, judges, limits and record. The block adds time: when
+the loop works and when it stops. A loop with no `timing` block is not touched by any of this. Two kinds:
+
+- `interval`: wake the agent on a schedule (every N seconds), optionally only when a command you wrote says there is something to do.
+- `timebox`: work until the check passes or a wall-clock deadline comes, whichever is first.
+
+```json
+{"version": 1, "flow": "my-flow", "check": {"command": "sh check.sh", "timeout": 60},
+ "limits": {"attempts": 3, "cost": 2.0, "attempt_seconds": 900},
+ "timing": {"kind": "interval", "every": 600, "watch": "sh watch.sh", "for": 86400}}
+
+{"version": 1, "flow": "my-flow", "check": {"command": "sh check.sh", "timeout": 60},
+ "limits": {"cost": 5.0, "attempt_seconds": 1800},
+ "timing": {"kind": "timebox", "until": "2026-12-01T09:00:00+01:00"}}
+```
+
+Save one with `agentgraph loop set my-flow --check CMD --attempts N --cost D --timing-file timing.json` (`--no-timing` takes it off again).
+
+### Settings
+
+| key | for | meaning |
+|---|---|---|
+| `kind` | both | `interval` or `timebox` (required) |
+| `every` | interval | seconds between ticks, 10 to 86400 (required) |
+| `watch` | interval | a shell command the controller runs at each tick, in the work folder; no model call |
+| `watch_seconds` | interval | the watch command's time limit (default 60) |
+| `wake_codes`, `done_codes` | interval | exit codes that wake the agent (default `[10]`) and that finish the run (default `[11]`) |
+| `until` | both | the end: an ISO 8601 time **with an offset** (`2026-12-01T09:00:00+01:00`, or `...Z`), or Unix seconds; at most 365 days ahead of the save |
+| `for` | both | the end: seconds from the start of the run (at most 365 days) |
+| `ticks` | interval | the end: a number of ticks |
+| `stop_on_fail` | interval | a wake that fails ends the run (default false: the run goes on to the next tick) |
+| `min_attempt_seconds` | timebox | no attempt starts with less than this left, 1 to 86400 (default 60) |
+| `cache_seconds` | both | a session whose last turn is older than this is not reused (default 300) |
+| `notes` | both | the notes file: a path inside the work folder (default `.opencode/loop-notes/<run id>.md`) |
+
+Every number in the block must be finite (NaN and Infinity are refused). Both kinds need `limits.cost`, `limits.attempt_seconds` and an end (`until`, `for` or, for an interval loop, `ticks`; an interval loop may have several, the first that
+comes wins). Without them `loop set`, the page's save and `loop start` refuse the settings and say which is missing. `limits.attempt_seconds` is required
+because a turn may not run past the end: the turn that is running when the end comes is cut to the time left (to the end of the schedule for an interval loop with `until` or `for`,
+to the deadline for a timebox), and for an interval loop with `ticks` alone `attempt_seconds` is the only bound. No turn is started with less than one second left, and none is ever
+started with a timeout of 0 (which the executors read as "no limit"). `limits.attempts` is
+still required for every loop except a `timebox`, which may leave it out (the deadline and the spend limit stop it). Unknown keys are still refused.
+
+### What a tick does (interval)
+
+Tick 0 is the start; tick k is due at start + k * `every`. At a tick the controller runs `watch` itself:
+
+| watch ends with | what happens |
+|---|---|
+| exit 0 | an idle tick: nothing is sent to any agent, no session is made, nothing is spent |
+| a `wake_codes` code (10) | the agent is woken: the loop's own steps run (work, check, judges) until they pass or `limits.attempts` is used (**per wake**). The last lines of the watch output are in the first work message of the wake |
+| a `done_codes` code (11) | the run ends `passed`, `passed_by` says `watch` |
+| anything else, or the time limit | a watch error; three in a row end the run `check_error` |
+
+With no `watch`, every tick wakes the agent. A wake that does not pass is recorded and counted as failed; the run waits for the next tick
+(unless `stop_on_fail`). A wake that ends any other way (a broken check, an agent error, a limit, a cancel) ends the run. A tick that comes due
+while a wake is still running is **skipped** and counted, never queued. When `ticks`, `for` or `until` is reached the run ends `limit`, and the reason
+says how many ticks were idle, woken, skipped and failed. A timebox repeats the loop as usual; an attempt still running at the deadline is stopped
+(its time limit is the smaller of `attempt_seconds` and the time left) and the run ends `limit` with the reason `deadline`. While a turn or a check runs, the
+controller also compares the wall clock with the end (a monotonic timeout does not run while the machine sleeps) and stops it when the end has passed; a check is
+given its own time limit cut to the time left plus 10 seconds.
+
+### Notes and fresh sessions
+
+A session's prompt cache goes cold after a few minutes, so a long-idle session costs more to continue than a new one. If more than `cache_seconds`
+passed since the session's last turn, the next turn starts a **fresh** session. Its message names the notes file and tells the agent to read it first.
+Every work message of a timed run tells the agent to update the notes file before it ends its turn. The controller creates the file, with the goal and
+the check command, when it is missing; an existing file is kept.
+
+### Status
+
+`agentgraph loop status` (and `--json`, and the page's run list) shows for a timed run: the kind, the next tick time, the last tick's result, the idle,
+woken, skipped and failed counts, the spend in total and for today (`timing.spend_by_day` in the record), and the end. Between ticks the stored
+status is `running`, with the hint "waiting for the next tick at ...". The schedule is `run.json` `timing` (`anchor`, `next_k`, `next_at`, `counts`, the last
+50 ticks); every tick is also an event in `events.jsonl` (step `tick`), except that a long run of idle ticks is not an event each: the first idle tick after another result is
+one, then one for every 100 idle ticks in a row (`idle_in_a_row` says how many). The counts in `run.json` are exact.
+
+### Resume, the supervisor and the off switch
+
+- A resumed run goes on with its schedule. Ticks that came due while no controller was alive are counted as skipped, not replayed; the latest one
+  runs at once. A step of unknown fate still pauses the run as before.
+- `agentgraph loop supervise [--project P] [--every N]` looks at the project's timed runs every N seconds (default 30, at least 5) and resumes an **interval** run whose
+  controller died while it was waiting for a tick or running the watch command, at most 5 times per run. It leaves, and logs why (`.opencode/loops/supervisor.log`), a run that
+  needs a person (`waiting`, `paused`), one with a pause or cancel request, one that died inside a wake (a step may have run), a time box (it has no tick to go on from), and
+  a run it has resumed 5 times. One run that cannot be resumed does not stop the others. It ends when it has nothing left to watch: no interval run with a live controller or one it
+  just resumed. `loop start` of a timed interval loop starts it detached unless one is alive for the project (a lock file in `.opencode/loops`) or you give `--no-supervisor`; so does
+  `loop resume` of one. A time box starts none. It is one more process: it does **not** survive a reboot.
+- `agentgraph loop off [--project P]` writes a marker (`.opencode/loops/timed-off.json`) and cancels every unfinished timed run of the project. Starting or resuming a timed
+  loop is then refused until `agentgraph loop on`. Loops without `timing` are not affected. A run that is being made while `off` looks is not missed: the controller looks at
+  the marker again under the run's lock and cancels a queued run, a start looks again after it has written the run, and the supervisor never starts a queued run made before the time of the last `off`
+  (the marker keeps that time after `on`).
+- `limits.seconds` counts the time the controller is alive, waiting for ticks included; do not set it on an interval loop (use `for` or `until`).
+- The settings page's form does not edit the `timing` block, but it shows the schedule in one plain line, and every save from it says what the schedule is: the stored block
+  (a plain save), the block the settings had (an Undo, a kept trial), or `null` for none. The server **refuses** a save of a timed loop that has no `timing` key at all (400,
+  nothing written): it would have to guess between keeping the schedule and dropping it. An explicit `null` removes the schedule, an explicit block replaces it (and is validated, so a
+  block the rest of the settings no longer fit is refused). Change the timing with `agentgraph loop set FLOW --timing-file FILE`, or turn it off with `agentgraph loop set FLOW --no-timing`.
+- A timed run made before `limits.attempt_seconds` was required is not run again: `loop resume` (and a resumed or checked controller) refuses it with "start it again", the supervisor leaves it
+  and logs why, and `loop status` still shows it (with that advice instead of "resume").
+- The supervisor's count of resumes for a run starts again whenever a resumed controller completes a tick, so only five deaths **in a row** without progress make it give up; `loop status` then says
+  the supervisor gave up after 5 resumes and what to run. A run started with `--no-supervisor` keeps that choice: `loop resume` of it does not start one. A run started the usual way does.
+- `execute(check_only=True)` (what `loop resume` runs first) never writes, also while timed loops are off: the queued run is cancelled by the controller that is started, or by the supervisor.
+
+### Not covered
+
+- A reboot: nothing resumes runs or the supervisor afterwards; `agentgraph loop resume RUN` (or `supervise`) does.
+- Schedules that start at a set time (every day at 09:00, cron): ticks are N seconds after the start of the run. `until` and `for` only set the end.
+- One tick per run at a time: no parallel wakes, and a tick missed while a wake runs or no controller is alive is not made up.
+- A model turn is still not capped while it runs: the spend limit stops the **next** turn.
+
 ## The Desktop bridge
 
 `python3 -P -m agentgraph.loopapi [--project DIR] [--structure DIR]` answers one request per process: one JSON line on stdin (`{"op": "read"}`, `{"op": "read", "run": id}`,

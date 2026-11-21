@@ -3686,6 +3686,8 @@ var AGENTGRAPH_ASSETS = (function () {
       if (!total.none) settings.limits.seconds = total.value;
       if (!spend.none) settings.limits.cost = spend.value;
       settings.allow_asks = values.allow_asks === true;
+      // The form does not edit the schedule of a timed loop, but a save says what it is: the server refuses a save that leaves it out (it would have to guess).
+      if (entry.settings?.timing) settings.timing = entry.settings.timing;
       if (!lcSelf(entry)) { const team = lcBuildTeam(entry, values, !!command); if (team.error) return team; Object.assign(settings, team.extra); }
       return { settings };
     }
@@ -3757,6 +3759,9 @@ var AGENTGRAPH_ASSETS = (function () {
         const draft = lcDrafts.get(id); if (draft && isStale(error) && typeof error.rev === 'string') draft.rev = error.rev;
       }).then(() => { lcBusy.delete(id); if (alive) { lcRedraw(wanted); lcLoad(true); } });
     }
+    // Settings sent back to the server (an Undo, a kept trial) say their schedule out loud: the block they had, or null for none. A save with no `timing`
+    // key for a loop that is timed is refused, and an old version that was untimed must not take the schedule that is stored now.
+    const lcExplicit = settings => ({ ...settings, timing: settings.timing ?? null });
     function lcSave(entry) {
       const values = lcCurrent(entry), built = lcBuild(entry, values);
       if (built.error) { lcNotes.set(entry.flow, { kind: 'error', text: built.error }); lcRedraw('c:save'); return; }
@@ -3769,7 +3774,7 @@ var AGENTGRAPH_ASSETS = (function () {
         const now = reply.settings && typeof reply.settings === 'object' ? reply.settings : settings, back = reply.before && typeof reply.before === 'object' ? reply.before : null;
         lcApply(entry.flow, now, text(reply.rev));
         lcNotes.set(entry.flow, { kind: 'ok', text: said });
-        lcUndo.set(entry.flow, { what, request: back ? { op: 'save', flow: entry.flow, settings: back, rev: text(reply.rev) } : { op: 'remove', flow: entry.flow, rev: text(reply.rev) },
+        lcUndo.set(entry.flow, { what, request: back ? { op: 'save', flow: entry.flow, settings: lcExplicit(back), rev: text(reply.rev) } : { op: 'remove', flow: entry.flow, rev: text(reply.rev) },
           undone: back ? 'The settings are back as they were.' : 'The settings are removed again.' });
       }, wanted, runId);
     }
@@ -3780,7 +3785,7 @@ var AGENTGRAPH_ASSETS = (function () {
         const now = reply.settings && typeof reply.settings === 'object' ? reply.settings : entry.settings, back = reply.before && typeof reply.before === 'object' ? reply.before : null;
         lcApply(entry.flow, now, text(reply.rev));
         lcNotes.set(entry.flow, { kind: 'ok', text: 'Went back to that version.' });
-        if (back) lcUndo.set(entry.flow, { what: 'The loop went back to an earlier version.', request: { op: 'save', flow: entry.flow, settings: back, rev: text(reply.rev) }, undone: 'The settings are back as they were.' });
+        if (back) lcUndo.set(entry.flow, { what: 'The loop went back to an earlier version.', request: { op: 'save', flow: entry.flow, settings: lcExplicit(back), rev: text(reply.rev) }, undone: 'The settings are back as they were.' });
         else lcUndo.delete(entry.flow);
       }, 'c:restore:' + version);
     }
@@ -3797,7 +3802,7 @@ var AGENTGRAPH_ASSETS = (function () {
       lcWrite(entry.flow, { op: 'remove', flow: entry.flow, rev: text(lcCurrent(entry).rev) }, reply => {
         lcDrafts.delete(entry.flow); lcApply(entry.flow, null, '');
         lcNotes.set(entry.flow, { kind: 'ok', text: 'The saved settings are removed.' });
-        if (reply.before && typeof reply.before === 'object') lcUndo.set(entry.flow, { what: 'The loop settings were removed.', request: { op: 'save', flow: entry.flow, settings: reply.before, rev: '' }, undone: 'The settings are back.' });
+        if (reply.before && typeof reply.before === 'object') lcUndo.set(entry.flow, { what: 'The loop settings were removed.', request: { op: 'save', flow: entry.flow, settings: lcExplicit(reply.before), rev: '' }, undone: 'The settings are back.' });
         else lcUndo.delete(entry.flow);
       }, 'c:remove');
     }
@@ -3893,6 +3898,11 @@ var AGENTGRAPH_ASSETS = (function () {
       group('The check', [lcFieldRow(entry, 'When it fails', 'steps.check.fail', 'select', 'Used only when a check command is saved.', routes.filter(([value]) => value !== 'human'))]);
       return more;
     }
+    // A schedule in one plain line: the kind, how often, when it ends.
+    function lcTimingText(timing) {
+      const ends = [timing.until ? 'at ' + text(timing.until) : '', lcKnown(timing.for) ? 'after ' + Number(timing.for) + '\u00a0s' : '', lcKnown(timing.ticks) ? 'after ' + plural(Number(timing.ticks), 'tick', 'ticks') : ''].filter(Boolean);
+      return 'Timed loop: ' + (timing.kind === 'interval' ? 'wakes the agent every ' + Number(timing.every) + '\u00a0s' : 'works until the check passes or the deadline') + (ends.length ? ', ends ' + ends.join(' or ') : '') + '.';
+    }
     function lcForm(item, entry) {
       const team = !lcSelf(entry), form = el('div', 'ag-loop-form'); form.dataset.loopForm = entry.flow;
       if (team) form.append(lcPathList(entry), el('p', 'ag-loop-hint', 'Then back to ' + lcTeamOf(entry.path).worker + '.'));
@@ -3900,6 +3910,7 @@ var AGENTGRAPH_ASSETS = (function () {
         lcFieldRow(entry, 'Attempts (1 to 50, required)', 'attempts', 'number'), lcFieldRow(entry, 'Seconds per attempt (optional)', 'attempt_seconds', 'number'),
         lcFieldRow(entry, 'Seconds in total (optional)', 'seconds', 'number'), lcFieldRow(entry, 'No new attempt once spend reaches… (dollars, optional)', 'cost', 'number', 'Checked before each attempt; an attempt already begun can pass it.'),
         lcFieldRow(entry, 'Session', 'session', 'session'));
+      if (entry.settings?.timing) { const line = el('p', 'ag-loop-hint', lcTimingText(entry.settings.timing) + ' The form does not change it: use agentgraph loop set.'); line.dataset.loopTiming = ''; form.append(line); }
       if (team) {
         form.append(lcFieldRow(entry, 'Files the worker must write (optional, one path per line)', 'artifacts', 'textarea', 'A turn that leaves one of them out is sent back to the worker.'));
         const approval = el('label', 'ag-check ag-loop-asks'), tick = el('input'); tick.type = 'checkbox'; tick.checked = lcCurrent(entry).approval === true; tick.dataset.loopField = 'approval';
@@ -3940,11 +3951,12 @@ var AGENTGRAPH_ASSETS = (function () {
         if (settings.approval === 'before_pass') line('Approval', 'asked before it passes');
         if (Array.isArray(settings.artifacts) && settings.artifacts.length) line('Files', settings.artifacts.slice(0, 20).map(text).join(', '));
       }
-      const bits = [plural(Number(limits.attempts) || 0, 'attempt', 'attempts')];
+      const bits = [lcKnown(limits.attempts) ? plural(Number(limits.attempts), 'attempt', 'attempts') : 'no attempt limit'];
       if (lcKnown(limits.attempt_seconds)) bits.push(Number(limits.attempt_seconds) + '\u00a0s per attempt');
       if (lcKnown(limits.seconds)) bits.push(Number(limits.seconds) + '\u00a0s in total');
       if (lcKnown(limits.cost)) bits.push('no new attempt once spend reaches ' + cost(limits.cost));
       line('Limits', bits.join(' · '));
+      if (settings.timing) line('Timing', lcTimingText(settings.timing));
       line('Session', (settings.session === 'fresh' ? 'a fresh one for each attempt' : 'one for every attempt') + ' · actions that would ask: ' + (settings.allow_asks ? 'allowed' : 'refused'));
       if (full.definition?.goal) line('Goal', text(full.definition.goal).trim());
       if (full.definition?.workdir) line('Folder', text(full.definition.workdir));
@@ -4005,6 +4017,7 @@ var AGENTGRAPH_ASSETS = (function () {
     function lcPassedBy(by, judges) {
       const parts = text(by).split('+').filter(Boolean), who = parts.filter(part => part !== 'approval').map(part => part === 'check' ? 'the check' : part === 'judges' ? (judges > 1 ? 'the judges' : 'the judge') : part);
       if (!parts.length) return '';
+      if (parts.length === 1 && parts[0] === 'watch') return 'Passed: the watch command exited with its done code.';
       return 'Passed' + (who.length ? ' by ' + who.join(' and ') : '') + (parts.includes('approval') ? ' with your approval' : '') + '.';
     }
     function lcStepRows(item, attempt, given, ctx) {
@@ -4215,7 +4228,7 @@ var AGENTGRAPH_ASSETS = (function () {
         const fulls = lcCompare.runs.map(id => lcRuns.get(id)); if (fulls.some(one => !one)) return null;
         const listed = lcCompare.runs.map(id => (lc.data?.runs || []).find(one => one.run === id) || {}), last = fulls.map(one => lcFacts(one, (Array.isArray(one.run?.attempts) ? one.run.attempts : []).length)), [A, B] = last;
         titles = listed.map(one => (one.trial ? 'Trial, ' : '') + 'started ' + lcAgo(one.created));
-        const status = fulls.map((one, i) => lcWord(one.run?.status || listed[i].status)), used = fulls.map((one, i) => (Array.isArray(one.run?.attempts) ? one.run.attempts.length : 0) + ' of ' + (Number(one.run?.limits?.attempts) || Number(listed[i].limit) || '?'));
+        const status = fulls.map((one, i) => lcWord(one.run?.status || listed[i].status)), used = fulls.map((one, i) => (Array.isArray(one.run?.attempts) ? one.run.attempts.length : 0) + (Number(one.run?.limits?.attempts) || Number(listed[i].limit) ? ' of ' + (Number(one.run?.limits?.attempts) || Number(listed[i].limit)) : ''));
         const total = key => fulls.map((one, i) => key === 'time' ? lcTime(one.run?.totals?.seconds ?? listed[i].seconds) : lcCost(one.run?.totals?.cost ?? listed[i].cost));
         rows = [['Status', status[0], status[1]], ['Attempts used', used[0], used[1]], ['Work', A.work, B.work], ['Check exit', A.exit, B.exit], ['Check output', A.tail, B.tail], ['Verdicts', A.verdicts, B.verdicts], ['Time', ...total('time')], ['Cost', ...total('cost')]];
       } else return null;
@@ -4336,7 +4349,7 @@ var AGENTGRAPH_ASSETS = (function () {
         note.append(el('p', '', 'This was a trial: it used the form\'s values without saving them. The saved loop on disk is unchanged.'));
         const buttons = el('span', 'ag-form-buttons'), entry = lcEntry(run.flow);
         if (entry && full.definition?.settings) {
-          const keep = () => { lcKeepAsk = ''; lcSaveAs(entry, full.definition.settings, text(lcCurrent(entry).rev), 'Kept: these settings are now the saved loop.', 'The loop settings were saved from a trial.', 'c:keep:' + id, id); };
+          const keep = () => { lcKeepAsk = ''; lcSaveAs(entry, lcExplicit(full.definition.settings), text(lcCurrent(entry).rev), 'Kept: these settings are now the saved loop.', 'The loop settings were saved from a trial.', 'c:keep:' + id, id); };
           if (lcKeepAsk === id && lcDirty(entry, full.definition.settings)) {
             // v7 r3: keeping replaces the form's values: asked in place when the form holds unsaved edits.
             const dialog = el('div', 'ag-loop-ask'); dialog.dataset.loopKeepAsk = ''; dialog.setAttribute('role', 'group'); dialog.setAttribute('aria-label', 'Confirm keeping this version');
@@ -4374,9 +4387,9 @@ var AGENTGRAPH_ASSETS = (function () {
       const head = el('button', 'ag-loop-run-head'); head.type = 'button'; head.setAttribute('aria-expanded', String(open)); head.dataset.loopControl = 'open:' + run.run;
       const status = el('span', 'ag-loop-status', lcWord(run.status)); status.dataset.status = text(run.status); status.title = LC_GLOSS[run.status] || '';
       if (run.status === 'passed') status.dataset.pass = 'true';
-      const meta = el('span', 'ag-loop-meta'), seen = Number(run.attempts) || 0, limit = Number(run.limit) || 0;
+      const meta = el('span', 'ag-loop-meta'), seen = Number(run.attempts) || 0, limit = Number(run.limit) || 0;  // no limit (a timebox with none): just the count
       const age = ago(run.created);
-      meta.append(el('span', 'ag-loop-attempts', seen + ' of ' + limit + (limit === 1 ? ' attempt' : ' attempts')), el('span', 'ag-loop-time', lcTime(run.seconds)), el('span', 'ag-loop-cost', lcCost(run.cost)), el('span', 'ag-loop-age', age === 'now' ? 'just now' : age + ' ago'));
+      meta.append(el('span', 'ag-loop-attempts', limit ? seen + ' of ' + limit + (limit === 1 ? ' attempt' : ' attempts') : plural(seen, 'attempt', 'attempts')), el('span', 'ag-loop-time', lcTime(run.seconds)), el('span', 'ag-loop-cost', lcCost(run.cost)), el('span', 'ag-loop-age', age === 'now' ? 'just now' : age + ' ago'));
       head.append(status);
       if (run.trial === true) { const mark = el('span', 'ag-loop-trial', 'Trial'); mark.dataset.loopTrial = ''; head.append(mark); }
       head.append(meta);

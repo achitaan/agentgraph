@@ -16,7 +16,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import looprun
+from . import looprun, looptime
 from .snapshot_json import STRUCTURE_DIR, load_structure
 
 OUTPUT_CHARS = 20_000
@@ -181,7 +181,7 @@ def _summary(project, run_id: str) -> dict | None:
             "goal": (state.get("goal") or "")[:GOAL_SHOWN], "check": command,
             "last_check": {"outcome": checks[-1].get("outcome"), "exit": checks[-1].get("exit")} if checks else None,
             "passed_by": state.get("passed_by"), "waiting": state.get("waiting"), "answered": looprun.answer_pending(folder, state), "trial": bool(state.get("trial")),
-            "settings_sha256": state.get("settings_sha256")}
+            "settings_sha256": state.get("settings_sha256"), **({"timing": looptime.view(state)} if state.get("timing") else {})}
 
 
 def listing(structure_dir, project, scratch) -> dict:
@@ -272,10 +272,15 @@ def save(structure_dir, flow, settings, rev) -> dict:
             pass  # saved as it is; a run of it is `invalid` until a check or a judge exists
     except looprun.LoopError as exc:
         raise ApiError(400, str(exc)) from None
-    data = (json.dumps(clean, indent=2, sort_keys=True) + "\n").encode("utf-8")
     with looprun._Locked(target.parent):
         old = _read(structure_dir, flow)
         _check_rev(rev, rev_of(old))
+        kept = (_document(old) or {}).get("timing")
+        if "timing" not in settings and kept is not None:
+            # every save from the page says what its schedule is (the block, or null for none): leaving it out of a loop that is timed would be a guess either way
+            raise ApiError(400, f"this loop is timed and the settings you sent do not say what to do with its schedule, so nothing was saved: send `timing` (null removes the schedule), "
+                                f"or change it with `agentgraph loop set {flow} --timing-file FILE` (`--no-timing` makes it an ordinary loop)")
+        data = (json.dumps(clean, indent=2, sort_keys=True) + "\n").encode("utf-8")
         before = _settings_of(structure_dir, flow)[0] if old is not None else None
         looprun._keep(target)
         looprun._write_atomic(target, data)

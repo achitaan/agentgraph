@@ -9571,6 +9571,7 @@
         entry('review-loop', ['impl-openai', 'verifier', 'impl-openai'], { settings: JSON.parse(JSON.stringify(LOOP_TEAM_SAVED)), rev: 'rev-t1' })] };
       if (options.versions) { state.loops[0].versions = JSON.parse(JSON.stringify(options.versions)); state.loops[3].versions = JSON.parse(JSON.stringify(options.versions)); }
       if (options.problem) state.loops[1].problem = options.problem;
+      if (options.timing) state.loops[0].settings.timing = JSON.parse(JSON.stringify(options.timing));
       if (options.noCheck) delete state.loops[0].settings.check;
       const details = new Map(), order = [], lag = new Map();
       const add = detail => { details.set(detail.run.run, detail); order.push(detail.run.run); };
@@ -9611,6 +9612,7 @@
           const before = found.settings ? JSON.parse(JSON.stringify(found.settings)) : null;
           if (request.op === 'remove') { if (!before) fail('nothing is saved for ' + request.flow); found.settings = null; found.rev = ''; return { ok: true, before }; }
           found.settings = JSON.parse(JSON.stringify({ version: 1, flow: request.flow, ...request.settings })); found.rev = 'rev-' + (++state.revs);
+          if (found.settings.timing === null) delete found.settings.timing;  // the server: an explicit null takes the schedule off
           return { ok: true, settings: JSON.parse(JSON.stringify(found.settings)), rev: found.rev, before };
         }
         if (request.op === 'start') {
@@ -9707,8 +9709,55 @@
         assert(sameJson(post, { op: 'save', flow: 'fix-loop', settings: want, rev: 'rev-1' }), 'POST ' + JSON.stringify(post));
         await loopClick(root, 'undo');
         const back = fakes.calls.filter(call => call.op === 'save').at(-1);
-        assert(sameJson(back, { op: 'save', flow: 'fix-loop', settings: LOOP_SAVED, rev: 'rev-2' }), 'Undo posts: ' + JSON.stringify(back));
+        assert(sameJson(back, { op: 'save', flow: 'fix-loop', settings: { ...LOOP_SAVED, timing: null }, rev: 'rev-2' }), 'Undo posts: ' + JSON.stringify(back));
         assert(sameJson(fakes.state.loops[0].settings, LOOP_SAVED) && loopField(root, 'attempts').value === '4' && loopField(root, 'cost').value === '1.5', 'the form does not show what Undo put back');
+      });
+    });
+
+    // M1 of round 3: a save from the page always says what the schedule is (the block, or null for none): the server refuses a save that leaves it out.
+    const LOOP_TIMING = { kind: 'interval', every: 600, watch: 'sh watch.sh', ticks: 8 };
+    await test('v9 timed loops: the form shows the schedule read-only in one plain line, and a save, an Undo and a restored version each send `timing` out loud (the stored block, or null for an untimed version)', async () => {
+      await loopMount({ timing: LOOP_TIMING }, async (root, fakes) => {
+        const line = loopSection(root).querySelector('[data-loop-timing]');
+        assert(line && /Timed loop: wakes the agent every 600.s, ends after 8 ticks\./.test(line.textContent) && /agentgraph loop set/.test(line.textContent) && !line.querySelector('input, button'), 'timing line: ' + line?.textContent);
+        typeIn(loopField(root, 'attempts'), '6'); await loopClick(root, 'save');
+        const post = fakes.calls.find(call => call.op === 'save');
+        assert(post && sameJson(post.settings.timing, LOOP_TIMING), 'a save of a timed loop did not carry its schedule: ' + JSON.stringify(post));
+        await loopClick(root, 'undo');
+        const back = fakes.calls.filter(call => call.op === 'save').at(-1);
+        assert(sameJson(back.settings.timing, LOOP_TIMING), 'Undo of a save over a timed loop lost the schedule: ' + JSON.stringify(back));
+      });
+      // The loop is untimed, a restored version is timed: Undo must put back an untimed loop (null), not leave the key out.
+      await loopMount({ versions: [{ version: '20261121T060000-000001', time: Date.now() / 1000 - 3000, sha256: 'aa11bb22cc33dd44' }], restored: { ...LOOP_SAVED, limits: { attempts: 2, attempt_seconds: 60, cost: 1 }, timing: LOOP_TIMING } }, async (root, fakes) => {
+        assert(!loopSection(root).querySelector('[data-loop-timing]'), 'an untimed loop shows a schedule line');
+        await loopClick(root, 'restore:20261121T060000-000001');
+        assert(loopSection(root).querySelector('[data-loop-timing]'), 'the restored loop does not show its schedule');
+        await loopClick(root, 'undo');
+        const back = fakes.calls.filter(call => call.op === 'save').at(-1);
+        assert(back && back.settings.timing === null && 'timing' in back.settings, 'Undo of a restore did not send timing: null: ' + JSON.stringify(back));
+        assert(!fakes.state.loops[0].settings.timing && !loopSection(root).querySelector('[data-loop-timing]'), 'the loop is timed after the Undo');
+      });
+    });
+
+    await test('v9 timed loops: "Keep this version" of an untimed trial saves the loop untimed (timing: null), not with the schedule that is stored now', async () => {
+      const extra = now => { const detail = loopDetail('20261121-070000-cccc', 'fix-loop', 'passed', { created: now - 50, attempts: loopTwoAttempts() }); detail.run.trial = true; detail.run.settings_sha256 = 'trialcccc'; detail.definition.settings = { ...LOOP_SAVED, flow: 'fix-loop' }; return [detail]; };
+      await loopMount({ timing: LOOP_TIMING, extra }, async (root, fakes) => {
+        await loopOpen(root, '20261121-070000-cccc'); await loopClick(root, 'keep:20261121-070000-cccc');
+        const post = fakes.calls.filter(call => call.op === 'save').at(-1);
+        assert(post && post.settings.timing === null, 'keep of an untimed trial: ' + JSON.stringify(post));
+        assert(!fakes.state.loops[0].settings.timing, 'the kept loop is timed');
+      });
+    });
+
+    await test('v9 timed loops: a time box with no attempt limit never reads "N of 0 attempts", and a run that ended on a watch command says so in plain words', async () => {
+      const extra = now => { const detail = loopDetail('20261121-071000-dddd', 'fix-loop', 'passed', { created: now - 40, limit: 0, attempts: loopTwoAttempts().slice(0, 1), reason: 'the watch command exited 11 at tick 3: finished' }); detail.run.passed_by = 'watch'; return [detail]; };
+      await loopMount({ extra }, async root => {
+        const row = loopRow(root, '20261121-071000-dddd');
+        assert(row && !/of 0/.test(row.textContent) && /1 attempt\b/.test(row.querySelector('.ag-loop-attempts')?.textContent || ''), 'run row: ' + row?.textContent.slice(0, 200));
+        await loopOpen(root, '20261121-071000-dddd');
+        const body = loopRow(root, '20261121-071000-dddd').querySelector('.ag-loop-body');
+        assert(/the watch command exited with its done code/i.test(body.querySelector('[data-loop-passedby]')?.textContent || '') && !/passed by watch/i.test(body.textContent), 'passed by: ' + body.textContent.slice(-300));
+        assert(!/of 0\b|\b0 attempts/.test(body.textContent), 'a zero attempt limit in the body: ' + body.textContent.slice(0, 300));
       });
     });
 
@@ -9759,7 +9808,7 @@
         assert(loopSection(root).querySelector('[data-loop-line="ok"]') && loopField(root, 'attempts').value === '', 'the form still shows removed settings');
         await loopClick(root, 'undo');
         const back = fakes.calls.filter(call => call.op === 'save').at(-1);
-        assert(sameJson(back, { op: 'save', flow: 'fix-loop', settings: LOOP_SAVED, rev: '' }) && loopField(root, 'attempts').value === '4', 'Undo of a remove: ' + JSON.stringify(back));
+        assert(sameJson(back, { op: 'save', flow: 'fix-loop', settings: { ...LOOP_SAVED, timing: null }, rev: '' }) && loopField(root, 'attempts').value === '4', 'Undo of a remove: ' + JSON.stringify(back));
       });
     });
 
@@ -10327,7 +10376,7 @@
         assert(tfield(root, 'attempts').value === '2', 'the form does not show the restored settings');
         const undo = tsec(root).querySelector('[data-loop-control="undo"]'); assert(undo, 'no Undo after a restore');
         await tclick(root, 'undo'); const saves = tposts(fakes, 'save');
-        assert(saves.length === 1 && canon(saves[0].settings) === canon(LOOP_TEAM_SAVED) && saves[0].rev === 'rev-2', 'undo of a restore ' + canon(saves));
+        assert(saves.length === 1 && canon(saves[0].settings) === canon({ ...LOOP_TEAM_SAVED, timing: null }) && saves[0].rev === 'rev-2', 'undo of a restore ' + canon(saves));
         assert(tfield(root, 'attempts').value === '4', 'the form is not back');
       });
       await tmount({ versions: TEAM_VERSIONS() }, async root => {

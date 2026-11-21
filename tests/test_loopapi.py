@@ -706,3 +706,53 @@ class QueuedNeverStartedTests(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TimedSaveTests(Base):
+    """The page says what a timed loop's schedule is on every save: leaving `timing` out is refused (it would be a guess), null removes it."""
+    TIMED = {"check": {"command": "true"}, "limits": {"attempts": 3, "cost": 1, "attempt_seconds": 100}, "timing": {"kind": "interval", "every": 30, "ticks": 4}}
+    FORM = {"check": {"command": "false"}, "limits": {"attempts": 2, "cost": 1, "attempt_seconds": 100}}  # no timing key
+
+    def stored(self):
+        return json.loads(looprun.settings_path(self.structure, "self").read_text())
+
+    def test_a_save_with_no_timing_key_for_a_timed_loop_is_refused_and_writes_nothing(self):
+        first = loopapi.save(self.structure, "self", self.TIMED, "")
+        before = looprun.settings_path(self.structure, "self").read_bytes()
+        for form in (self.FORM, {**self.FORM, "limits": {"attempts": 2, "cost": 1}}):
+            with self.subTest(form=form), self.assertRaises(loopapi.ApiError) as caught:
+                loopapi.save(self.structure, "self", form, first["rev"])
+            self.assertEqual(caught.exception.status, 400)
+            self.assertIn("timed", caught.exception.message)
+            self.assertIn("agentgraph loop set self --timing-file", caught.exception.message)
+            self.assertIn("--no-timing", caught.exception.message)
+            self.assertEqual(looprun.settings_path(self.structure, "self").read_bytes(), before)
+
+    def test_an_explicit_null_removes_the_schedule_and_a_block_replaces_it(self):
+        first = loopapi.save(self.structure, "self", self.TIMED, "")
+        second = loopapi.save(self.structure, "self", {**self.FORM, "timing": None}, first["rev"])
+        self.assertNotIn("timing", self.stored())
+        self.assertNotIn("timing", second["settings"])
+        self.assertEqual(second["before"]["timing"]["every"], 30)
+        third = loopapi.save(self.structure, "self", {**self.TIMED, "timing": {"kind": "interval", "every": 60, "ticks": 2}}, second["rev"])
+        self.assertEqual(self.stored()["timing"]["every"], 60)
+        with self.assertRaises(loopapi.ApiError):  # an explicit block is validated: this one needs limits.attempt_seconds
+            loopapi.save(self.structure, "self", {**self.TIMED, "limits": {"attempts": 2, "cost": 1}}, third["rev"])
+
+    def test_undo_of_a_restore_that_made_a_loop_timed_leaves_it_untimed(self):
+        """The page's Undo sends `before` with the schedule it had: for an untimed loop that is null, not nothing."""
+        plain = loopapi.save(self.structure, "self", {"check": {"command": "false"}, "limits": {"attempts": 2, "cost": 1}}, "")
+        timed = loopapi.save(self.structure, "self", self.TIMED, plain["rev"])
+        undo = {**timed["before"], "timing": timed["before"].get("timing")}  # what the page builds
+        loopapi.save(self.structure, "self", undo, timed["rev"])
+        self.assertNotIn("timing", self.stored())
+
+    def test_a_save_that_sends_its_own_timing_or_a_loop_with_none_is_unchanged(self):
+        first = loopapi.save(self.structure, "self", self.TIMED, "")
+        changed = {**self.TIMED, "timing": {"kind": "interval", "every": 60, "ticks": 2}}
+        second = loopapi.save(self.structure, "self", changed, first["rev"])
+        self.assertEqual(self.stored()["timing"]["every"], 60)
+        plain = loopapi.save(self.structure, "pair", {"limits": {"attempts": 2}}, "")
+        self.assertNotIn("timing", plain["settings"])
+        self.assertNotIn("timing", json.loads(looprun.settings_path(self.structure, "pair").read_text()))
+        self.assertTrue(second["rev"])

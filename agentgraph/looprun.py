@@ -80,7 +80,7 @@ import time
 from contextlib import closing, contextmanager
 from pathlib import Path
 
-from . import bench, paths, sidechat, snapshot_json, sources
+from . import bench, looptime, paths, sidechat, snapshot_json, sources
 from . import cost as costmod
 
 VERSION = 1
@@ -141,7 +141,7 @@ def validate(settings, path) -> dict:
     """The settings with their defaults filled in, or LoopError naming `path` and the problem. Unknown keys are refused."""
     if not isinstance(settings, dict):
         raise LoopError(f"{path}: the settings must be a JSON object")
-    _only(settings, {"version", "flow", "goal", "check", "session", "limits", "allow_asks", "steps", "artifacts", "approval"}, "the settings", path)
+    _only(settings, {"version", "flow", "goal", "check", "session", "limits", "allow_asks", "steps", "artifacts", "approval", "timing"}, "the settings", path)
     if settings.get("version") != VERSION:
         raise LoopError(f"{path}: version must be {VERSION}")
     flow = settings.get("flow")
@@ -174,13 +174,20 @@ def validate(settings, path) -> dict:
         raise LoopError(f"{path}: session must be 'reuse' or 'fresh'")
     out["session"] = session
     limits = settings.get("limits")
+    timing = settings.get("timing")
+    timebox = isinstance(timing, dict) and timing.get("kind") == "timebox"  # a time-boxed loop may leave the attempt limit out: the deadline and the spend limit stop it
+    if limits is None and timebox:
+        limits = {}
     if not isinstance(limits, dict):
         raise LoopError(f"{path}: limits.attempts is required (1 to 50)")
     _only(limits, {"attempts", "attempt_seconds", "seconds", "cost"}, "limits", path)
     attempts = limits.get("attempts")
-    if not isinstance(attempts, int) or isinstance(attempts, bool) or not 1 <= attempts <= 50:
+    if attempts is None and timebox:
+        out["limits"] = {}
+    elif not isinstance(attempts, int) or isinstance(attempts, bool) or not 1 <= attempts <= 50:
         raise LoopError(f"{path}: limits.attempts is required and must be a whole number from 1 to 50")
-    out["limits"] = {"attempts": attempts}
+    else:
+        out["limits"] = {"attempts": attempts}
     for key, top in (("attempt_seconds", 86400), ("seconds", 604800), ("cost", 10000)):
         if key in limits and limits[key] is not None:
             if not _number(limits[key]) or not 0 < limits[key] <= top:
@@ -203,6 +210,11 @@ def validate(settings, path) -> dict:
         raise LoopError(f"{path}: approval must be 'before_pass' or 'none'")
     if approval != "none":
         out["approval"] = approval
+    if timing is not None:
+        try:
+            out["timing"] = looptime.validate(timing, out["limits"])
+        except looptime.TimingError as exc:
+            raise LoopError(f"{path}: {exc}") from None
     return out
 
 
@@ -613,12 +625,13 @@ def tail_of(output: str) -> str:
 def build_message(goal: str, command: str, n: int, limit: int, previous: dict | None, last_agent: str | None, attempt_seconds=None) -> str:
     """What the agent is sent: the goal in full every time (it must survive compaction), and after a failed check its exit code
     and the end of its output. Nothing the agent said earlier is repeated or trusted."""
+    of = f" of {limit}" if limit else ""
     if previous is None:
-        return (f"Loop run, attempt {n} of {limit}. A controller program, not you, decides when the work is done.\n\n"
+        return (f"Loop run, attempt {n}{of}. A controller program, not you, decides when the work is done.\n\n"
                 f"# Goal\n\n{goal.strip()}\n\n# How it is checked\n\nAfter your turn the controller runs this command in the work folder:\n\n"
                 f"    {command}\n\nThe work counts as done only when it exits 0. Saying that you are done changes nothing.\n\n"
                 "Make one attempt and return. The controller runs the check and comes back with the result.\n")
-    lines = [f"Loop run, attempt {n} of {limit}. A controller program, not you, decides when the work is done."]
+    lines = [f"Loop run, attempt {n}{of}. A controller program, not you, decides when the work is done."]
     if last_agent == "stalled":
         seconds = f" after {attempt_seconds:g} seconds" if _number(attempt_seconds) else ""
         lines.append(f"Your last turn was stopped{seconds} (the time limit for one attempt); anything it was still running was killed.")
@@ -660,7 +673,7 @@ def build_work_message(goal: str, n: int, limit: int, command, judges, artifacts
                        attempt_seconds=None, taking_over=None) -> str:
     """What the worker is sent in a loop between agents: the goal in full every time, how the work is judged, and after a failure who
     failed it and the evidence. What came back from a judge or a person is marked as data, not as instructions."""
-    lines = [f"Loop run, attempt {n} of {limit}. A controller program, not you, decides when the work is done."]
+    lines = [f"Loop run, attempt {n}{f' of {limit}' if limit else ''}. A controller program, not you, decides when the work is done."]
     if taking_over:
         lines.append(f"This attempt is yours because {taking_over} did not get the work through; earlier attempts were made by {taking_over}.")
     if last_agent == "stalled":
@@ -693,7 +706,7 @@ def build_work_message(goal: str, n: int, limit: int, command, judges, artifacts
 def build_judge_message(goal: str, n: int, limit: int, agent: str, command, check: dict | None, artifacts, workdir, report, judges, note=None) -> str:
     """What a judge is sent: the goal, the check result, the artifact copies' paths, the work folder, and the verdict-line rule. Not what
     the worker said, unless the judge's handoff is `report` (then labelled as a claim)."""
-    lines = [f"Loop run, attempt {n} of {limit}. A controller program, not you, decides when the work is done. You are the judge `{agent}`."]
+    lines = [f"Loop run, attempt {n}{f' of {limit}' if limit else ''}. A controller program, not you, decides when the work is done. You are the judge `{agent}`."]
     if note:
         lines.append(note)
     lines += ["", f"# Goal\n\n{goal.strip()}", "", "# Your job\n\nYou did not do this work; judge it. Another agent worked in the folder below; look at the files themselves "
@@ -718,7 +731,7 @@ def admit(used: int, limits: dict, elapsed: float, cost, cancelled: bool, passin
     limit; a turn whose cost is unknown (`unknown` is the reason) ends admission when a cost limit is set, and is not counted otherwise."""
     if cancelled:
         return "cancelled", "cancel requested"
-    if used >= limits["attempts"]:
+    if limits.get("attempts") is not None and used >= limits["attempts"]:
         return "failed", f"attempt limit ({limits['attempts']}) reached without {passing}"
     if limits.get("seconds") is not None and elapsed >= limits["seconds"]:
         return "limit", f"seconds limit ({limits['seconds']:g}) reached after {elapsed:.0f} seconds"
@@ -1265,11 +1278,18 @@ def hint(folder, state: dict) -> str:
     if shown == "interrupted" and state.get("status") == "queued":
         return f"  its controller never started (nothing was sent to an agent): agentgraph loop resume {run}  starts it  (or: agentgraph loop cancel {run})"
     if shown == "interrupted":
+        if looptime.lacks_turn_limit({"timing": state.get("timing"), "limits": state.get("limits")}):
+            return f"  made before turn limits were required (no limits.attempt_seconds), so it cannot be resumed: start the loop again  (or: agentgraph loop cancel {run})"
+        if isinstance(state.get("timing"), dict) and looptime.restarts(Path(folder)) >= looptime.MAX_RESTARTS:
+            return (f"  the supervisor gave up on this run after {looptime.MAX_RESTARTS} resumes that each ended with the controller dying again\n"
+                    f"  agentgraph loop resume {run}  to go on yourself, and look at run.log in the run folder  (or: agentgraph loop cancel {run})")
         return f"  no controller is running this run: agentgraph loop resume {run}  (or: agentgraph loop cancel {run})"
     if shown == "paused":
         return f"  paused: {state.get('reason') or 'on request'}\n  agentgraph loop resume {run} [--redo | --accept]  (or: agentgraph loop cancel {run})"
     if shown == "waiting" and not _held(Path(folder)):
         return f"  no controller is running this run: answer it, then agentgraph loop resume {run}  (or: agentgraph loop cancel {run})"
+    if shown == "running":
+        return looptime.waiting_hint(state)
     return ""
 
 
@@ -1354,7 +1374,7 @@ class Controller:
     """Walks the compiled steps of one run. Decides from memory; writes run.json after every transition. A step starts in
     `_start_step` (limits checked there for every agent turn) and its result is recorded in `_record` and routed in `run`."""
 
-    def __init__(self, folder: Path, definition: dict, state: dict, executor, env: dict):
+    def __init__(self, folder: Path, definition: dict, state: dict, executor, env: dict, clock=None):
         self.folder, self.definition, self.state, self.executor, self.env = folder, definition, state, executor, env
         self.order = definition["steps"]
         self.steps = {s["id"]: s for s in self.order}
@@ -1363,7 +1383,14 @@ class Controller:
         self.judges = [s for s in self.order if s.get("role") == "judge"]
         self.own = snapshot_json.is_self_loop(definition.get("path") or [])
         self.limits = definition["settings"]["limits"]
+        self.max_attempts = self.limits.get("attempts")  # None: a time box with no attempt limit
         self.workdir = Path(definition["workdir"])
+        timing = definition["settings"].get("timing")
+        self.timing = looptime.Timed(self, timing, clock or looptime.Clock()) if timing else None
+        self.base = 0  # attempts made before the wake in progress (an interval loop counts attempts per wake)
+        self.wake_open = False
+        self.wake_result: dict | None = None
+        self.cut = False  # the wall clock passed the end of a timed run while a turn or a check was running
         self.began = time.monotonic()
         self.last_save = 0.0
         self.terminated = False
@@ -1414,10 +1441,17 @@ class Controller:
     def cancelled(self) -> bool:
         return self.terminated or (self.folder / "cancel").exists()
 
-    def poll(self) -> bool:
+    def poll(self, grace: float | None = 0.0) -> bool:
+        """Called while a turn, a check or the watch command runs: true to stop it. A cancel stops it; so does the wall clock passing the end of a timed
+        run (plus `grace`; None: not for this one), which a monotonic timeout cannot see when the machine sleeps. `cut` says it was the end."""
         if time.monotonic() - self.last_save >= HEARTBEAT:
             self.save()
-        return self.cancelled()
+        if self.cancelled():
+            return True
+        if grace is not None and self.timing is not None and self.timing.over(grace):
+            self.cut = True
+            return True
+        return False
 
     def known_cost(self):
         return self.totals()["cost"]
@@ -1437,10 +1471,18 @@ class Controller:
             (self.folder / "pause").unlink(missing_ok=True)
         else:
             self.state.update(status="running", pid=os.getpid(), started=round(time.time(), 3))
+        if self.timing is not None:
+            self.timing.begin()
         self.save()
         _event(self.folder, attempt=len(self.state["attempts"]), step="-", outcome="resumed" if resumed else "started", route=step_id if resumed else self.head)
         if resumed and self.cancelled():  # a cancel was answered "requested" while the last controller was pausing: it ends the run before any step
             return self.finish("cancelled", "cancel requested while the run was pausing; no step was run after it", step_id)
+        if self.timing is not None and self.timing.interval:
+            return self.timing.drive(where)
+        return self._walk(step_id, mode, extra)
+
+    def _walk(self, step_id: str, mode: str, extra) -> str:
+        """The walk itself, from `step_id` in `mode`: until the run ends, is paused, or (an interval loop's wake) the wake is over."""
         try:
             while True:
                 step = self.steps[step_id]
@@ -1449,8 +1491,11 @@ class Controller:
                     nxt = self._follow(step, outcome, extra, again=True)
                 else:
                     if mode == "fresh" and step_id == self.head:
-                        refusal = admit(len(self.state["attempts"]), self.limits, time.monotonic() - self.began, self.known_cost(), self.cancelled(), self.passing(),
-                                        self.unknown_cost())
+                        refusal = admit(len(self.state["attempts"]) - self.base, self.limits, time.monotonic() - self.began, self.known_cost(), self.cancelled(),
+                                        self.passing(), self.unknown_cost())
+                        late = self.timing and self.timing.admission()
+                        if late and (not refusal or refusal[0] == "failed"):  # the end of a timed run outranks the attempt limit: a turn cut at the deadline is not a stall
+                            refusal = late
                         if refusal:
                             status, reason = refusal
                             if status == "failed" and self.last_agent == "stalled":
@@ -1612,7 +1657,8 @@ class Controller:
         return self.kinds[step["kind"]](step, carried) if carried else self.kinds[step["kind"]](step)
 
     def _turn_admission(self, step) -> None:
-        refusal = admit(0, self.limits, time.monotonic() - self.began, self.known_cost(), self.cancelled(), self.passing(), self.unknown_cost())
+        refusal = admit(0, self.limits, time.monotonic() - self.began, self.known_cost(), self.cancelled(), self.passing(), self.unknown_cost()) \
+            or (self.timing and self.timing.admission())
         if refusal:
             raise _End(refusal[0], refusal[1], step["id"])
 
@@ -1651,7 +1697,7 @@ class Controller:
 
     def _begin(self) -> None:
         n = len(self.state["attempts"]) + 1
-        if n > 1:
+        if n > 1 + self.base:
             self.state["attempts"][-1]["feedback"] = f"attempt-{n}/message.md"
         self.attempt = {"n": n, "steps": [], "started": round(time.time(), 3), "ended": None, "agent": None, "check": None, "message": None,
                         "feedback": None, "artifacts": [], "escalated_to": None, "feedback_from": (self.feedback or {}).get("from"), "approved": False}
@@ -1793,6 +1839,17 @@ class Controller:
             self.state["passed_by"] = None
         if self.attempt is not None and self.attempt.get("ended") is None:
             self.attempt["ended"] = round(time.time(), 3)
+        if self.wake_open and status in looptime.WAKE_ENDS:  # an interval loop's wake is over; the run is not
+            self.wake_result = {"status": status, "reason": reason, "step": step_id}
+            self.state["passed_by"] = None
+            return status
+        _end_run(self.folder, self.state, status, reason, step_id, self.save)
+        return status
+
+    def end_timed(self, status: str, reason: str, step_id: str, passed_by: str | None = None) -> str:
+        """End a timed run on the word of its schedule (the watch command said finished, or failed three times), not of a check."""
+        if passed_by:
+            self.state["passed_by"] = passed_by
         _end_run(self.folder, self.state, status, reason, step_id, self.save)
         return status
 
@@ -1817,6 +1874,8 @@ class Controller:
 
     # step kinds
     def _session_for(self, agent: str, fresh: bool) -> str:
+        if self.timing is not None and agent in self.sessions and self.timing.stale(self.sessions[agent]):
+            fresh = True  # the session's cache has gone cold: a new session with the notes file is cheaper than rebuilding the old one
         if fresh or agent not in self.sessions:
             self.sessions[agent] = new_session_id()
         return self.sessions[agent]
@@ -1842,7 +1901,7 @@ class Controller:
             role, agent = step.get("role", "work"), step["agent"]
             escalate = step.get("escalate")
             taking_over = None
-            if role == "work" and escalate and n > escalate["after"]:
+            if role == "work" and escalate and n - self.base > escalate["after"]:
                 taking_over, agent = agent, escalate["to"]
                 self.attempt["escalated_to"] = agent
             fresh = step.get("session") == "fresh"
@@ -1853,10 +1912,12 @@ class Controller:
             if role == "judge":
                 message = self._judge_message(step, agent, n)
             elif self.own:
-                message = build_message(self.definition["goal"], self.check_step["command"], n, self.limits["attempts"], self.last_check, self.last_agent,
+                message = build_message(self.definition["goal"], self.check_step["command"], n - self.base, self.max_attempts, self.last_check, self.last_agent,
                                         self.limits.get("attempt_seconds"))
             else:
                 message = self._work_message(step, n, taking_over)
+            if self.timing is not None and role == "work":
+                message = self.timing.decorate(message, session)
         if session not in self.state["sessions"]:
             self.state["sessions"].append(session)  # in the record before the process starts, so a crash cannot orphan it
         entry, outcome = None, "agent_error"
@@ -1895,6 +1956,12 @@ class Controller:
         n = self.attempt["n"]
         folder = self.folder / f"attempt-{n}"
         stem = f"{slug}.t{attempt_try}" if attempt_try > 1 else slug
+        limit = self.limits.get("attempt_seconds")
+        if self.timing is not None and result is None:  # the end of a timed run is looked at again right before the send: the turn gets the time left, never none
+            refusal = self.timing.admission()
+            if refusal:
+                raise _End(refusal[0], refusal[1], step["id"])
+            limit = self.timing.timeout(limit)
         if entry is None:
             message_file = (f"message.t{attempt_try}.md" if attempt_try > 1 else "message.md") if role == "work" else f"{stem}.message.md"
             (folder / message_file).write_text(message, encoding="utf-8")
@@ -1916,13 +1983,17 @@ class Controller:
         self.state["cursor"] = {"attempt": n, "step": step["id"], "phase": "started", "try": attempt_try, "session": session, "message_sha256": _text_sha(message),
                                 "sent_at": round(time.time(), 3), "users": users, "last_user": last_user, "next": None}
         self.save()
+        self.cut = False
         if result is None:
             try:
-                result = self.executor.attempt(agent=agent, session=session, first=first, title=title, message=message, timeout=self.limits.get("attempt_seconds"),
+                result = self.executor.attempt(agent=agent, session=session, first=first, title=title, message=message, timeout=limit,
                                                env=self.env, cwd=self.workdir, auto=bool(self.definition["settings"].get("allow_asks")), poll=self.poll)
             except Exception as exc:  # an executor that fails is an agent failure, never a pass
                 result = {"exit": None, "outcome": "agent_error", "session": session, "cost": None, "tokens": None, "sessions": None,
                           "seconds": 0.0, "error": f"{type(exc).__name__}: {exc}"[:200], "text": ""}
+        if result.get("outcome") == "cancelled" and self.cut and not self.cancelled():  # stopped at the end of the schedule: the same as a turn that ran out of time
+            result = {**result, "outcome": "stalled"}
+        self.cut = False
         outcome = result["outcome"]
         if outcome == "returned" or result.get("sessions"):
             self.confirmed.add(session)
@@ -1933,6 +2004,8 @@ class Controller:
         (self.folder / reply_file).write_text(text, encoding="utf-8")
         entry.update(seconds=round(result.get("seconds") or 0, 2), cost=result.get("cost"), tokens=result.get("tokens"), sessions=result.get("sessions"),
                      exit=result.get("exit"), error=result.get("error"), reply=reply_file)
+        if self.timing is not None:
+            self.timing.note_turn(session, result.get("cost"))
         if result.get("recovered"):
             entry["recovered"] = True
             if result.get("accepted"):
@@ -1956,7 +2029,7 @@ class Controller:
         if feedback:
             self._handoff(feedback["from"], target, feedback["kind"], feedback.get("file")) if feedback["kind"] in ("findings", "check") else None
         judges = [j["agent"] for j in self.judges]
-        return build_work_message(self.definition["goal"], n, self.limits["attempts"], (self.check_step or {}).get("command"), judges, step.get("artifacts"),
+        return build_work_message(self.definition["goal"], n - self.base, self.max_attempts, (self.check_step or {}).get("command"), judges, step.get("artifacts"),
                                   any(s.get("approval") for s in self.order), feedback, self.last_agent, self.limits.get("attempt_seconds"), taking_over)
 
     def _judge_message(self, step, agent: str, n: int) -> str:
@@ -1972,7 +2045,7 @@ class Controller:
         if step.get("handoff") == "report":
             report = self._read((self.attempt["steps"][0] or {}).get("reply"))
             self._handoff("work", agent, "report", self.attempt["steps"][0].get("reply"))
-        return build_judge_message(self.definition["goal"], n, self.limits["attempts"], agent, (self.check_step or {}).get("command"), check, paths,
+        return build_judge_message(self.definition["goal"], n - self.base, self.max_attempts, agent, (self.check_step or {}).get("command"), check, paths,
                                    self.workdir, report, [j["agent"] for j in self.judges])
 
     def _collect(self, step) -> list[str]:
@@ -2005,7 +2078,13 @@ class Controller:
         path = self.folder / f"attempt-{n}" / "check.out"
         self.state["cursor"] = {"attempt": n, "step": step["id"], "phase": "started", "try": 1, "session": None, "message_sha256": None, "next": None}
         self.save()
-        result = run_check(step["command"], step.get("timeout"), self.workdir, self.env, path, self.poll)
+        own = step.get("timeout")
+        limit = self.timing.check_timeout(own) if self.timing is not None else own
+        self.cut = False
+        result = run_check(step["command"], limit, self.workdir, self.env, path, (lambda: self.poll(looptime.CHECK_GRACE)) if self.timing is not None else self.poll)
+        cut, self.cut = self.cut, False
+        if self.timing is not None and (cut or (result.get("timed_out") and limit != own)):
+            raise _End("limit", f"deadline: the end ({self.timing.rt.get('end') or 'of the schedule'}) came while the check of attempt {n} was running; it was stopped", step["id"])
         if result.get("cancelled"):  # the check was cut short: its half-written output is not a result
             raise _End("cancelled", f"cancel requested while the check of attempt {n} was running; it was stopped", step["id"])
         outcome = check_outcome(result["exit"], result["timed_out"], step.get("inconclusive_codes", []))
@@ -2037,12 +2116,13 @@ def _new_run_folder(project) -> tuple[str, Path]:
 
 
 def start(project, flow_id: str, *, structure=None, goal: str | None = None, workdir=None, wait: bool = False, executor=None,
-          executor_spec: dict | None = None, scratch=None, executable=None, db=None, settings: dict | None = None) -> str:
+          executor_spec: dict | None = None, scratch=None, executable=None, db=None, settings: dict | None = None, clock=None, supervisor: bool = True) -> str:
     """Write the run folder and start the run: detached (default) or, with `wait`, in this process. Returns the run id.
     LoopError (nothing written) when the flow is not there or is not a self-loop or has no saved loop; a loop that cannot run
     (no check, no goal, unreadable settings, no opencode) is written as a run with the status `invalid` and no attempt. `settings` makes a
     trial run: these settings (checked like a saved loop, `version` and `flow` filled in) are pinned in the run instead of the saved loop,
-    which is neither read nor changed; the record says `trial: true`."""
+    which is neither read nor changed; the record says `trial: true`. A timed loop is refused while `agentgraph loop off` is in force, and a detached
+    one starts the project's supervisor unless `supervisor` is false or one is alive."""
     project = Path(project).absolute()
     path, shape = read_flow_of(structure, flow_id)
     refusal = path_refusal(path)
@@ -2059,6 +2139,8 @@ def start(project, flow_id: str, *, structure=None, goal: str | None = None, wor
         settings = load_settings(structure, flow_id)  # a loop that cannot be read or is refused makes no run folder at all
         if settings is None:
             raise LoopError(f"no loop is saved for flow {flow_id}; save one with `agentgraph loop set {flow_id} --check CMD --attempts N`")
+    if settings.get("timing"):
+        looptime.refuse_if_off(project, f"starting {flow_id}")
     work = Path(workdir).absolute() if workdir else project
     goal = goal if goal is not None else settings.get("goal")
     steps: list[dict] = []
@@ -2106,6 +2188,10 @@ def start(project, flow_id: str, *, structure=None, goal: str | None = None, wor
              "pid": None, "heartbeat": now, "created": now, "sessions": [], "attempts": [],
              "limits": settings.get("limits"), "totals": {"cost": None, "seconds": 0, "sessions": None, "attempts": 0, "cost_unknown_steps": 0},
              "trial": trial, "settings_sha256": definition["settings_sha256"], "steps_sha256": definition["steps_sha256"], "cursor": None, "recoveries": [], "session_costs": {}}
+    if settings.get("timing"):
+        state["timing"] = looptime.new_state(settings["timing"])  # from the start, so that the supervisor sees a timed run that is still queued
+        if not supervisor:
+            state["timing"]["supervisor"] = False  # the run's own choice: a resume does not start one either
     if problem is not None:
         state.update(status="invalid", reason=problem, ended=now)
         _write_atomic(folder / "run.json", _json(state))
@@ -2113,8 +2199,11 @@ def start(project, flow_id: str, *, structure=None, goal: str | None = None, wor
         return run_id
     _write_atomic(folder / "run.json", _json(state))
     _event(folder, attempt=0, step="-", outcome="queued", route="-")
+    if settings.get("timing") and looptime.is_off(project):  # `off` was switched on while this run was being made: it may have scanned before the run was there
+        cancel(folder)
+        looptime.refuse_if_off(project, f"starting {flow_id}")
     if wait:
-        execute(folder, executor)
+        execute(folder, executor, clock=clock)
         return run_id
     log = open(folder / "run.log", "ab")
     try:
@@ -2124,22 +2213,29 @@ def start(project, flow_id: str, *, structure=None, goal: str | None = None, wor
         threading.Thread(target=proc.wait, daemon=True).start()  # a long-lived caller (the page's server) must not collect zombies
     finally:
         log.close()
+    if (settings.get("timing") or {}).get("kind") == "interval" and supervisor:  # a time box has no tick to go on from: nothing for a supervisor to do
+        looptime.ensure_supervisor(project, paths.REPO)
     return run_id
 
 
-def execute(folder, executor=None, resume: str | None = None, check_only: bool = False) -> str | None:
+def execute(folder, executor=None, resume: str | None = None, check_only: bool = False, clock=None) -> str | None:
     """Run a run folder in this process and return its final status (or `paused`). With `resume` None the run must be `queued`; with `resume`
     ("", "redo" or "accept") it is a run that was started before (`running` with no controller, `paused` or `waiting`) and goes on from its
     cursor. Refused (Busy, nothing written) when another process holds the folder or the run is final or queued; LoopError, nothing written,
     when the choice does not fit the step. `check_only` stops after those refusals."""
     folder = Path(folder)
     definition = read_definition(folder)
+    timed = bool((definition.get("settings") or {}).get("timing"))
     lock = open(folder / "lock", "a+")
     try:
         if not _flock(lock):
             raise Busy(f"run {folder.name} is already running in another process: its lock was still held after waiting {LOCK_WAIT:g}s, so a controller is alive") from None
         state = read_run(folder)
         status = state.get("status")
+        if timed and looptime.is_off(definition["project"]):  # looked at under the run's lock: `off` and a start cannot miss each other
+            if status == "queued" and not check_only:  # a run that was made as `off` looked: it is over, and does not start after `on`
+                _end_cancelled(folder, state, "timed loops were switched off (agentgraph loop off) before the run started")
+            looptime.refuse_if_off(definition["project"], f"running {folder.name}")
         if resume is None:
             if status != "queued":
                 raise Busy(f"run {folder.name} is already {status}; only a queued run can be started")
@@ -2150,9 +2246,11 @@ def execute(folder, executor=None, resume: str | None = None, check_only: bool =
         elif status in FINAL or status == "queued" or status not in ("running", "paused", "waiting"):
             raise Busy(f"run {folder.name} is {status}: " + ("it is over and cannot be resumed" if status in FINAL else f"it was created less than {QUEUED_GRACE:g}s ago and may still be starting; cancel it, or resume it later"))
         _verify_pins(definition, state)
+        if looptime.lacks_turn_limit(definition.get("settings")):
+            raise LoopError(f"run {folder.name} is a timed run made before turn limits were required (its settings have no limits.attempt_seconds), so its turns would have no bound: it is not run; start it again")
         if executor is None and not check_only:
             executor = make_executor(definition["executor"])
-        controller = Controller(folder, definition, state, executor, executor.env(definition["workdir"]) if executor is not None else {})
+        controller = Controller(folder, definition, state, executor, executor.env(definition["workdir"]) if executor is not None else {}, clock)
         where = controller.resume_point(resume) if resume is not None else None  # refusals come before anything is written
         if check_only:
             return None
@@ -2190,7 +2288,7 @@ def _verify_pins(definition: dict, state: dict) -> None:
             raise LoopError(f"the definition of run {name} was changed after the run started ({key} does not match): it is not run; start again")
 
 
-def resume(folder, choice: str | None = None, wait: bool = False, executor=None) -> str | None:
+def resume(folder, choice: str | None = None, wait: bool = False, executor=None, clock=None, supervisor: bool = True) -> str | None:
     """Go on with a run whose controller is gone (`interrupted`), `paused` or `waiting`, from its cursor and its pinned definition.
     `choice` is for a paused step whose fate is not known: `redo` sends it again, `accept` takes it as returned. Detached by default (returns
     None once the new controller is started); with `wait`, in this process (returns the status). Refusals are checked first and write nothing;
@@ -2201,7 +2299,7 @@ def resume(folder, choice: str | None = None, wait: bool = False, executor=None)
     if _held(folder):  # a live controller: refused at once, without waiting for the lock (a page request must not hang)
         raise Busy(f"run {folder.name} is already running in another process: a controller holds its lock, so it is alive")
     if wait:
-        return execute(folder, executor, resume=choice or "")
+        return execute(folder, executor, resume=choice or "", clock=clock)
     execute(folder, resume=choice or "", check_only=True)
     log = open(folder / "run.log", "ab")
     try:
@@ -2211,6 +2309,9 @@ def resume(folder, choice: str | None = None, wait: bool = False, executor=None)
         threading.Thread(target=proc.wait, daemon=True).start()
     finally:
         log.close()
+    definition = read_definition(folder)
+    if supervisor and ((definition.get("settings") or {}).get("timing") or {}).get("kind") == "interval" and (read_run(folder).get("timing") or {}).get("supervisor") is not False:
+        looptime.ensure_supervisor(definition["project"], paths.REPO)  # a resumed interval run may die again while it waits: someone must be there to resume it
     return None
 
 
@@ -2283,11 +2384,11 @@ def _requested(folder: Path) -> str:
         lock.close()
 
 
-def _end_cancelled(folder: Path, state: dict) -> str:
+def _end_cancelled(folder: Path, state: dict, why: str | None = None) -> str:
     """Mark a run cancelled by a person; the caller holds the run's lock and has read `state`. It ends like `Controller.finish`: `_end_run`, with
     the totals and heartbeat refreshed from the record (no controller counts seconds, so the seconds and sessions it had are kept)."""
     was = state.get("status")
-    reason = f"cancelled by a person while no controller was running it (it was {was}" + (", and its controller never started)" if was == "queued" else ")")
+    reason = why or (f"cancelled by a person while no controller was running it (it was {was}" + (", and its controller never started)" if was == "queued" else ")"))
 
     def write():
         old = state.get("totals") or {}
@@ -2372,6 +2473,9 @@ def _parser() -> argparse.ArgumentParser:
     arts.add_argument("--artifact", metavar="NAME", action="append", help="a file to copy after each worker turn (repeat for several; replaces the saved list)")
     arts.add_argument("--no-artifacts", action="store_true", help="forget the saved artifacts")
     p.add_argument("--approval", metavar="before_pass|none", help="before_pass: a person approves between the last pass and done")
+    timing = p.add_mutually_exclusive_group()
+    timing.add_argument("--timing-file", metavar="F", help="a JSON file with the `timing` block of a timed loop (interval or timebox; see docs/LOOPS.md)")
+    timing.add_argument("--no-timing", action="store_true", help="forget the saved timing: the loop is an ordinary loop again")
     common(p)
     p = sub.add_parser("show", help="the saved loop of a flow")
     p.add_argument("flow")
@@ -2390,6 +2494,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--scratch", metavar="DIR", help="run the agent on this scratch config (agentgraph bench scratch-config)")
     p.add_argument("--executable", metavar="F", help="the opencode CLI (default: OPENCODE_CLI or the app's)")
     p.add_argument("--db", metavar="F", help="the opencode database to read cost from")
+    p.add_argument("--no-supervisor", action="store_true", help="a timed loop: do not start the supervisor that resumes the run if its controller dies")
     p.add_argument("--settings-file", metavar="F", help="a trial run: JSON settings used for this run only, instead of the saved loop (which is not read or changed)")
     common(p, True)
     p = sub.add_parser("run", help="(internal) run a queued run folder, or with --resume go on with one")
@@ -2404,6 +2509,13 @@ def _parser() -> argparse.ArgumentParser:
     common(p, True)
     p = sub.add_parser("pause", help="stop a running run after the step it is on; resume goes on")
     p.add_argument("run")
+    common(p, True)
+    p = sub.add_parser("supervise", help="resume timed runs whose controller died while waiting for a tick; ends when no timed run is unfinished")
+    p.add_argument("--every", type=float, default=looptime.SUPERVISOR_EVERY, metavar="N", help="seconds between looks (default %(default)g)")
+    common(p, True)
+    p = sub.add_parser("off", help="cancel every unfinished timed run of the project and refuse timed loops until `on`")
+    common(p, True)
+    p = sub.add_parser("on", help="allow timed loops again after `off`")
     common(p, True)
     p = sub.add_parser("versions", help="the kept earlier versions of a flow's saved loop")
     p.add_argument("flow")
@@ -2474,6 +2586,13 @@ def _set(args) -> int:
         current.pop("artifacts", None)
     if args.approval:
         current["approval"] = args.approval
+    if args.timing_file:
+        try:
+            current["timing"] = json.loads(Path(args.timing_file).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise LoopError(f"cannot read the timing file: {exc}") from None
+    if args.no_timing:
+        current.pop("timing", None)
     problem_free = validate(current, settings_path(args.structure, args.flow))
     try:
         compile(path, problem_free, _shape["group_of"])  # a route or a step the walker would refuse is refused now, nothing saved
@@ -2486,12 +2605,12 @@ def _set(args) -> int:
 
 def _line(settings: dict) -> str:
     limits = settings["limits"]
-    bits = [f"attempts {limits['attempts']}"] + [f"{k.replace('_', ' ')} {limits[k]:g}" for k in ("attempt_seconds", "seconds", "cost") if k in limits]
+    bits = ([f"attempts {limits['attempts']}"] if "attempts" in limits else []) + [f"{k.replace('_', ' ')} {limits[k]:g}" for k in ("attempt_seconds", "seconds", "cost") if k in limits]
     check = settings.get("check")
     return (f"flow {settings['flow']}: check {check['command']!r} (timeout {check['timeout']:g}s)" if check else f"flow {settings['flow']}: no check") + \
         f", {', '.join(bits)}, session {settings['session']}" + (", allow asks" if settings["allow_asks"] else "") + \
         (f", steps for {', '.join(settings['steps'])}" if settings.get("steps") else "") + (f", artifacts {', '.join(settings['artifacts'])}" if settings.get("artifacts") else "") + \
-        (", approval before pass" if settings.get("approval") else "")
+        (", approval before pass" if settings.get("approval") else "") + (f", timing {looptime.line(settings['timing'])}" if settings.get("timing") else "")
 
 
 def _start(args) -> int:
@@ -2502,7 +2621,7 @@ def _start(args) -> int:
         except (OSError, ValueError) as exc:
             raise LoopError(f"cannot read the settings file: {exc}") from None
     run_id = start(args.project, args.flow, structure=args.structure, goal=_read_goal(args), workdir=args.workdir, wait=args.wait,
-                   scratch=args.scratch, executable=args.executable, db=args.db, settings=trial)
+                   scratch=args.scratch, executable=args.executable, db=args.db, settings=trial, supervisor=not args.no_supervisor)
     folder = run_dir(Path(args.project).absolute(), run_id)
     state = read_run(folder)
     if state["status"] == "invalid" or args.wait:
@@ -2584,7 +2703,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "status":
             folder, state = _find_run(args)
             state = {**state, "status": shown_status(folder, state)} if args.json else state
-            print(json.dumps(state, indent=2, sort_keys=True) if args.json else "\n".join([line for line in (describe(folder, state), hint(folder, state), *describe_steps(state)) if line]))
+            print(json.dumps(state, indent=2, sort_keys=True) if args.json else
+                  "\n".join([line for line in (describe(folder, state), looptime.summary(state), hint(folder, state), *describe_steps(state)) if line]))
             return 0
         if args.command == "list":
             project = Path(args.project).absolute()
@@ -2621,6 +2741,18 @@ def main(argv: list[str] | None = None) -> int:
                 return 0 if status == "passed" else 1
             resume(folder, choice)
             print(f"run {args.run} resumed: agentgraph loop status {args.run}")
+            return 0
+        if args.command == "supervise":
+            return looptime.supervise(Path(args.project).absolute(), args.every)
+        if args.command == "off":
+            project = Path(args.project).absolute()
+            for run, what in looptime.switch_off(project):
+                print(f"run {run}: {what}")
+            print(f"timed loops are off in {project}: starting or resuming one is refused until `agentgraph loop on`; loops without timing are not affected")
+            return 0
+        if args.command == "on":
+            project = Path(args.project).absolute()
+            print(f"timed loops are on again in {project}" if looptime.switch_on(project) else f"timed loops were not switched off in {project}")
             return 0
         if args.command == "versions":
             rows = versions(args.structure, args.flow)
