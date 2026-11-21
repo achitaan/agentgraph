@@ -41,7 +41,18 @@ def _session_document(session: Session) -> dict:
     }
 
 
-def _problems(graph: TaskGraph) -> list[str]:
+def _problems(graph: TaskGraph, structure: dict | None = None) -> list[str]:
+    """What `agentgraph check` reports for the graph's file (`check.all_problems`, read-only: lint, flows,
+    escalation, groups, hand edits, history), so the views and `check` agree. A graph with no readable file (a demo,
+    a graph handed in memory) gets the validator's problems only."""
+    if graph.path and Path(graph.path).is_file():
+        try:
+            from . import check, outputs  # check imports this module
+            found = check.all_problems(Path(graph.path), check.rules_of(structure or load_structure(), outputs.edit_home()))
+        except Exception:  # noqa: BLE001  the views never fail on a graph; fall back to the validator below
+            found = None
+        if found is not None:
+            return found
     try:
         return contract.validate(graph)
     except (AttributeError, TypeError):
@@ -65,7 +76,7 @@ def _problems(graph: TaskGraph) -> list[str]:
 
 
 def _graph_document(graph: TaskGraph, busy_ids: set[str], handoffs: set[tuple[str, str]],
-                    known: dict[str, Session] | None = None) -> dict:
+                    known: dict[str, Session] | None = None, structure: dict | None = None) -> dict:
     # What the database confirms per node (never stored in the graph): live, quiet, orphan, unreported or None.
     # `known` is every session of the database; None when it could not be read.
     liveness = contract.graph_liveness(graph, known)
@@ -102,7 +113,7 @@ def _graph_document(graph: TaskGraph, busy_ids: set[str], handoffs: set[tuple[st
                 status_by_id.get(node_id) == "passed" for node_id in obj.nodes)}
             for obj in graph.objectives
         ],
-        "problems": _problems(graph),
+        "problems": _problems(graph, structure),
         "waves": [[node.id for node in layer] for layer in layers],
         "nodes": nodes,
         "edges": [
@@ -580,7 +591,7 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
     # Confirmed state comes from the whole database; a snapshot made without one falls back to the sessions it lists.
     known = snapshot.known if snapshot.known is not None else (
         {item.id: item for item in sessions if item.id is not None} if sessions else None)
-    graph_doc = _graph_document(active, busy_ids, handoffs, known) if active is not None else None
+    graph_doc = _graph_document(active, busy_ids, handoffs, known, structure) if active is not None else None
     listed = [agent for agents in grouped.values() for agent in agents]
     return _json_safe({
         "version": 1, "generated": snapshot.now, "source": source,

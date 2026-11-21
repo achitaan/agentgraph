@@ -206,10 +206,17 @@ class Rules(unittest.TestCase):
             nd(g, "n2")["attempts"] = 2
         self.assertEqual(self.found(done, rerun), [])
 
-    def test_a_node_added_already_passed_is_held_only_to_its_dependencies(self):
+    def test_a_node_added_already_passed_is_held_to_the_dispatch_and_evaluation_rules(self):
         def import_(g):
             g["nodes"].append(node("n4", "research", "explorer", status="passed", evidence="x"))
-        self.assertEqual(self.found(base(), import_), [])
+        self.rejects(base(), import_, "n4 (explorer) is newly passed but was never dispatched")
+        self.rejects(base(), import_, "n4 is newly passed with no evaluated, joined or completed event")
+
+        def ran(g):
+            g["nodes"].append(node("n4", "research", "explorer", status="passed", evidence="x", attempts=1, session="ses_4"))
+            ev(g, "n4", "dispatched", T + 100)
+            ev(g, "n4", "evaluated", T + 101)
+        self.assertEqual(self.found(base(), ran), [])
         self.rejects(base(), lambda g: g["nodes"].append(node("n4", "research", "explorer", ["n2"], status="passed", evidence="x")),
                      "n4 is newly passed while its dependency n2 is running")
 

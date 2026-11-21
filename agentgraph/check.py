@@ -11,11 +11,13 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import re
 import sys
 from collections.abc import Iterator
 from math import isfinite
 from pathlib import Path
+from typing import NamedTuple
 
 from .contract import (
     EVENT_NAMES, FAILURE_KINDS, GRAPH_LIMITS, GRAPH_STATUSES, MAX_NODE_LIST, NODE_LIST_FIELDS, NODE_STATUSES,
@@ -203,16 +205,19 @@ def _read_raw(path: Path) -> tuple[dict | None, list[str]]:
     return raw, []
 
 
-def read_graph(path: Path) -> tuple[TaskGraph | None, list[str]]:
+def read_graph(path: Path, rules: "Rules | None" = None) -> tuple[TaskGraph | None, list[str]]:
     """Read once and return the decoded graph and its validation problems.
 
     An unreadable file or non-object yields no graph and one diagnostic.
     An object with invalid fields still yields a tolerant graph for display.
+    With `rules` the problems are every one `check` reports (`all_problems`), from the same read.
     """
     path = Path(path)
     raw, issues = _read_raw(path)
     if raw is None:
         return None, issues
+    if rules is not None:
+        return _examine_read_only(raw, path, rules)
     return _graph_and_issues(raw, path)
 
 
@@ -228,8 +233,7 @@ def _chain_index(graph: TaskGraph, seats=None):
                           node.agent) for node in graph.nodes}  # who a node stands for: a seat for its council
     followers: dict[str, list] = {}
     for node in graph.nodes:
-        targets = list(node.depends_on) + (list(node.feedback_to) if node.type == "gate" else [])
-        for target in dict.fromkeys(targets):
+        for target in dict.fromkeys(node.depends_on):  # a follower reads its predecessor: a gate's feedback_to alone is no step
             followers.setdefault(target, []).append(node)
     return by_id, runs, followers
 
@@ -275,42 +279,100 @@ def measurable(flow: dict, hubs=frozenset()) -> bool:
     return not is_self_loop(flow["path"]) and len(flow_steps(flow["path"], hubs)[0]) >= 2
 
 
+def _missing(start, best, index, label: str) -> str:
+    """The problem for `start`, which has no complete chain: the first missing step (`best`: where the search got)."""
+    by_id, _, _ = index
+    working = best[2]
+    step, (current, chain) = best[0], best[1]
+    agent = working[step]
+    where = "" if current == start.id else f" after {by_id[current].agent} ({current})"
+    if agent in chain:
+        return (f"{start.id} ({start.agent}) is not sent back to {agent}{where}: {current} must be a gate "
+                f"whose feedback_to names {chain[agent]}: flow {label}")
+    return f"{start.id} ({start.agent}) is not followed by {agent}{where}: flow {label}"
+
+
 def follows(graph: TaskGraph, flow: dict, hubs=frozenset(), seats=None, index=None) -> tuple[list[dict], list[str]]:
     """The one definition of a task graph following a drawn flow, used by `check` (flow_problems) and by the
     stats (flow_chains, agentgraph.flowrun). Returns (chains, problems): `chains` holds the chain ({agent: node id})
     from each node of the flow's first agent (a FLOW_START_TYPES type, any status) that has the rest of the path after
     it; `problems` one message per such node not yet passed that has none (a passed node's work is done: the flow
-    may have been drawn after it). The graph follows the flow when it has a chain and no problem. A flow a task graph
-    cannot show (`measurable` false) gives ([], [])."""
+    may have been drawn after it). The graph follows the flow when it has a chain and no problem. A step to a new
+    agent needs a node that depends on the current one (`depends_on`; a gate's `feedback_to` alone is no step: a
+    follower reads its predecessor). A flow a task graph cannot show (`measurable` false) gives ([], [])."""
+    chains, problems, _ = _follow(graph, flow, hubs, seats, index)
+    return chains, problems
+
+
+def _follow(graph: TaskGraph, flow: dict, hubs, seats, index) -> tuple[list[dict], list[str], list[str]]:
+    """`follows`, and the ids of the nodes the flow applies to (those with a chain, and those without that have not
+    passed): what `applied_flows` records."""
     if not measurable(flow, hubs):
-        return [], []
+        return [], [], []
     index = index if index is not None else _chain_index(graph, seats)
-    by_id, runs, _ = index
+    _, runs, _ = index
     working, _ = flow_steps(flow["path"], hubs)
     label = " → ".join(flow["path"])
     chains: list[dict] = []
     problems: list[str] = []
+    applies: list[str] = []
     for start in graph.nodes:
         if runs[start.id] != working[0] or start.type not in FLOW_START_TYPES:
             continue
         found, best, ran_out = _walk_chain(working, start, index)
         if found is not None:
             chains.append(found)
+            applies.append(start.id)
             continue
         if start.status == "passed":
             continue
-        step, (current, chain) = best
+        applies.append(start.id)
         if ran_out:
             problems.append(f"{start.id} ({start.agent}): its chain is too tangled to check: flow {label}")
-            continue
-        agent = working[step]
-        where = "" if current == start.id else f" after {by_id[current].agent} ({current})"
-        if agent in chain:
-            problems.append(f"{start.id} ({start.agent}) is not sent back to {agent}{where}: {current} must be a gate "
-                            f"whose feedback_to names {chain[agent]}: flow {label}")
         else:
-            problems.append(f"{start.id} ({start.agent}) is not followed by {agent}{where}: flow {label}")
-    return chains, problems
+            problems.append(_missing(start, (*best, working), index, label))
+    return chains, problems, applies
+
+
+def applied_flows(graph: TaskGraph, flows, hubs=frozenset(), seats=None) -> dict[str, list[str]]:
+    """The drawn flows that apply to each node of the graph now: {node id: [flow ids]}, for the nodes the flow
+    starts from that follow it or still owe it (a passed node without a chain is not owed: the flow may have been
+    drawn after it). `check` records them (transitions.flows_record) and keeps enforcing them when the node changes."""
+    index = _chain_index(graph, seats)
+    found: dict[str, list[str]] = {}
+    for flow in _checked_flows(flows, hubs):
+        for node_id in _follow(graph, flow, hubs, seats, index)[2]:
+            found.setdefault(node_id, []).append(flow["id"])
+    return found
+
+
+def recorded_flow_problems(graph: TaskGraph, recorded: dict[str, list[str]], flows, hubs=frozenset(), seats=None) -> list[str]:
+    """What the recorded flows still want of nodes that no longer start them: each node in `recorded` (retyped,
+    given to another agent or passed since) needs the rest of the path as a chain, as when it started the flow. A
+    node the plain rule already holds to the flow is not reported twice."""
+    by_id = {flow["id"]: flow for flow in _checked_flows(flows, hubs)}
+    nodes = {node.id: node for node in graph.nodes}
+    index = _chain_index(graph, seats)
+    _, runs, _ = index
+    found = []
+    for node_id, ids in recorded.items():
+        node = nodes.get(node_id)
+        for flow_id in ids:
+            flow = by_id.get(flow_id)
+            if node is None or flow is None:
+                continue
+            working, _ = flow_steps(flow["path"], hubs)
+            if runs[node.id] == working[0] and node.type in FLOW_START_TYPES and node.status != "passed":
+                continue  # the plain rule reports it
+            chain, best, ran_out = _walk_chain(working, node, index)
+            if chain is not None:
+                continue
+            label = " → ".join(flow["path"])
+            why = ("its chain is too tangled to check" if ran_out else
+                   _missing(node, (*best, working), index, label).split(": flow ")[0].split(f"{node.id} ({node.agent}) ", 1)[1])
+            found.append(f"{node.id} ({node.agent}, {node.type}, {node.status}) was recorded as following flow {label} "
+                         f"and {why} (only an amendment naming {node.id} and the flow releases it)")
+    return found
 
 
 def flow_problems(graph: TaskGraph, flows, hubs=frozenset(), seats=None) -> list[str]:
@@ -318,8 +380,8 @@ def flow_problems(graph: TaskGraph, flows, hubs=frozenset(), seats=None) -> list
     follow. A flow applies to work that starts at its first agent (the second
     when the hub is first): every node of that agent of a FLOW_START_TYPES type
     that has not passed needs the rest of the path as a chain. A step forward to
-    a new agent Y needs a node run by Y that follows the chain's current node
-    (lists it in depends_on, or is a gate whose feedback_to names it); a return
+    a new agent Y needs a node run by Y that depends on the chain's current node
+    (a gate's feedback_to alone is no step); a return
     to an earlier agent needs the current node to be a gate whose feedback_to
     names that agent's node on the chain, and the chain continues from there.
     The hub as the last step adds nothing. `seats` ({council lead: seat
@@ -471,19 +533,42 @@ def _graph_and_issues(raw: dict, path: Path, flows=(), hubs=frozenset(), seats=N
     return graph, issues
 
 
-def _history_step(folder: int, path: Path, raw: dict, issues: list[str]) -> list[str]:
-    """The history rules for one graph that has passed the type checks, then (when `issues` and the result are both
-    empty) its new record. Runs under the graph folder's lock. Returns the history problems."""
+def _history_step(folder: int, path: Path, raw: dict, issues: list[str], graph: TaskGraph, rules: "Rules",
+                  write: bool) -> list[str]:
+    """The history rules for one graph that has passed the type checks (the last passing state's, and the flows
+    recorded for the graph), then, when `write` (under the graph folder's lock), its new records: the state when
+    `issues` and the result are both empty, the recorded flows whatever the result. Returns the history problems.
+    Without `write` nothing is written (the views and `record` compare only)."""
     stem = Path(path).stem
     found: list[str] = []
+
+    def warn(text: str) -> None:
+        if write:
+            _print(text)
+
     try:
         previous = transitions.load_state(folder, stem)
     except transitions.HistoryError as exc:
-        _print(f"warning: {exc}")
+        warn(f"warning: {exc}")
         previous = None
     if previous is not None:
         found = transitions.problems(previous, raw)
-    if not issues and not found:
+    try:
+        before = transitions.load_flows(folder, stem)
+    except transitions.HistoryError as exc:
+        warn(f"warning: {exc}")
+        before = None
+    if rules.shape is not None:  # without the structure folder the recorded flows are left as they are
+        record = transitions.flows_record(before, applied_flows(graph, rules.flows, rules.hubs, rules.seats),
+                                          raw.get("amendments") or [],
+                                          {flow["id"] for flow in _checked_flows(rules.flows, rules.hubs)})
+        found += recorded_flow_problems(graph, record["nodes"], rules.flows, rules.hubs, rules.seats)
+        if write and record != before and (before is not None or record["nodes"] or record["released"]):
+            try:
+                transitions.save_flows(folder, stem, record)
+            except OSError as exc:
+                _print(f"warning: recorded flows of {stem} not saved: {exc.strerror or exc}")
+    if write and not issues and not found:
         try:
             transitions.save_state(folder, stem, transitions.state_of(raw))
         except OSError as exc:
@@ -491,10 +576,74 @@ def _history_step(folder: int, path: Path, raw: dict, issues: list[str]) -> list
     return found
 
 
-def file_problems(path: Path) -> list[str] | None:
-    """Every problem `check` would report, or None if no graph can be read."""
-    graph, issues = read_graph(path)
+class Rules(NamedTuple):
+    """What a graph is held to besides its own fields: the structure folder's flows, hubs, seats, groups,
+    escalation and pools, and the memory home whose edit log says which outputs were edited by hand."""
+    shape: dict | None
+    flows: list
+    hubs: frozenset
+    seats: dict
+    teams: list
+    escalation: list
+    pools: dict
+    edits: Path | None
+
+
+def rules_of(shape: dict | None, edits: Path | None = None) -> Rules:
+    """`Rules` for a loaded structure (`snapshot_json.load_structure`; None: no drawn flows)."""
+    return Rules(shape, shape["flows"] if shape else [], hub_names(shape), shape["seats"] if shape else {},
+                 shape.get("teams", []) if shape else [],  # the groups: agents that report to one lead
+                 shape["escalation"] if shape else [],  # escalates_to: a problem when a node's tiers break it
+                 shape["pool"] if shape else {},  # pool: a warning when more nodes of one agent can run at once
+                 edits)
+
+
+def default_rules(structure: Path | None = None, home: Path | None = None) -> Rules:
+    """`check`'s rules with no options: the orchestration's own structure folder (or `structure`) and the edit log of
+    `home` (default: $AGENTGRAPH_HOME, else the active preset's memory folder)."""
+    return rules_of(load_structure(structure), outputs.edit_home(home))
+
+
+def _examine(raw: dict, path: Path, rules: Rules, folder: int | None, write: bool) -> tuple[TaskGraph, list[str], list[str], list[str]]:
+    """Everything `check` knows about one readable graph: (graph, problems, unsaved-edit warnings, drift warnings).
+    The one place the problem list is made; `check`, `record` and the views all use it."""
+    graph, issues = _graph_and_issues(raw, path, rules.flows, rules.hubs, rules.seats, rules.teams, rules.escalation)
+    issues = issues + outputs.lost_edits(graph, rules.edits)  # an edit by hand the graph no longer records
+    unsaved = outputs.unsaved_edits(graph, rules.edits)  # a save stopped before the graph: a warning
+    drift: list[str] = []
+    if not _raw_issues(raw):
+        drift = transitions.warnings(raw, path)
+        if folder is not None:
+            issues = issues + _history_step(folder, path, raw, issues, graph, rules, write)
+    return graph, issues, unsaved, drift
+
+
+def _examine_read_only(raw: dict, path: Path, rules: Rules) -> tuple[TaskGraph, list[str]]:
+    folder = None
+    try:
+        folder = os.open(path.resolve().parent, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        pass
+    try:
+        graph, issues, _, _ = _examine(raw, path, rules, folder, False)
+        return graph, issues
+    finally:
+        if folder is not None:
+            os.close(folder)
+
+
+def all_problems(path: Path, rules: Rules | None = None) -> list[str] | None:
+    """Every problem `check` reports for the graph file `path` (lint, flows, escalation, groups, hand edits,
+    history), or None if no graph can be read. Read-only: it compares the graph with what `check` last recorded
+    and writes nothing, so `check` itself is the only writer. `record` and the snapshot use it, so their problems
+    are `check`'s."""
+    graph, issues = read_graph(path, rules if rules is not None else default_rules())
     return issues if graph is not None else None
+
+
+def file_problems(path: Path) -> list[str] | None:
+    """Every problem `check` would report, or None if no graph can be read (`all_problems`)."""
+    return all_problems(path)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -516,12 +665,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.structure is not None and shape is None:
         _print(f"structure folder {args.structure} does not exist or holds no group folder")
         return 2
-    flows = shape["flows"] if shape else []
-    hubs = hub_names(shape)
-    seats = shape["seats"] if shape else {}
-    teams = shape.get("teams", []) if shape else []  # the groups: agents that report to one lead
-    escalation = shape["escalation"] if shape else []  # escalates_to: a problem when a node's tiers break it
-    pools = shape["pool"] if shape else {}  # pool: a warning when more nodes of one agent can run at once
+    rules = rules_of(shape, edits)
+    flows, pools, seats = rules.flows, rules.pools, rules.seats
 
     discovery_warnings: list[str] = []
     try:
@@ -561,13 +706,8 @@ def main(argv: list[str] | None = None) -> int:
             if raw is not None:
                 if args.task is not None and raw.get("task") != args.task:
                     continue  # Another task's graph: never validated, so it cannot slow this check.
-                graph, issues = _graph_and_issues(raw, path, flows, hubs, seats, teams, escalation)
-                issues = issues + outputs.lost_edits(graph, edits)  # an edit by hand the graph no longer records
-                unsaved[id(graph)] = outputs.unsaved_edits(graph, edits)  # a save stopped before the graph: a warning
-                if not _raw_issues(raw):
-                    drift[id(graph)] = transitions.warnings(raw, path)
-                    if folder is not None:
-                        issues = issues + _history_step(folder, path, raw, issues)
+                graph, issues, unsaved_edits, drifted = _examine(raw, path, rules, folder, True)
+                unsaved[id(graph)], drift[id(graph)] = unsaved_edits, drifted
             if graph is None:
                 # A non-object is readable JSON with a schema problem; preserve
                 # the CLI's distinction between it and a read or decode failure.

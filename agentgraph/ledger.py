@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from itertools import groupby
 from pathlib import Path
 
-from . import check, cost, sources
+from . import check, cost, outputs, sources
 from .contract import FAILURE_KINDS, VERDICTS, TaskGraph, objective_coverage
 
 DUE_RUNS = 5
@@ -402,14 +402,18 @@ class _RecordResult:
 
 def record(
     home: Path, now: float | None, graph_dir: Path, *, task: str | None = None,
-    db_path: Path = sources.DB_PATH, abandoned: bool = False,
+    db_path: Path = sources.DB_PATH, abandoned: bool = False, rules: check.Rules | None = None,
 ) -> _RecordResult:
-    """Upsert checked passed graphs or one explicitly abandoned graph."""
+    """Upsert checked passed graphs or one explicitly abandoned graph. A passed graph is checked as `agentgraph check`
+    checks it (`check.all_problems`, with `rules`: default the orchestration's structure folder and this home's edit
+    log); one `check` rejects is refused with the same messages."""
     if abandoned and not task:
         return _RecordResult([], [], ["--abandoned requires --task NAME"], 2, signals(home, now))
     graph_dir = graph_dir.resolve()
     if not graph_dir.is_dir():
         return _RecordResult([], [], [f"graph directory is not a directory: {graph_dir}"], 2, _due_fields([], []))
+    if rules is None:
+        rules = check.default_rules(home=home)
     paths, warnings = sources.graph_files(graph_dir)
     if not paths:
         notes = [f"no graph matches task {task!r}"] if task is not None else []
@@ -417,7 +421,7 @@ def record(
     with _lock(home, writing=True):
         matches = []
         for path in paths:
-            graph, problems = check.read_graph(path)
+            graph, problems = check.read_graph(path, rules)
             if graph is None:
                 warnings.append(f"graph: skipped {path.name}: {problems[0]}")
             elif task is None or graph.task == task:
@@ -1011,7 +1015,9 @@ def _hand_options(args: argparse.Namespace) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentgraph ledger", description=__doc__)
-    parser.add_argument("--home", type=Path, help="ledger directory (default: $AGENTGRAPH_HOME or ~/.config/opencode/orchestration/memory)")
+    parser.add_argument("--home", type=Path, help="ledger directory (default: the one `agentgraph check` and the views use: "
+                        "$AGENTGRAPH_HOME, else the active preset's memory folder (memory-<preset>), else the "
+                        "orchestration's `memory`)")
     commands = parser.add_subparsers(dest="command", required=True)
     record_parser = commands.add_parser("record", help="record task graphs")
     record_parser.add_argument("--dir", type=Path, help="graph directory (default: nearest .opencode/graph)")
@@ -1056,10 +1062,11 @@ def main(argv: list[str] | None = None) -> int:
         command_parser.add_argument("--backups", type=Path, help="backups folder (default: beside the home's orchestration folder)")
         command_parser.add_argument("--agents-dir", type=Path, help="agent files folder (default: beside the backups folder)")
     for command_parser in (record_parser, feedback_parser, improved_parser, signals_parser):
-        command_parser.add_argument("--home", type=Path, default=argparse.SUPPRESS, help="ledger directory")
+        command_parser.add_argument("--home", type=Path, default=argparse.SUPPRESS,
+                                    help="ledger directory (default: as above)")
 
     args = parser.parse_args(argv)
-    home = (args.home or Path(os.environ.get("AGENTGRAPH_HOME", "~/.config/opencode/orchestration/memory"))).expanduser()
+    home = outputs.edit_home(args.home)  # --home, else $AGENTGRAPH_HOME, else the active preset's folder: as `check`
     try:
         if args.command == "record":
             if args.abandoned and not args.task:

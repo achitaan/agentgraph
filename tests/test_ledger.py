@@ -242,8 +242,8 @@ class Ledger(unittest.TestCase):
                 reads.append(Path(p).resolve())
             return read_text(p)
 
-        def read_then_replace(p):
-            result = read_graph(p)
+        def read_then_replace(p, *args):
+            result = read_graph(p, *args)
             replacement = p.with_suffix(".new")
             replacement.write_text(json.dumps(graph("changing", lessons=["wrong snapshot"], nodes=[])))
             replacement.replace(p)
@@ -679,11 +679,11 @@ class Ledger(unittest.TestCase):
         lock_path.touch()
         read_graph = ledger.check.read_graph
 
-        def check_locked(path):
+        def check_locked(path, *args):
             with lock_path.open("rb") as lock:
                 with self.assertRaises(BlockingIOError):
                     fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
-            return read_graph(path)
+            return read_graph(path, *args)
 
         with patch.object(ledger.check, "read_graph", side_effect=check_locked) as read:
             self.assertEqual(self.record()[0], 0)
@@ -728,6 +728,20 @@ class Ledger(unittest.TestCase):
             self.assertIn("warning: reading without a lock", errors)
         (self.home / ".lock").unlink()
         self.assertEqual(self.cli("signals", "--json")[2], "")
+
+    def test_the_default_home_is_the_one_check_uses(self):
+        resolved = self.project / "resolved"
+        env = {key: value for key, value in os.environ.items() if key != "AGENTGRAPH_HOME"}
+        with patch.dict(os.environ, env, clear=True), patch("agentgraph.snapshot_json.ledger_home", return_value=resolved):
+            self.assertEqual(self.cli("feedback", "preset", env_home=True)[0], 0)  # no --home, no $AGENTGRAPH_HOME
+            self.assertEqual([json.loads(line)["text"] for line in (resolved / "feedback.jsonl").read_text().splitlines()], ["preset"])
+            self.assertFalse(self.home.exists())
+            self.assertEqual(self.cli("feedback", "flag")[0], 0)  # --home still wins
+            self.assertEqual([item["text"] for item in self.records("feedback.jsonl")], ["flag"])
+            with patch.dict(os.environ, {"AGENTGRAPH_HOME": str(self.project / "env")}):
+                self.assertEqual(self.cli("feedback", "env", env_home=True)[0], 0)
+            self.assertTrue((self.project / "env" / "feedback.jsonl").exists())
+            self.assertEqual(len((resolved / "feedback.jsonl").read_text().splitlines()), 1)
 
     def test_home_flag_overrides_environment(self):
         env_directory = self.project / "env-ledger"

@@ -490,7 +490,8 @@ class Enforcement(unittest.TestCase):
         (self.graphs / "flows.json").write_text(json.dumps(graph(nodes)))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            code = check.main(["--dir", str(self.graphs), "--structure", str(structure_dir or self.root)])
+            # One file name holds unrelated graphs in turn: none may be held to the history of another.
+            code = check.main(["--dir", str(self.graphs), "--structure", str(structure_dir or self.root), "--no-history"])
         return code, out.getvalue()
 
     def problems(self, nodes):
@@ -563,16 +564,21 @@ class Enforcement(unittest.TestCase):
             with self.subTest(type=type_):
                 self.assertEqual(len(self.problems([node("x", type_, "impl-openai")])), 1)
 
-    def test_a_gate_reached_through_feedback_to_only(self):
-        # The gate depends on the lane's predecessor, not on the lane.
+    def test_a_gate_reached_through_feedback_to_only_is_no_step(self):
+        # A follower reads its predecessor: a gate that sends work back to the lane but depends on the lane's
+        # predecessor does not follow the lane.
         self.flow("researcher", "impl-claude", "reviewer", "impl-claude")
-        nodes = [node("r1", "research", "researcher"), node("i1", "implement", "impl-claude", status="pending", depends_on=["r1"]),
-                 gate("g1", "reviewer", ["r1"], ["i1"])]
-        self.assert_passes(nodes)
+        lane = [node("r1", "research", "researcher"), node("i1", "implement", "impl-claude", status="pending", depends_on=["r1"])]
+        code, out = self.run_check(lane + [gate("g1", "reviewer", ["r1"], ["i1"])])
+        self.assertEqual(code, 1, out)
+        self.assertIn("r1 (researcher) is not followed by reviewer after impl-claude (i1): flow researcher → impl-claude → reviewer → impl-claude", out)
+        self.assert_passes(lane + [gate("g1", "reviewer", ["i1"], ["i1"])])
         self.flow("impl-openai", "verifier", "impl-openai")
-        self.assert_passes([node("r0", "research", "researcher", status="passed", evidence="ok"),
-                            node("n1", "implement", "impl-openai", depends_on=["r0"]),
-                            gate("g1", "verifier", ["r0"], ["n1"])])
+        code, out = self.run_check([node("r0", "research", "researcher", status="passed", evidence="ok"),
+                                    node("n1", "implement", "impl-openai", depends_on=["r0"]),
+                                    gate("g1", "verifier", ["r0"], ["n1"])])
+        self.assertEqual(code, 1, out)
+        self.assertIn("n1 (impl-openai) is not followed by verifier", out)
 
     def test_a_gate_by_another_agent_or_for_another_node_does_not_count(self):
         self.flow("impl-openai", "reviewer", "impl-openai")
@@ -1021,6 +1027,221 @@ class Endpoint(unittest.TestCase):
             demo.server_close()
             thread.join(2)
         self.assertEqual(tree(self.root), self.before)
+
+
+class RecordedFlows(unittest.TestCase):
+    """A flow a node once followed or owed keeps binding it when it is retyped, given to another agent or passed;
+    only an amendment naming the node and the flow, or the user removing the flow, releases it."""
+
+    def setUp(self):
+        self.root = make_structure(Path(self.enterContext(tempfile.TemporaryDirectory())))
+        structure.add_flow(["impl-openai", "verifier", "impl-openai"], None, self.root)
+        self.graphs = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def lane(self):
+        return graph([node("i1", "implement", "impl-openai", attempts=1, session="ses_i"), gate("g1", "verifier", ["i1"], ["i1"])])
+
+    def check(self, raw, *extra):
+        (self.graphs / "flows.json").write_text(json.dumps(raw))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = check.main(["--dir", str(self.graphs), "--structure", str(self.root), "--home", str(self.home), *extra])
+        return code, out.getvalue()
+
+    def recorded(self):
+        self.assertEqual(self.check(self.lane())[0], 0)
+        self.assertEqual(json.loads((self.graphs / ".history" / "flows.flows").read_text())["nodes"],
+                         {"i1": ["impl-openai-verifier-impl-openai"]})
+
+    def bypass(self, **changes):
+        raw = self.lane()
+        raw["nodes"] = [{**raw["nodes"][0], **changes}]
+        return raw
+
+    def test_the_flow_is_recorded_when_a_node_is_first_seen_owing_it_and_nothing_else_is_written_for_other_nodes(self):
+        self.recorded()
+        raw = graph([node("n1", "implement", "impl-claude")])
+        self.assertEqual(self.check(raw)[0], 0)
+        self.assertEqual(sorted(json.loads((self.graphs / ".history" / "flows.flows").read_text())["nodes"]), ["i1"])
+
+    def test_retyping_the_node_does_not_release_the_flow(self):
+        self.recorded()
+        code, out = self.check(self.bypass(type="check"))
+        self.assertEqual(code, 1, out)
+        self.assertIn("i1 (impl-openai, check, running) was recorded as following flow impl-openai → verifier → impl-openai "
+                      "and is not followed by verifier", out)
+
+    def test_giving_the_node_to_another_agent_does_not_release_the_flow(self):
+        self.recorded()
+        code, out = self.check(self.bypass(agent="orchestrator"))
+        self.assertEqual(code, 1, out)
+        self.assertIn("i1 (orchestrator, implement, running) was recorded as following flow", out)
+
+    def test_passing_the_node_without_its_followers_is_refused(self):
+        self.recorded()
+        raw = self.bypass(status="passed", evidence="done")
+        raw["events"] = [{"time": 3, "node": "i1", "event": "dispatched", "note": ""},
+                         {"time": 4, "node": "i1", "event": "evaluated", "note": ""}]
+        code, out = self.check(raw)
+        self.assertEqual(code, 1, out)
+        self.assertIn("i1 (impl-openai, implement, passed) was recorded as following flow", out)
+        self.assertNotIn("never dispatched", out)  # the flow alone refuses it
+
+    def test_a_graph_marked_passed_cannot_leave_the_followers_pending(self):
+        self.recorded()
+        raw = self.lane()
+        raw["nodes"][0].update(status="passed", evidence="done")
+        raw["status"] = "passed"
+        raw["events"] = [{"time": 3, "node": "i1", "event": "dispatched", "note": ""},
+                         {"time": 4, "node": "i1", "event": "evaluated", "note": ""}]
+        code, out = self.check(raw)
+        self.assertEqual(code, 1, out)
+        self.assertIn("graph is passed but node g1 is pending", out)
+
+    def test_the_followers_must_still_read_the_node(self):
+        self.recorded()
+        raw = self.lane()
+        raw["nodes"][1]["depends_on"] = []  # a gate that only names the node in feedback_to
+        code, out = self.check(raw)
+        self.assertEqual(code, 1, out)
+        self.assertIn("i1 (impl-openai) is not followed by verifier", out)
+
+    def test_an_amendment_naming_the_node_and_the_flow_releases_it_for_good(self):
+        self.recorded()
+        raw = self.bypass(type="check")
+        raw.update(revision=2, amendments=["The user approved: i1 is released from the verifier flow (a spike)."])
+        code, out = self.check(raw)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.check(raw)[0], 0)
+        record = json.loads((self.graphs / ".history" / "flows.flows").read_text())
+        self.assertEqual((record["nodes"], record["released"]), ({}, {"i1": ["impl-openai-verifier-impl-openai"]}))
+
+    def test_an_amendment_that_does_not_name_the_node_and_the_flow_releases_nothing(self):
+        self.recorded()
+        for text in ("Loosened something else.", "i1 done_when changed.", "The flow was clarified."):
+            with self.subTest(text=text):
+                raw = self.bypass(type="check")
+                raw.update(revision=2, amendments=[text])
+                self.assertEqual(self.check(raw)[0], 1)
+
+    def test_removing_the_flow_from_the_structure_releases_it(self):
+        self.recorded()
+        structure.remove_flow("impl-openai-verifier-impl-openai", self.root)
+        self.assertEqual(self.check(self.bypass(type="check"))[0], 0)
+
+    def test_a_missing_structure_folder_does_not_forget_what_was_recorded(self):
+        self.recorded()
+        shutil.rmtree(self.root)
+        with patch.object(snapshot_json, "STRUCTURE_DIR", self.root):
+            out = io.StringIO()
+            (self.graphs / "flows.json").write_text(json.dumps(self.bypass(type="check")))
+            with contextlib.redirect_stdout(out):
+                check.main(["--dir", str(self.graphs), "--home", str(self.home)])
+        self.assertEqual(json.loads((self.graphs / ".history" / "flows.flows").read_text())["nodes"],
+                         {"i1": ["impl-openai-verifier-impl-openai"]})
+
+    def test_no_history_means_no_recorded_flows(self):
+        self.recorded()
+        self.assertEqual(self.check(self.bypass(type="check"), "--no-history")[0], 0)
+
+    def test_a_passed_node_that_never_followed_a_flow_owes_none(self):
+        raw = graph([node("n1", "implement", "impl-openai", status="passed", evidence="ok", attempts=1, session="s")])
+        self.assertEqual(self.check(raw)[0], 0)
+        self.assertFalse((self.graphs / ".history" / "flows.flows").exists())
+
+    def test_a_node_that_follows_the_flow_when_first_seen_passed_is_recorded(self):
+        raw = self.lane()
+        raw["nodes"][0].update(status="passed", evidence="ok")
+        raw["nodes"][1].update(status="passed", evidence="ok", verdict="confirmed")
+        self.assertEqual(self.check(raw)[0], 0)
+        record = json.loads((self.graphs / ".history" / "flows.flows").read_text())
+        self.assertEqual(record["nodes"], {"i1": ["impl-openai-verifier-impl-openai"]})
+
+
+class OneProblemList(unittest.TestCase):
+    """`check`, `record` and the snapshot report the same problems for a graph."""
+
+    def setUp(self):
+        self.root = make_structure(Path(self.enterContext(tempfile.TemporaryDirectory())))
+        structure.add_flow(["impl-openai", "verifier", "impl-openai"], None, self.root)
+        self.graphs = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.path = self.graphs / "flows.json"
+
+    def rules(self):
+        return check.rules_of(snapshot_json.load_structure(self.root), self.home)
+
+    def printed(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = check.main(["--dir", str(self.graphs), "--structure", str(self.root), "--home", str(self.home)])
+        return code, [line.strip()[2:] for line in out.getvalue().splitlines() if line.startswith("            - ")]
+
+    def write(self, nodes, **extra):
+        self.path.write_text(json.dumps({**graph(nodes), "task": "flows", **extra}))
+
+    def test_all_problems_are_what_check_prints_and_write_nothing(self):
+        self.write([node("i1", "implement", "impl-openai")])
+        before = sorted(p.name for p in self.graphs.iterdir())
+        found = check.all_problems(self.path, self.rules())
+        self.assertEqual(len(found), 1)
+        self.assertIn("i1 (impl-openai) is not followed by verifier", found[0])
+        self.assertEqual(sorted(p.name for p in self.graphs.iterdir()), before)  # no history written
+        self.assertEqual(self.printed(), (1, found))
+        self.assertEqual(check.all_problems(self.path, self.rules()), found)
+
+    def test_all_problems_include_the_history_rules(self):
+        self.write([node("i1", "implement", "impl-openai", attempts=3), gate("g1", "verifier", ["i1"], ["i1"])])
+        self.assertEqual(self.printed()[0], 0)  # check records the state
+        self.write([node("i1", "implement", "impl-openai", attempts=1), gate("g1", "verifier", ["i1"], ["i1"])])
+        found = check.all_problems(self.path, self.rules())
+        self.assertEqual(found, ["i1 attempts went down from 3 to 1"])
+        self.assertEqual(self.printed(), (1, found))
+
+    def test_all_problems_of_a_passing_graph_are_empty_and_unreadable_graphs_have_none(self):
+        self.write([node("i1", "implement", "impl-openai"), gate("g1", "verifier", ["i1"], ["i1"])])
+        self.assertEqual(check.all_problems(self.path, self.rules()), [])
+        self.path.write_text("{bad")
+        self.assertIsNone(check.all_problems(self.path, self.rules()))
+        self.path.write_text("[]")
+        self.assertIsNone(check.all_problems(self.path, self.rules()))
+
+    def test_the_snapshot_problems_are_the_check_problems(self):
+        self.write([node("i1", "implement", "impl-openai")])
+        found = check.all_problems(self.path, self.rules())
+        shape = snapshot_json.load_structure(self.root)
+        with patch.object(snapshot_json, "load_structure", return_value=shape), \
+                patch("agentgraph.outputs.edit_home", return_value=self.home):
+            snapshot_graph = check.graph_from_raw(json.loads(self.path.read_text()), self.path)
+            self.assertEqual(snapshot_json._problems(snapshot_graph, shape), found)
+            self.write([node("i1", "implement", "impl-openai"), gate("g1", "verifier", ["i1"], ["i1"])])
+            self.assertEqual(snapshot_json._problems(snapshot_graph, shape), [])
+
+    def test_record_refuses_a_graph_check_rejects_with_check_messages_and_records_a_good_one(self):
+        from agentgraph import ledger
+        # i1 is recorded as following the flow; then the graph is marked passed with its follower deleted.
+        self.write([node("i1", "implement", "impl-openai", status="passed", evidence="ok", attempts=1, session="s"),
+                    gate("g1", "verifier", ["i1"], ["i1"])], status="running")
+        self.assertEqual(self.printed()[0], 0)
+        raw = json.loads(self.path.read_text())
+        raw["nodes"] = [raw["nodes"][0]]
+        raw["status"] = "passed"
+        self.path.write_text(json.dumps(raw))
+        code, problems = self.printed()
+        self.assertEqual(code, 1)
+        result = ledger.record(self.home, 100.0, self.graphs, rules=self.rules())
+        self.assertEqual(result.code, 1)
+        self.assertEqual(result.runs, [])
+        self.assertTrue(any(problems[0] in note for note in result.notes), (problems, result.notes))
+        raw["nodes"] = [{**raw["nodes"][0]}, {**gate("g1", "verifier", ["i1"], ["i1"]), "status": "passed",
+                                                "evidence": "ok", "verdict": "confirmed", "attempts": 1, "session": "s3"}]
+        raw["events"] = [{"time": 3, "node": "g1", "event": "dispatched", "note": ""},
+                         {"time": 4, "node": "g1", "event": "evaluated", "note": ""}]
+        self.path.write_text(json.dumps(raw))
+        self.assertEqual(self.printed(), (0, []))
+        result = ledger.record(self.home, 100.0, self.graphs, rules=self.rules())
+        self.assertEqual((result.code, [run["task"] for run in result.runs]), (0, ["flows"]))
 
 
 if __name__ == "__main__":

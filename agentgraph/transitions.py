@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import stat
 import time
@@ -23,6 +24,7 @@ from pathlib import Path
 VERSION = 1
 HISTORY_DIR = ".history"
 SUFFIX = ".state"
+FLOWS_SUFFIX = ".flows"  # the flows recorded for a graph (flows_record)
 STATE_LIMIT = 16 * 1024 * 1024  # bytes read back
 FUTURE_SECONDS = 3600  # a new event dated further ahead than this is a clock error (E5)
 STALL_ATTEMPTS = 3  # attempts at which a node that is not stalled is a "stall candidate" (T8)
@@ -119,9 +121,8 @@ def _open_history(folder: int, *, create: bool) -> int | None:
         return None
 
 
-def load_state(folder: int, stem: str) -> dict | None:
-    """The record of the graph file `stem` in the graph folder `folder` (an open directory descriptor); None when
-    there is none. HistoryError when it cannot be used (the caller treats that as no history)."""
+def _read_record(folder: int, name: str, what: str) -> dict | None:
+    """The JSON object in `.history/<name>` of the graph folder `folder`; None when there is none."""
     try:
         history = _open_history(folder, create=False)
     except OSError as exc:
@@ -130,35 +131,67 @@ def load_state(folder: int, stem: str) -> dict | None:
         return None
     try:
         try:
-            fd = os.open(stem + SUFFIX, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=history)
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=history)
         except FileNotFoundError:
             return None
         except OSError as exc:
-            raise HistoryError(f"history of {stem} unusable ({exc.strerror}); ignored") from None
+            raise HistoryError(f"{what} unusable ({exc.strerror}); ignored") from None
         with os.fdopen(fd, "rb") as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                raise HistoryError(f"history of {stem} is not a regular file; ignored")
+                raise HistoryError(f"{what} is not a regular file; ignored")
             data = stream.read(STATE_LIMIT + 1)
     finally:
         os.close(history)
     try:
-        state = json.loads(data.decode("utf-8"))
-        if not isinstance(state, dict) or state.get("version") != VERSION or not isinstance(state.get("nodes"), dict) \
-                or not isinstance(state.get("objectives"), dict) or not isinstance(state.get("events"), dict):
-            raise ValueError("not a history record")
-        return state
+        record = json.loads(data.decode("utf-8"))
     except (ValueError, UnicodeDecodeError, RecursionError):
-        raise HistoryError(f"history of {stem} is not a readable record; ignored") from None
+        raise HistoryError(f"{what} is not a readable record; ignored") from None
+    if not isinstance(record, dict) or record.get("version") != VERSION:
+        raise HistoryError(f"{what} is not a readable record; ignored")
+    return record
+
+
+def load_state(folder: int, stem: str) -> dict | None:
+    """The record of the graph file `stem` in the graph folder `folder` (an open directory descriptor); None when
+    there is none. HistoryError when it cannot be used (the caller treats that as no history)."""
+    state = _read_record(folder, stem + SUFFIX, f"history of {stem}")
+    if state is not None and (not isinstance(state.get("nodes"), dict) or not isinstance(state.get("objectives"), dict)
+                              or not isinstance(state.get("events"), dict)):
+        raise HistoryError(f"history of {stem} is not a readable record; ignored")
+    return state
+
+
+def load_flows(folder: int, stem: str) -> dict | None:
+    """The flows recorded for the graph file `stem` (`check` writes them, see `flows_record`); None when there are
+    none. HistoryError when the record cannot be used."""
+    record = _read_record(folder, stem + FLOWS_SUFFIX, f"recorded flows of {stem}")
+    if record is not None and (not isinstance(record.get("nodes"), dict) or not isinstance(record.get("released"), dict)
+                               or type(record.get("amendments")) is not int
+                               or not all(_ids(v) for v in (*record["nodes"].values(), *record["released"].values()))):
+        raise HistoryError(f"recorded flows of {stem} are not a readable record; ignored")
+    return record
+
+
+def _ids(value) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
 def save_state(folder: int, stem: str, state: dict) -> bool:
     """Write the record atomically (a temporary file in the same folder, fsync, rename), under the graph folder's
     lock the caller holds. False when the record on disk was already this one. Raises OSError."""
+    return _write_record(folder, stem + SUFFIX, state)
+
+
+def save_flows(folder: int, stem: str, record: dict) -> bool:
+    """`save_state` for the recorded flows."""
+    return _write_record(folder, stem + FLOWS_SUFFIX, record)
+
+
+def _write_record(folder: int, name: str, state: dict) -> bool:
     data = (json.dumps(state, sort_keys=True, indent=1) + "\n").encode("utf-8")
     history = _open_history(folder, create=True)
     if history is None:
         raise OSError("history folder missing")
-    name = stem + SUFFIX
     try:
         try:
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=history)
@@ -184,6 +217,34 @@ def save_state(folder: int, stem: str, state: dict) -> bool:
     finally:
         os.close(history)
     return True
+
+
+def flows_record(previous: dict | None, applied: dict[str, list[str]], amendments, known: set[str]) -> dict:
+    """The recorded flows after one more look at a graph: for each node the ids of the drawn flows it has been seen
+    following or owing (`applied`: this run's), added to those recorded before, and kept whatever the node becomes
+    (retyped, given to another agent, passed). Two things release a flow: the user removing it from the structure
+    (it is not in `known`), and an amendment added since the last look (`amendments`, the graph's list) that
+    names the node and says "flow"; a released flow is never recorded for that node again (`released`). The record
+    holds ids only, never text."""
+    previous = previous or {}
+    nodes_before = previous.get("nodes", {})
+    released = {node_id: [fid for fid in ids if fid in known] for node_id, ids in previous.get("released", {}).items()}
+    amendments = [text for text in amendments if isinstance(text, str)]
+    for text in amendments[min(_int(previous.get("amendments"), len(amendments)), len(amendments)):]:
+        if "flow" not in text.lower():
+            continue
+        for node_id in set(nodes_before) | set(applied):
+            if re.search(rf"(?<![\w-]){re.escape(node_id)}(?![\w-])", text):
+                released[node_id] = list(dict.fromkeys(
+                    released.get(node_id, []) + nodes_before.get(node_id, []) + applied.get(node_id, [])))
+    nodes = {}
+    for node_id in set(nodes_before) | set(applied):
+        ids = [fid for fid in dict.fromkeys(nodes_before.get(node_id, []) + applied.get(node_id, []))
+               if fid in known and fid not in released.get(node_id, [])]
+        if ids:
+            nodes[node_id] = ids
+    return {"version": VERSION, "amendments": len(amendments), "nodes": nodes,
+            "released": {node_id: ids for node_id, ids in released.items() if ids}}
 
 
 # --- the rules -----------------------------------------------------------------------------------------------
@@ -264,8 +325,6 @@ def problems(prev: dict, raw: dict, now: float | None = None) -> list[str]:
             for dep in node.get("depends_on") or []:
                 if dep in nodes and nodes[dep].get("status") != "passed":
                     passed_problems.append(f"{node_id} is newly passed while its dependency {dep} is {nodes[dep].get('status')}")
-            if old is None:
-                continue  # a node added already passed (imported work, a graph rewritten whole): only its dependencies are held to
             mine = [e for e in events if isinstance(e, dict) and e.get("node") == node_id]
             if _is_worker(node):
                 if not any(e.get("event") in DISPATCH_EVENTS for e in mine):
