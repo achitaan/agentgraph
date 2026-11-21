@@ -341,7 +341,7 @@ def _public(item: dict) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentgraph cases", description=__doc__.splitlines()[0])
-    parser.add_argument("--home", type=Path, help="memory home (default: $AGENTGRAPH_HOME or ~/.config/opencode/orchestration/memory)")
+    parser.add_argument("--home", type=Path, help="memory home (default: $AGENTGRAPH_HOME, else the active preset's memory folder)")
     parser.add_argument("--agent", help="only this agent's cases")
     side = parser.add_mutually_exclusive_group()
     side.add_argument("--held-out", action="store_true", help="only held-out cases (for trying a drafted edit)")
@@ -353,7 +353,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--edit", metavar="NAME", help="the edit under trial")
     parser.add_argument("--note-file", type=Path, help="a note for the trial (UTF-8, cut to %d characters)" % NOTE_CHARS)
     args = parser.parse_args(argv)
-    home = (args.home or Path(os.environ.get("AGENTGRAPH_HOME", "~/.config/opencode/orchestration/memory"))).expanduser()
+    from .outputs import edit_home
+    home = edit_home(args.home)
     try:
         if args.result is not None:
             if args.outcome is None or args.edit is None:

@@ -276,8 +276,8 @@ def signal_lines(report: dict) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentgraph.handedits", description=__doc__.splitlines()[0])
-    parser.add_argument("--home", type=Path, help="memory home holding edits.jsonl (default: $AGENTGRAPH_HOME or "
-                                                  "~/.config/opencode/orchestration/memory)")
+    parser.add_argument("--home", type=Path, help="memory home holding edits.jsonl (default: $AGENTGRAPH_HOME, else "
+                                                  "the active preset's memory folder)")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--days", type=float, default=DAYS)
     parser.add_argument("--edits", type=int, default=EDITS)
@@ -286,7 +286,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--backups", type=Path)
     parser.add_argument("--agents-dir", type=Path)
     args = parser.parse_args(argv)
-    home = (args.home or Path(os.environ.get("AGENTGRAPH_HOME", "~/.config/opencode/orchestration/memory"))).expanduser()
+    from .outputs import edit_home
+    home = edit_home(args.home)
     report = signal(home, days=args.days, min_edits=args.edits, min_tasks=args.tasks, min_rewrites=args.rewrites,
                     backups=args.backups, agents_dir=args.agents_dir)
     if args.json:
