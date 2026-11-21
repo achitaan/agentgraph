@@ -53,15 +53,18 @@ SCRATCH = Path(os.environ.get("L_SUITE_SCRATCH", TEMP / "v9-scratch"))
 WORK = Path(os.environ.get("L_SUITE_WORK", TEMP / "v9-work"))
 RESULTS = REPO / "bench" / "results" / "l-suite.jsonl"
 DISCARDED = REPO / "bench" / "results" / "l-suite-discarded.jsonl"
-FROZEN = SUITE / "FROZEN.sha256"
-TASKS = ["t1", "t2", "t3", "t4"]
+FROZEN_FILES = {1: SUITE / "FROZEN.sha256", 2: SUITE / "FROZEN2.sha256"}
+FROZEN = FROZEN_FILES[1]
+ROUND_TASKS = {1: ["t1", "t2", "t3", "t4"], 2: ["t5", "t6"]}
+TASKS = ROUND_TASKS[1] + ROUND_TASKS[2]
+ROUND_OF = {t: r for r, ts in ROUND_TASKS.items() for t in ts}
 METHODS = ["direct", "loop-1", "loop-2"]
 FLOWS = {"loop-1": "impl-openai -> impl-openai", "loop-2": "impl-openai -> verifier -> impl-openai"}
 AGENT = "impl-openai"
 DIRECT_TIMEOUT = 600
-LOOP_LIMITS = {"attempts": 3, "attempt_seconds": 300, "cost": 1.0}
+LOOP_LIMITS = {1: {"attempts": 3, "attempt_seconds": 300, "cost": 1.0}, 2: {"attempts": 3, "attempt_seconds": 420, "cost": 1.0}}
 UNKNOWN_COST = 0.30
-STOP_AT = 5.40
+STOP_AT = {1: 5.40, 2: 2.60}
 NOTE = ("Before you finish, run the visible check (`{cmd}`) in the project folder and fix whatever it reports. "
         "Stop when it passes.")
 
@@ -77,28 +80,33 @@ def task_info(task: str) -> dict:
     return info
 
 
-def frozen_files() -> list[Path]:
+def frozen_files(rnd: int = 1) -> list[Path]:
     files = []
-    for task in TASKS:
+    for task in ROUND_TASKS[rnd]:
         base = SUITE / task
-        for part in ("fixture", "hidden", "reference"):
+        for part in ("fixture", "hidden", "reference", "naive"):
             files += [p for p in sorted((base / part).rglob("*")) if p.is_file() and "__pycache__" not in p.parts]
         files += [base / "goal.md", base / "task.json"]
     return files
 
 
-def freeze_lines() -> list[str]:
+def freeze_lines(rnd: int = 1) -> list[str]:
     return [f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(SUITE)}"
-            for p in sorted(frozen_files(), key=lambda p: str(p.relative_to(SUITE)))]
+            for p in sorted(frozen_files(rnd), key=lambda p: str(p.relative_to(SUITE)))]
 
 
-def verify_frozen() -> list[str]:
-    """The problems (empty = every hash still matches)."""
-    if not FROZEN.is_file():
-        return ["FROZEN.sha256 does not exist"]
-    want = FROZEN.read_text(encoding="utf-8").splitlines()
-    have = freeze_lines()
-    return [f"changed/added/removed: {line}" for line in sorted(set(want) ^ set(have))]
+def verify_frozen(rounds=(1, 2)) -> list[str]:
+    """The problems (empty = every hash still matches). Round 2's file is only required once it exists or a round-2 task runs."""
+    out = []
+    for rnd in rounds:
+        path = FROZEN_FILES[rnd]
+        if not path.is_file():
+            out.append(f"{path.name} does not exist")
+            continue
+        want = path.read_text(encoding="utf-8").splitlines()
+        have = freeze_lines(rnd)
+        out += [f"{path.name} changed/added/removed: {line}" for line in sorted(set(want) ^ set(have))]
+    return out
 
 
 # ---- the host ----
@@ -122,9 +130,10 @@ def prepare_work(info: dict, folder: Path, bench) -> Path:
     return work
 
 
-def ensure_loops() -> Path:
+def ensure_loops(rnd: int = 1) -> Path:
     """The loop structure (two agents, two flows) and the saved loops. Idempotent."""
-    structure = WORK / "structure"
+    structure = WORK / ("structure" if rnd == 1 else f"structure{rnd}")
+    limits = LOOP_LIMITS[rnd]
     for part in ("30-build", "40-verify", "flows"):
         (structure / part).mkdir(parents=True, exist_ok=True)
     texts = {structure / "30-build" / "impl-openai.md": "The worker.\n", structure / "40-verify" / "verifier.md": "The judge.\n"}
@@ -137,8 +146,8 @@ def ensure_loops() -> Path:
     for flow in FLOWS:
         if not (structure / ".loops" / f"{flow}.json").is_file():
             done = subprocess.run([str(CODE / "bin" / "agentgraph"), "loop", "set", flow, "--check", "python3 check.py", "--attempts",
-                                   str(LOOP_LIMITS["attempts"]), "--attempt-seconds", str(LOOP_LIMITS["attempt_seconds"]), "--cost",
-                                   str(LOOP_LIMITS["cost"]), "--allow-asks", "--structure", str(structure)],
+                                   str(limits["attempts"]), "--attempt-seconds", str(limits["attempt_seconds"]), "--cost",
+                                   str(limits["cost"]), "--allow-asks", "--structure", str(structure)],
                                   cwd=WORK, env=env, capture_output=True, text=True, timeout=60)
             if done.returncode != 0:
                 raise SystemExit(f"loop set {flow} failed: {done.stderr or done.stdout}")
@@ -255,12 +264,12 @@ def rows_of(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def spend() -> tuple[float, int]:
-    """(dollars, unknown costs) over every real row ever made, kept or discarded; an unknown cost counts as $0.30."""
+def spend(rnd=None) -> tuple[float, int]:
+    """(dollars, unknown costs) over every real row ever made, kept or discarded (of one round, or all); an unknown cost counts as $0.30."""
     total, unknown = 0.0, 0
     for path in (RESULTS, DISCARDED):
         for row in rows_of(path):
-            if row.get("fake"):
+            if row.get("fake") or (rnd is not None and ROUND_OF.get(row.get("task")) != rnd):
                 continue
             if row.get("cost") is None:
                 total += UNKNOWN_COST
@@ -271,15 +280,17 @@ def spend() -> tuple[float, int]:
 
 
 def run_cell(method: str, task: str, rep: int, args) -> dict:
-    problems = verify_frozen()
+    rnd = ROUND_OF[task]
+    problems = verify_frozen((1, 2) if FROZEN_FILES[2].is_file() else (1,)) if rnd == 1 else verify_frozen((1, 2))
     if problems:
         raise SystemExit("the suite is not frozen or changed since: " + "; ".join(problems[:3]))
     results = Path(args.results)
     if not args.again and any((r["method"], r["task"], r["rep"]) == (method, task, rep) for r in rows_of(results)):
         raise SystemExit(f"{method} {task} r{rep} already has a row in {results}")
-    total, _ = spend()
-    if not args.fake and total >= args.stop_at:
-        raise SystemExit(f"spend {total:.2f} has reached the stop line {args.stop_at:.2f}: not starting {method} {task} r{rep}")
+    total, _ = spend(rnd)
+    stop_at = args.stop_at if args.stop_at is not None else STOP_AT[rnd]
+    if not args.fake and total >= stop_at:
+        raise SystemExit(f"round {rnd} spend {total:.2f} has reached the stop line {stop_at:.2f}: not starting {method} {task} r{rep}")
     bench, sources = host()
     scratch = bench.open_scratch(SCRATCH)
     info = task_info(task)
@@ -289,7 +300,7 @@ def run_cell(method: str, task: str, rep: int, args) -> dict:
     work = prepare_work(info, folder, bench)
     env = bench.run_env(scratch, work)
     db_path = Path(sources.DB_PATH)
-    row = {"method": method, "task": task, "rep": rep, "time": int(time.time()), "model": scratch.get("pin_model"),
+    row = {"method": method, "task": task, "rep": rep, "round": rnd, "time": int(time.time()), "model": scratch.get("pin_model"),
            "config_hash": scratch["hash"], "fake": bool(args.fake), "work": str(work)}
     roots: list[str] = []
     errors: list[str] = []
@@ -315,7 +326,7 @@ def run_cell(method: str, task: str, rep: int, args) -> dict:
         status = "timeout" if result["timed_out"] else ("error" if errors else "returned")
         row.update(status=status, reason=None, attempts=None, retries=None, run=None, seconds=round(result["seconds"], 1))
     else:
-        structure = ensure_loops()
+        structure = ensure_loops(rnd)
         proj = folder / "proj"
         proj.mkdir()
         shutil.copy(info["dir"] / "goal.md", proj / "goal.md")
@@ -365,13 +376,8 @@ def num(value, digits=0) -> str:
     return "n/a" if value is None else f"{value:,.{digits}f}"
 
 
-def report(rows: list[dict]) -> str:
-    rows = [r for r in rows if not r.get("fake")]
-    if not rows:
-        return "no rows"
-    out = [f"{len(rows)} rows; tasks {sorted({r['task'] for r in rows})}; reps {sorted({r['rep'] for r in rows})}", "",
-           "## By method (sums over all runs of the method; n = runs)", "",
-           "| method | n | visible pass | hidden pass | hidden regressions | sessions | calls | input | output | cache read | cache write | cost $ | minutes | attempts | retries | final status |",
+def method_table(rows: list[dict]) -> list[str]:
+    out = ["| method | n | visible pass | hidden pass | hidden regressions | sessions | calls | input | output | cache read | cache write | cost $ | minutes | attempts | retries | final status |",
            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for method in METHODS:
         mine = [r for r in rows if r["method"] == method]
@@ -397,9 +403,12 @@ def report(rows: list[dict]) -> str:
             str(sum(r.get("attempts") or 0 for r in mine)) if loop else "n/a",
             str(sum(r.get("retries") or 0 for r in mine)) if loop else "n/a",
             ", ".join(f"{k}={v}" for k, v in sorted(statuses.items()))]) + " |")
-    out += ["", "## Per task and method (one value per repetition, in rep order; V = visible check, H = hidden check)", "",
-            "| task | method | n | V pass | H pass | sessions | calls | cost $ | seconds | attempts | status |",
-            "|---|---|---|---|---|---|---|---|---|---|---|"]
+    return out
+
+
+def task_table(rows: list[dict]) -> list[str]:
+    out = ["| task | method | n | V pass | H pass | sessions | calls | cost $ | seconds | attempts | status |",
+           "|---|---|---|---|---|---|---|---|---|---|---|"]
     for task in TASKS:
         for method in METHODS:
             mine = sorted((r for r in rows if r["task"] == task and r["method"] == method), key=lambda r: r["rep"])
@@ -413,16 +422,35 @@ def report(rows: list[dict]) -> str:
                 task, method, str(len(mine)), f"{sum(1 for r in mine if r['visible'])}/{len(mine)}", f"{sum(1 for r in mine if r['hidden'])}/{len(mine)}",
                 seq("sessions"), seq("calls"), seq("cost", lambda v: f"{v:.3f}"), seq("seconds", lambda v: f"{v:.0f}"),
                 seq("attempts") if method != "direct" else "n/a", "/".join(str(r.get("status")) for r in mine)]) + " |")
+    return out
+
+
+def report(rows: list[dict]) -> str:
+    rows = [r for r in rows if not r.get("fake")]
+    if not rows:
+        return "no rows"
+    for r in rows:
+        r.setdefault("round", ROUND_OF.get(r["task"], 1))
+    rounds = sorted({r["round"] for r in rows})
+    out = [f"{len(rows)} rows; rounds {rounds}; tasks {sorted({r['task'] for r in rows})}; reps {sorted({r['rep'] for r in rows})}"]
+    for rnd in rounds:
+        mine = [r for r in rows if r["round"] == rnd]
+        out += ["", f"## Round {rnd} by method (tasks {ROUND_TASKS[rnd]}; sums over all runs of the method; n = runs)", ""] + method_table(mine)
+    if len(rounds) > 1:
+        out += ["", f"## Both rounds together (n = runs; the rounds are shown apart above and in the per-task table)", ""] + method_table(rows)
+    out += ["", "## Per task and method (one value per repetition, in rep order; V = visible check, H = hidden check; round 1 = t1-t4, round 2 = t5-t6)", ""]
+    out += task_table(rows)
     out += ["", "## Rows", "",
-            "| method | task | rep | V | H | status | attempts | sessions | calls | cost $ | seconds | peeked | run / session |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
-    for r in sorted(rows, key=lambda r: (METHODS.index(r["method"]), r["task"], r["rep"])):
-        out.append("| " + " | ".join([r["method"], r["task"], str(r["rep"]), "pass" if r["visible"] else "FAIL", "pass" if r["hidden"] else "FAIL",
+            "| round | method | task | rep | V | H | status | attempts | sessions | calls | cost $ | seconds | peeked | run / session |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for r in sorted(rows, key=lambda r: (r["round"], METHODS.index(r["method"]), r["task"], r["rep"])):
+        out.append("| " + " | ".join([str(r["round"]), r["method"], r["task"], str(r["rep"]), "pass" if r["visible"] else "FAIL", "pass" if r["hidden"] else "FAIL",
                                       str(r.get("status")), num(r.get("attempts")), num(r.get("sessions")), num(r.get("calls")),
                                       num(r.get("cost"), 3), num(r.get("seconds")), num(r.get("peeked")),
                                       str(r.get("run") or (r.get("roots") or ["-"])[0])]) + " |")
     total, unknown = spend()
-    out += ["", f"spend over every row ever made (kept and discarded; an unknown cost counts ${UNKNOWN_COST:.2f}): ${total:.4f}, {unknown} unknown"]
+    parts = ", ".join(f"round {rnd} ${spend(rnd)[0]:.4f}" for rnd in rounds)
+    out += ["", f"spend over every row ever made (kept and discarded; an unknown cost counts ${UNKNOWN_COST:.2f}): ${total:.4f} in all ({parts}), {unknown} unknown"]
     return "\n".join(out)
 
 
@@ -438,19 +466,25 @@ def main() -> int:
     ap.add_argument("--fake", action="store_true", help="dry run: a stand-in agent copies reference/ (no model, no spend)")
     ap.add_argument("--again", action="store_true", help="allow a second row for the same cell")
     ap.add_argument("--results", default=str(RESULTS))
-    ap.add_argument("--stop-at", type=float, default=STOP_AT)
+    ap.add_argument("--stop-at", type=float, default=None, help="default: 5.40 for round 1, 2.60 for round 2")
+    ap.add_argument("--round", type=int, choices=(1, 2), default=None, help="for --freeze and --spend")
     args = ap.parse_args()
+    args.round_given = args.round is not None
+    args.round = args.round or 1
     if args.freeze:
-        FROZEN.write_text("\n".join(freeze_lines()) + "\n", encoding="utf-8")
-        print(f"wrote {FROZEN} ({len(freeze_lines())} files)")
+        path = FROZEN_FILES[args.round]
+        if path.exists():
+            raise SystemExit(f"{path.name} already exists: a frozen suite is never re-frozen by this script (delete it by hand on purpose)")
+        path.write_text("\n".join(freeze_lines(args.round)) + "\n", encoding="utf-8")
+        print(f"wrote {path} ({len(freeze_lines(args.round))} files)")
         return 0
     if args.verify_frozen:
         problems = verify_frozen()
         print("frozen hashes match" if not problems else "\n".join(problems))
         return 1 if problems else 0
     if args.spend:
-        total, unknown = spend()
-        print(f"${total:.4f} spent, {unknown} unknown cost(s) counted at ${UNKNOWN_COST:.2f}")
+        total, unknown = spend(args.round if args.round_given else None)
+        print(f"${total:.4f} spent{f' in round {args.round}' if args.round_given else ' in all rounds'}, {unknown} unknown cost(s) counted at ${UNKNOWN_COST:.2f}")
         return 0
     if args.report:
         print(report(rows_of(Path(args.results))))
