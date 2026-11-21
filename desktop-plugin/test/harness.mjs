@@ -3294,6 +3294,123 @@ await check("v7 panel: the view's loops action carries pause, resume, answer, re
 });
 // ---- end v4 ----
 
+// ---- v7 round 3: the Desktop bridge against the REAL interpreter and the repo's real agentgraph.loopapi (no model call) ----
+// The fake interpreters above cannot tell whether `python3 -P -m agentgraph.loopapi` exists. These run the command itself, on a temp structure
+// folder and a temp project, and set each answer beside what the page's HTTP server (agentgraph.server, the same folders copied) answers
+// for the same request.
+const LOOPS_WORLD_PY = `
+import json, sys
+from pathlib import Path
+from agentgraph import looprun
+base = Path(sys.argv[1])
+structure = base / "personal" / "structure"
+(structure / "30-build").mkdir(parents=True)
+(structure / "30-build" / "worker.md").write_text("Does the work.\\n")
+(structure / "30-build" / "reviewer.md").write_text("Reviews.\\n")
+(structure / "flows").mkdir()
+(structure / "flows" / "self.md").write_text("path: worker -> worker\\n\\nCheck its own work.\\n")
+(structure / "flows" / "pair.md").write_text("path: worker -> reviewer -> worker\\n\\nA longer path.\\n")
+project = base / "project"
+project.mkdir()
+looprun.save_settings(structure, "self", {"version": 1, "flow": "self", "limits": {"attempts": 3}, "check": {"command": "true", "timeout": 20}})
+ids = []
+for _ in range(2):
+    ids.append(looprun.start(project, "self", structure=structure, goal="Make it pass.", wait=True, executor=looprun.ScriptedExecutor([{}])))
+folder = looprun.run_dir(project, ids[1])  # the second run says running and has no controller (a controller that was killed)
+state = looprun.read_run(folder)
+(folder / "run.json").write_text(json.dumps({**state, "status": "running", "ended": None}))
+print(json.dumps(ids))
+`;
+const LOOPS_SERVER_PY = `
+import sys
+from pathlib import Path
+from agentgraph import server
+base = Path(sys.argv[1])
+httpd = server.make_server(0, structure_dir=base / "personal" / "structure", loops_project=base / "project")
+print(httpd.server_port, flush=True)
+httpd.serve_forever()
+`;
+await check("v7 r3 main (real python3): the bridge's loop command answers read, read of one run, save, a stale save, cancel of a run with no controller and an unknown run as the page's HTTP server does for the same request (same keys, same words)", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(TMP, "loops-real-")));
+  const env = Object.assign({}, process.env, { PYTHONPATH: ORCHESTRATION, PYTHONIOENCODING: "utf-8" });
+  delete env.AGENTGRAPH_PERSONAL;
+  const a = path.join(root, "a"), b = path.join(root, "b");
+  fs.mkdirSync(a);
+  const made = childProcess.spawnSync("python3", ["-P", "-c", LOOPS_WORLD_PY, a], { cwd: ORCHESTRATION, env, encoding: "utf8" });
+  assert.equal(made.status, 0, "building the temp world failed: " + made.stderr.slice(-400));
+  const [run1, run2] = JSON.parse(made.stdout.trim().split("\n").pop());
+  fs.cpSync(a, b, { recursive: true }); // the same bytes twice: a for the bridge, b for the page's server
+  const httpd = childProcess.spawn("python3", ["-P", "-c", LOOPS_SERVER_PY, b], { cwd: ORCHESTRATION, env, stdio: ["ignore", "pipe", "pipe"] });
+  const saved = process.env.AGENTGRAPH_PERSONAL;
+  try {
+    const port = await new Promise((resolve, reject) => {
+      let out = "";
+      httpd.stdout.on("data", (chunk) => { out += chunk; if (/\n/.test(out)) resolve(Number(out.trim())); });
+      httpd.on("exit", () => reject(new Error("the page server did not start")));
+      setTimeout(() => reject(new Error("the page server did not start in time")), 15000);
+    });
+    process.env.AGENTGRAPH_PERSONAL = path.join(a, "personal"); // the structure folder the real command reads (the bridge passes the process environment on)
+    const m = mainContext({ home: ORCHESTRATION });
+    resolveDefault(loadMain(CODE, []).module.exports).main(m.ctx);
+    const impl = m.provided[0].impl;
+    const bridge = async (request, directory = path.join(a, "project")) => JSON.parse(await impl.loops({ directory, request: JSON.stringify(request) }));
+    const page = async (request) => {
+      const read = request.op === "read";
+      const url = "http://127.0.0.1:" + port + (read ? (request.run ? "/api/loop/run?id=" + encodeURIComponent(request.run) : "/api/loops") : "/api/loop");
+      const response = await fetch(url, read ? { cache: "no-store" } : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) });
+      return { status: response.status, doc: await response.json() };
+    };
+    const plain = (doc) => JSON.parse(JSON.stringify(doc).split(a).join("ROOT").split(b).join("ROOT"));
+    const keys = (doc) => Object.keys(doc).sort();
+    // read: the listing
+    const list = await bridge({ op: "read" }), listed = await page({ op: "read" });
+    assert.equal(typeof list.error, "undefined", "the listing: " + JSON.stringify(list).slice(0, 300));
+    assert.deepEqual(keys(list), ["loops", "orphans", "project", "runs", "scratch"]);
+    assert.deepEqual(plain(list), plain(listed.doc), "the listing differs from the page's");
+    assert.deepEqual(list.loops.map((one) => one.flow).sort(), ["pair", "self"]);
+    assert.equal(list.runs.length, 2);
+    assert.equal(list.runs.find((one) => one.run === run2).status, "interrupted", "a run with no controller is shown interrupted");
+    // read: one run
+    const one = await bridge({ op: "read", run: run1 }), oneHttp = await page({ op: "read", run: run1 });
+    assert.deepEqual(keys(one), keys(oneHttp.doc));
+    assert.deepEqual(plain(one), plain(oneHttp.doc), "the run differs from the page's");
+    assert.equal(one.run.status, "passed");
+    // save with the rev the listing carried, then a second save with that same (now stale) rev
+    const entry = list.loops.find((item) => item.flow === "self");
+    const settings = { version: 1, flow: "self", limits: { attempts: 4 }, check: { command: "true", timeout: 20, inconclusive_codes: [75] }, session: "reuse", allow_asks: false };
+    const save = { op: "save", flow: "self", settings, rev: entry.rev };
+    const saved = await bridge(save), savedHttp = await page(save);
+    assert.deepEqual(keys(saved), keys(savedHttp.doc));
+    assert.deepEqual(plain(saved), plain(savedHttp.doc), "the save differs from the page's");
+    assert.equal(saved.ok, true);
+    assert.equal(saved.settings.limits.attempts, 4);
+    const stale = await bridge(save), staleHttp = await page(save);
+    assert.equal(staleHttp.status, 409, "the page's server refuses a stale rev with 409");
+    assert.deepEqual({ error: stale.error, rev: stale.rev }, { error: staleHttp.doc.error, rev: staleHttp.doc.rev }, "the stale refusal differs from the page's");
+    assert.match(stale.error, /changed since/i);
+    assert.equal(stale.rev, saved.rev, "the refusal carries the current rev");
+    // cancel of a run with no controller
+    const cancel = { op: "cancel", run: run2 };
+    const cancelled = await bridge(cancel), cancelledHttp = await page(cancel);
+    assert.deepEqual(plain(cancelled), plain(cancelledHttp.doc), "the cancel differs from the page's");
+    assert.equal(cancelled.run, run2);
+    assert.equal(cancelled.result, "cancelled", "a run with no controller is marked cancelled here");
+    const after = await bridge({ op: "read", run: run2 }), afterHttp = await page({ op: "read", run: run2 });
+    assert.equal(after.run.status, "cancelled");
+    assert.equal(afterHttp.doc.run.status, "cancelled");
+    // an unknown run, and no project folder
+    const missing = { op: "read", run: "20261121-000000-ffff" };
+    const none = await bridge(missing), noneHttp = await page(missing);
+    assert.equal(noneHttp.status, 404);
+    assert.deepEqual(plain({ error: none.error }), plain({ error: noneHttp.doc.error }), "the unknown run is not refused in the page's words");
+    const bare = await bridge({ op: "read" }, "");
+    assert.deepEqual([keys(bare), bare.project, bare.runs], [["loops", "orphans", "project", "runs", "scratch"], "", []], "no folder: no runs");
+  } finally {
+    if (saved === undefined) delete process.env.AGENTGRAPH_PERSONAL; else process.env.AGENTGRAPH_PERSONAL = saved;
+    httpd.kill("SIGKILL");
+  }
+});
+
 await check("the harness replaces an existing temporary bundle before reading it", () => {
   // build.mjs writes atomically, so even an identical rebuild replaces the existing file.
   assert.notEqual(fs.statSync(BUNDLE).ino, previousBundle.ino, "the existing bundle was reused");

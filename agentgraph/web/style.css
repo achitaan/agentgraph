@@ -834,6 +834,7 @@
 .agentgraph .ag-loopbox .ag-loop-goal { min-height: 64px; }
 .agentgraph .ag-loopbox .ag-loop-asks { margin-top: 8px; }
 .agentgraph .ag-loopbox .ag-loop-runrow { margin: 10px 0 14px; }
+.agentgraph .ag-loopbox .ag-loop-run-hint { display: inline; margin: 0 0 0 10px; }
 .agentgraph .ag-loopbox .ag-loop-need { margin: 0 0 6px; white-space: normal; }
 .agentgraph .ag-loopbox .ag-form-submit[data-loop-blocked="true"] { cursor: not-allowed; }
 .agentgraph .ag-loopbox .ag-loop-start { display: block; padding: 8px 10px; border: 1px solid var(--ag-control-border); border-radius: 6px; background: var(--ag-highlight); }

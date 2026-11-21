@@ -3509,6 +3509,8 @@
     // the page reads again on return to the tab and after each of its own writes); queued and running runs at the live rate.
     const LC_SLOW_MS = LC_POLL_MS * 15, LC_QUIET = ['waiting', 'paused', 'interrupted'];
     let lcOpen = '', lcCancelAsk = '', lcTimer = null, lcTimerMs = 0, lcWanted = '', lcLate = false;
+    let lcWrites = 0, lcKeepAsk = '', lcHintSync = null; // v7 r3: writes finished so far (a list read that began before one is stale); the trial whose Keep is being confirmed; redraws the hint beside Run while typing
+    const lcAnswered = new Set(); // runs with no controller whose answer was saved but whose resume was refused
     let lcAnswer = null, lcInspect = null; // the answer being confirmed ({ run, kind, note }); the step whose history is open ({ run, step })
     const lcCompare = { mode: '', runs: [], run: '', attempts: [] }, lcBoxes = new Set(); // what is picked to compare; the <details> left open (by flow)
     const LC_STATUS = { queued: 'Queued', waiting: 'Waiting for an answer', paused: 'Paused', running: 'Running', passed: 'Passed', failed: 'Failed', limit: 'Stopped at a limit', invalid: 'Not started', check_error: 'Check could not run', inconclusive: 'Check inconclusive', stalled: 'Stalled', agent_error: 'Agent error', cancelled: 'Cancelled', interrupted: 'Interrupted' };
@@ -3565,11 +3567,14 @@
     function lcLoad(force) {
       if (!lcAction || lc.loading || (!force && (lc.data || lc.error) && Date.now() - lc.at < LC_FRESH_MS)) return Promise.resolve();
       lc.loading = true;
-      const before = JSON.stringify([lc.data, lc.error]);
-      return ask(lcAction, { op: 'read' }).then(reply => { if (!alive) return; lc.data = lcClean(reply); lc.error = ''; },
-        error => { if (alive) lc.error = sentence(text(error?.message) || 'The loops could not be read'); }).then(() => {
-        lc.loading = false; lc.at = Date.now();
+      const before = JSON.stringify([lc.data, lc.error]), stamp = lcWrites;
+      let stale = false; // v7 r3: a write finished while this read was out, so its answer may be from before the write: it is dropped and the loops are read again
+      return ask(lcAction, { op: 'read' }).then(reply => { if (!alive) return; if (stamp !== lcWrites) { stale = true; return; } lc.data = lcClean(reply); lc.error = ''; },
+        error => { if (!alive) return; if (stamp !== lcWrites) { stale = true; return; } lc.error = sentence(text(error?.message) || 'The loops could not be read'); }).then(() => {
+        lc.loading = false;
         if (!alive) return;
+        if (stale) return lcLoad(true);
+        lc.at = Date.now();
         (lc.data?.runs || []).forEach(run => lcFresh.delete(run.run));
         lcSyncOpen(); lcSchedule();
         // A flow the list does not know (yet) shows "Reading…" until this read says otherwise.
@@ -3581,7 +3586,7 @@
     function lcSyncOpen() {
       if (!lcOpen) return;
       const row = (lc.data?.runs || []).find(run => run.run === lcOpen), full = lcRuns.get(lcOpen);
-      if (row && (!full || row.live || full.run?.status !== row.status || (full.run?.attempts || []).length !== row.attempts)) lcReadRun(lcOpen);
+      if (row && (!full || row.live || full.run?.status !== row.status || (typeof row.reason === 'string' && text(full.run?.reason) !== row.reason) || (full.run?.attempts || []).length !== row.attempts)) lcReadRun(lcOpen);
     }
     function lcReadRun(id) {
       if (!lcAction || lcReading.has(id)) return;
@@ -3640,7 +3645,14 @@
       return values;
     }
     const lcCurrent = entry => lcDrafts.get(entry.flow) || { ...lcValues(entry.settings, entry.path), rev: text(entry.rev) };
-    function lcEdit(entry, patch) { lcDrafts.set(entry.flow, { ...lcCurrent(entry), ...patch }); }
+    function lcEdit(entry, patch) { lcDrafts.set(entry.flow, { ...lcCurrent(entry), ...patch }); if (lcHintSync) lcHintSync(); }
+    // The form holds values that are not the saved ones (a field typed back to the saved value is not a change).
+    // With `kept` (settings about to be put in the form) it is also false when the form already holds exactly those values: nothing would be lost.
+    function lcDirty(entry, kept) {
+      const draft = lcDrafts.get(entry.flow); if (!draft) return false;
+      const differs = base => Object.keys(base).some(key => key in draft && JSON.stringify(draft[key]) !== JSON.stringify(base[key]));
+      return differs(lcValues(entry.settings, entry.path)) && (!kept || differs(lcValues(kept, entry.path)));
+    }
     // The settings to save from the form, or the sentence that refuses them (nothing is sent then).
     function lcBuild(entry, values) {
       const number = (raw, top, name, whole) => {
@@ -3718,12 +3730,19 @@
     }
     function lcApply(id, settings, rev) { const entry = lcEntry(id); if (entry) { entry.settings = settings; entry.rev = rev; } }
     // One write: ask, take the answer, say what happened, read the loops again. A refusal is the server's own words.
+    // A click while another write for this flow is out is not dropped silently: the page says so, and the caller keeps whatever it was asking.
+    function lcFree(id, wanted, runId = '') {
+      if (!lcBusy.has(id)) return true;
+      lcNotes.set(id, { kind: 'error', text: 'A change is still being made. Try again in a moment.', ...(runId ? { run: runId } : {}) });
+      lcRedraw(wanted || ''); return false;
+    }
     function lcWrite(id, request, done, wanted, runId = '') {
       if (!lcAction || lcBusy.has(id)) return;
       lcBusy.add(id); lcNotes.delete(id);
       lcRedraw(wanted);
-      ask(lcAction, request).then(reply => { if (alive) done(reply); }, error => {
+      ask(lcAction, request).then(reply => { if (alive) { lcWrites++; done(reply); } }, error => {
         if (!alive) return;
+        lcWrites++;
         lcNotes.set(id, { kind: 'error', text: sentence(plainWords(text(error?.message))) || 'Not changed.', ...(runId ? { run: runId } : {}) });
         const draft = lcDrafts.get(id); if (draft && isStale(error) && typeof error.rev === 'string') draft.rev = error.rev;
       }).then(() => { lcBusy.delete(id); if (alive) { lcRedraw(wanted); lcLoad(true); } });
@@ -3757,7 +3776,7 @@
     }
     // Try without saving: a run with the form's values; nothing is written, so there is nothing to undo.
     function lcTrial(entry) {
-      if (lcBusy.has(entry.flow)) return;
+      if (!lcFree(entry.flow, 'c:trial')) return;
       const built = lcBuild(entry, lcCurrent(entry));
       if (built.error) { lcNotes.set(entry.flow, { kind: 'error', text: built.error }); lcRedraw('c:trial'); return; }
       if (lcSelf(entry) && !built.settings.check) { lcNotes.set(entry.flow, { kind: 'error', text: 'A loop on one agent needs a check command to run. Enter one above.' }); lcRedraw('c:trial'); return; }
@@ -3773,7 +3792,7 @@
       }, 'c:remove');
     }
     function lcUndoNow(entry) {
-      const last = lcUndo.get(entry.flow); if (!last || lcBusy.has(entry.flow)) return;
+      const last = lcUndo.get(entry.flow); if (!last || !lcFree(entry.flow, 'c:save')) return;
       lcWrite(entry.flow, last.request, reply => {
         lcUndo.delete(entry.flow); lcDrafts.delete(entry.flow);
         if (last.request.op === 'save') lcApply(entry.flow, reply.settings && typeof reply.settings === 'object' ? reply.settings : last.request.settings, text(reply.rev)); else lcApply(entry.flow, null, '');
@@ -3791,7 +3810,7 @@
       }, 'c:run');
     }
     function lcRunPressed(entry) {
-      if (lcBusy.has(entry.flow) || lcNeedsCheck(entry)) return;
+      if (lcNeedsCheck(entry) || !lcFree(entry.flow, 'c:run')) return;
       if (text(entry.settings?.goal).trim()) { lcStart(entry, {}); return; }
       lcStarts.set(entry.flow, { goal: lcCurrent(entry).goal, workdir: '' }); lcNotes.delete(entry.flow); lcRedraw('f:run_goal');
     }
@@ -3806,7 +3825,7 @@
       two.append(el('span', 'ag-form-label', 'Work folder (optional; the project folder if empty)'), folder);
       const buttons = el('span', 'ag-form-buttons');
       buttons.append(setupButton('Start', { loopControl: 'start' }, () => {
-        if (lcBusy.has(entry.flow)) return;
+        if (!lcFree(entry.flow, 'c:run')) return;
         const said = ask.goal.trim(), where = ask.workdir.trim();
         if (!said) { lcNotes.set(entry.flow, { kind: 'error', text: 'Say what the loop should do: a goal is needed.' }); lcRedraw('f:run_goal'); return; }
         lcStart(entry, { goal: said, ...(where ? { workdir: where } : {}), ...(ask.settings ? { settings: ask.settings } : {}) });
@@ -3883,9 +3902,9 @@
       form.append(el('p', 'ag-loop-hint', 'Off: an action that would ask for permission is refused. On: the agent can do anything its agent file does not deny; use a folder you can afford to lose.'));
       if (team) form.append(lcMore(entry));
       const actions = el('div', 'ag-form-actions'), buttons = el('div', 'ag-form-buttons'), busy = lcBusy.has(entry.flow);
-      const save = setupButton('Save', { loopControl: 'save' }, () => { if (!lcBusy.has(entry.flow)) lcSave(entry); }, 'ag-form-submit');
+      const save = setupButton('Save', { loopControl: 'save' }, () => { if (lcFree(entry.flow, 'c:save')) lcSave(entry); }, 'ag-form-submit');
       buttons.append(save, setupButton('Try without saving', { loopControl: 'trial' }, () => lcTrial(entry)));
-      if (entry.settings) buttons.append(setupButton('Remove', { loopControl: 'remove' }, () => { if (!lcBusy.has(entry.flow)) lcRemove(entry); }));
+      if (entry.settings) buttons.append(setupButton('Remove', { loopControl: 'remove' }, () => { if (lcFree(entry.flow, 'c:remove')) lcRemove(entry); }));
       if (busy) buttons.querySelectorAll('button').forEach(button => button.setAttribute('aria-disabled', 'true'));
       actions.append(buttons); form.append(actions);
       form.append(el('p', 'ag-loop-hint', 'Try without saving runs once with the values above. The saved loop is not changed.'));
@@ -4046,10 +4065,24 @@
       const box = el('div', 'ag-loop-waiting'); box.dataset.loopWaiting = '';
       const who = wait.step ? lcStepName(wait.step, path) + ' ' + lcStepOutcome({ step: wait.step, outcome: wait.outcome, role: String(wait.step).startsWith('judge:') ? 'judge' : '', kind: wait.step === 'check' ? 'check' : 'agent' }) : 'The run';
       box.append(el('p', 'ag-loop-waiting-q', who + (wait.outcome === 'pass' ? '. Nothing counts as passed until you answer.' : '. The run is waiting for you.')));
+      // v7 r3: a run that says it waits but has no controller reads no answer: the page says so, and an answer is followed by a resume.
+      const alone = (typeof info.live === 'boolean' ? info.live : run.live) === false, saved = alone && lcAnswered.has(id);
+      if (alone) {
+        const gone = el('p', 'ag-loop-waiting-alone', 'The run is waiting for your answer, but nothing is running it.' + (saved ? ' Your answer is saved. Resume starts the run again so it can read it.' : ' Your answer is saved and the run is started again with it.')); gone.dataset.loopAlone = '';
+        box.append(gone);
+      }
+      if (saved) {
+        const buttons = el('span', 'ag-form-buttons');
+        buttons.append(setupButton('Resume', { loopControl: 'resume:' + id }, () => lcRunOp(run, { op: 'resume', run: id }, 'Resumed. The run goes on.', 'c:resume:' + id), 'ag-form-submit'));
+        box.append(buttons); body.append(box); return;
+      }
       box.append(el('p', 'ag-loop-hint', 'Approve carries on. Send back returns the work to ' + worker + ', with a note if you write one. Stop ends the run.'));
       const send = (answer, said) => () => {
+        if (!lcFree(run.flow, 'c:confirm-' + answer + ':' + id, id)) return;
         const note = answer === 'reject' ? text(lcAnswer?.note).trim() : '';
-        lcAnswer = null; lcRunOp(run, { op: 'answer', run: id, answer, ...(note ? { note } : {}) }, said, 'c:' + answer + ':' + id);
+        lcAnswer = null;
+        const request = { op: 'answer', run: id, answer, ...(note ? { note } : {}) };
+        if (alone) lcAnswerAlone(run, request, 'c:' + answer + ':' + id); else lcRunOp(run, request, said, 'c:' + answer + ':' + id);
       };
       if (lcAnswer?.run === id) {
         const kind = lcAnswer.kind, dialog = el('div', 'ag-loop-ask'); dialog.dataset.loopAsk = kind; dialog.setAttribute('role', 'group'); dialog.setAttribute('aria-label', 'Confirm your answer');
@@ -4092,9 +4125,32 @@
     }
     function lcRunOp(run, request, said, wanted) {
       lcWrite(run.flow, request, reply => {
-        lcNotes.set(run.flow, { kind: 'ok', text: reply?.result === 'cancelled' ? 'The run is cancelled.' : said, run: run.run });
-        if (request.op === 'resume') lcResumed.set(run.run, { flow: run.flow, at: Date.now(), from: lcSaid(run) });
+        lcNotes.set(run.flow, { kind: 'ok', text: reply?.result === 'cancelled' ? 'The run is cancelled.' : said, run: run.run, ...(request.op === 'resume' ? { resumed: true } : {}) });
+        if (request.op === 'resume') { lcAnswered.delete(run.run); lcResumed.set(run.run, { flow: run.flow, at: Date.now(), from: lcSaid(run) }); }
       }, wanted, run.run);
+    }
+    // An answer to a run nothing is running: it is written, then the run is resumed so it reads it (one confirm, two posts under one busy hold).
+    // When the resume is refused the answer stays saved: the page says so and offers Resume alone.
+    function lcAnswerAlone(run, request, wanted) {
+      const flow = run.flow;
+      if (!lcAction || lcBusy.has(flow)) return;
+      lcBusy.add(flow); lcNotes.delete(flow); lcRedraw(wanted);
+      const refused = error => sentence(plainWords(text(error?.message))) || 'It was refused.';
+      ask(lcAction, request).then(() => {
+        if (!alive) return;
+        lcWrites++;
+        return ask(lcAction, { op: 'resume', run: run.run }).then(() => {
+          if (!alive) return;
+          lcWrites++; lcAnswered.delete(run.run);
+          lcNotes.set(flow, { kind: 'ok', text: 'Answered. The run was started again and goes on.', run: run.run, resumed: true });
+          lcResumed.set(run.run, { flow, at: Date.now(), from: lcSaid(run) });
+        }, error => {
+          if (!alive) return;
+          lcWrites++; lcAnswered.add(run.run);
+          lcNotes.set(flow, { kind: 'error', text: 'Your answer is saved, but the run was not started: ' + refused(error) + ' Press Resume to try again.', run: run.run });
+        });
+      }, error => { if (alive) { lcWrites++; lcNotes.set(flow, { kind: 'error', text: sentence(plainWords(text(error?.message))) || 'Not changed.', run: run.run }); } })
+        .then(() => { lcBusy.delete(flow); if (alive) { lcRedraw(wanted); lcLoad(true); } });
     }
     // ---- compare ----
     function lcPickRun(id) {
@@ -4166,6 +4222,12 @@
       const word = key => LC_FIELD_WORDS[key] || (/^steps\./.test(key) ? key.replace(/^steps\./, '').replace(/\./g, ' ') : key.replace(/_/g, ' ').replace(/\./g, ' '));
       return names.length ? [...new Set(names.map(word))].slice(0, 5).join(', ') + (names.length > 5 ? ' and ' + (names.length - 5) + ' more' : '') : 'nothing that shows in the settings';
     }
+    // v7 r3: the server's `changed` (dotted setting paths; [] is identical) in words, by first segment.
+    const LC_CHANGED = { goal: 'the goal', workdir: 'the folder', check: 'the check', limits: 'the limits', steps: 'the agents\' settings', artifacts: 'the required files', approval: 'asking before a pass', session: 'the session rule' };
+    const lcChangedWords = changed => {
+      const names = [...new Set(changed.map(path => LC_CHANGED[text(path).split('.')[0]] || 'other settings'))];
+      return names.length ? 'differs from the saved loop in: ' + names.join(', ') : 'same as the saved loop';
+    };
     function lcVersions(item, entry, runs) {
       const key = 'versions:' + entry.flow, box = el('details', 'ag-loop-versions'); box.dataset.loopVersions = ''; box.open = lcBoxes.has(key);
       box.addEventListener('toggle', () => { if (box.open) lcBoxes.add(key); else lcBoxes.delete(key); });
@@ -4173,13 +4235,18 @@
       box.append(el('summary', '', 'Versions and how each did'));
       if (!versions.length) box.append(el('p', 'ag-loop-hint', 'No earlier version is kept yet. Each Save keeps the one before it.'));
       const list = el('ul', 'ag-loop-version-list');
-      versions.slice(0, 50).forEach(version => {
-        const row = el('li', 'ag-loop-version'), saved = !!entry.rev && version.sha256 === entry.rev; row.dataset.loopVersion = text(version.version);
-        const said = el('span', 'ag-loop-version-text', 'Kept ' + lcAgo(version.time) + ' · ');
-        const found = runs.map(run => run.settings_sha256 === version.sha256 ? lcRuns.get(run.run)?.definition?.settings : null).find(Boolean);
-        said.append(document.createTextNode(saved ? 'same as the saved loop' : found ? 'differs from the saved loop in ' + lcDiffWords(found, entry.settings) : 'what differs shows once a run that used it is opened'));
+      // An older server sends no `changed`: the rows say what they can (a run that used the version, once opened), and one sentence above the list says the rest.
+      const rows = versions.slice(0, 50).map(version => {
+        const saved = !!entry.rev && version.sha256 === entry.rev, found = runs.map(run => run.settings_sha256 === version.sha256 ? lcRuns.get(run.run)?.definition?.settings : null).find(Boolean);
+        const words = saved ? 'same as the saved loop' : Array.isArray(version.changed) ? lcChangedWords(version.changed) : found ? 'differs from the saved loop in ' + lcDiffWords(found, entry.settings) : '';
+        return { version, saved, words };
+      });
+      if (rows.some(one => !one.words)) { const old = el('p', 'ag-loop-hint', 'What differs from the saved loop shows once a run that used a version is opened.'); old.dataset.loopVersionsOld = ''; box.append(old); }
+      rows.forEach(({ version, saved, words }) => {
+        const row = el('li', 'ag-loop-version'); row.dataset.loopVersion = text(version.version);
+        const said = el('span', 'ag-loop-version-text', 'Kept ' + lcAgo(version.time) + (words ? ' · ' + words : ''));
         row.append(said);
-        if (!saved) row.append(setupButton('Go back to this version', { loopControl: 'restore:' + version.version }, () => { if (!lcBusy.has(entry.flow)) lcRestore(entry, text(version.version)); }, 'ag-text-button ag-loop-tool'));
+        if (!saved) row.append(setupButton('Go back to this version', { loopControl: 'restore:' + version.version }, () => { if (lcFree(entry.flow, 'c:restore:' + version.version)) lcRestore(entry, text(version.version)); }, 'ag-text-button ag-loop-tool'));
         list.append(row);
       });
       box.append(list);
@@ -4192,10 +4259,16 @@
         const body = el('tbody');
         [...groups.entries()].forEach(([sha, group]) => {
           const trials = group.filter(run => run.trial).length, kept = versions.find(version => version.sha256 === sha), tr = el('tr'); tr.dataset.sha = sha;
-          const label = trials === group.length ? 'Trial' : sha === entry.rev ? 'The saved loop' : kept ? 'Version kept ' + lcAgo(kept.time) : 'Earlier settings';
-          const costs = group.map(run => run.cost), known = costs.filter(lcKnown), attempts = lcSum(group.map(run => Number(run.attempts) || 0)), seconds = group.map(run => run.seconds).filter(lcKnown);
-          const cells = [label + ' · ' + sha.slice(0, 8) + (trials && trials < group.length ? ' (' + plural(trials, 'trial', 'trials') + ')' : ''), String(group.length), String(group.filter(run => run.status === 'passed').length),
-            (attempts / group.length).toFixed(1) + ' per run', known.length ? lcCost(lcSum(known)) + (known.length < costs.length ? ' + unknown on ' + (costs.length - known.length) : '') : 'cost unknown', seconds.length ? lcTime(lcSum(seconds)) : '—'];
+          // A version is kept when a Save replaces it: its time is when it stopped being the saved loop.
+          const label = trials === group.length ? 'Trial' : sha === entry.rev ? 'The saved loop' : kept ? 'Earlier version, replaced ' + lcAgo(kept.time) : 'Earlier settings';
+          const costs = group.map(run => run.cost), known = costs.filter(lcKnown), seconds = group.map(run => run.seconds), knownTime = seconds.filter(lcKnown);
+          // Attempts used is over the runs that are over: a queued or running run has not used its attempts yet.
+          const finished = group.filter(run => !['queued', 'running', 'waiting', 'paused', 'interrupted'].includes(run.status)), attempts = lcSum(finished.map(run => Number(run.attempts) || 0));
+          const mixed = trials > 0 && trials < group.length, won = group.filter(run => run.status === 'passed'), trialWon = won.filter(run => run.trial).length;
+          const cells = [label + ' · ' + sha.slice(0, 8), mixed ? plural(group.length, 'run', 'runs') + ', ' + (trials === 1 ? '1 of them a trial' : trials + ' of them trials') : String(group.length),
+            mixed ? String(won.length - trialWon) + (trialWon ? ', and ' + trialWon + ' in a trial' : '') : String(won.length),
+            finished.length ? (attempts / finished.length).toFixed(1) + ' per finished run' : 'no run is over yet', known.length ? lcCost(lcSum(known)) + (known.length < costs.length ? ' + unknown on ' + (costs.length - known.length) : '') : 'cost unknown',
+            knownTime.length ? lcTime(lcSum(knownTime)) + (knownTime.length < seconds.length ? ' + unknown on ' + (seconds.length - knownTime.length) : '') : 'time unknown'];
           const names = ['Settings', 'Runs', 'Passed', 'Attempts used', 'Cost', 'Time'];
           cells.forEach((said, i) => { const cell = el(i ? 'td' : 'th', '', said); cell.dataset.label = names[i]; if (!i) cell.scope = 'row'; tr.append(cell); });
           body.append(tr);
@@ -4207,18 +4280,24 @@
     function lcRunLine(body, run) {
       const said = lcNotes.get(run.flow);
       if (!said || said.run !== run.run) return;
-      const line = el('p', said.kind === 'error' ? 'ag-form-error ag-loop-line' : 'ag-form-reason ag-loop-line', said.text); line.dataset.loopLine = said.kind; line.setAttribute('role', said.kind === 'error' ? 'alert' : 'status'); body.append(line);
+      // v7 r3: what the note said when the click was answered is checked against what the run reads now.
+      let words = said.text;
+      const stopped = ['paused', 'interrupted'].includes(run.status);
+      if (said.resumed && stopped && !lcResumed.has(run.run)) words = 'The run stopped again. What happened is shown below.';
+      if (said.cancel && run.status === 'cancelled') words = 'The run is cancelled.';
+      else if (said.cancel && ['paused', 'interrupted', 'waiting'].includes(run.status)) words = 'Cancel was asked, but the run ' + (run.status === 'waiting' ? 'is waiting for you' : 'paused first') + '. It is ' + run.status + ', not cancelled. Press Cancel run to end it.';
+      const line = el('p', said.kind === 'error' ? 'ag-form-error ag-loop-line' : 'ag-form-reason ag-loop-line', words); line.dataset.loopLine = said.kind; line.setAttribute('role', said.kind === 'error' ? 'alert' : 'status'); body.append(line);
     }
     function lcBody(row, run, full) {
       const body = el('div', 'ag-loop-body'), info = full.run || {}, status = info.status || run.status, id = run.run, path = Array.isArray(full.definition?.path) ? full.definition.path : [];
       const live = info.live === true || run.live === true || ['queued', 'running'].includes(status), team = lcIsTeam(full), trial = run.trial === true || info.trial === true;
       const ctx = { run: id, path, team };
-      if (live || ['paused', 'interrupted'].includes(status)) {
+      if (live || ['paused', 'interrupted', 'waiting'].includes(status)) {
         if (lcCancelAsk === id) {
           const dialog = el('div', 'ag-loop-ask'); dialog.setAttribute('role', 'group'); dialog.setAttribute('aria-label', 'Confirm cancel');
           dialog.append(el('p', '', 'Cancel this run? The turn now running is stopped and no new attempt begins.'));
           const buttons = el('span', 'ag-form-buttons');
-          buttons.append(setupButton('Cancel run', { loopControl: 'cancel-confirm:' + id }, () => { lcCancelAsk = ''; lcWrite(run.flow, { op: 'cancel', run: id }, reply => { lcNotes.set(run.flow, { kind: 'ok', text: reply?.result === 'cancelled' ? 'The run is cancelled.' : 'Cancel asked. The run stops at once or before its next attempt.', run: id }); }, 'c:cancel-run:' + id, id); }, 'ag-form-submit'),
+          buttons.append(setupButton('Cancel run', { loopControl: 'cancel-confirm:' + id }, () => { if (!lcFree(run.flow, 'c:cancel-confirm:' + id, id)) return; lcCancelAsk = ''; lcWrite(run.flow, { op: 'cancel', run: id }, reply => { lcNotes.set(run.flow, reply?.result === 'cancelled' ? { kind: 'ok', text: 'The run is cancelled.', run: id } : { kind: 'ok', text: 'Cancel asked. The run stops at once or before its next attempt.', run: id, cancel: true }); }, 'c:cancel-run:' + id, id); }, 'ag-form-submit'),
             setupButton('Keep it running', { loopControl: 'cancel-keep:' + id }, () => { lcCancelAsk = ''; lcRedraw('c:cancel-run:' + id); }));
           dialog.append(buttons); body.append(dialog);
         } else {
@@ -4235,9 +4314,20 @@
         note.append(el('p', '', 'This was a trial: it used the form\'s values without saving them. The saved loop on disk is unchanged.'));
         const buttons = el('span', 'ag-form-buttons'), entry = lcEntry(run.flow);
         if (entry && full.definition?.settings) {
-          buttons.append(setupButton('Keep this version', { loopControl: 'keep:' + id }, () => { if (!lcBusy.has(run.flow)) lcSaveAs(entry, full.definition.settings, text(lcCurrent(entry).rev), 'Kept: these settings are now the saved loop.', 'The loop settings were saved from a trial.', 'c:keep:' + id, id); }),
-            setupButton('Discard', { loopControl: 'discard:' + id }, () => { lcNotes.set(run.flow, { kind: 'ok', text: 'Nothing was saved, so there is nothing to remove: the trial never changed the saved loop.' }); lcRedraw('c:discard:' + id); }));
-          note.append(buttons);
+          const keep = () => { lcKeepAsk = ''; lcSaveAs(entry, full.definition.settings, text(lcCurrent(entry).rev), 'Kept: these settings are now the saved loop.', 'The loop settings were saved from a trial.', 'c:keep:' + id, id); };
+          if (lcKeepAsk === id && lcDirty(entry, full.definition.settings)) {
+            // v7 r3: keeping replaces the form's values: asked in place when the form holds unsaved edits.
+            const dialog = el('div', 'ag-loop-ask'); dialog.dataset.loopKeepAsk = ''; dialog.setAttribute('role', 'group'); dialog.setAttribute('aria-label', 'Confirm keeping this version');
+            dialog.append(el('p', '', 'The form has unsaved changes. Keeping this version replaces them with this version\'s values.'));
+            const ask = el('span', 'ag-form-buttons');
+            ask.append(setupButton('Keep this version', { loopControl: 'keep-confirm:' + id }, () => { if (lcFree(run.flow, 'c:keep-confirm:' + id, id)) keep(); }, 'ag-form-submit'),
+              setupButton('Not yet', { loopControl: 'keep-not-yet:' + id }, () => { lcKeepAsk = ''; lcRedraw('c:keep:' + id); }));
+            dialog.append(ask); note.append(dialog);
+          } else {
+            buttons.append(setupButton('Keep this version', { loopControl: 'keep:' + id }, () => { if (!lcFree(run.flow, 'c:keep:' + id, id)) return; if (lcDirty(entry, full.definition.settings)) { lcKeepAsk = id; lcRedraw('c:keep-confirm:' + id); return; } keep(); }),
+              setupButton('Discard', { loopControl: 'discard:' + id }, () => { lcNotes.set(run.flow, { kind: 'ok', text: 'Nothing was saved, so there is nothing to remove: the trial never changed the saved loop.' }); lcRedraw('c:discard:' + id); }));
+            note.append(buttons);
+          }
         }
         body.append(note);
       }
@@ -4249,7 +4339,8 @@
       (Array.isArray(info.attempts) ? info.attempts : []).forEach(attempt => lcAttempt(body, attempt, given.get(attempt.n), given.get(attempt.n + 1), ctx));
       if (!(Array.isArray(info.attempts) && info.attempts.length)) body.append(el('p', 'ag-run-empty', live ? 'No attempt has finished yet' : 'No attempt was made'));
       const final = el('p', 'ag-loop-final'), word = el('span', 'ag-loop-final-status', lcWord(status)); word.dataset.status = text(status); if (status === 'passed') word.dataset.pass = 'true';
-      final.append(word, el('span', 'ag-loop-final-reason', lcReason(info.reason || run.reason)));
+      final.append(word); // v7 r3: a paused or interrupted run's reason is in its own block above, once
+      final.append(el('span', 'ag-loop-final-reason', ['paused', 'interrupted'].includes(status) ? '' : lcReason(info.reason || run.reason)));
       body.append(final);
       const by = lcPassedBy(info.passed_by || run.passed_by, lcTeamOf(path).judges.length);
       if (status === 'passed' && by) { const line = el('p', 'ag-loop-passedby', by); line.dataset.loopPassedby = ''; body.append(line); }
@@ -4267,7 +4358,7 @@
       head.append(status);
       if (run.trial === true) { const mark = el('span', 'ag-loop-trial', 'Trial'); mark.dataset.loopTrial = ''; head.append(mark); }
       head.append(meta);
-      head.addEventListener('click', () => { lcOpen = open ? '' : run.run; lcCancelAsk = ''; lcAnswer = null; lcInspect = null; if (!open && !lcRuns.has(run.run)) lcReadRun(run.run); else if (!open) lcSyncOpen(); lcRedraw('c:open:' + run.run); });
+      head.addEventListener('click', () => { lcOpen = open ? '' : run.run; lcCancelAsk = ''; lcKeepAsk = ''; lcAnswer = null; lcInspect = null; if (!open && !lcRuns.has(run.run)) lcReadRun(run.run); else if (!open) lcSyncOpen(); lcRedraw('c:open:' + run.run); });
       row.append(head);
       const picked = lcCompare.mode === 'run' && lcCompare.runs.includes(run.run), tools = el('div', 'ag-loop-run-tools');
       const pick = setupButton(picked ? 'Picked to compare' : 'Compare', { loopControl: 'compare:' + run.run }, () => lcPickRun(run.run), 'ag-text-button ag-loop-tool'); pick.setAttribute('aria-pressed', String(picked));
@@ -4313,6 +4404,14 @@
           runRow.append(run);
         }
         item.append(runRow);
+        // v7 r3: Run starts the saved loop; while the form holds other values, the page says so beside it and shows where the form's values go.
+        lcHintSync = () => {
+          const button = runRow.querySelector('[data-loop-control="run"]'), now = lcEntry(entry.flow); if (!button || !now) return;
+          const hint = runRow.querySelector('[data-loop-run-hint]'), dirty = lcDirty(now);
+          if (dirty && !hint) { const one = el('span', 'ag-loop-hint ag-loop-run-hint', 'Runs the saved loop. Use Try without saving for the values in the form.'); one.dataset.loopRunHint = ''; button.after(one); }
+          else if (!dirty && hint) hint.remove();
+        };
+        lcHintSync();
         const runs = lcRunsOf(flow.id), list = el('div', 'ag-loop-runs');
         lcVersions(item, entry, runs);
         item.append(el('p', 'ag-form-label ag-loop-runs-label', 'Runs'));
