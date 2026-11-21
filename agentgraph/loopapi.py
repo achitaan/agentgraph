@@ -10,12 +10,14 @@ cannot overwrite each other. A run id is checked against the run id pattern befo
 absolute folder that exists; a check's output is read as its last `OUTPUT_CHARS` characters."""
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 from . import looprun
-from .snapshot_json import load_structure
+from .snapshot_json import STRUCTURE_DIR, load_structure
 
 OUTPUT_CHARS = 20_000
 RUNS_SHOWN = 50
@@ -112,11 +114,55 @@ def _orphans(structure, known: set[str]) -> list[str]:
     return sorted(name for name in names if looprun.FLOW_ID.fullmatch(name) and name not in known)
 
 
-def _versions(structure, flow: str) -> list[dict]:
+def _leaves(value, prefix: str = "") -> dict:
+    """The settings as {dotted path: value} over their leaves: objects are walked (an empty one is a leaf), lists and scalars are leaves."""
+    if isinstance(value, dict) and value:
+        return {path: leaf for key, item in value.items() for path, leaf in _leaves(item, f"{prefix}.{key}" if prefix else str(key)).items()}
+    return {prefix: value}
+
+
+def _document(data: bytes | None):
+    """The plain JSON of a settings file (None when it is missing or not JSON)."""
     try:
-        return looprun.versions(structure, flow)
+        return json.loads((data or b"").decode("utf-8")) if data else None
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def _changed(now: dict, kept: dict) -> list[str]:
+    """The sorted dotted paths whose values differ between two settings documents; a path present on one side only differs. No values."""
+    a, b = _leaves(now) if now else {}, _leaves(kept) if kept else {}
+    missing = object()
+    return sorted(path for path in a.keys() | b.keys() if a.get(path, missing) != b.get(path, missing))
+
+
+def _versions(structure, flow: str) -> list[dict]:
+    """The kept earlier versions, newest first, each with `changed`: the sorted dotted setting paths whose values differ from the loop saved now
+    (every path of the version when there is no saved loop; `[]` when identical). Both sides are compared as validated settings (defaults filled
+    in) when both validate, else as the files' plain JSON."""
+    try:
+        rows = looprun.versions(structure, flow)
     except looprun.LoopError:
         return []
+    path = looprun.settings_path(structure, flow)
+    try:
+        current = _document(path.read_bytes())
+    except OSError:
+        current = None
+    folder = looprun._history(path)
+    out = []
+    for row in rows:
+        try:
+            kept = _document((folder / f"{row['version']}.json").read_bytes())
+        except OSError:
+            kept = None
+        a, b = current, kept
+        try:
+            a, b = looprun.validate(current, path) if current is not None else None, looprun.validate(kept, path) if kept is not None else None
+        except looprun.LoopError:
+            a, b = current, kept
+        out.append({**row, "changed": _changed(a if isinstance(a, dict) else {}, b if isinstance(b, dict) else {})})
+    return out
 
 
 def _summary(project, run_id: str) -> dict | None:
@@ -139,7 +185,7 @@ def _summary(project, run_id: str) -> dict | None:
 
 
 def listing(structure_dir, project, scratch) -> dict:
-    """`GET /api/loops`: every drawn flow with its saved loop, the settings files without a flow, and the newest runs."""
+    """`GET /api/loops`: every drawn flow with its saved loop, the settings files without a flow, and the newest runs (none, and `project` "", when there is no project)."""
     shape = load_structure(structure_dir)
     loops, known = [], set()
     for flow in (shape["flows"] if shape else []):
@@ -151,8 +197,8 @@ def listing(structure_dir, project, scratch) -> dict:
                       "runnable": runnable, "reason": reason, "settings": settings, "problem": problem,
                       "rev": rev_of(_read(structure_dir, flow["id"])), "versions": _versions(structure_dir, flow["id"])})
     known.update(flow["id"] for flow in (shape["unreadable_flows"] if shape else []))
-    runs = [row for row in (_summary(project, run_id) for run_id in looprun.list_runs(project)[:RUNS_SHOWN]) if row is not None]
-    return {"project": str(project), "scratch": bool(scratch), "loops": loops, "orphans": _orphans(structure_dir, known), "runs": runs}
+    runs = [row for row in (_summary(project, run_id) for run_id in looprun.list_runs(project)[:RUNS_SHOWN]) if row is not None] if project is not None else []
+    return {"project": str(project) if project is not None else "", "scratch": bool(scratch), "loops": loops, "orphans": _orphans(structure_dir, known), "runs": runs}
 
 
 def _output(path: Path) -> tuple[str, bool]:
@@ -297,7 +343,8 @@ def start(structure_dir, project, flow, goal=None, workdir=None, *, scratch=None
 
 def cancel(project, run_id) -> dict:
     """Stop a run: a live controller is asked (before the next attempt, or now if an agent turn is running; the reply is `{"run"}`, as in release 1); with no
-    controller (interrupted, paused, waiting, or queued whose controller never started) the run is marked cancelled here (`{"run", "result": "cancelled"}`). 409 for a run that is over."""
+    controller (interrupted, paused, waiting, or queued whose controller never started) the run is marked cancelled here (`{"run", "result": "cancelled"}`); so is a run that
+    a controller leaves `paused` while the request is being written (`looprun.cancel` waits up to `CANCEL_WAIT` seconds for it, except for a plainly running run). 409 for a run that is over."""
     folder = _run_folder(project, run_id)
     _state(folder)
     try:
@@ -384,3 +431,71 @@ def shape_ok(request) -> bool:
     if not required <= set(request) <= allowed:
         return False
     return all(isinstance(value, dict if key == "settings" else str) for key, value in request.items())
+
+
+REQUEST_LIMIT = 65536  # bytes of the one request line the Desktop bridge may send (the same limit as its own check)
+NEEDS_PROJECT = {"start", "cancel", "pause", "resume", "answer"}
+
+
+def _request_line(stream) -> dict:
+    """The one JSON request the command was given on stdin, or an `ApiError`."""
+    raw = stream.read(REQUEST_LIMIT + 1)
+    if len(raw) > REQUEST_LIMIT:
+        raise ApiError(400, "the loop request is too large")
+    try:
+        lines = [line for line in raw.decode("utf-8").split("\n") if line.strip()]
+        if len(lines) != 1:
+            raise ValueError
+        request = json.loads(lines[0])
+    except ValueError:
+        raise ApiError(400, "expected one JSON request on one line: " + SHAPES) from None
+    return request
+
+
+def answer_request(request, structure_dir, project, *, scratch=None, executor_spec=None) -> dict:
+    """What the Desktop bridge asks for, answered as the page server answers it: `{"op": "read"}` the listing, `{"op": "read", "run": id}` one run, and any
+    write of `POST /api/loop` (the same `shape_ok`, the same functions, the same `ApiError`s). `project` None (no session folder): the listing has no runs and
+    what needs a run folder (read one run, start, cancel, pause, resume, answer) is refused in words."""
+    if not isinstance(request, dict):
+        raise ApiError(400, "expected one JSON object: " + SHAPES)
+    if request.get("op") == "read":
+        if not set(request) <= {"op", "run"} or not isinstance(request.get("run", ""), str):
+            raise ApiError(400, 'expected {"op": "read"} or {"op": "read", "run": id}')
+        if "run" not in request:
+            return listing(structure_dir, project, scratch)
+        if project is None:
+            raise ApiError(404, f"no run {request['run'][:40]}: no project folder is open")
+        return run_detail(project, request["run"])
+    if not shape_ok(request):
+        raise ApiError(400, "expected " + SHAPES)
+    if project is None and request["op"] in NEEDS_PROJECT:
+        raise ApiError(400, "no project folder is open, so there is nowhere to start or change a run")
+    return post(request, structure_dir, project, scratch=scratch, executor_spec=executor_spec)
+
+
+def main(argv=None, stdin=None, stdout=None) -> int:
+    """`python3 -P -m agentgraph.loopapi [--project DIR] [--structure DIR]`, the Desktop bridge's command: one JSON request on stdin, one line of JSON on
+    stdout (the page's answer; or `{"error", "status", "rev"?}` with exit 1), never a traceback. `--project` is the folder whose runs are listed and where
+    runs are made (none: no runs); the structure folder is the page server's default (`$AGENTGRAPH_PERSONAL`, else the checkout's) unless `--structure`."""
+    out = stdout or sys.stdout
+    try:
+        parser = argparse.ArgumentParser(prog="agentgraph.loopapi", add_help=False, exit_on_error=False)
+        parser.add_argument("--project", type=Path)
+        parser.add_argument("--structure", type=Path)
+        args = parser.parse_args(argv)
+        structure = args.structure if args.structure is not None else Path(STRUCTURE_DIR)
+        doc = answer_request(_request_line(stdin or sys.stdin.buffer), structure, args.project.absolute() if args.project is not None else None)
+        text, code = json.dumps(doc, allow_nan=False), 0
+    except ApiError as exc:
+        text, code = json.dumps({**exc.body(), "status": exc.status}), 1
+    except (argparse.ArgumentError, SystemExit):
+        text, code = json.dumps({"error": "usage: python3 -m agentgraph.loopapi [--project DIR] [--structure DIR]", "status": 400}), 1
+    except Exception as exc:  # the bridge reads one document: whatever went wrong is said in a line, not as a traceback
+        text, code = json.dumps({"error": " ".join(f"the loops command failed: {type(exc).__name__}: {exc}".split())[:300], "status": 500}), 1
+    out.write(text + "\n")
+    out.flush()
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -2,6 +2,9 @@
 the scripted executor. No test starts OpenCode; runs are started with `wait` semantics through the controller or written by hand."""
 import hashlib
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -309,7 +312,47 @@ class Release3Tests(Base):
         versions = self.entry()["versions"]
         self.assertEqual(len(versions), 2)
         self.assertGreaterEqual(versions[0]["version"], versions[1]["version"])
-        self.assertEqual(set(versions[0]), {"version", "time", "sha256"})
+        self.assertEqual(set(versions[0]), {"version", "time", "sha256", "changed"})  # v8b round 2: `changed` is additive
+
+    def save_loop(self, **settings):
+        looprun.save_settings(self.structure, "self", {"version": 1, "flow": "self", "limits": {"attempts": 2}, "check": {"command": "true"}, **settings})
+
+    def test_v8b2_6_each_version_lists_the_setting_paths_that_differ_from_the_loop_saved_now_sorted_and_without_values(self):
+        self.save_loop(goal="First goal.", check={"command": "true", "timeout": 60}, limits={"attempts": 2, "cost": 5})
+        self.save_loop(goal="Second goal.", check={"command": "false", "timeout": 60}, limits={"attempts": 4}, artifacts=["out.txt"])
+        self.save_loop(goal="Second goal.", check={"command": "false", "timeout": 90}, limits={"attempts": 4}, artifacts=["out.txt", "b.txt"], approval="before_pass")
+        versions = self.entry()["versions"]
+        self.assertEqual(len(versions), 2)
+        newest, oldest = versions
+        self.assertEqual(newest["changed"], ["approval", "artifacts", "check.timeout"])
+        self.assertEqual(oldest["changed"], ["approval", "artifacts", "check.command", "check.timeout", "goal", "limits.attempts", "limits.cost"])
+        for row in versions:
+            self.assertEqual(row["changed"], sorted(row["changed"]))
+            self.assertTrue(all(isinstance(path, str) for path in row["changed"]))
+        self.assertNotIn("Second goal.", json.dumps(versions))  # paths only, no values
+
+    def test_v8b2_6_a_version_equal_to_the_saved_loop_changed_nothing_and_a_missing_section_lists_its_leaves(self):
+        self.save_loop(goal="Same.", steps={"worker": {"session": "fresh"}})
+        self.save_loop(goal="Same.", steps={"worker": {"session": "fresh"}})
+        self.assertEqual(self.entry()["versions"][0]["changed"], [])
+        self.save_loop(goal="Same.", steps={"worker": {"session": "reuse", "retries": 1}})
+        changed = self.entry()["versions"][0]["changed"]
+        self.assertIn("steps.worker.session", changed)
+        self.assertEqual(changed, sorted(changed))
+        self.assertNotIn("goal", changed)
+        self.save_loop(goal="Same.")  # the steps section is gone from the saved loop: its leaves are listed from the version
+        self.assertIn("steps.worker.session", self.entry()["versions"][0]["changed"])
+
+    def test_v8b2_6_a_removed_loop_lists_every_setting_of_its_versions_and_an_unreadable_version_is_listed_without_changes_broken(self):
+        self.save_loop(goal="One.")
+        self.save_loop(goal="Two.")
+        loopapi.remove(self.structure, "self", loopapi.rev_of(looprun.settings_path(self.structure, "self").read_bytes()))
+        rows = self.entry()["versions"]
+        self.assertTrue(rows and all("goal" in row["changed"] and "check.command" in row["changed"] for row in rows))
+        history = looprun._history(looprun.settings_path(self.structure, "self"))
+        (history / "20000101T000000.000000Z-00000000.json").write_text("{not json")
+        rows = self.entry()["versions"]
+        self.assertTrue(all(isinstance(row["changed"], list) for row in rows))
 
     def test_the_page_save_and_remove_keep_history_and_restore_needs_the_current_rev(self):
         first = loopapi.save(self.structure, "self", {"version": 1, "flow": "self", **GOOD}, "")
@@ -387,6 +430,121 @@ class Release3Tests(Base):
                {"op": "start", "flow": "f", "settings": "x"}, {"op": "pause", "run": "r", "x": "y"}]
         self.assertEqual([loopapi.shape_ok(r) for r in good], [True] * len(good))
         self.assertEqual([loopapi.shape_ok(r) for r in bad], [False] * len(bad))
+
+
+class EntryPointTests(Base):
+    """`python3 -P -m agentgraph.loopapi [--project DIR]` as the Desktop bridge runs it: one JSON request line on stdin, one JSON line on stdout, the real
+    interpreter against a temp structure folder (`AGENTGRAPH_PERSONAL`, so the live config is never read) and a temp project."""
+
+    REPO = Path(__file__).resolve().parent.parent
+
+    def call(self, request, project=True, expect_exit=None, env=None):
+        stdin = request if isinstance(request, str) else json.dumps(request) + "\n"
+        personal = self.tmp / "personal"
+        if not personal.exists():
+            personal.mkdir()
+            (personal / "structure").symlink_to(self.structure, target_is_directory=True)
+        environment = {**os.environ, "PYTHONPATH": str(self.REPO), "PYTHONIOENCODING": "utf-8", "AGENTGRAPH_PERSONAL": str(personal), **(env or {})}
+        done = subprocess.run([sys.executable, "-P", "-m", "agentgraph.loopapi", *(["--project", str(self.project)] if project else [])], input=stdin,
+                              capture_output=True, text=True, encoding="utf-8", cwd=self.REPO, env=environment, timeout=60)
+        self.assertNotIn("Traceback", done.stderr)
+        lines = done.stdout.split("\n")
+        self.assertEqual((len(lines), lines[-1]), (2, ""), done.stdout)  # exactly one line, ended by a newline, and nothing else
+        doc = json.loads(lines[0])
+        self.assertIsInstance(doc, dict)
+        self.assertEqual(done.returncode, 0 if "error" not in doc else 1, (done.returncode, doc))
+        return doc
+
+    def error(self, doc, status, words=""):
+        self.assertEqual(set(doc) - {"rev"}, {"error", "status"})
+        self.assertEqual(doc["status"], status)
+        self.assertTrue(isinstance(doc["error"], str) and doc["error"] and "\n" not in doc["error"])
+        self.assertIn(words, doc["error"])
+        return doc
+
+    def test_the_list_request_answers_the_loops_and_the_runs_of_the_project(self):
+        run = self.finished()
+        doc = self.call({"op": "read"})
+        self.assertEqual(set(doc), {"project", "scratch", "loops", "orphans", "runs"})
+        self.assertEqual((doc["project"], doc["scratch"]), (str(self.project), False))
+        self.assertEqual([item["flow"] for item in doc["loops"]], ["pair", "self"])
+        self.assertEqual([row["run"] for row in doc["runs"]], [run])
+        self.assertEqual(doc, json.loads(json.dumps(loopapi.listing(self.structure, self.project, None))))  # the page's own answer
+
+    def test_the_list_request_with_no_project_lists_the_loops_and_no_runs(self):
+        self.finished()
+        doc = self.call({"op": "read"}, project=False)
+        self.assertEqual((doc["project"], doc["runs"], [item["flow"] for item in doc["loops"]]), ("", [], ["pair", "self"]))
+
+    def test_one_run_is_read_and_an_unknown_run_is_404(self):
+        run = self.finished()
+        doc = self.call({"op": "read", "run": run})
+        self.assertEqual((doc["run"]["run"], doc["run"]["status"]), (run, "passed"))
+        self.error(self.call({"op": "read", "run": "20260101-000000-abcd"}), 404, "no run")
+        self.error(self.call({"op": "read", "run": run}, project=False), 404)
+
+    def test_save_then_list_shows_it_and_a_stale_rev_is_409_with_the_current_rev(self):
+        saved = self.call({"op": "save", "flow": "self", "settings": GOOD, "rev": ""})
+        self.assertEqual(set(saved), {"ok", "settings", "rev", "before"})
+        self.assertTrue(saved["ok"])
+        entry = next(item for item in self.call({"op": "read"})["loops"] if item["flow"] == "self")
+        self.assertEqual((entry["rev"], entry["settings"]["limits"]), (saved["rev"], {"attempts": 3}))
+        stale = self.error(self.call({"op": "save", "flow": "self", "settings": GOOD, "rev": ""}), 409, "changed")
+        self.assertEqual(stale["rev"], saved["rev"])
+        self.error(self.call({"op": "remove", "flow": "self", "rev": ""}), 409, "changed")
+
+    def test_a_refusal_is_the_400_document_and_a_bad_shape_is_400(self):
+        self.error(self.call({"op": "save", "flow": "self", "settings": {"limits": {"attempts": 0}}, "rev": ""}), 400, "attempts")
+        self.error(self.call({"op": "save", "flow": "self", "rev": ""}), 400, "expected")
+        self.error(self.call({"op": "teleport"}), 400, "expected")
+        self.error(self.call({"op": "cancel", "run": 7}), 400, "expected")
+        self.error(self.call({"op": "read", "run": 7}), 400)
+        self.error(self.call({"op": "read", "extra": 1}), 400)
+        self.error(self.call({"op": "save", "flow": "nope", "settings": GOOD, "rev": ""}), 400)
+
+    def test_restore_and_remove_change_the_saved_loop(self):
+        first = self.call({"op": "save", "flow": "self", "settings": GOOD, "rev": ""})
+        second = self.call({"op": "save", "flow": "self", "settings": {**GOOD, "limits": {"attempts": 5}}, "rev": first["rev"]})
+        version = next(item for item in self.call({"op": "read"})["loops"] if item["flow"] == "self")["versions"][0]["version"]
+        restored = self.call({"op": "restore", "flow": "self", "version": version, "rev": second["rev"]})
+        self.assertEqual((restored["ok"], restored["rev"], restored["settings"]["limits"]), (True, first["rev"], {"attempts": 3}))
+        self.assertEqual(self.call({"op": "remove", "flow": "self", "rev": first["rev"]})["before"]["limits"], {"attempts": 3})
+        self.error(self.call({"op": "restore", "flow": "self", "version": "20260101T000000-000001", "rev": ""}), 400)
+
+    def test_start_is_refused_in_words_without_a_model_call_and_with_no_project(self):
+        self.call({"op": "save", "flow": "self", "settings": GOOD, "rev": ""})
+        doc = self.call({"op": "start", "flow": "self"})  # no goal anywhere: an `invalid` run, no executor is made
+        self.assertEqual((doc["ok"], doc["status"], "goal" in doc["reason"]), (True, "invalid", True))
+        self.assertEqual(looprun.read_run(looprun.run_dir(self.project, doc["run"]))["status"], "invalid")
+        self.error(self.call({"op": "start", "flow": "self", "goal": "g"}, project=False), 400, "project")
+        self.error(self.call({"op": "start", "flow": "self", "workdir": "relative"}), 400, "absolute")
+
+    def test_cancel_pause_resume_and_answer_answer_as_the_page_does(self):
+        run = self.finished()
+        self.error(self.call({"op": "cancel", "run": run}), 409)
+        self.error(self.call({"op": "pause", "run": run}), 409)
+        self.error(self.call({"op": "resume", "run": run}), 409)
+        self.error(self.call({"op": "answer", "run": run, "answer": "approve"}), 409)
+        self.error(self.call({"op": "cancel", "run": "20260101-000000-abcd"}), 404)
+        self.error(self.call({"op": "cancel", "run": run}, project=False), 400, "project")
+        queued = QueuedNeverStartedTests("test_cancel_of_a_never_started_run_answers_cancelled")
+        queued.structure, queued.project = self.structure, self.project
+        waiting, folder = queued.queued(age=60)
+        self.assertEqual(self.call({"op": "cancel", "run": waiting}), {"ok": True, "run": waiting, "result": "cancelled"})
+        self.assertEqual(looprun.read_run(folder)["status"], "cancelled")
+
+    def test_garbage_empty_and_oversized_input_is_one_error_line(self):
+        for text in ("not json\n", "", "\n", "[1]\n", "7\n", "null\n", "{\"op\": \n", "\u00e9\n\xff", "{}\n", '{"op": "read"}\n{"op": "read"}\n'):
+            with self.subTest(text=text):
+                self.error(self.call(text), 400)
+        self.error(self.call(json.dumps({"op": "save", "flow": "self", "settings": {"goal": "x" * 70000}, "rev": ""})), 400, "large")
+
+    def test_the_default_structure_is_the_one_the_page_server_uses(self):
+        doc = self.call({"op": "read"}, env={"AGENTGRAPH_PERSONAL": str(self.tmp / "personal")})
+        self.assertEqual([item["flow"] for item in doc["loops"]], ["pair", "self"])
+        elsewhere = self.tmp / "empty"
+        (elsewhere / "structure").mkdir(parents=True)
+        self.assertEqual(self.call({"op": "read"}, env={"AGENTGRAPH_PERSONAL": str(elsewhere)})["loops"], [])
 
 
 class QueuedNeverStartedTests(Base):

@@ -127,7 +127,7 @@ agentgraph loop pause RUN               # after the step it is on (never cuts a 
 agentgraph loop resume RUN [--redo | --accept] [--wait]
 agentgraph loop answer RUN approve|reject|stop [--note T]   # also for a waiting run that has no controller; resume picks the answer up
 agentgraph loop start my-flow --goal-file goal.md --settings-file trial.json   # a trial: these settings for this run only
-agentgraph loop versions my-flow        # the kept earlier versions of the saved loop, newest first
+agentgraph loop versions my-flow        # the kept earlier versions of the saved loop, newest first (the page also gets `changed`: the setting paths that differ from the saved loop)
 agentgraph loop restore my-flow VERSION # put one back (what it replaces is kept too)
 ```
 
@@ -148,13 +148,15 @@ the sha256 of the message) and after the step is recorded (`phase: done`, with t
 
 - A step whose cursor is `done` continues at its route. A check step whose cursor is `started` runs the check again (see below).
 - An agent step whose cursor is `started` may or may not have been sent. `resume` asks the executor to **reconcile** and acts on one of three answers:
-  - `not_sent`: the session does not exist (and the cursor does not say it held user messages before the send), or it holds no user message since the send
-    (the cursor records the count of user messages before the send; the clock decides nothing). A missing session that held messages before the send, a session
-    with fewer messages than the count, and a cursor with no count when the session exists are `unknown`. The message is sent.
+  - `not_sent`: the session does not exist (and the cursor holds a count of 0 user messages before the send), or it holds no user message since the send
+    (the cursor records the count of user messages before the send, and the id and seq of the last one as the database has them; the clock decides nothing).
+    A missing session that held messages before the send, a missing session when the cursor holds no count (the send had started: it may have held this message),
+    a session with fewer messages than the count, a session whose user message at the counted place is not the one recorded (one removed and one added leaves the
+    count equal), and a cursor with no count when the session exists are `unknown`. A cursor written before the last message's id was recorded is judged by the count alone. The message is sent.
     A new user message that does not have this text, or two new messages with it, is `unknown`: someone else wrote into the session, or two tries cannot be told apart.
     A retry of a turn is told from its earlier try by that count, so a finished reply of try 1 is never adopted for try 2.
   - `finished`: exactly one new user message has this text and the session is idle after a reply (an idle row that says `succeeded` after an assistant reply, no live
-    process for the session, every sub-session idle). A judge's verdict is read from the turn's last assistant message only (none with text: `inconclusive`). The reply is adopted as the step's result (`recovered: true`, cost read from the session) and the walk goes on.
+    process for the session, every sub-session idle). A judge's verdict is read from the turn's last assistant message only (none with text, or a turn that carries no `final` message at all: `inconclusive`; the joined text of every message is never read). The reply is adopted as the step's result (`recovered: true`, cost read from the session) and the walk goes on.
   - `unknown`: anything else (still busy, a live process, the database unreadable, no idle row). The run becomes `paused` with the reason and **nothing is sent**.
 - A paused step is the person's to decide: `resume --redo` sends the message again, `resume --accept` takes the step as returned and goes to the check.
   Both are refused (and change nothing) for a step that may not have run, a judge's turn cannot be accepted (no verdict to read), and any other
@@ -166,7 +168,7 @@ the sha256 of the message) and after the step is recorded (`phase: done`, with t
   A `resume` of a run whose lock a controller holds is refused at once, without waiting for the lock.
 - A run still `queued` 30 seconds after it was created with no controller holding its lock is shown `interrupted` (the controller never started, nothing was sent):
   `resume` starts it (`--redo` and `--accept` are refused: there is no step to redo) and `cancel` marks it `cancelled`. A detached `run` that cannot start the
-  controller (no OpenCode, unreadable or changed definition) writes a final status with the reason in words instead of leaving `queued`, under the run's lock. A lock that is held
+  controller (no OpenCode, an executor that cannot be made, unreadable or changed definition, or any other error, including a `--resume ""` of a never-started run) writes a final status with the reason in words instead of leaving `queued`, under the run's lock. A lock that is held
   means a controller exists and owns the record, so a `run` that finds it busy writes nothing.
 - Looking does not touch a run: `list` and `status` only probe the lock read-only (a missing lock file means not held), create no file and do not follow a symlinked run folder.
   A probe never keeps a controller from taking its lock, and a controller waits up to a second for it.
@@ -174,8 +176,10 @@ the sha256 of the message) and after the step is recorded (`phase: done`, with t
 - `answer` is decided and written under `answer.lock` (a `flock`, so a stale file wedges nothing): a run that is no longer `waiting` refuses it, and an answer taken
   by a controller that is killed before it saved is not lost. A `cancel` with no controller and a controller ending the run take the same lock, so an answer is
   either decided before the run ends or is refused; one that lost is removed, and `answer.json` is never left in a run that is no longer `waiting`.
-- A `cancel` answered "requested" always comes true: a controller that is pausing when it is asked ends the run `cancelled` instead of `paused`, and a `cancel` file that
-  reached a run that had just paused ends its next `resume` `cancelled` before any step is sent.
+- A `cancel` answered "requested" always comes true: a controller that is pausing when it is asked ends the run `cancelled` instead of `paused`. For a run that is not plainly
+  running (paused, waiting, or with a `pause` asked) `cancel` waits up to 2 seconds for the controller's lock after it has written the request; if the run then reads `paused`
+  it is marked `cancelled` there and the answer is `cancelled`, so no request is left behind. A `cancel` file that still reaches a run that paused (the lock stayed held)
+  ends its next `resume` `cancelled` before any step is sent.
 - `pause` is for a run a controller is running: it writes a `pause` file and the controller stops after the step it is on (the run says `paused`,
   `resume` goes on at the next step). `cancel` and `answer` act on a paused, waiting or interrupted run with no controller, under the run's lock.
 - `list` and `status` say it in words: `interrupted (the controller is gone; agentgraph loop resume RUN)`, `paused`, `waiting`, `trial`.
@@ -190,6 +194,12 @@ the sha256 of the message) and after the step is recorded (`phase: done`, with t
   (at most 50, the oldest go first). `loop versions` lists them, `loop restore` puts one back byte for byte and keeps what it replaced. A bad or traversing version id is refused.
 - `loop start --settings-file F` (or `{"op": "start", "settings": {...}}`) is a trial run: the settings (checked like a saved loop) are pinned in the run, the saved loop is neither read
   nor changed, and `run.json` says `trial: true`. Every run, trial or not, records `settings_sha256` (the sha256 of the pinned settings as JSON).
+
+## The Desktop bridge
+
+`python3 -P -m agentgraph.loopapi [--project DIR] [--structure DIR]` answers one request per process: one JSON line on stdin (`{"op": "read"}`, `{"op": "read", "run": id}`,
+or a `POST /api/loop` body such as `{"op": "cancel", "run": id}`), one JSON line on stdout. A failure is `{"error": text, "status": N}` (plus `rev` for a stale `save`) with exit code 1.
+The keys and replies are `WEB_API.md`'s; a `start` with no `--project` is refused in words.
 
 ## What this does and does not guarantee
 

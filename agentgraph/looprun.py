@@ -93,6 +93,7 @@ GOAL_LIMIT = 20000
 HEARTBEAT = 5.0
 LOCK_WAIT = 1.0  # seconds a controller (or a cancel) waits for the run lock: a probe holds it for an instant
 ANSWER_WAIT = 5.0  # seconds a person's answer (or the controller taking it) waits for the other
+CANCEL_WAIT = 2.0  # seconds a cancel that was answered "requested" waits for the controller's lock, to see a run that ended `paused` in that window
 QUEUED_GRACE = 30.0  # seconds after which a queued run that no controller took shows `interrupted`
 RUN_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{4}")
 FLOW_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
@@ -792,7 +793,7 @@ def new_session_id() -> str:
 class ScriptedExecutor:
     """For tests. `attempts` is a list (each call takes the next item, whoever is asked) or a dict {agent: list} (each agent's turns are
     scripted on their own; an agent with no item left gets an empty reply). Keys of an item: `sleep` seconds, `hang` (wait for the time
-    limit or a cancel), `error`, `text`, `final` (the last message's text, which the verdict is read from; default `text`), `cost`, `tokens`, `sessions`, `exit`. `calls` holds every call (agent, session, first, message,
+    limit or a cancel), `error`, `text`, `final` (the last message's text, which the verdict is read from; the executor gives `text` when the item has none), `cost`, `tokens`, `sessions`, `exit`. `calls` holds every call (agent, session, first, message,
     cwd, ...) in order, `by_agent(agent)` and `sessions(agent)` read it back; `hook(n, call)` runs first. `reconcile` is a file the
     tests write: JSON {"answer": "not_sent" | "finished" | "unknown", "text", "cost", "sessions", "reason"}; no file, or one that cannot
     be read, answers `unknown`. `reconciles` holds every (session, message_sha256) asked about."""
@@ -817,7 +818,7 @@ class ScriptedExecutor:
         """The number of user messages the session holds before a send: the scripted executor has no database, so none."""
         return None
 
-    def reconcile(self, session: str, message_sha256: str, sent_at=None, users=None) -> dict:
+    def reconcile(self, session: str, message_sha256: str, sent_at=None, users=None, last_user=None) -> dict:
         self.reconciles.append((session, message_sha256))
         try:
             answer = json.loads(self.reconcile_file.read_text(encoding="utf-8")) if self.reconcile_file else None
@@ -861,7 +862,7 @@ class ScriptedExecutor:
         return {"exit": None if outcome in ("stalled", "cancelled") else item.get("exit", 1 if error else 0), "outcome": outcome,
                 "session": session, "cost": item.get("cost"), "tokens": item.get("tokens"), "sessions": item.get("sessions"),
                 "seconds": time.monotonic() - started, "error": error, "text": item.get("text", ""),
-                **({"final": item["final"]} if "final" in item else {})}
+                "final": item["final"] if "final" in item else item.get("text", "")}
 
 
 class OpenCodeExecutor:
@@ -966,11 +967,23 @@ class OpenCodeExecutor:
         except (sqlite3.Error, OSError, ValueError):
             return None
 
-    def reconcile(self, session: str, message_sha256: str, sent_at: float | None = None, users: int | None = None) -> dict:
+    def last_user(self, session: str) -> dict | None:
+        """The newest user message `session` holds now, `{"seq", "id"}` as the database has them (None when there is none or the database cannot be
+        read). Read-only. The controller records it beside the count before a send: a count alone cannot tell "one message removed and this one added"
+        from "nothing sent"."""
+        try:
+            with closing(costmod._connect(self.db_path)) as db:
+                row = db.execute("SELECT seq, id FROM session_message WHERE session_id=? AND type='user' ORDER BY seq DESC LIMIT 1", (session,)).fetchone()
+        except (sqlite3.Error, OSError, ValueError):
+            return None
+        return {"seq": row[0], "id": row[1]} if row else None
+
+    def reconcile(self, session: str, message_sha256: str, sent_at: float | None = None, users: int | None = None, last_user: dict | None = None) -> dict:
         """What became of a message that may have been sent to `session` (read-only; never sends). `users` (the user-message count, see `mark`)
-        was recorded just before the send and tells this send's message from earlier ones; `sent_at` is kept for the record and decides nothing.
-        `not_sent`: no process of this session is alive and either the session row is missing (with no count above 0) or the session holds
-        no user message since that send. With no count in the cursor, a session that exists is `unknown`. `finished`: exactly one new user message
+        was recorded just before the send and tells this send's message from earlier ones, and `last_user` (see `last_user`) is the message the count
+        ended on: it must still be the user message at that place, or a message was removed and the count lies. `sent_at` is kept for the record and
+        decides nothing. `not_sent`: no process of this session is alive and either the session row is missing (and the cursor holds a count of 0) or the
+        session holds no user message since that send. With no count in the cursor, a missing row and a session that exists are `unknown`. `finished`: exactly one new user message
         has this text, an idle row with outcome `succeeded` follows an assistant reply, and nothing of this turn is still busy; `text`,
         `final` (the text of the turn's last assistant message, "" when it has none) and `cost` are read from the turn's own rows. Anything else, including a process
         still alive, a new message with other text and a database that cannot be read, is `unknown` with the reason."""
@@ -984,26 +997,31 @@ class OpenCodeExecutor:
             return unknown(f"an opencode process for this session is still running (pid {pids[0]})")
         try:
             with closing(costmod._connect(self.db_path)) as db:
-                return self._reconcile_rows(db, session, message_sha256, unknown, sent_at, users)
+                return self._reconcile_rows(db, session, message_sha256, unknown, sent_at, users, last_user)
         except (sqlite3.Error, OSError, ValueError) as exc:
             return unknown(f"the opencode database cannot be read: {type(exc).__name__}: {exc}"[:200])
 
     @staticmethod
-    def _reconcile_rows(db, session: str, sha: str, unknown, sent_at: float | None = None, users: int | None = None) -> dict:
+    def _reconcile_rows(db, session: str, sha: str, unknown, sent_at: float | None = None, users: int | None = None, last_user: dict | None = None) -> dict:
+        counted = isinstance(users, int) and not isinstance(users, bool) and users >= 0
         if db.execute("SELECT 1 FROM session_v2 WHERE id=?", (session,)).fetchone() is None:
-            if isinstance(users, int) and not isinstance(users, bool) and users > 0:
+            if not counted:  # the cursor says the send had started: with no count, a session that is gone may have held this message
+                return unknown("the session row is missing and the cursor holds no count of the user messages before the send, so it cannot be told what became of this one")
+            if users > 0:
                 return unknown(f"the session row is missing although it held {users} user message(s) before the send, so it cannot be told what became of this one")
             return {"answer": "not_sent", "reason": "the session does not exist"}
-        every = [(seq, created, text) for seq, created, text in db.execute(
-            "SELECT seq, time_created, CASE WHEN json_valid(data) THEN json_extract(data, '$.text') END FROM session_message WHERE session_id=? AND type='user' ORDER BY seq", (session,))]
-        if not (isinstance(users, int) and not isinstance(users, bool) and users >= 0):
+        every = [(seq, created, text, mid) for seq, created, text, mid in db.execute(
+            "SELECT seq, time_created, CASE WHEN json_valid(data) THEN json_extract(data, '$.text') END, id FROM session_message WHERE session_id=? AND type='user' ORDER BY seq", (session,))]
+        if not counted:
             return unknown("the cursor holds no count of the user messages before the send, and a clock alone cannot tell this send's message from an earlier one")
         if len(every) < users:
             return unknown(f"the session holds {len(every)} user message(s), fewer than the {users} it held before the send, so it was changed")
+        if isinstance(last_user, dict) and users > 0 and (every[users - 1][0], every[users - 1][3]) != (last_user.get("seq"), last_user.get("id")):
+            return unknown("the user message the session ended on before the send is not where it was (a message was removed or replaced), so what is new cannot be told")
         new = every[users:]  # the count before the send is exact: what came after it is this send's (or someone else's)
         if not new:
             return {"answer": "not_sent", "reason": "the session holds no user message since the send"}
-        mine = [(seq, created) for seq, created, text in new if isinstance(text, str) and hashlib.sha256(text.encode("utf-8")).hexdigest() == sha]
+        mine = [(seq, created) for seq, created, text, _mid in new if isinstance(text, str) and hashlib.sha256(text.encode("utf-8")).hexdigest() == sha]
         if not mine:
             return unknown(f"the session holds {len(new)} new user message(s) since the send, none with this text: someone else wrote into it, so it cannot be told whether this one was sent")
         if len(mine) > 1:
@@ -1524,7 +1542,7 @@ class Controller:
             record.update(answer=None, action="accept", reason=None)
         else:
             try:
-                answer = self.executor.reconcile(cursor.get("session"), sha, cursor.get("sent_at"), cursor.get("users"))
+                answer = self.executor.reconcile(cursor.get("session"), sha, cursor.get("sent_at"), cursor.get("users"), **({"last_user": cursor["last_user"]} if cursor.get("last_user") else {}))
             except Exception as exc:  # anything that goes wrong is "cannot tell"
                 answer = {"answer": "unknown", "reason": f"reconcile failed: {type(exc).__name__}: {exc}"[:200]}
             name = answer.get("answer") if isinstance(answer, dict) else None
@@ -1851,10 +1869,14 @@ class Controller:
         first = session not in self.confirmed and not exists
         try:
             users = self.executor.mark(session) if result is None else None
-        except Exception:  # noqa: BLE001 - without a count the time of the send is all a reconcile has
+        except Exception:  # noqa: BLE001 - without a count a reconcile cannot tell this send's message from an earlier one
             users = None
+        try:
+            last_user = getattr(self.executor, "last_user", lambda _session: None)(session) if result is None else None
+        except Exception:  # noqa: BLE001 - the count alone is the weaker guard
+            last_user = None
         self.state["cursor"] = {"attempt": n, "step": step["id"], "phase": "started", "try": attempt_try, "session": session, "message_sha256": _text_sha(message),
-                                "sent_at": round(time.time(), 3), "users": users, "next": None}
+                                "sent_at": round(time.time(), 3), "users": users, "last_user": last_user, "next": None}
         self.save()
         if result is None:
             try:
@@ -1878,7 +1900,7 @@ class Controller:
             if result.get("accepted"):
                 entry["accepted"] = True
         if role == "judge" and outcome == "returned":
-            outcome, findings = read_verdict(result["final"] if isinstance(result.get("final"), str) else text)  # the last message's words, not every message's
+            outcome, findings = read_verdict(result["final"] if isinstance(result.get("final"), str) else "")  # the last message's words only: a turn that has none is inconclusive, never read from the joined text
             entry["verdict"] = outcome
             if outcome == "fail":
                 entry["findings"] = f"attempt-{n}/{stem}.findings.md"
@@ -2166,39 +2188,61 @@ def pause(folder) -> None:
 
 
 def cancel(folder) -> str:
-    """Stop a run. A controller that holds the run's lock is asked through the `cancel` file and stops itself (returns "requested"). With no
-    controller (queued and never taken, interrupted, paused or waiting) the run is marked `cancelled` here, under its lock (returns
-    "cancelled"); a controller that starts late then finds a run that is over. Busy for a run that is over."""
+    """Stop a run. A controller that holds the run's lock is asked through the `cancel` file and stops itself (returns "requested"); a
+    controller that was pausing at that moment may have passed its cancel check, so a request for a run that is not plainly running (paused,
+    waiting, or with a pause asked) waits up to `CANCEL_WAIT` seconds for the lock and, if the run then reads `paused`, marks it `cancelled`
+    here and returns "cancelled" (no stale request is left). With no controller (queued and never taken, interrupted, paused or waiting) the
+    run is marked `cancelled` here, under its lock (returns "cancelled"); a controller that starts late then finds a run that is over.
+    Busy for a run that is over."""
     folder = Path(folder)
     state = read_run(folder)
     status = state.get("status")
     if status in FINAL:
         raise Busy(f"run {folder.name} is already {status}")
     if _held(folder):
-        request_cancel(folder)
-        return "requested"
+        return _requested(folder, status)
     lock = open(folder / "lock", "a+")
     try:
         if not _flock(lock):
-            request_cancel(folder)
-            return "requested"
+            return _requested(folder, status)
         state = read_run(folder)
         if state.get("status") in FINAL:
             raise Busy(f"run {folder.name} is already {state.get('status')}")
-        now = round(time.time(), 3)
-        attempts = state.get("attempts") or []
-        if attempts and attempts[-1].get("ended") is None:
-            attempts[-1]["ended"] = now
-        state.update(status="cancelled", reason=f"cancelled by a person while no controller was running it (it was {state.get('status')}" + (", and its controller never started)" if state.get("status") == "queued" else ")"), ended=now, waiting=None)
-        with _answer_lock(folder, 5.0, strict=False):  # an answer being given right now is decided before the run ends; one that lost is removed
-            _write_atomic(folder / "run.json", _json(state))
-            (folder / "answer.json").unlink(missing_ok=True)
-        _event(folder, attempt=len(attempts), step=(state.get("cursor") or {}).get("step", "-"), outcome="cancelled", route="end", reason=state["reason"])
-        for name in ("pause", "cancel"):
-            (folder / name).unlink(missing_ok=True)
-        return "cancelled"
+        return _end_cancelled(folder, state)
     finally:
         lock.close()
+
+
+def _requested(folder: Path, status) -> str:
+    """A controller owns the run: ask it. A run that is `paused`, waiting or being paused may have a controller on its way out that no longer
+    looks at the request: wait for its lock and, if the run ended `paused`, end it here (the lock is held while it is decided)."""
+    request_cancel(folder)
+    if status == "running" and not (folder / "pause").exists():
+        return "requested"
+    lock = open(folder / "lock", "a+")
+    try:
+        if not _flock(lock, CANCEL_WAIT):
+            return "requested"
+        state = read_run(folder)
+        return _end_cancelled(folder, state) if state.get("status") == "paused" else "requested"
+    finally:
+        lock.close()
+
+
+def _end_cancelled(folder: Path, state: dict) -> str:
+    """Mark a run cancelled by a person; the caller holds the run's lock and has read `state`."""
+    now = round(time.time(), 3)
+    attempts = state.get("attempts") or []
+    if attempts and attempts[-1].get("ended") is None:
+        attempts[-1]["ended"] = now
+    state.update(status="cancelled", reason=f"cancelled by a person while no controller was running it (it was {state.get('status')}" + (", and its controller never started)" if state.get("status") == "queued" else ")"), ended=now, waiting=None)
+    with _answer_lock(folder, 5.0, strict=False):  # an answer being given right now is decided before the run ends; one that lost is removed
+        _write_atomic(folder / "run.json", _json(state))
+        (folder / "answer.json").unlink(missing_ok=True)
+    _event(folder, attempt=len(attempts), step=(state.get("cursor") or {}).get("step", "-"), outcome="cancelled", route="end", reason=state["reason"])
+    for name in ("pause", "cancel"):
+        (folder / name).unlink(missing_ok=True)
+    return "cancelled"
 
 
 @contextmanager
@@ -2425,9 +2469,10 @@ def _run_folder(args) -> Path:
 def _never_ran(folder: Path, resume, exc: Exception) -> None:
     """The detached `run` command failed before its controller loop: a queued run gets a final status with the reason in words (the person
     would otherwise read `queued` for ever). It is written only under the run's lock: a lock that is held means a controller exists and owns
-    the record, so a `Busy` (and a lock that stays busy) writes nothing. A resumed run keeps the record it had; the reason goes to the
+    the record, so a `Busy` (and a lock that stays busy) writes nothing. Only a run that is still `queued` is written (a resume of a run that
+    had started keeps the record it had, and so does a `--resume ""` of one that never did once it has started); the reason also goes to the
     command's stderr and `run.log`."""
-    if resume is not None or isinstance(exc, Busy):
+    if isinstance(exc, Busy):
         return
     try:
         with open(folder / "lock", "a+") as lock:
@@ -2477,7 +2522,7 @@ def main(argv: list[str] | None = None) -> int:
             folder = Path(args.run_dir)
             try:
                 status = execute(folder, resume=args.resume)
-            except (LoopError, bench.BenchError, KeyError) as exc:
+            except Exception as exc:  # whatever the type: a queued run never stays queued without a reason
                 _never_ran(folder, args.resume, exc)
                 raise
             print(describe(folder, read_run(folder)))

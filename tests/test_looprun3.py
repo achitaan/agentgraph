@@ -788,6 +788,37 @@ class QueuedRunTests(Base):
         self.assertEqual((code, record["status"]), (2, "invalid"))
         self.assertIn("executor", record["reason"])
 
+    def test_v8b2_3_the_resume_of_a_never_started_queued_run_that_fails_late_is_written_with_the_reason(self):  # `--resume ""` is a fresh start of a queued run
+        self.save()
+        run = queue(self)
+        path = self.folder(run) / "definition.json"
+        data = json.loads(path.read_text())
+        data["executor"] = {"kind": "nonsense"}
+        path.write_text(json.dumps(data))
+        age(self, run, 300)  # a queued run younger than QUEUED_GRACE may still be starting and is refused
+        code, _, _ = self.cli("run", "--run-dir", str(self.folder(run)), "--resume")
+        record = self.record(run)
+        self.assertEqual((code, record["status"]), (2, "invalid"))
+        self.assertIn("executor", record["reason"])
+
+    def test_v8b2_3_an_exception_of_any_type_before_the_first_attempt_is_written_as_the_reason_never_a_silent_queued(self):
+        self.save()
+        for resume in ((), ("--resume",)):
+            run = queue(self)
+            with mock.patch.object(looprun, "execute", side_effect=RuntimeError("the disk went away")), self.assertRaises(RuntimeError):
+                self.cli("run", "--run-dir", str(self.folder(run)), *resume)
+            record = self.record(run)
+            self.assertEqual(record["status"], "invalid", resume)
+            self.assertIn("the disk went away", record["reason"])
+            self.assertIsNotNone(record["ended"])
+
+    def test_v8b2_3_a_run_that_is_not_queued_keeps_its_record_when_the_command_fails(self):
+        self.save()
+        run = self.start(self.executor())
+        before = self.record(run)
+        looprun._never_ran(self.folder(run), "", RuntimeError("late"))
+        self.assertEqual(self.record(run), before)
+
     def test_f02_an_unreadable_definition_is_written_as_invalid_with_the_reason(self):
         self.save()
         run = queue(self)
@@ -874,8 +905,8 @@ class ReconcileRowsTests(unittest.TestCase):
         self.sid = "ses_aaaaaaaaaaaa1111111111"
         self.addCleanup(self.fx.db.close)
 
-    def ask(self, text="hello", sent_at=None, users=0):  # `users=None`: the cursor holds no count of the user messages before the send
-        kw = {k: v for k, v in (("sent_at", sent_at), ("users", users)) if v is not None}
+    def ask(self, text="hello", sent_at=None, users=0, last_user=None):  # `users=None`: the cursor holds no count of the user messages before the send
+        kw = {k: v for k, v in (("sent_at", sent_at), ("users", users), ("last_user", last_user)) if v is not None}
         return looprun.OpenCodeExecutor._reconcile_rows(self.fx.db, self.sid, sha(text), lambda why: {"answer": "unknown", "reason": why}, **kw)
 
     def test_a_session_that_is_not_there_was_never_sent_to(self):
@@ -892,8 +923,10 @@ class ReconcileRowsTests(unittest.TestCase):
         self.assertIn("3", answer["reason"])
         self.assertEqual(self.ask(users=0)["answer"], "not_sent")  # a first send into a session that was never made
 
-    def test_v8b3_with_no_recorded_count_not_sent_only_when_the_session_row_is_missing(self):
-        self.assertEqual(self.ask(users=None, sent_at=5.0)["answer"], "not_sent")  # no row: nothing was ever sent
+    def test_v8b2_3_with_no_recorded_count_nothing_is_decided_whether_or_not_the_session_row_exists(self):  # the first line said `not_sent` for a missing row (round 3, finding 4)
+        answer = self.ask(users=None, sent_at=5.0)  # the cursor says the send had started: the row may have held this message
+        self.assertEqual(answer["answer"], "unknown")
+        self.assertIn("no count", answer["reason"])
         self.fx.session(self.sid)
         for kw in ({}, {"sent_at": 5.0}, {"sent_at": 1e12}):  # a session that exists is never decided by the clock
             self.assertEqual(self.ask(users=None, **kw)["answer"], "unknown", kw)
@@ -907,6 +940,50 @@ class ReconcileRowsTests(unittest.TestCase):
         self.fx.session(self.sid)
         self.fx.user(self.sid, "a", 1_000)
         self.assertEqual(self.ask(users=2)["answer"], "unknown")
+
+    def last(self, index):
+        row = self.fx.db.execute("SELECT seq, id FROM session_message WHERE session_id=? AND type='user' ORDER BY seq LIMIT 1 OFFSET ?", (self.sid, index)).fetchone()
+        return {"seq": row[0], "id": row[1]}
+
+    def test_v8b2_4_one_user_message_removed_and_this_one_added_is_unknown_never_not_sent(self):  # an equal count with another last message
+        self.fx.session(self.sid)
+        self.fx.user(self.sid, "first", 1_000)
+        self.fx.user(self.sid, "second", 2_000)
+        before = self.last(1)  # what the cursor holds before the send: two user messages, the last one's seq and id
+        self.assertEqual(self.ask(users=2, last_user=before)["answer"], "not_sent")  # nothing came since
+        self.fx.db.execute("DELETE FROM session_message WHERE id=?", (before["id"],))  # the session is compacted: "second" goes ...
+        self.fx.user(self.sid, "hello", 3_000)  # ... and this send's message arrives: two rows again
+        self.fx.reply(self.sid, ["r"], 3_100)
+        self.fx.idle(self.sid, "succeeded", 3_200)
+        answer = self.ask(users=2, last_user=before)
+        self.assertEqual(answer["answer"], "unknown")
+        self.assertIn("removed or replaced", answer["reason"])
+        self.assertEqual(self.ask(users=2)["answer"], "not_sent")  # the count alone was fooled: this is what the id adds
+
+    def test_v8b2_4_the_message_the_count_ended_on_is_checked_and_a_cursor_without_it_keeps_the_count_alone(self):
+        self.fx.session(self.sid)
+        self.fx.user(self.sid, "first", 1_000)
+        before = self.last(0)
+        self.fx.user(self.sid, "hello", 2_000)
+        self.fx.reply(self.sid, ["r"], 2_100)
+        self.fx.idle(self.sid, "succeeded", 2_200)
+        self.assertEqual(self.ask(users=1, last_user=before)["answer"], "finished")
+        self.assertEqual(self.ask(users=1, last_user={"seq": before["seq"], "id": "msg_other"})["answer"], "unknown")
+        self.assertEqual(self.ask(users=1, last_user={"seq": 99, "id": before["id"]})["answer"], "unknown")
+        self.assertEqual(self.ask(users=1)["answer"], "finished")  # a cursor written before `last_user` existed
+        self.assertEqual(self.ask(users=0, last_user=None)["answer"], "finished")
+
+    def test_v8b2_4_the_last_user_message_is_read_from_the_database_read_only(self):
+        executor = object.__new__(looprun.OpenCodeExecutor)
+        executor.db_path = self.fx.path
+        self.assertIsNone(executor.last_user(self.sid))
+        self.fx.session(self.sid)
+        self.fx.user(self.sid, "a", 1_000)
+        self.fx.user(self.sid, "b", 2_000)
+        self.assertEqual(executor.last_user(self.sid), self.last(1))
+        self.assertEqual(set(executor.last_user(self.sid)), {"seq", "id"})
+        executor.db_path = self.tmp / "missing.db"
+        self.assertIsNone(executor.last_user(self.sid))
 
     def test_a_newer_user_message_with_other_text_is_unknown_never_not_sent(self):
         self.fx.session(self.sid)
@@ -1033,10 +1110,14 @@ class DbExecutor(looprun.ScriptedExecutor):
     def mark(self, session):
         return self.fx.db.execute("SELECT count(*) FROM session_message WHERE session_id=? AND type='user'", (session,)).fetchone()[0]
 
-    def reconcile(self, session, message_sha256, sent_at=None, users=None):
+    def last_user(self, session):
+        row = self.fx.db.execute("SELECT seq, id FROM session_message WHERE session_id=? AND type='user' ORDER BY seq DESC LIMIT 1", (session,)).fetchone()
+        return {"seq": row[0], "id": row[1]} if row else None
+
+    def reconcile(self, session, message_sha256, sent_at=None, users=None, last_user=None):
         self.reconciles.append((session, message_sha256))
         unknown = lambda why: {"answer": "unknown", "reason": why}  # noqa: E731
-        return looprun.OpenCodeExecutor._reconcile_rows(self.fx.db, session, message_sha256, unknown, **{k: v for k, v in (("sent_at", sent_at), ("users", users)) if v is not None})
+        return looprun.OpenCodeExecutor._reconcile_rows(self.fx.db, session, message_sha256, unknown, **{k: v for k, v in (("sent_at", sent_at), ("users", users), ("last_user", last_user)) if v is not None})
 
     def attempt(self, **call):
         session = call["session"]
@@ -1092,6 +1173,29 @@ class RetryAdoptionTests(Base):
         self.assertFalse(turns[1].get("recovered"), "try 2 adopted a reply that is try 1's")
         self.assertEqual(record["recoveries"][-1]["answer"], "not_sent")
         self.assertEqual(len(executor.calls), 3)  # try 1, then try 2 sent once after the resume, then the judge
+
+    def test_v8b2_4_the_cursor_records_the_last_user_message_before_the_send_and_a_resume_uses_it(self):
+        fx = self.setup_run()
+        executor = DbExecutor(fx, [{"error": "boom afterwards", "text": "try one's reply"}, {"text": "try two's reply"}, {"text": PASS}])
+        original_attempt = executor.attempt
+
+        def attempt(**call):
+            if len(executor.calls) == 1:
+                raise Kill()  # try 2 is cut before its message is sent
+            return original_attempt(**call)
+        executor.attempt = attempt
+        run = self.crash(executor, "duo")
+        executor.attempt = original_attempt
+        cursor = self.record(run)["cursor"]
+        first = fx.db.execute("SELECT seq, id FROM session_message WHERE type='user' ORDER BY seq").fetchall()
+        self.assertEqual((cursor["try"], cursor["users"], cursor["last_user"]), (2, 1, {"seq": first[0][0], "id": first[0][1]}))
+        fx.db.execute("DELETE FROM session_message WHERE id=?", (first[0][1],))  # compaction takes try 1's message out ...
+        fx.user(cursor["session"], "written by someone else", 9_999_999)  # ... and another message arrives: the count is 1 again
+        fx.db.commit()
+        looprun.resume(self.folder(run), wait=True, executor=executor)
+        record = self.record(run)
+        self.assertEqual((record["recoveries"][-1]["answer"], record["status"]), ("unknown", "paused"))
+        self.assertEqual(len(executor.calls), 1)  # nothing was sent again
 
     def test_f04_kill_after_try_2s_message_arrived_waits_for_a_person(self):
         fx = self.setup_run()
@@ -1194,7 +1298,26 @@ class VerdictTests(Base):
         record = self.record(run)
         judge = record["attempts"][0]["steps"][-1]
         self.assertEqual((judge["recovered"], judge["verdict"], record["status"]), (True, "inconclusive", "inconclusive"))
-        self.reconcile.write_text(json.dumps({"answer": "finished", "text": "x"}))  # an answer without `final` falls back to its text
+
+    def test_v8b4_5_a_turn_that_has_no_final_is_inconclusive_never_read_from_the_joined_text(self):
+        self.save("duo", check="exit 0", attempts=1, steps={"reviewer": {"retries": 0}})
+        executor = self.executor({"worker": [{}], "reviewer": [{"text": PASS}]}, hook=lambda n, call: (_ for _ in ()).throw(Kill()) if call["agent"] == "reviewer" else None,
+                                 answer="finished", text="found it.\nVERDICT: PASS")  # an adopted turn whose answer carries no `final`
+        run = self.crash(executor, "duo")
+        looprun.resume(self.folder(run), wait=True, executor=executor)
+        record = self.record(run)
+        self.assertEqual((record["attempts"][0]["steps"][-1]["verdict"], record["status"]), ("inconclusive", "inconclusive"))
+
+        class NoFinal(looprun.ScriptedExecutor):  # a turn read live by an executor that gives no `final`
+            def attempt(self, **call):
+                result = super().attempt(**call)
+                result.pop("final", None)
+                return result
+        self.save("duo", check="exit 0", attempts=1, steps={"reviewer": {"retries": 0}})
+        run = self.start(NoFinal({"worker": [{}], "reviewer": [{"text": PASS}]}), "duo")
+        self.assertEqual(self.record(run)["status"], "inconclusive")
+        run = self.start(self.executor({"worker": [{}], "reviewer": [{"text": PASS}]}), "duo")  # the scripted executor gives its text as the final message
+        self.assertEqual(self.record(run)["status"], "passed")
 
 
 class EndingTests(Base):
@@ -1405,7 +1528,7 @@ class CancelWhilePausingTests(Base):
             box["result"] = looprun.cancel(controller.folder)
             return original(controller, reason)
         executor = self.executor(hook=hook)
-        with mock.patch.object(looprun.Controller, "_pause", pause):
+        with mock.patch.object(looprun.Controller, "_pause", pause), mock.patch.object(looprun, "CANCEL_WAIT", 0.2):  # the lock is the pausing controller's own: the wait only runs out
             run = self.start(executor)
         return run, executor, box
 
@@ -1415,6 +1538,50 @@ class CancelWhilePausingTests(Base):
         self.assertEqual(self.record(run)["status"], "cancelled")  # "requested" came true
         self.assertEqual(len(executor.calls), 1)
         self.assertFalse((self.folder(run) / "pause").exists())
+
+    def test_v8b2_5_a_cancel_answered_requested_for_a_run_that_then_ends_paused_is_marked_cancelled_once_the_lock_frees(self):
+        self.save(check="exit 1", attempts=3)
+        box = {}
+        original = looprun.Controller._pause
+
+        def hook(count, call):
+            looprun.pause(self.folder(looprun.list_runs(self.project)[0]))
+
+        def pause(controller, reason):
+            result = original(controller, reason)  # past its cancel check: the run is `paused` and the lock is still held
+            box["thread"] = threading.Thread(target=lambda: box.update(result=looprun.cancel(controller.folder)))
+            box["thread"].start()
+            deadline = time.monotonic() + 5
+            while not (controller.folder / "cancel").exists() and time.monotonic() < deadline:
+                time.sleep(0.01)  # the request is written: it is the window the controller can no longer see
+            return result
+        executor = self.executor(hook=hook)
+        with mock.patch.object(looprun.Controller, "_pause", pause):
+            run = self.start(executor)
+        box["thread"].join(10)
+        self.assertEqual(box["result"], "cancelled")
+        record = self.record(run)
+        self.assertEqual(record["status"], "cancelled")
+        self.assertIn("cancel", record["reason"])
+        self.assertFalse((self.folder(run) / "cancel").exists())  # no stale request is left for a later resume
+        self.assertEqual(len(executor.calls), 1)
+
+    def test_v8b2_5_a_cancel_that_finds_the_lock_still_held_after_the_wait_stays_requested(self):
+        run, executor, box = self.pausing(True)
+        self.assertEqual(box["result"], "requested")
+        self.assertEqual(self.record(run)["status"], "paused")
+
+    def test_v8b2_5_a_cancel_of_a_plainly_running_run_does_not_wait(self):
+        self.save(check="exit 1", attempts=3)
+        seen = {}
+
+        def hook(count, call):
+            start = time.monotonic()
+            seen["result"] = looprun.cancel(self.folder(looprun.list_runs(self.project)[0]))
+            seen["seconds"] = time.monotonic() - start
+        self.start(self.executor(hook=hook))
+        self.assertEqual(seen["result"], "requested")
+        self.assertLess(seen["seconds"], 1.0)
 
     def test_v8b7_a_cancel_left_behind_by_a_pausing_controller_ends_the_next_resume_without_running_a_step(self):
         run, executor, box = self.pausing(True)
