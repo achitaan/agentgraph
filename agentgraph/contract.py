@@ -7,7 +7,7 @@ both import only this module. Standard library only.
 from __future__ import annotations
 
 from collections import Counter, deque
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from posixpath import abspath, join, normpath
@@ -126,6 +126,7 @@ class Session:
     tokens_out: int = 0
     directory: str = ""
     context: int | None = None  # tokens in the context window at the last model call
+    idle_since: float | None = None  # unix seconds the session last went idle; None while busy or never recorded
     wear: dict | None = None  # root session only: context window use and how often it was summarized
 
 
@@ -228,6 +229,8 @@ class Snapshot:
     graphs: list[TaskGraph] = field(default_factory=list)  # newest first
     warnings: list[str] = field(default_factory=list)  # data that could not be read
     disabled_agents: list[str] = field(default_factory=list)  # config's disabled_agents
+    # Every session in the database by id, not only the root's tree; None when the database could not be read.
+    known: dict[str, Session] | None = None
 
 
 # --- helpers shared by both sides ---------------------------------------
@@ -283,6 +286,45 @@ def node_busy(node: Node, busy_ids: Collection[str]) -> bool:
     session is often reused for several nodes, so a busy session alone does
     not make a finished node busy."""
     return node.status == "running" and node.session is not None and node.session in busy_ids
+
+
+LIVENESS = ("live", "quiet", "orphan", "unreported")
+# A passed or failed node's session is often reused for later work, so its being busy says nothing.
+_UNREPORTED_STATUSES = ("pending", "returned", "blocked")
+
+
+def node_liveness(node: Node, known: Mapping[str, Session] | None,
+                  shared: Collection[str] = frozenset()) -> tuple[str | None, float | None]:
+    """What the database confirms about a node, as (liveness, idle_since); never stored in the graph.
+
+    `live`: status running and its session busy. `quiet`: running, the session exists and is idle
+    (`idle_since` is when it went idle, else its last update). `orphan`: running with no session id, or one the
+    database does not have. `unreported`: the session is busy but the node is pending, returned or blocked, and
+    no running node (`shared` holds the sessions of running nodes and the graph's owner) accounts for it.
+    Otherwise (None, None). `known` None means the database was unreadable: a session id says nothing then."""
+    sid = node.session if isinstance(node.session, str) and node.session else None
+    session = known.get(sid) if known is not None and sid is not None else None
+    if node.status == "running":
+        if sid is None:
+            return "orphan", None
+        if known is None:
+            return None, None
+        if session is None:
+            return "orphan", None
+        if session.busy:
+            return "live", None
+        return "quiet", session.idle_since if session.idle_since is not None else session.updated
+    if session is not None and session.busy and node.status in _UNREPORTED_STATUSES and sid not in shared:
+        return "unreported", None
+    return None, None
+
+
+def graph_liveness(graph: TaskGraph, known: Mapping[str, Session] | None) -> dict[str, tuple[str | None, float | None]]:
+    """`node_liveness` for every node of a graph, by node id."""
+    shared = {node.session for node in graph.nodes if node.status == "running" and node.session}
+    if graph.session:
+        shared.add(graph.session)
+    return {node.id: node_liveness(node, known, shared) for node in graph.nodes}
 
 
 def running_by_agent(snapshot: Snapshot) -> dict[str, int]:

@@ -482,6 +482,7 @@ def _session(row: tuple) -> Session:
         model=model_name,
         effort=effort,
         busy=busy is not None and (idle is None or busy > idle),
+        idle_since=_num(idle) / 1000.0 if idle is not None and not (busy is not None and busy > idle) else None,
         created=_num(created) / 1000.0,
         updated=_num(updated) / 1000.0,
         cost=_num(cost),
@@ -908,4 +909,5 @@ def build_snapshot(
         graphs=graphs,
         warnings=discovery_warnings + w1 + w2 + w3,
         disabled_agents=disabled,
+        known={item.id: item for item in sessions_all} if sessions_all is not None else None,
     )

@@ -64,7 +64,12 @@ def _problems(graph: TaskGraph) -> list[str]:
         return contract.validate(normalized)
 
 
-def _graph_document(graph: TaskGraph, busy_ids: set[str], handoffs: set[tuple[str, str]]) -> dict:
+def _graph_document(graph: TaskGraph, busy_ids: set[str], handoffs: set[tuple[str, str]],
+                    known: dict[str, Session] | None = None) -> dict:
+    # What the database confirms per node (never stored in the graph): live, quiet, orphan, unreported or None.
+    # `known` is every session of the database; None when it could not be read.
+    liveness = contract.graph_liveness(graph, known)
+    counts = {kind: sum(state == kind for state, _ in liveness.values()) for kind in contract.LIVENESS}
     layers = contract.waves(graph)
     wave_by_id = {node.id: i for i, layer in enumerate(layers) for node in layer}
     delivered, total = contract.objective_coverage(graph)
@@ -78,6 +83,7 @@ def _graph_document(graph: TaskGraph, busy_ids: set[str], handoffs: set[tuple[st
         nodes.append({
             **{key: value for key, value in asdict(node).items() if key != "base"},  # `base` is the ledger's (cases)
             "busy": contract.node_busy(node, busy_ids),
+            "liveness": liveness[node.id][0], "idle_since": liveness[node.id][1],
             "wave": wave_by_id[node.id], "escalated": bool(transitions),
             "inputs": [{"from": entry.from_node, "artifact": entry.artifact, "revision": entry.revision,
                         "stale": (node.id, entry.from_node, entry.artifact, entry.revision) in stale}
@@ -87,6 +93,7 @@ def _graph_document(graph: TaskGraph, busy_ids: set[str], handoffs: set[tuple[st
         "task": graph.task, "goal": graph.goal, "status": graph.status,
         "revision": graph.revision, "created": graph.created, "updated": graph.updated,
         "path": graph.path,
+        "liveness": counts,
         "progress": {"passed": sum(node.status == "passed" for node in graph.nodes),
                      "total": len(graph.nodes)},
         "coverage": {"delivered": delivered, "total": total},
@@ -570,7 +577,10 @@ def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, 
     grouped["hub"].sort(key=lambda entry: entry["name"] != root_name)  # stable: the root first
     handoffs: set[tuple[str, str]] = set()
     busy_ids = {session.id for session in sessions if session.busy and session.id is not None}
-    graph_doc = _graph_document(active, busy_ids, handoffs) if active is not None else None
+    # Confirmed state comes from the whole database; a snapshot made without one falls back to the sessions it lists.
+    known = snapshot.known if snapshot.known is not None else (
+        {item.id: item for item in sessions if item.id is not None} if sessions else None)
+    graph_doc = _graph_document(active, busy_ids, handoffs, known) if active is not None else None
     listed = [agent for agents in grouped.values() for agent in agents]
     return _json_safe({
         "version": 1, "generated": snapshot.now, "source": source,

@@ -54,7 +54,7 @@ class SnapshotDocumentTests(unittest.TestCase):
                     self.assertKeys(graph, "task status updated")
                 graph = doc["graph"]
                 self.assertKeys(graph, "task goal status revision created updated path progress coverage "
-                                         "objectives problems waves nodes edges advice events amendments lessons flows loops work_loops")
+                                         "objectives problems waves nodes edges advice events amendments lessons flows loops work_loops liveness")
                 self.assertKeys(graph["progress"], "passed total")
                 self.assertKeys(graph["coverage"], "delivered total")
                 for objective in graph["objectives"]:
@@ -62,7 +62,7 @@ class SnapshotDocumentTests(unittest.TestCase):
                 for node in graph["nodes"]:
                     self.assertKeys(node, "id type agent goal status depends_on scope done_when attempts tiers "
                                           "escalated baseline evidence outputs changed_paths failure_kind stalled "
-                                          "verdict session started finished busy wave pattern feedback_to artifacts inputs")
+                                          "verdict session started finished busy liveness idle_since wave pattern feedback_to artifacts inputs")
                 self.assertEqual([node["pattern"] for node in graph["nodes"]], [
                     "parallel", "parallel", "synthesize", "parallel", "parallel", "parallel", "parallel",
                     "synthesize", "evaluate", "chain", "chain",
@@ -397,6 +397,42 @@ class SnapshotDocumentTests(unittest.TestCase):
         snap.graphs[0].nodes[0].status = "pending"
         graph = snapshot_json.snapshot_document(snap, "demo")["graph"]
         self.assertFalse(next(node for node in graph["nodes"] if node["id"] == "n1")["busy"])
+
+    def test_nodes_carry_confirmed_liveness_and_the_graph_counts_it(self):
+        snap = demo_snapshot(1000)
+        node = snap.graphs[0].nodes[0]
+        session = next(item for item in snap.sessions if item.id == node.session)
+
+        def state():
+            graph = snapshot_json.snapshot_document(snap, "demo")["graph"]
+            doc = next(item for item in graph["nodes"] if item["id"] == node.id)
+            return doc["liveness"], doc["idle_since"], doc["busy"], graph["liveness"]
+
+        # Reported passed, session busy elsewhere: nothing is claimed, and the graph file is untouched.
+        node.status, session.busy, session.idle_since = "passed", True, None
+        self.assertEqual(state()[:3], (None, None, False))
+        node.status = "pending"
+        self.assertEqual(state()[:3], ("unreported", None, False))
+        node.status = "running"
+        live = state()
+        self.assertEqual(live[:3], ("live", None, True))
+        graph = snapshot_json.snapshot_document(snap, "demo")["graph"]
+        for kind in contract.LIVENESS:  # the demo has other running nodes; the counts must agree with the nodes
+            self.assertEqual(live[3][kind], sum(item["liveness"] == kind for item in graph["nodes"]))
+        self.assertGreaterEqual(live[3]["live"], 1)
+        session.busy, session.idle_since = False, 900.0
+        self.assertEqual(state()[:3], ("quiet", 900.0, False))
+        node.session = "no-such-session"
+        quiet_counts = state()
+        self.assertEqual(quiet_counts[:3], ("orphan", None, False))
+        self.assertEqual(set(quiet_counts[3]), {"live", "quiet", "orphan", "unreported"})
+        self.assertGreaterEqual(quiet_counts[3]["orphan"], 1)
+        # A snapshot that read the whole database decides by it, not by the root's tree alone.
+        node.session = "outside"
+        snap.known = {"outside": replace(session, id="outside", busy=True)}
+        self.assertEqual(state()[:3], ("live", None, False))
+        snap.known = {}
+        self.assertEqual(state()[0], "orphan")
 
     def test_demo_artifact_handoffs_and_agent_flows(self):
         snap = demo_snapshot(1000)

@@ -582,6 +582,24 @@ class Snapshots(unittest.TestCase):
             self.assertEqual(snap.root.id, "mine")
             self.assertEqual(snap.warnings, [])
 
+    def test_snapshot_knows_every_session_and_when_idle_began(self):
+        with tempfile.TemporaryDirectory() as t:
+            base = Path(t).resolve()
+            write_config(base / "cfg")
+            (base / "proj" / ".opencode" / "graph").mkdir(parents=True)
+            db = base / "o.db"
+            make_db(db, [row("r1", directory=str(base / "proj"), updated=5000),
+                         row("elsewhere", directory="/b", updated=1000, busy=3000, idle=2000),
+                         row("done", directory="/b", updated=1000, busy=1000, idle=4000),
+                         row("never", directory="/b", updated=1000)])
+            snap = build_snapshot(base / "cfg", None, db, cwd=base / "proj", now=1.0)
+            self.assertEqual(set(snap.known), {"r1", "elsewhere", "done", "never"})  # not only the root's tree
+            self.assertTrue(snap.known["elsewhere"].busy)
+            self.assertIsNone(snap.known["elsewhere"].idle_since)
+            self.assertEqual(snap.known["done"].idle_since, 4.0)
+            self.assertIsNone(snap.known["never"].idle_since)
+            self.assertIsNone(build_snapshot(base / "cfg", None, base / "no.db", cwd=base / "proj", now=1.0).known)
+
     def test_unknown_graph_session_warns(self):
         with tempfile.TemporaryDirectory() as t:
             base = Path(t).resolve()

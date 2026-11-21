@@ -1053,3 +1053,46 @@ class RunningByAgent(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NodeLiveness(unittest.TestCase):
+    """What the database confirms about a node; the graph's own status is only a report."""
+
+    @staticmethod
+    def sessions(**states):
+        return {sid: Session(sid, None, "impl", "t", "m", "", busy, 1.0, 50.0, idle_since=idle)
+                for sid, (busy, idle) in states.items()}
+
+    def liveness(self, status, session, known):
+        node = Node(id="n", type="implement", agent="impl", goal="g", status=status, session=session)
+        return contract.graph_liveness(graph([node]), known)
+
+    def test_running_node_is_live_quiet_or_orphan(self):
+        known = self.sessions(busy=(True, None), idle=(False, 40.0), never=(False, None))
+        for session, expected in (("busy", ("live", None)), ("idle", ("quiet", 40.0)), ("never", ("quiet", 50.0)),
+                                  ("gone", ("orphan", None)), (None, ("orphan", None))):
+            with self.subTest(session=session):
+                self.assertEqual(self.liveness("running", session, known)["n"], expected)
+
+    def test_busy_session_of_a_node_that_is_not_running_is_unreported(self):
+        known = self.sessions(busy=(True, None), idle=(False, 40.0))
+        for status, expected in (("pending", "unreported"), ("returned", "unreported"), ("blocked", "unreported"),
+                                 ("passed", None), ("failed", None)):
+            with self.subTest(status=status):
+                self.assertEqual(self.liveness(status, "busy", known)["n"], (expected, None))
+        self.assertEqual(self.liveness("pending", "idle", known)["n"], (None, None))
+        self.assertEqual(self.liveness("pending", None, known)["n"], (None, None))
+
+    def test_a_session_a_running_node_or_the_owner_uses_is_not_unreported(self):
+        known = self.sessions(busy=(True, None))
+        node = Node(id="n", type="implement", agent="impl", goal="g", status="pending", session="busy")
+        other = Node(id="m", type="implement", agent="impl", goal="g", status="running", session="busy")
+        self.assertEqual(contract.graph_liveness(graph([node, other]), known)["n"], (None, None))
+        owned = graph([node])
+        owned.session = "busy"
+        self.assertEqual(contract.graph_liveness(owned, known)["n"], (None, None))
+
+    def test_unreadable_database_confirms_nothing(self):
+        self.assertEqual(self.liveness("running", "s", None)["n"], (None, None))
+        self.assertEqual(self.liveness("running", None, None)["n"], ("orphan", None))  # no id is a fact of the graph
+        self.assertEqual(self.liveness("pending", "s", None)["n"], (None, None))
