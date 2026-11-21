@@ -55,3 +55,12 @@ The baseline before any change: 1,614 turns at $0.305 a turn, 56% of the spend o
 The `improve-orchestration` skills may propose a change to these two settings from those numbers, and only with the user's approval.
 
 The what-if numbers are estimates: each recorded turn's cost is rescaled by how its priced tokens would change, using Anthropic's published ratios (cache read 0.1×, five-minute write 1.25×, one-hour write 2×, output 5×).
+
+## Loops
+
+A loop (`agentgraph loop`, [docs/LOOPS.md](docs/LOOPS.md)) spends money in a way the numbers above do not cover, so its rules are separate:
+
+- The cost limit is checked before each agent turn, a judge's included. It stops the next turn; it does not cap a turn already running, so a run can end above the limit by one turn.
+- An unknown cost is never counted as zero. With a cost limit set, an unknown cost ends the run `limit`; without one, only the attempt and time limits apply.
+- A run's cost is kept per step, per session and in total in its `run.json` (`totals.cost`, `totals.cost_unknown_steps`).
+- Measured cost on one model: a worker with a judge cost about twice a worker alone, 2.3 times a direct run in the second benchmark round, 1.9 times without the retried run. The benchmark showed no saving by loops. See `.opencode/artifacts/agentgraph-loops/v9/r2/results.md` and `docs/REPORT.md` section 3.5.

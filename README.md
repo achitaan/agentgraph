@@ -10,6 +10,8 @@ A working multi-agent setup for OpenCode, with a live graph on the side so you c
 - **The side chat's moon** (only when the side chat is installed): a small moon named `side chat` beside the orchestrator. It is not an agent (no lines, not in the editors, not counted as working); it goes round only while it answers, and in 3D on a plane of its own. Choosing it opens a panel with one quiet line (it reads the main chat and the task graph, answers only you, changes nothing), its model and spend, and its chat. In OpenCode Desktop a box asks it one question at a time (Enter sends); the web page shows its transcript only.
 - **Visualizer** (`agentgraph/`, `desktop-plugin/`, `tui-plugin/`): the same picture as an OpenCode Desktop side panel, a terminal sidebar and a web page. The orchestrator sits in the centre with every agent round it; loops are drawn as cycles; it shows what needs you, what each agent spent, and what the setup has learned from your corrections.
 - **Graph format and checker** ([GRAPH_FORMAT.md](GRAPH_FORMAT.md), `bin/agentgraph`): how a task is written down as a graph, checked, recorded and learned from.
+- **Loops** (`agentgraph loop`, [docs/LOOPS.md](docs/LOOPS.md)): a drawn path that repeats until a check command passes, run by code and not by the orchestrator: attempts, limits, pause, resume and cost are counted and enforced outside the prompts.
+- **What was built and how it fits**: [docs/REPORT.md](docs/REPORT.md) (numbers, evidence, limits), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (the parts and how they connect).
 
 ## Install
 

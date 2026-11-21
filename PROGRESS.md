@@ -21,9 +21,9 @@ installed into the live config only after the user approves. Lanes run on Sonnet
 | 2. Orchestration | n10 | passed: solo vs delegated measured, drawn flow followed in 3 of 3 runs |
 | 3. Execution reliability | n11 (transitions), n19 (liveness, status), n20 (view labels), n21 (flows, shared problems) | passed |
 | 4. Self-improvement in the views | n23 (proposal records and API), n24 (view controls), n25 (a real cycle from the command line), n12 (the same proposals driven through the page) | passed, on a scratch config only |
-| 5. Install and customization | n13 | passed |
-| Review | n16 (independent review), n26 and n27 (its minor findings) | n16 passed: confirmed, no critical or major defect, twelve minor findings. n26 and n27 running |
-| Final suites and report | n17 | after n26 and n27 |
+| 5. Install and customization | n13 (install, in a scratch home), n27 (install review fixes) | passed: 42 install tests, a reinstall kept the preset, an added agent, own prompt files and an edited skill; not run on the live home |
+| Review | n16 (independent review), n26 and n27 (its minor findings) | passed: n16 confirmed (nothing run), twelve minor findings; n26 fixed 1-5, 10, 11 and n27 fixed 6-9; finding 12 (no server-side confirm) is a known limit |
+| Final suites and report | n17 | running: `docs/REPORT.md` and `docs/ARCHITECTURE.md` written; final suite counts and the five `PENDING(...)` lines are the owner's |
 | Approval and install | n14, n15 | waits for the user; nothing below "Waiting for your review" is installed |
 
 ### Starting numbers (measured, 2026-11-21, before any change)
@@ -149,24 +149,36 @@ next message; cost is final when the process exits. Native `/goal` has no headle
 of the terminal and Desktop apps). Plugin hooks were not tested; the idle hook is not in the installed plugin
 types. A self-loop `A -> A` today is text for the orchestrator only, and flow files drop extra keys on rewrite.
 
-Decision (v1): loop settings live in `structure/loops/<flow id>.json` beside the unchanged flow file; one
+Decision (v1): loop settings live in `structure/.loops/<flow id>.json` beside the unchanged flow file; one
 detached controller process per run calls `opencode run` once per attempt, runs the check command itself and
 routes on its exit code; each run keeps its own pinned definition and record under `.opencode/loops/<run id>/`.
 
-| Release | Graph nodes | Status |
+| Release | Graph nodes | Status (graph, at the time of writing) |
 |---|---|---|
-| vNext.1 single-agent loop | v0 audit, v1 design, v2 controller, v3 settings and page API, v4 views, v5 demonstration (tests A-D on real sessions and through the page) | v0 and v1 passed; v2 running |
-| vNext.2 loops between agents | v6 controller, v7 views | not started |
-| vNext.3 recovery, pause, cost | v8 | not started |
-| vNext.4 inspect and improve | v7 views, v10 demonstration | not started |
-| vNext.5 | none | not built unless an earlier release shows the need |
-| Benchmark | v9 | not started |
-| Review, final suites, docs | v11, v12 | not started |
+| vNext.1 single-agent loop | v0-v5 | passed. Tests A-D on real sessions: 38 checks, 0 failed, $0.0837; through the real page: 8 runs, $0.098, 28 PASS in round 2 (`v5a`, `v5`) |
+| vNext.2 loops between agents | v6, v7 | v6 passed (two real runs, about $0.097). v7 running again after the final review. Real judge FAIL then PASS through the page (`v10`) |
+| vNext.3 recovery, pause, cost | v8, v8b | v8 passed (a real `not_sent` answered and resumed, $0.123). v8b running again after the final review |
+| vNext.4 inspect and improve | v7, v10 | v10 passed: failed run, trial, compare, keep, go back, undo through the real page, $0.6446 over 10 runs. v7 as above |
+| vNext.5 | none | not built (six items, `docs/REPORT.md` section 3.7) |
+| Benchmark | v9 | passed: 36 real runs, every method 12/12 on visible and hidden checks, so no ranking on correctness; direct $0.589, loop-1 $0.601, loop-2 $1.261 |
+| Controller review | v11a | passed: round 1 refuted, round 2 confirmed; the reviewer ran nothing |
+| Final review | v11 | failed: verdict `unverifiable`, 12 findings (2 major: the Desktop loop bridge spawns `agentgraph.loopapi`, which has no entry point; a `waiting` run with no controller cannot be resumed from the page). The reviewer ran nothing |
+| Final suites, docs | v12 | pending (this item writes the documents only) |
 
 No release is called complete until it has been run through the real page and real OpenCode sessions.
 
 ## Next
 
-n26, n27 and v2 are running. Then n17 (final suites and report for Part 1); v3, v4, v5 for vNext.1; later
-releases in order as the spend limit allows. If money runs short the cuts are, in order: the vNext.4 extras,
-view polish for loops between agents, benchmark repetitions.
+What remains:
+
+1. The final review of Part 2 failed (v11). the graph shows v7 and v8b as running again and a new v11 round is needed; the working tree has uncommitted changes in
+   `agentgraph/loopapi.py`, `agentgraph/looprun.py` and two test files that this progress note did not read.
+2. Your decision on the items under "Waiting for your review" (A, B, C, D, J, K, L and the earlier sections). Item K is not drafted.
+3. Install into the live configuration only after you approve (n14, n15). Nothing is installed.
+4. Final suite counts, the Desktop bundle rebuild, the total spend and which temporary folders can be removed: the owner's `PENDING(...)` lines in
+   `docs/REPORT.md`.
+
+A next session should first run `bin/agentgraph check --task agentgraph-loops`, read `.opencode/artifacts/agentgraph-loops/v11/r1/review.md`, and read
+the state of v7, v8b and v11 in the graph before touching code.
+
+Documents: `docs/REPORT.md` (what was done, numbers, limits), `docs/ARCHITECTURE.md` (how the parts fit), `docs/LOOPS.md` (loop reference).
