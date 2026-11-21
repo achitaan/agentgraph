@@ -619,5 +619,213 @@ class CommandTests(Base):
                 improve.show(self.home, self.root, bad)
 
 
+class LedgerRowTests(Base):
+    """Every change has a ledger row: approve (with the recorded results), revert, and `note` for the rest."""
+
+    def rows(self):
+        return [json.loads(line) for line in (self.home / "improvements.jsonl").read_text().splitlines()]
+
+    def test_approve_fills_the_metric_from_the_recorded_results(self):
+        record = self.propose()
+        improve.add_results(self.home, record["id"], "before", [
+            improve._result_row("c1", "fail", 0.4, 10, None, weighted=1000.0),
+            improve._result_row("c2", "pass", 0.2, 6, None, weighted=500.0)])
+        improve.add_results(self.home, record["id"], "after", [improve._result_row("c1", "pass", 0.1, 4, None, weighted=250.0)])
+        self.approve(record)
+        row = self.rows()[0]
+        self.assertEqual(row["kind"], "proposal")
+        self.assertEqual(row["proposal"], record["id"])
+        self.assertEqual(row["metric_before"], {"runs": 2, "passes": 1, "mean_cost": 0.3, "mean_turns": 8.0, "mean_weighted_tokens": 750.0})
+        self.assertEqual(row["metric_after"]["passes"], 1)
+        self.assertIn("before: 2 runs, 1 passed, mean cost $0.300, mean turns 8.0", row["metric"])
+        self.assertIn("after: 1 runs, 1 passed", row["metric"])
+        self.assertEqual(row["files_sha256"], {self.rel: sha(self.newtext.encode())})
+        self.assertEqual((row["by"], row["by_words"]), ("user", "yes, apply it"))
+
+    def test_approve_without_results_says_so(self):
+        self.approve(self.propose())
+        row = self.rows()[0]
+        self.assertIsNone(row["metric"])
+        self.assertIsNone(row["metric_before"])
+        self.assertIn("no results recorded", row["summary"])
+
+    def test_revert_writes_a_row_naming_the_proposal_who_and_why(self):
+        record = self.propose()
+        self.approve(record, now=100.0)
+        improve.revert(self.home, self.root, record["id"], who="user", note="it made the designer worse", now=200.0)
+        row = self.rows()[-1]
+        self.assertEqual((row["kind"], row["proposal"], row["by"], row["why"]), ("revert", record["id"], "user", "it made the designer worse"))
+        self.assertEqual(row["files_sha256"], {self.rel: sha(self.original)})
+        self.assertTrue(row["keep_watermark"])
+        self.assertEqual([item["kind"] for item in improve.changes(self.home)], ["proposal", "revert"])
+
+    def test_note_records_hashes_never_contents_and_changes_only_the_ledger(self):
+        before = self.file.read_bytes()
+        code, out, err = self.cli("note", "--kind", "settings", "--title", "Raised the buffer", "--why", "long chats cost too much",
+                                  "--files", self.rel, "missing.json", "--metric-before", "319", "--metric-after", "195",
+                                  "--unit", "dollars", "--when", "2026-11-19 12:39", "--by-user", "yes do it")
+        self.assertEqual(code, 0, err)
+        row = self.rows()[0]
+        self.assertEqual(row["files_sha256"], {self.rel: sha(before), "missing.json": None})
+        self.assertEqual((row["metric_before"], row["metric_after"], row["unit"], row["kind"]), (319, 195, "dollars", "settings"))
+        self.assertEqual((row["by"], row["by_words"]), ("user", "yes do it"))
+        self.assertNotIn("Be brief", json.dumps(row))
+        self.assertEqual(self.file.read_bytes(), before)
+        self.assertEqual(sorted(path.name for path in self.home.iterdir() if path.is_file() and not path.name.startswith(".")), ["improvements.jsonl"])
+        self.assertEqual(sorted(path.name for path in self.root.iterdir()), ["oh-my-opencode-slim"])
+
+    def test_note_needs_the_users_words_and_a_plain_path(self):
+        base = ("note", "--kind", "other", "--title", "t", "--why", "w")
+        self.assertEqual(self.cli(*base)[0], 1)
+        self.assertEqual(self.cli(*base, "--by-user", "")[0], 1)
+        self.assertEqual(self.cli(*base, "--by-user", "ok", "--files", "../escape")[0], 1)
+        self.assertEqual(self.cli(*base, "--by-user", "ok", "--files", "/etc/hosts")[0], 1)
+        with self.assertRaises(SystemExit):
+            self.cli("note", "--kind", "nope", "--title", "t", "--why", "w", "--by-user", "ok")
+        self.assertFalse((self.home / "improvements.jsonl").exists())
+
+    def test_note_refuses_a_file_that_leaves_the_root_through_a_link(self):
+        outside = self.tmp / "outside.txt"
+        outside.write_text("secret")
+        (self.root / "link.txt").symlink_to(outside)
+        code, _, err = self.cli("note", "--kind", "other", "--title", "t", "--why", "w", "--by-user", "ok", "--files", "link.txt")
+        self.assertEqual(code, 1)
+        self.assertIn("outside", err)
+        self.assertFalse((self.home / "improvements.jsonl").exists())
+
+    def test_changes_lists_in_time_order_with_metrics(self):
+        record = self.propose()
+        self.approve(record, now=2000.0)
+        improve.note(self.home, self.root, "install", "Installed by hand", "owner asked", by_user="yes", files=[self.rel],
+                     metric_before=100, metric_after=60, unit="tokens", when=1000.0)
+        improve.note(self.home, self.root, "other", "Later thing", "why", by_user="yes", when=3000.0)
+        found = improve.changes(self.home)
+        self.assertEqual([item["time"] for item in found], [1000.0, 2000.0, 3000.0])
+        self.assertEqual([item["kind"] for item in found], ["install", "proposal", "other"])
+        code, out, _ = self.cli("changes")
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertIn("install", lines[0])
+        self.assertIn("Installed by hand", lines[0])
+        self.assertIn("before 100; after 60 (tokens)", lines[1])
+        self.assertIn("no metric recorded", out)
+        code, out, _ = self.cli("changes", "--json")
+        self.assertEqual([item["title"] for item in json.loads(out)["changes"]][0], "Installed by hand")
+
+    def test_a_note_does_not_consume_the_signals_waiting(self):
+        ledger.feedback(self.home, 50.0, "the designer talks too much", agent="designer", task="t")
+        pending = lambda now: ledger.signals(self.home, now, cost_db=self.tmp / "none.db", settings_log=self.tmp / "none.jsonl")["feedback"]
+        before = pending(60.0)
+        self.assertTrue(before)
+        improve.note(self.home, self.root, "settings", "A setting", "why", by_user="yes", now=70.0)
+        self.assertEqual(pending(80.0), before)
+
+    def test_backfill_file_applies_once_and_refuses_a_duplicate(self):
+        path = self.tmp / "backfill.jsonl"
+        rows = [{"kind": "install", "title": "Proposal A", "why": "moved the policy", "files": [self.rel],
+                 "sha256": {self.rel: "ab" * 32}, "metric_before": 234, "metric_after": 96, "unit": "k tokens", "when": "2026-11-21 12:02",
+                 "source": "commit 1e6d700"},
+                {"kind": "settings", "title": "Cache", "why": "long pauses", "metric_before": None, "metric_after": None, "when": 1795110955.16,
+                 "source": "COSTS.md"}]
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        self.assertEqual(self.cli("note", "--from-file", str(path))[0], 1)  # no approval anywhere
+        code, out, err = self.cli("note", "--from-file", str(path), "--by-user", "yes in chat")
+        self.assertEqual(code, 0, err)
+        found = self.rows()
+        self.assertEqual(len(found), 2)
+        self.assertEqual(found[0]["files_sha256"], {self.rel: "ab" * 32})  # the hash in the file, not the file as it is now
+        self.assertEqual(found[0]["source"], "commit 1e6d700")
+        self.assertIsNone(found[1]["metric_before"])
+        code, _, err = self.cli("note", "--from-file", str(path), "--by-user", "yes in chat")
+        self.assertEqual(code, 1)
+        self.assertIn("already recorded", err)
+        self.assertEqual(len(self.rows()), 2)
+
+    def test_a_backfill_row_without_a_time_is_refused(self):
+        path = self.tmp / "notime.jsonl"
+        path.write_text(json.dumps({"kind": "other", "title": "ok", "why": "w"}) + "\n")
+        code, _, err = self.cli("note", "--from-file", str(path), "--by-user", "yes")
+        self.assertEqual(code, 1)
+        self.assertIn("needs `when`", err)
+
+    def test_a_bad_row_in_a_backfill_file_records_nothing(self):
+        path = self.tmp / "bad.jsonl"
+        path.write_text(json.dumps({"kind": "other", "title": "ok", "why": "w", "when": 5}) + "\n" + json.dumps({"kind": "bogus", "title": "t", "why": "w"}) + "\n")
+        code, _, err = self.cli("note", "--from-file", str(path), "--by-user", "yes")
+        self.assertEqual(code, 1)
+        self.assertIn("line 2", err)
+        self.assertFalse((self.home / "improvements.jsonl").exists())
+
+
+class CostCriterionTests(Base):
+    def side(self, costs, outcome="pass", key="weighted"):
+        return [improve._result_row(f"c{n % 2}", outcome, c if key == "cost" else None, 5, None, weighted=c if key == "weighted" else None)
+                for n, c in enumerate(costs)]
+
+    def evaluation(self, before, after):
+        return {"before": before, "after": after}
+
+    def test_weighted_tokens_count_cache_reads_cheap_and_writes_dear(self):
+        from agentgraph import bench
+        row = {"tokens": {"input": 100, "cache_read": 1000, "cache_write": 80, "output": 10, "reasoning": 2}}
+        self.assertEqual(bench.weighted_tokens(row), 100 + 0.1 * 1000 + 1.25 * 80 + 5 * 12)
+        self.assertIsNone(bench.weighted_tokens({"cost": 1.0}))
+        self.assertIsNone(bench.weighted_tokens({"tokens": {"input": 1}}))
+
+    def test_import_bench_records_weighted_tokens(self):
+        record = self.propose()
+        results = self.tmp / "results"
+        results.mkdir()
+        row = {"scenario": "s1", "rep": 1, "check": {"passed": True}, "cost": 0.1, "turns": 4,
+               "tokens": {"input": 10, "cache_read": 100, "cache_write": 8, "output": 2, "reasoning": 0}}
+        (results / "lab.jsonl").write_text(json.dumps(row) + "\n" + json.dumps({**row, "rep": 2, "tokens": None}) + "\n")
+        improve.import_bench(self.home, record["id"], "after", "lab", results)
+        after = improve._load(self.home, record["id"])["evaluation"]["after"]
+        self.assertEqual(after[0]["weighted"], 10 + 10 + 10 + 10)
+        self.assertNotIn("weighted", after[1])
+
+    def test_equal_passes_are_ranked_by_cost_with_the_spread(self):
+        cheaper = improve.cost_comparison(self.evaluation(self.side([100, 102, 98, 101]), self.side([60, 62, 58, 61])))
+        self.assertEqual((cheaper["verdict"], cheaper["unit"]), ("cheaper", "weighted tokens"))
+        dearer = improve.cost_comparison(self.evaluation(self.side([60, 62, 58, 61]), self.side([100, 102, 98, 101])))
+        self.assertEqual(dearer["verdict"], "dearer")
+        # the gap is inside the spread across runs
+        noisy = improve.cost_comparison(self.evaluation(self.side([10, 200, 30, 180]), self.side([20, 190, 40, 150])))
+        self.assertEqual(noisy["verdict"], "no clear difference")
+        # a clear but tiny gap (under 5%) is not a difference either
+        tiny = improve.cost_comparison(self.evaluation(self.side([100.0, 100.1, 99.9, 100.0]), self.side([98.0, 98.1, 97.9, 98.0])))
+        self.assertEqual(tiny["verdict"], "no clear difference")
+
+    def test_fewer_than_three_runs_a_side_is_too_few_to_tell(self):
+        for before, after in (([100, 100], [1, 1, 1, 1]), ([100, 100, 100], [1, 1]), ([], [1, 1, 1])):
+            with self.subTest(before=before, after=after):
+                found = improve.cost_comparison(self.evaluation(self.side(before), self.side(after)))
+                self.assertEqual(found["verdict"], "too few runs to tell")
+                self.assertIn("too few runs to tell", found["text"])
+
+    def test_dollars_are_used_when_no_run_has_tokens(self):
+        found = improve.cost_comparison(self.evaluation(self.side([1.0, 1.1, 0.9], key="cost"), self.side([0.5, 0.55, 0.45], key="cost")))
+        self.assertEqual((found["verdict"], found["unit"]), ("cheaper", "dollars"))
+
+    def test_passes_decide_first_and_cost_only_breaks_a_tie(self):
+        better = self.evaluation(self.side([100, 101, 99], "fail"), self.side([500, 501, 499], "pass"))
+        ranked = improve.summary(better)["ranking"]
+        self.assertEqual((ranked["by"], ranked["result"]), ("passes", "more passes"))
+        tie = improve.summary(self.evaluation(self.side([100, 101, 99]), self.side([50, 51, 49])))["ranking"]
+        self.assertEqual((tie["by"], tie["result"]), ("cost", "cheaper"))
+        self.assertIn("same passes", tie["text"])
+
+    def test_show_states_the_rule_and_min_held_out_still_applies(self):
+        record = self.propose()
+        for n, value in enumerate((100, 101, 99)):
+            improve.add_results(self.home, record["id"], "before", [improve._result_row(f"c{n}", "pass", None, 3, f"s{n}", weighted=value)])
+            improve.add_results(self.home, record["id"], "after", [improve._result_row(f"c{n}", "pass", None, 3, f"s{n}", weighted=value / 2)])
+        code, out, _ = self.cli("show", record["id"])
+        self.assertIn("ranking: same passes", out)
+        self.assertIn("cheaper", out)
+        self.assertIn("cost rule:", out)
+        self.assertEqual(improve.summary(improve._load(self.home, record["id"])["evaluation"])["verdict"], "not enough runs")
+
+
 if __name__ == "__main__":
     unittest.main()

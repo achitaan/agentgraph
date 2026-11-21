@@ -996,5 +996,43 @@ class Ledger(unittest.TestCase):
         self.assertEqual([m["id"] for m in json.loads(output)["messages"]], ["msg:valid"])
 
 
+class ChangeRowTests(Ledger):
+    """`ledger.changed` and `ledger.changes`: changes made outside the improvement cycle, and reverts."""
+
+    def row(self, **kw):
+        return {"when": 100.0, "kind": "settings", "summary": "Raised a buffer", "why": "cost", "by": "user", "by_words": "yes",
+                "files": ["opencode.json"], "files_sha256": {"opencode.json": "ab" * 32}, "metric_before": 319, "metric_after": 195,
+                "unit": "dollars", "source": "COSTS.md", **kw}
+
+    def test_changed_appends_valid_rows_all_or_none_and_refuses_a_duplicate(self):
+        built = ledger.changed(self.home, [self.row(), self.row(when=50.0, summary="Earlier")])
+        self.assertEqual(len(built), 2)
+        lines = (self.home / "improvements.jsonl").read_text().splitlines()
+        self.assertEqual(len(lines), 2)
+        stored = [json.loads(line) for line in lines]
+        self.assertTrue(all(item["keep_watermark"] for item in stored))
+        self.assertEqual(stored[0]["files_sha256"], {"opencode.json": "ab" * 32})
+        with self.assertRaises(ValueError):
+            ledger.changed(self.home, [self.row(summary="New one"), self.row()])  # the second is already there
+        self.assertEqual(len((self.home / "improvements.jsonl").read_text().splitlines()), 2)  # none of the pair was written
+        with self.assertRaises(ValueError):
+            ledger.changed(self.home, [self.row(summary="Twice"), self.row(summary="Twice")])
+
+    def test_a_badly_formed_row_is_refused(self):
+        for bad in (self.row(kind="bogus"), self.row(summary=" "), self.row(files_sha256={"a": 3}), self.row(metric_before=[1])):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                ledger.changed(self.home, [bad])
+        self.assertFalse((self.home / "improvements.jsonl").exists())
+
+    def test_changes_are_oldest_first_and_old_rows_read_as_improved(self):
+        ledger.improved(self.home, 70.0, ["a.md"], "an old row")
+        ledger.changed(self.home, [self.row(when=90.0), self.row(when=10.0, summary="First")])
+        found = ledger.changes(self.home)
+        self.assertEqual([(item["time"], item["kind"]) for item in found], [(10.0, "settings"), (70.0, "improved"), (90.0, "settings")])
+        self.assertEqual(found[1]["files"], ["a.md"])
+        self.assertIsNone(found[1]["metric_before"])
+        self.assertEqual(found[2]["metric_after"], 195)
+
+
 if __name__ == "__main__":
     unittest.main()

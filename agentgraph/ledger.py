@@ -112,6 +112,29 @@ def _valid_improvement_fields(item: dict) -> bool:
         and (item.get("metric") is None or isinstance(item["metric"], str))
         and ("seen_until" not in item or _number(item["seen_until"]))
         and all(field not in item or _sizes(item[field]) for field in ("size_change", "fixed_chars", "size_actual"))
+        and _valid_change_fields(item)
+    )
+
+
+CHANGE_KINDS = ("proposal", "revert", "settings", "install", "other")
+
+
+def _metric_value(value) -> bool:
+    """A metric before or after: nothing, a number, a short text, or a small map of numbers (runs, passes, mean cost...)."""
+    return (value is None or isinstance(value, str) or _number(value)
+            or (isinstance(value, dict) and all(isinstance(key, str) and (item is None or isinstance(item, str) or _number(item))
+                                                for key, item in value.items())))
+
+
+def _valid_change_fields(item: dict) -> bool:
+    """The optional fields of a change row (a proposal applied or reverted, or a change made outside `improve`)."""
+    hashes = item.get("files_sha256", {})
+    return (
+        item.get("kind", "other") in CHANGE_KINDS
+        and all(item.get(field) is None or isinstance(item[field], str) for field in ("proposal", "by", "by_words", "why", "unit", "source"))
+        and isinstance(hashes, dict) and all(isinstance(key, str) and (value is None or isinstance(value, str)) for key, value in hashes.items())
+        and all(_metric_value(item.get(field)) for field in ("metric_before", "metric_after"))
+        and ("recorded" not in item or _number(item["recorded"]))
     )
 
 
@@ -509,9 +532,10 @@ def feedback(
 def improved(
     home: Path, now: float | None, file: str | Path | list[str], summary: str, *,
     signals: list[str] | None = None, metric: str | None = None, seen_until: float | None = None,
-    keep_watermark: bool = False, size_change: dict[str, int] | None = None,
+    keep_watermark: bool = False, size_change: dict[str, int] | None = None, extra: dict | None = None,
 ) -> dict:
-    """Record an applied improvement without opening or modifying its file.
+    """Record an applied improvement without opening or modifying its file. `extra` adds change fields
+    (`kind`, `proposal`, `by`, `why`, `metric_before`, `metric_after`, ...; see `_valid_change_fields`).
 
     `size_change` is the proposal's stated change to each agent's fixed text, in characters. With a bloat
     baseline in the home, the record also keeps the fixed text measured now (`fixed_chars`) and the actual change
@@ -526,10 +550,72 @@ def improved(
         if not _sizes(size_change):
             raise ValueError("size_change maps agent names to whole numbers of characters")
         fields["size_change"] = size_change
+    if extra:
+        if not _valid_change_fields(extra):
+            raise ValueError("the change fields are not well formed")
+        fields.update(extra)
     fields.update(_measured_size(home))
     from . import models
     fields.update(models.stored_field(home))
     return _append(home / _IMPROVEMENTS, now, fields)
+
+
+def _change_row(when: float, kind: str, summary: str, *, files=(), files_sha256=None, why: str = "", by: str = "command",
+                by_words: str | None = None, proposal: str | None = None, metric: str | None = None,
+                metric_before=None, metric_after=None, unit: str | None = None, source: str | None = None,
+                signals: list[str] | None = None, keep_watermark: bool = True, now: float | None = None) -> dict:
+    fields = {"file": list(files), "summary": summary, "signals": signals or [], "metric": metric, "kind": kind,
+              "by": by, "by_words": by_words, "why": why, "proposal": proposal, "files_sha256": files_sha256 or {},
+              "metric_before": metric_before, "metric_after": metric_after, "unit": unit, "source": source,
+              "recorded": _now(now)}
+    if keep_watermark:
+        fields["keep_watermark"] = True
+    if kind not in CHANGE_KINDS or not isinstance(summary, str) or not summary.strip() or not _number(when) \
+            or not _valid_improvement({"time": when, **fields}):
+        raise ValueError("a change needs a kind (%s), a title and well-formed fields" % ", ".join(CHANGE_KINDS))
+    return {"time": when, **fields}
+
+
+def changed(home: Path, rows: list[dict]) -> list[dict]:
+    """Record changes made outside the improvement cycle (and reverts) as `improvements.jsonl` rows, under one lock and all
+    or none. Each row is a dict of `_change_row`'s arguments plus `when` (the time of the change). They carry
+    `keep_watermark`, so recording a change does not consume the signals still waiting. A row with the same kind, title
+    and time as one already there (or earlier in `rows`) is refused. No file is opened except the ledger."""
+    built = []
+    for row in rows:
+        row = dict(row)
+        when = row.pop("when")
+        built.append(_change_row(when, row.pop("kind"), row.pop("summary"), **row))
+    path = home / _IMPROVEMENTS
+    with _lock(home, writing=True):
+        seen = {(item.get("kind"), item["summary"], item["time"]) for item in _records(_read(path, _valid_improvement))}
+        for item in built:
+            key = (item["kind"], item["summary"], item["time"])
+            if key in seen:
+                raise ValueError(f"already recorded: {item['kind']} {item['summary']!r} at {item['time']}")
+            seen.add(key)
+        for item in built:
+            _append_locked(path, item["time"], {key: value for key, value in item.items() if key != "time"})
+    return built
+
+
+def changes(home: Path, *, lock: bool = True) -> list[dict]:
+    """Every row of the improvement ledger as a change, oldest first: `{time, kind, title, files, files_sha256, by, by_words,
+    why, proposal, metric, metric_before, metric_after, unit, source}`. A row written by `agentgraph improved` has kind
+    `improved` (no kind was recorded); an applied proposal has `proposal`."""
+    def read():
+        return sorted(_records(_read(home / _IMPROVEMENTS, _valid_improvement)), key=lambda item: item["time"])
+    if lock:
+        with _lock(home, writing=False):
+            found = read()
+    else:
+        found = read()
+    return [{"time": item["time"], "kind": item.get("kind", "improved"), "title": item["summary"],
+             "files": [item["file"]] if isinstance(item["file"], str) else item["file"],
+             "files_sha256": item.get("files_sha256", {}), "by": item.get("by"), "by_words": item.get("by_words"),
+             "why": item.get("why"), "proposal": item.get("proposal"), "metric": item.get("metric"),
+             "metric_before": item.get("metric_before"), "metric_after": item.get("metric_after"),
+             "unit": item.get("unit"), "source": item.get("source")} for item in found]
 
 
 def _measured_size(home: Path) -> dict:

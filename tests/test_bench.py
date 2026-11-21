@@ -459,5 +459,17 @@ class ScenarioTests(unittest.TestCase):
             bench.load_scenario("nope")
 
 
+class WeightedTokensTests(unittest.TestCase):
+    def test_cache_reads_are_cheap_writes_dear_and_reasoning_counts_as_output(self):
+        row = {"tokens": {"input": 10, "cache_read": 1000, "cache_write": 8, "output": 3, "reasoning": 1}}
+        self.assertEqual(bench.weighted_tokens(row), 10 + 100 + 10 + 20)
+
+    def test_a_row_without_all_counts_has_no_weighted_tokens(self):
+        for row in ({}, {"tokens": None}, {"tokens": {"input": 1, "output": 1}}, {"tokens": {"input": -1, "cache_read": 0, "cache_write": 0, "output": 0}},
+                    {"tokens": {"input": True, "cache_read": 0, "cache_write": 0, "output": 0}}):
+            with self.subTest(row=row):
+                self.assertIsNone(bench.weighted_tokens(row))
+
+
 if __name__ == "__main__":
     unittest.main()

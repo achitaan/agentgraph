@@ -8,8 +8,12 @@ Resume from here after an interruption. The checkpoints for the work itself are 
 
 Their artifacts are under `.opencode/artifacts/<graph name>/` (git-ignored, local only).
 
-Spend stop: $1,600 for the whole chat, including its workers and bench runs (user, 2026-11-21); no new lanes
-from $1,550. Prompt, settings, skill and model changes are built and measured on scratch copies of the config and
+Spend stop (user, 2026-11-21: "the stop is when this chat reaches 250$"): $250 for the chat that began on
+2026-11-21 12:50 (session `ses_e00c524f5ffe1ZnetjODXR8yVQ`), counting its messages, its workers and the bench, loop and
+probe runs started after it began; no new lanes from $225. `usage.py` prints it as `THIS CHAT`. Across both chats
+that is about $1,700 (the first chat ended at $1,452.47; its stop was $1,600). The work is the cost and loops plan:
+`docs/PLAN-cost-loops.md`, graph `.opencode/graph/agentgraph-cost-loops.json`.
+Prompt, settings, skill and model changes are built and measured on scratch copies of the config and
 installed into the live config only after the user approves. Lanes run on Sonnet 5.5.
 
 ## Part 1: architecture improvement

@@ -10,8 +10,8 @@ from pathlib import Path
 from agentgraph import cost
 
 
-def turn(read=0, write=0, output=1000, gap=0.5, between=(), dollars=None, tokens_in=0):
-    made = {"input": tokens_in, "read": read, "write": write, "output": output, "gap": gap, "between": list(between), "cost": 0.0}
+def turn(read=0, write=0, output=1000, gap=0.5, between=(), dollars=None, tokens_in=0, **extra):
+    made = {"input": tokens_in, "read": read, "write": write, "output": output, "gap": gap, "between": list(between), "cost": 0.0, **extra}
     made["cost"] = cost._weight(made) * 5e-6 if dollars is None else dollars
     return made
 
@@ -27,6 +27,26 @@ class CostTests(unittest.TestCase):
         self.assertEqual(cost.cause_of(turn(gap=0.2, between=["system"], **cold)), "settings or model changed")
         self.assertEqual(cost.cause_of(turn(gap=20, between=["compaction", "user"], **cold)), "after compaction")
         self.assertEqual(cost.cause_of(turn(gap=0.2, between=["user"], **cold)), "unexplained")
+
+    def test_causes_found_in_the_data_are_named_after_the_old_ones(self):
+        self.assertEqual(cost.CAUSES[:5], ("pause over an hour", "pause over 5 minutes", "settings or model changed", "after compaction", "unexplained"))
+        self.assertEqual(len(set(cost.CAUSES)), len(cost.CAUSES))
+        cold = dict(read=0, write=300_000, gap=0.2, between=["user"])
+        # the whole last context was read: the write is new text, not a miss (priority over the later checks)
+        self.assertEqual(cost.cause_of(turn(read=400_000, write=60_000, gap=0.2, before=410_000)), "large new content (no miss)")
+        self.assertEqual(cost.cause_of(turn(read=0, write=300_000, gap=0.2, before=290_000)), "unexplained")  # grew, but nothing was read
+        # a request that billed nothing came just before
+        self.assertEqual(cost.cause_of(turn(failed=True, before=250_000, **cold)), "after a failed request")
+        # the context got smaller without a compaction: an edit before the end of the cached part
+        self.assertEqual(cost.cause_of(turn(before=700_000, **cold)), "context shrank")
+        self.assertEqual(cost.cause_of(turn(before=700_000, failed=True, **cold)), "after a failed request")
+        # settings notices still come first; so do pauses
+        self.assertEqual(cost.cause_of(turn(before=700_000, gap=0.2, between=["system"], read=0, write=300_000)), "settings or model changed")
+        self.assertEqual(cost.cause_of(turn(before=700_000, read=0, write=300_000, gap=9)), "pause over 5 minutes")
+        # near the end of the lifetime, cold turns are 10 to 15 times as common
+        self.assertEqual(cost.cause_of(turn(read=0, write=300_000, gap=4.2, before=200_000)), "pause of 3 to 5 minutes")
+        self.assertEqual(cost.cause_of(turn(read=0, write=300_000, gap=2.9, before=200_000)), "unexplained")
+        self.assertEqual(cost.cause_of(turn(read=0, write=300_000, gap=0.2)), "unexplained")  # no 'before' key at all
 
     def test_the_breakdown_adds_up_and_the_what_ifs_move_the_right_way(self):
         turns = [turn(write=30_000)]
@@ -77,7 +97,9 @@ class CostTests(unittest.TestCase):
             db.close()
             session, turns, workers = cost.load_turns(db_path=path)
             self.assertEqual((session, workers), ("ses_root", {"sessions": 1, "cost": 2.5}))
-            self.assertEqual(turns[0], {"cost": 0.5, "input": 10, "read": 100, "write": 200, "output": 25, "gap": 0.0, "between": ["user"], "time": 60.0, "model": ""})
+            self.assertEqual(turns[0], {"cost": 0.5, "input": 10, "read": 100, "write": 200, "output": 25, "gap": 0.0, "between": ["user"], "time": 60.0, "model": "",
+                                        "before": 0, "failed": False})
+            self.assertEqual((turns[1]["before"], turns[1]["failed"], turns[2]["failed"]), (310, False, False))
             self.assertEqual((turns[1]["time"], turns[2]["time"], turns[2]["model"]), (660.0, 670.0, ""))
             self.assertEqual((turns[1]["gap"], turns[1]["between"], turns[1]["write"]), (10.0, ["system", "user"], 70_000))
             self.assertEqual(len(turns), 3)

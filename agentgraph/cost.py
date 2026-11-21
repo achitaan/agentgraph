@@ -24,7 +24,11 @@ COLD_TOKENS = 50_000           # a cold turn writes at least this much, and more
 KEPT_AFTER_COMPACTION = 40_000  # summary plus the recent conversation kept beside it
 SUMMARY_OUTPUT = 4_000
 BANDS = ((0, 100_000), (100_000, 200_000), (200_000, 400_000), (400_000, 10**9))
-CAUSES = ("pause over an hour", "pause over 5 minutes", "settings or model changed", "after compaction", "unexplained")
+CAUSES = ("pause over an hour", "pause over 5 minutes", "settings or model changed", "after compaction", "unexplained",
+          "large new content (no miss)", "after a failed request", "context shrank",
+          "pause of 3 to 5 minutes")
+HIT_SHARE = 0.97               # a turn that read this share of the last context still hit the cache
+NEAR_EXPIRY = 3.0              # minutes: from here to the cache lifetime, cold turns are 10 to 15 times as common
 SWITCHES = {"system", "model-switched", "agent-switched"}
 PAUSE_CAUSES = {"pause over an hour", "pause over 5 minutes"}
 CONFIG_PATH = sources.CONFIG_DIR / "opencode.json"
@@ -47,7 +51,7 @@ def _read_turns(db, session: str) -> list[dict]:
               "tokens.reasoning", "time.created", "model.id")
     columns = ", ".join(f"CASE WHEN {ok} THEN json_extract(data, '$.{field}') END" for field in fields)
     rows = db.execute(f"SELECT type, {ok}, {columns} FROM session_message WHERE session_id=? ORDER BY seq", (session,)).fetchall()
-    turns, between, previous = [], set(), None
+    turns, between, previous, last, failed = [], set(), None, 0, False
     for kind, valid, cost, tokens_in, read, write, output, reasoning, created, model in rows:
         if kind != "assistant":
             between.add(kind)
@@ -55,13 +59,19 @@ def _read_turns(db, session: str) -> list[dict]:
         if not valid:
             continue
         created = _number(created) / 1000
-        turns.append({
+        turn = {
             "cost": _number(cost), "input": int(_number(tokens_in)),
             "read": int(_number(read)), "write": int(_number(write)),
             "output": int(_number(output)) + int(_number(reasoning)),
             "gap": (created - previous) / 60 if previous and created else 0.0, "between": sorted(between),
             "time": created, "model": model if isinstance(model, str) else "",
-        })
+            # what the turns before left: the context of the last one that billed tokens, and whether the
+            # one just before failed without billing any
+            "before": last, "failed": failed,
+        }
+        turns.append(turn)
+        failed = _context(turn) == 0
+        last = _context(turn) or last
         previous, between = created or previous, set()
     return turns
 
@@ -310,7 +320,16 @@ def cause_of(turn: dict) -> str:
         return "pause over an hour"
     if turn["gap"] > CACHE_MINUTES:
         return "pause over 5 minutes"
-    return "settings or model changed" if SWITCHES & set(turn["between"]) else "unexplained"
+    if SWITCHES & set(turn["between"]):
+        return "settings or model changed"
+    before = turn.get("before", 0)
+    if before and turn["read"] >= HIT_SHARE * before:
+        return "large new content (no miss)"   # the whole last context was read: the write is new text
+    if turn.get("failed"):
+        return "after a failed request"
+    if before and _context(turn) < before:
+        return "context shrank"
+    return "pause of 3 to 5 minutes" if turn["gap"] >= NEAR_EXPIRY else "unexplained"
 
 
 def _capped(turn: dict, cap: int) -> dict:
@@ -435,6 +454,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="print the numbers as JSON")
     parser.add_argument("--long-turns", type=int, default=LONG_TURNS, help="list worker sessions over this many turns (default 300)")
     parser.add_argument("--long-cost", type=float, default=LONG_COST, help="list worker sessions billed over this many dollars (default 25)")
+    parser.add_argument("--rollover", action="store_true", help="what other rollover (compaction) points would have cost, from the stored turns")
+    parser.add_argument("--threshold", type=int, help="with --rollover: one more context size to try, in tokens")
+    parser.add_argument("--cache", action="store_true", help="cache-read share and cold turns per agent")
+    parser.add_argument("--growth", action="store_true", help="where context growth comes from, by turn and by tool")
     parser.add_argument("--trend", action="store_true", help="cost per turn of root chats, split by the cost settings in force")
     parser.add_argument("--days", type=int, default=30, help="with --trend: chats updated in the last N days (default 30)")
     parser.add_argument("--settings-log", type=Path, default=SETTINGS_LOG, help="log of the cost settings over time")
@@ -448,12 +471,22 @@ def main(argv: list[str] | None = None) -> int:
         periods = trend(args.db, load_history(args.settings_log), days=args.days)
         print(json.dumps(periods) if args.json else trend_report(periods))
         return 0
+    wanted = {name for name in ("rollover", "cache", "growth") if getattr(args, name)}
+    replays = {}
+    if wanted:
+        from . import costreplay
+        thresholds = costreplay.THRESHOLDS + ((args.threshold,) if args.threshold else ())
+        chat, sessions, tools = costreplay.load_sessions(args.session, args.db, args.long_turns, args.long_cost, "growth" in wanted)
+        replays = costreplay.build(chat, sessions, tools, wanted, thresholds)
+        if not args.json:
+            print(costreplay.text(chat, replays))
+            return 0
     session, turns, workers = load_turns(args.session, args.db)
     result = analyse(turns, max(KEPT_AFTER_COMPACTION * 2, args.cap))
     billing = load_billing(session, args.db, args.long_turns, args.long_cost)
     if args.json:
         print(json.dumps({"session": session, "workers": {**workers, **billing["workers"], "cost": workers["cost"], "sessions": workers["sessions"]},
-                          "root": billing["root"], **result}))
+                          "root": billing["root"], **result, **replays}))
     else:
         print(report(session, result, workers, billing))
     return 0

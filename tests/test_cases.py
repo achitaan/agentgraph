@@ -404,5 +404,39 @@ class CheckAcceptsBase(Scratch):
         self.assertEqual(graph_from_raw(raw, Path("t.json")).nodes[0].base, BASE)
 
 
+class EvidenceCases(Scratch):
+    """Cases of kind cost, rule and feedback (made by `improve evidence --to-cases`): listed, never replayable."""
+
+    def item(self, kind="cost", key="cost:ses_1", **kw):
+        return cases.evidence_case(kind, key, kw.pop("agent", "impl-claude"), "worker session ses_1 cost $12.00", "3.0x the median",
+                                   now=100.0, findings=["ses_1"], **kw)
+
+    def test_evidence_cases_are_stored_once_and_listed_with_their_kind(self):
+        self.assertEqual(cases.add_evidence(self.home, [self.item(), self.item("rule", "rule:r", agent="orchestrator"),
+                                                          self.item("feedback", "feedback:a:1", agent="designer")]), 3)
+        self.assertEqual(cases.add_evidence(self.home, [self.item()]), 0)
+        self.assertEqual(sorted(item["kind"] for item in self.stored()), ["cost", "feedback", "rule"])
+        status, output, errors = self.cases("--json")
+        self.assertEqual(status, 0, errors)
+        listed = json.loads(output)["cases"]
+        self.assertEqual({item["kind"] for item in listed}, {"cost", "feedback", "rule"})
+        self.assertFalse(any(item["replayable"] for item in listed))
+        self.assertTrue(all(item["why_not"] for item in listed))
+        status, output, _ = self.cases("--kind", "rule", "--json")
+        self.assertEqual([item["kind"] for item in json.loads(output)["cases"]], ["rule"])
+
+    def test_a_failure_case_still_has_its_old_shape_and_kind(self):
+        self.write("t", [node(attempts=2)])
+        self.record()
+        self.assertEqual([item["kind"] for item in self.stored()], ["failure"])
+        self.assertEqual(self.item()["replayable"], False)
+
+    def test_an_unknown_kind_is_not_an_evidence_case(self):
+        with self.assertRaises(ValueError):
+            cases.evidence_case("failure", "k", "a", "t", "d", now=1.0)
+        bad = {**self.item(), "kind": "bogus"}
+        self.assertEqual(cases.add_evidence(self.home, [bad]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

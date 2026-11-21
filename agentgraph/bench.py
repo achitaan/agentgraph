@@ -728,6 +728,28 @@ def _value(row: dict, metric: str):
     return row.get(metric)
 
 
+# What a token of each kind costs relative to a plain input token, whatever the model (the ratios `cost` uses; a cache
+# write is counted at the five-minute price).
+WEIGHTS = {"input": 1.0, "cache_read": 0.1, "cache_write": 1.25, "output": 5.0}
+
+
+def weighted_tokens(row: dict) -> float | None:
+    """The run's tokens counted at those ratios (reasoning tokens as output), or None when the row has no token counts."""
+    tokens = row.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    counts = {}
+    for name in ("input", "cache_read", "cache_write", "output"):
+        value = tokens.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            return None
+        counts[name] = value
+    reasoning = tokens.get("reasoning")
+    if isinstance(reasoning, (int, float)) and not isinstance(reasoning, bool) and reasoning > 0:
+        counts["output"] += reasoning
+    return sum(WEIGHTS[name] * value for name, value in counts.items())
+
+
 def summarize(rows: list[dict]) -> dict:
     """Medians over reps of every metric, the check pass rate and, for a probe, the first-turn prompt tokens."""
     result = {"reps": len(rows)}

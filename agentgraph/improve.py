@@ -26,11 +26,23 @@ none), and appends the `improved` ledger row. It does not need a good evaluation
 printed and recorded. Revert refuses when a file is no longer what approve wrote (`--force` overrides), puts back the
 exact bytes from the backup, or deletes a file the proposal created. Reject changes no file.
 
+Every change has a ledger row (`improvements.jsonl`): approve writes one with the proposal's recorded results as its
+metric (runs, passes, mean cost, mean turns, before and after; no metric, and the row says so, when no result was
+recorded), revert writes one naming the proposal, who undid it and why, and `note` records a change made by hand
+(settings, an install, a revert, anything else) with each file's sha256 and never its contents. `changes` lists them.
+
 Verdict of the evaluation (`summary`): held-out and tune pass rates before and after. Fewer than 2 held-out results
 before or after -> "not enough runs". Otherwise a lower pass rate on either side -> "worse"; else a higher held-out
 rate (tune not lower) -> "better"; else a higher tune rate with held-out equal -> "better on tune only" (the change
 is not confirmed on cases it was not written from); else "no difference". The held-out side is the one that counts for
 trust, but a drop anywhere is shown rather than hidden.
+
+Ranking (`summary()["ranking"]`): first by passes (all results, both splits); when the pass rates are equal, by cost
+(`cost_comparison`). Cost is in weighted tokens when the results carry them (bench rows with token counts: input 1,
+cache read 0.1, cache write 1.25, output and reasoning 5 per token, so it does not depend on the model), else in dollars.
+Rule: on the cases both sides have (all runs when they share none), with at least 3 runs a side that carry the cost
+(fewer: "too few runs to tell"); "cheaper" or "dearer" when the means differ by more than twice the standard error of
+the difference (the spread across runs) and by at least 5%; otherwise "no clear difference".
 
     python3 -m agentgraph.improve propose --title T --why W --change PATH=NEWFILE [--case ID ...] [--note-id ID ...]
     python3 -m agentgraph.improve result ID --phase before|after --case CASE --outcome pass|fail [--cost D --turns N --source S]
@@ -38,6 +50,10 @@ trust, but a drop anywhere is shown rather than hidden.
     python3 -m agentgraph.improve show ID [--json] | list [--json]
     python3 -m agentgraph.improve approve ID --by-user "their words" [--force]
     python3 -m agentgraph.improve reject ID --reason R | reopen ID [--note N] | revert ID [--force] [--note N]
+    python3 -m agentgraph.improve note --kind K --title T --why W --by-user WORDS [--files PATH ...] [--metric-before V
+        --metric-after V --unit U] [--when TIME]  |  note --from-file F [--by-user WORDS]
+    python3 -m agentgraph.improve changes [--json]
+    python3 -m agentgraph.improve evidence [--json] [--limit N] | evidence --home SCRATCH --to-cases [--top N]   (see evidence.py)
 
 Every command takes `--config-root DIR` (default: OpenCode's config folder) and `--home DIR` (default: $AGENTGRAPH_HOME,
 else the active preset's ledger folder).
@@ -48,13 +64,16 @@ import argparse
 import difflib
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
 import shutil
 import sys
+import statistics
 import tempfile
 import time
+from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
 
@@ -71,6 +90,13 @@ RESULTS_LIMIT = 500         # results kept per phase
 SHORT = 1000                # a title, why, note
 QUOTE = 200
 MIN_HELD_OUT = 2
+COST_MIN_RUNS = 3           # runs a side that carry the cost, or "too few runs to tell"
+COST_STDERRS = 2.0          # a cost gap must be more than this many standard errors of the difference ...
+COST_MIN_GAP = 0.05         # ... and at least this share of the larger mean
+COST_RULE = (f"cost rule: weighted tokens when the results carry them, else dollars; at least {COST_MIN_RUNS} runs a side; "
+             f"cheaper or dearer when the means differ by more than {COST_STDERRS:g} standard errors of the difference and by "
+             f"{COST_MIN_GAP:.0%} or more; otherwise no clear difference")
+NOTE_KINDS = ("settings", "install", "revert", "other")
 
 
 class ImproveError(Exception):
@@ -222,20 +248,82 @@ def summary(evaluation: dict) -> dict:
         verdict = "no difference"
     text = (f"held-out {held['before'][0]}/{held['before'][1]} before, {held['after'][0]}/{held['after'][1]} after; "
             f"tune {tune['before'][0]}/{tune['before'][1]} before, {tune['after'][0]}/{tune['after'][1]} after: {verdict}")
-    return {**counts, "verdict": verdict, "text": text}
+    spent = cost_comparison(evaluation)
+    return {**counts, "verdict": verdict, "text": text, "cost": spent, "ranking": _ranking(evaluation, spent)}
 
 
-def _result_row(case: str, outcome: str, cost, turns, source) -> dict:
+def _number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _mean_sd(values: list[float]) -> tuple[float, float]:
+    return statistics.fmean(values), statistics.stdev(values) if len(values) > 1 else 0.0
+
+
+def cost_comparison(evaluation: dict) -> dict:
+    """Before against after on cost (rule: module docstring, `COST_RULE`): `{"unit", "basis", "before": {runs, mean, sd},
+    "after": {...}, "change", "verdict", "text"}`; `verdict` is cheaper, dearer, no clear difference or too few runs to tell."""
+    before, after = evaluation.get("before", []), evaluation.get("after", [])
+    shared = {row["case"] for row in before} & {row["case"] for row in after}
+    basis = "the cases both sides have" if shared else "all runs (the sides share no case)"
+    if shared:
+        before, after = [row for row in before if row["case"] in shared], [row for row in after if row["case"] in shared]
+    chosen = None
+    for unit, key in (("weighted tokens", "weighted"), ("dollars", "cost")):
+        b = [row[key] for row in before if _number(row.get(key))]
+        a = [row[key] for row in after if _number(row.get(key))]
+        if len(b) >= COST_MIN_RUNS and len(a) >= COST_MIN_RUNS:
+            chosen = unit, b, a
+            break
+    if chosen is None:
+        counts = [max(sum(_number(row.get(key)) for row in rows) for key in ("weighted", "cost")) for rows in (before, after)]
+        return {"unit": None, "basis": basis, "before": {"runs": counts[0]}, "after": {"runs": counts[1]}, "change": None,
+                "verdict": "too few runs to tell",
+                "text": f"too few runs to tell ({counts[0]} before, {counts[1]} after carry a cost; {COST_MIN_RUNS} a side are needed)"}
+    unit, b, a = chosen
+    (mb, sb), (ma, sa) = _mean_sd(b), _mean_sd(a)
+    gap = mb - ma
+    noise = math.sqrt(sb ** 2 / len(b) + sa ** 2 / len(a))
+    large = max(mb, ma)
+    if large > 0 and abs(gap) > COST_STDERRS * noise and abs(gap) >= COST_MIN_GAP * large:
+        verdict = "cheaper" if gap > 0 else "dearer"
+    else:
+        verdict = "no clear difference"
+    change = (ma - mb) / mb if mb else None
+    digits = 3 if unit == "dollars" else 0
+    text = (f"{verdict}: mean {ma:,.{digits}f} after against {mb:,.{digits}f} before ({unit}, "
+            f"{len(a)} and {len(b)} runs, {basis}" + (f", {change:+.1%}" if change is not None else "") + ")")
+    return {"unit": unit, "basis": basis, "before": {"runs": len(b), "mean": mb, "sd": sb},
+            "after": {"runs": len(a), "mean": ma, "sd": sa}, "change": change, "verdict": verdict, "text": text}
+
+
+def _ranking(evaluation: dict, spent: dict) -> dict:
+    """Before against after: by passes first, and by cost when the pass rates are equal."""
+    (bp, bt), (ap, at) = _pair(evaluation.get("before", [])), _pair(evaluation.get("after", []))
+    if not bt or not at:
+        return {"by": None, "result": "no results on one side", "text": "no results on one side"}
+    if Fraction(ap, at) != Fraction(bp, bt):
+        word = "more" if Fraction(ap, at) > Fraction(bp, bt) else "fewer"
+        text = f"by passes: {word} after ({ap}/{at} after, {bp}/{bt} before)"
+        return {"by": "passes", "result": f"{word} passes", "text": text}
+    return {"by": "cost", "result": spent["verdict"],
+            "text": f"same passes ({ap}/{at} after, {bp}/{bt} before); by cost: {spent['text']}"}
+
+
+def _result_row(case: str, outcome: str, cost, turns, source, weighted=None) -> dict:
     if not isinstance(case, str) or not REFERENCE.fullmatch(case):
         raise ImproveError("a case id is letters, digits, '.', '_', '-' or ':' (at most 64), e.g. a `cases` id or a bench scenario")
     if outcome not in ("pass", "fail"):
         raise ImproveError("outcome is pass or fail")
-    for name, value in (("cost", cost), ("turns", turns)):
+    for name, value in (("cost", cost), ("turns", turns), ("weighted", weighted)):
         if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0
                                   or value != value or value == float("inf")):
             raise ImproveError(f"{name} must be a number, 0 or more")
-    return {"case": case, "split": cases.split_of(case), "outcome": outcome, "cost": cost, "turns": turns,
-            "source": _clip(source, 200) or None}
+    row = {"case": case, "split": cases.split_of(case), "outcome": outcome, "cost": cost, "turns": turns,
+           "source": _clip(source, 200) or None}
+    if weighted is not None:
+        row["weighted"] = weighted
+    return row
 
 
 # --- records -----------------------------------------------------------------------------------------
@@ -357,7 +445,8 @@ def add_result(home: Path, proposal_id: str, phase: str, case: str, outcome: str
 def import_bench(home: Path, proposal_id: str, phase: str, label: str, results: Path | None = None, *,
                  now: float | None = None) -> tuple[dict, int]:
     """Bench result rows of `label` as results: the scenario name is the case, the row's check the outcome (a row
-    with no check, such as a probe, is skipped)."""
+    with no check, such as a probe, is skipped). Each result also carries the run's weighted tokens when the row has token
+    counts (`bench.weighted_tokens`), next to its dollars."""
     from . import bench
     try:
         rows = bench.read_rows(label, results)
@@ -370,7 +459,8 @@ def import_bench(home: Path, proposal_id: str, phase: str, label: str, results: 
             continue
         number = lambda value: value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
         found.append(_result_row(row["scenario"], "pass" if check["passed"] else "fail", number(row.get("cost")),
-                                 number(row.get("turns")), f"bench:{label}:{row['scenario']}:r{row.get('rep', '?')}"))
+                                 number(row.get("turns")), f"bench:{label}:{row['scenario']}:r{row.get('rep', '?')}",
+                                 weighted=bench.weighted_tokens(row)))
     if not found:
         raise ImproveError(f"bench label {label!r} has no scenario rows with a check")
     return add_results(home, proposal_id, phase, found, now=now), len(found)
@@ -476,6 +566,38 @@ def digest(home: Path, limit: int = 30) -> list[dict]:
     return sorted(found, key=lambda item: (item["created"], item["id"]), reverse=True)[:limit]
 
 
+METRIC_UNIT = "runs, passes, mean cost (dollars), mean turns, mean weighted tokens"
+
+
+def _phase_metric(rows: list[dict]) -> dict | None:
+    def mean(key):
+        values = [row[key] for row in rows if _number(row.get(key))]
+        return round(statistics.fmean(values), 6) if values else None
+    return {"runs": len(rows), "passes": sum(row["outcome"] == "pass" for row in rows), "mean_cost": mean("cost"),
+            "mean_turns": mean("turns"), "mean_weighted_tokens": mean("weighted")} if rows else None
+
+
+def _phase_text(phase: str, metric: dict | None) -> str:
+    if metric is None:
+        return f"{phase}: no runs"
+    parts = [f"{metric['runs']} runs", f"{metric['passes']} passed"]
+    if metric["mean_cost"] is not None:
+        parts.append(f"mean cost ${metric['mean_cost']:.3f}")
+    if metric["mean_turns"] is not None:
+        parts.append(f"mean turns {metric['mean_turns']:.1f}")
+    if metric["mean_weighted_tokens"] is not None:
+        parts.append(f"mean weighted tokens {metric['mean_weighted_tokens']:,.0f}")
+    return f"{phase}: " + ", ".join(parts)
+
+
+def evaluation_metric(evaluation: dict) -> tuple[dict | None, dict | None, str | None]:
+    """The proposal's recorded results as `(before, after, text)`; all three None when no result was recorded."""
+    before, after = _phase_metric(evaluation.get("before", [])), _phase_metric(evaluation.get("after", []))
+    if before is None and after is None:
+        return None, None, None
+    return before, after, "; ".join((_phase_text("before", before), _phase_text("after", after)))
+
+
 def approve(home: Path, root: Path, proposal_id: str, *, who: str, note: str, force: bool = False,
             now: float | None = None) -> dict:
     """Apply the proposal (see the module docstring). `who` is `user` (their words in `note`) or `command`."""
@@ -540,10 +662,18 @@ def approve(home: Path, root: Path, proposal_id: str, *, who: str, note: str, fo
             raise
     # `ledger.improved` takes the same lock itself, so it runs after ours is released.
     row = None
+    before, after, metric = evaluation_metric(record["evaluation"])
+    verdict = summary(record["evaluation"])["verdict"] if metric else "no results recorded"
     try:
         row = ledger.improved(Path(home), now, [change["path"] for change in record["changes"]],
-                              f"{record['title']} (proposal {record['id']}; {summary(record['evaluation'])['verdict']})",
-                              signals=[f"proposal {record['id']}"] + [f"case {item}" for item in record["evidence"]["cases"][:5]])
+                              f"{record['title']} (proposal {record['id']}; {verdict})",
+                              signals=[f"proposal {record['id']}"] + [f"case {item}" for item in record["evidence"]["cases"][:5]],
+                              metric=metric, extra={
+                                  "kind": "proposal", "proposal": record["id"], "by": who,
+                                  "by_words": _clip(note) if who == "user" else None, "why": _clip(record["why"]),
+                                  "metric_before": before, "metric_after": after, "unit": METRIC_UNIT,
+                                  "files_sha256": {item["path"]: item["after_sha256"] for item in record["applications"][-1]["files"]},
+                                  "source": "improve approve"})
     except (OSError, ValueError) as exc:
         with ledger._lock(Path(home), writing=True):
             record = _load(home, proposal_id)
@@ -626,7 +756,178 @@ def revert(home: Path, root: Path, proposal_id: str, *, who: str = "command", no
         application["reverted"] = ledger._now(now)
         _move(record, "reverted", who, note or "reverted", now)
         _save(home, record)
+    # Like approve: the ledger takes its own lock, so the row is written once ours is released.
+    try:
+        hashes = {item["path"]: _sha(_read_file(safe_path(root, item["path"]))) for item in application["files"]}
+        ledger.changed(Path(home), [{
+            "when": ledger._now(now), "kind": "revert", "summary": f"Reverted proposal {record['id']}: {record['title']}",
+            "files": [item["path"] for item in application["files"]], "files_sha256": hashes, "by": who,
+            "why": _clip(note) or "reverted", "proposal": record["id"], "source": "improve revert",
+            "signals": [f"proposal {record['id']}"]}])
+    except (OSError, ValueError, ImproveError) as exc:
+        raise ImproveError(f"the files were put back (proposal {proposal_id} is reverted) but the ledger row failed: {exc}") from None
     return record
+
+
+# --- changes made outside `improve` -------------------------------------------------------------------
+
+
+def _when(value, now: float) -> float:
+    """The time of a change: nothing (now), a number of seconds, or a date, `YYYY-MM-DD[ HH:MM[:SS]]` (local time unless
+    it carries an offset)."""
+    if value is None or value == "":
+        return now
+    if _number(value):
+        return float(value)
+    if not isinstance(value, str):
+        raise ImproveError(f"--when {value!r} is not a time")
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(value.strip().replace(" ", "T", 1)).timestamp()
+    except ValueError:
+        raise ImproveError(f"--when {value!r} is not a time: use YYYY-MM-DD, YYYY-MM-DD HH:MM[:SS] or seconds") from None
+
+
+def _metric_arg(value):
+    """A metric given on the command line or in a file: a number stays a number, text stays text."""
+    if isinstance(value, str):
+        try:
+            number = float(value)
+        except ValueError:
+            return _clip(value) or None
+        return int(number) if number.is_integer() and "." not in value else number
+    return value
+
+
+def _plain_relative(relative) -> str:
+    if (not isinstance(relative, str) or not relative or "\0" in relative or "\\" in relative or relative.startswith("/")
+            or any(part in ("", ".", "..") for part in relative.split("/"))):
+        raise ImproveError(f"{relative!r} must be a plain path below the config root (no .., absolute path or empty part)")
+    return relative
+
+
+def _file_hash(root: Path, relative: str) -> str | None:
+    """The sha256 of the file under the config root (None when it does not exist). The file is only hashed, in chunks;
+    its contents go nowhere."""
+    target = Path(os.path.realpath(root)) / relative
+    real = Path(os.path.realpath(target))
+    if not _inside(root, real):
+        raise ImproveError(f"{relative} resolves outside the config root; refused")
+    if not real.exists():
+        return None
+    if not real.is_file():
+        raise ImproveError(f"{relative} is not a regular file")
+    digest = hashlib.sha256()
+    with real.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 16), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _note_fields(root: Path, spec: dict, by_user, now: float, *, hash_now: bool) -> dict:
+    kind = spec.get("kind")
+    if kind not in NOTE_KINDS:
+        raise ImproveError(f"--kind is one of {', '.join(NOTE_KINDS)}")
+    title, why = _clip(spec.get("title")), _clip(spec.get("why"))
+    if not title or not why:
+        raise ImproveError("a note needs a title and a why, in plain words")
+    words = _clip(spec.get("by_user") or by_user)
+    if not words:
+        raise ImproveError("a note needs the user's own words saying who approved the change (--by-user)")
+    files = spec.get("files") or []
+    if not isinstance(files, list) or len(files) > CHANGES_LIMIT:
+        raise ImproveError(f"files is a list of at most {CHANGES_LIMIT} paths")
+    given = spec.get("sha256") or {}
+    if not isinstance(given, dict):
+        raise ImproveError("sha256 is a map from path to hash")
+    hashes = {}
+    for relative in files:
+        _plain_relative(relative)
+        hashes[relative] = _file_hash(root, relative) if hash_now else given.get(relative)
+    unit = _clip(spec.get("unit"), 200) or None
+    source = _clip(spec.get("source"), 400) or None
+    return {"when": _when(spec.get("when"), now), "kind": kind, "summary": title, "files": files, "files_sha256": hashes,
+            "why": why, "by": "user", "by_words": words, "metric_before": _metric_arg(spec.get("metric_before")),
+            "metric_after": _metric_arg(spec.get("metric_after")), "unit": unit, "source": source}
+
+
+def note(home: Path, root: Path, kind: str, title: str, why: str, *, by_user: str, files: list[str] | None = None,
+         metric_before=None, metric_after=None, unit: str | None = None, when=None, now: float | None = None) -> dict:
+    """Record a change made outside `improve` as one ledger row; no file but the ledger changes. Each file in `files` (paths
+    below the config root) is recorded with its current sha256, or null if it does not exist; its contents are never
+    read into the row."""
+    stamp = ledger._now(now)
+    spec = {"kind": kind, "title": title, "why": why, "files": files or [], "metric_before": metric_before,
+            "metric_after": metric_after, "unit": unit, "when": when}
+    row = _note_fields(root, spec, by_user, stamp, hash_now=True)
+    return _write_notes(home, [row], stamp)[0]
+
+
+def note_file(home: Path, root: Path, path: Path, *, by_user: str | None = None, now: float | None = None) -> list[dict]:
+    """Apply a file of notes, one JSON object a line: `kind, title, why, files, sha256 {path: hash}, metric_before,
+    metric_after, unit, when (required), by_user, source`. The hashes are the ones the file gives (a change made in the past has no
+    "current" hash); a row with no `by_user` takes `by_user`. All rows are recorded or none: a bad row, a missing
+    approval or a row already in the ledger refuses the whole file."""
+    stamp = ledger._now(now)
+    try:
+        lines = Path(path).expanduser().read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ImproveError(f"cannot read {path} as UTF-8 text: {exc}") from None
+    rows = []
+    for number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            spec = json.loads(line)
+            if not isinstance(spec, dict):
+                raise ValueError("not an object")
+            if spec.get("when") in (None, ""):
+                raise ValueError("a row in a file needs `when`, so that applying the file twice is seen and refused")
+            rows.append(_note_fields(root, spec, by_user, stamp, hash_now=False))
+        except (ValueError, ImproveError) as exc:
+            raise ImproveError(f"{path} line {number}: {exc}; nothing was recorded") from None
+    if not rows:
+        raise ImproveError(f"{path} has no notes")
+    return _write_notes(home, rows, stamp)
+
+
+def _write_notes(home: Path, rows: list[dict], now: float) -> list[dict]:
+    try:
+        return ledger.changed(Path(home), [{**row, "now": now} for row in rows])
+    except ValueError as exc:
+        raise ImproveError(f"{exc}; nothing was recorded") from None
+
+
+def _metric_text(value) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, dict):
+        return _phase_text("", value).lstrip(": ").strip() if "runs" in value else ", ".join(f"{k} {v}" for k, v in value.items())
+    return f"{value:,}" if isinstance(value, int) else f"{value:,.4g}" if isinstance(value, float) else str(value)
+
+
+def changes(home: Path) -> list[dict]:
+    """Every change in the ledger, oldest first (`ledger.changes`)."""
+    return ledger.changes(Path(home))
+
+
+def _changes_text(found: list[dict]) -> str:
+    if not found:
+        return "no changes recorded"
+    lines = []
+    for item in found:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(item["time"]))
+        line = f"{when}  {item['kind']:<9} {item['title']}"
+        if item["metric_before"] is not None or item["metric_after"] is not None:
+            unit = f" ({item['unit']})" if item["unit"] else ""
+            line += f"\n{'':>29}before {_metric_text(item['metric_before'])}; after {_metric_text(item['metric_after'])}{unit}"
+        elif item["kind"] != "improved":
+            line += f"\n{'':>29}no metric recorded"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 # --- command line ------------------------------------------------------------------------------------
@@ -645,6 +946,8 @@ def _show_text(shown: dict) -> str:
             lines.append(f"evidence {key}: {', '.join(evidence[key])}")
     lines.extend(f'quote: "{quote}"' for quote in evidence.get("quotes", []))
     lines.append("evaluation: " + shown["summary"]["text"])
+    lines.append("ranking: " + shown["summary"]["ranking"]["text"])
+    lines.append(COST_RULE)
     for phase in ("before", "after"):
         for row in shown["evaluation"][phase]:
             lines.append(f"  {phase:<6} {row['split']:<8} {row['case']} {row['outcome']}  cost {_money(row['cost'])}"
@@ -720,6 +1023,22 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true", help="restore even if a file was edited after applying")
     p.add_argument("--note", default="")
     p.add_argument("--line", action="store_true", help=line + "; it answers the proposal and is the user's own click")
+    p = commands.add_parser("note", parents=[common], help="record a change made outside improve (settings, an install, a revert...)")
+    p.add_argument("--kind", choices=NOTE_KINDS)
+    p.add_argument("--title")
+    p.add_argument("--why")
+    p.add_argument("--files", nargs="*", default=[], metavar="PATH", help="paths below the config root; each is recorded with its sha256, never its contents")
+    p.add_argument("--metric-before", metavar="VALUE")
+    p.add_argument("--metric-after", metavar="VALUE")
+    p.add_argument("--unit", help="what the metric counts")
+    p.add_argument("--when", help="when it was changed: YYYY-MM-DD, YYYY-MM-DD HH:MM[:SS] or seconds (default: now)")
+    p.add_argument("--by-user", metavar="WORDS", help="the user's own words approving the change (required)")
+    p.add_argument("--from-file", type=Path, metavar="FILE", help="record every note in a JSON-lines file (all or none); rows with no by_user take --by-user")
+    p = commands.add_parser("evidence", parents=[common], help="cost outliers, rules broken and feedback groups from what is on disk (no model call)")
+    from . import evidence
+    evidence.add_arguments(p)
+    p = commands.add_parser("changes", parents=[common], help="every change in time order: date, kind, title, metric before and after")
+    p.add_argument("--json", action="store_true")
     return parser
 
 
@@ -752,6 +1071,25 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "import-bench":
             record, count = import_bench(home, args.id, args.phase, args.label, args.results)
             print(f"imported {count} {args.phase} row(s); {summary(record['evaluation'])['text']}")
+        elif args.command == "note":
+            if args.from_file is not None:
+                if args.kind or args.title or args.why or args.files or args.metric_before or args.metric_after or args.unit or args.when:
+                    raise ImproveError("--from-file takes the notes from the file; only --by-user goes with it")
+                done = note_file(home, root, args.from_file, by_user=args.by_user)
+                print(f"recorded {len(done)} note(s) from {args.from_file}")
+            else:
+                if not args.kind or not args.title or not args.why:
+                    raise ImproveError("note needs --kind, --title and --why (or --from-file)")
+                done = [note(home, root, args.kind, args.title, args.why, by_user=args.by_user or "", files=args.files,
+                             metric_before=_metric_arg(args.metric_before), metric_after=_metric_arg(args.metric_after),
+                             unit=args.unit, when=args.when)]
+                print(f"recorded {args.kind}: {args.title}")
+        elif args.command == "evidence":
+            from . import evidence
+            return evidence.run(args)
+        elif args.command == "changes":
+            found = changes(home)
+            print(json.dumps({"changes": found}, indent=2, ensure_ascii=False) if args.json else _changes_text(found))
         elif args.command == "show":
             shown = show(home, root, args.id)
             print(_one_line(shown) if line else json.dumps(shown, indent=2, ensure_ascii=False) if args.json else _show_text(shown))
@@ -773,6 +1111,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(f"applied {record['id']}; backup {record['applications'][-1]['backup']}")
                 print("evaluation: " + summary(record["evaluation"])["text"])
+                print("ranking: " + summary(record["evaluation"])["ranking"]["text"])
         elif args.command == "reject":
             reject(home, args.id, args.reason, who="user" if line else "command")
             print(_one_line(show(home, root, args.id)) if line else f"rejected {args.id}; no file was changed")
