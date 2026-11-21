@@ -9620,7 +9620,7 @@
           return { ok: true, run: id, status: 'running', reason: '' };
         }
         if (request.op === 'pause') { const found = details.get(request.run); if (!found) fail('no such run', 404); return { ok: true, run: request.run }; }
-        if (request.op === 'resume') { const found = details.get(request.run); if (!found) fail('no such run', 404); found.run.status = 'running'; found.run.live = true; found.run.reason = ''; return { ok: true, run: request.run, status: 'running' }; }
+        if (request.op === 'resume') { const found = details.get(request.run); if (!found) fail('no such run', 404); const flip = () => { found.run.status = options.resumeTo || 'running'; found.run.live = (options.resumeTo || 'running') === 'running'; found.run.reason = ''; }; if (options.resumeLate) setTimeout(flip, options.resumeLate); else flip(); return { ok: true, run: request.run, status: 'running' }; }
         if (request.op === 'answer') { const found = details.get(request.run); if (!found) fail('no such run', 404); found.run.status = 'running'; found.run.waiting = null; return { ok: true, run: request.run }; }
         if (request.op === 'restore') {
           if (!found) fail('unknown flow ' + request.flow);
@@ -10222,6 +10222,17 @@
         const before = fakes.calls.filter(call => call.op === 'read').length; await sleep(500);
         assert(fakes.calls.filter(call => call.op === 'read').length - before >= 3, 'not followed after resume');
       });
+    });
+
+    await test('v10 polling: when the controller takes a moment to write after Resume (or Take the turn as done), the first read still says paused and the page keeps reading until the run changes', async () => {
+      for (const [id, choice] of [[TEAM_ASKED, null], [TEAM_GONE, null], [TEAM_AMBIG, 'accept']]) {
+        await tmount({ team: [id], resumeLate: 350, resumeTo: choice ? 'passed' : 'running' }, async (root, fakes) => {
+          await topen(root, id); await tclick(root, (choice ? 'accept:' : 'resume:') + id);
+          await sleep(900); await settled();
+          const status = trow(root, id)?.dataset.status;
+          assert(status === (choice ? 'passed' : 'running'), id + ' still reads ' + status + ' after the controller wrote (the page stopped reading)');
+        });
+      }
     });
 
     await test('v7 inspection: a step chip opens that step\'s history across attempts (tries, outcomes, routes, time, cost, message, reply, findings; long texts folded); the loop\'s edge on the canvas does the same while a run is open', async () => {

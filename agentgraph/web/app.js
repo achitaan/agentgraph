@@ -3504,7 +3504,7 @@
     const lc = { data: null, at: 0, loading: false, error: '' };
     const lcRuns = new Map(), lcReading = new Set(), lcBusy = new Set(), lcDrafts = new Map(), lcNotes = new Map(), lcUndo = new Map(), lcStarts = new Map();
     // Runs the page started that the list has not shown yet (followed until it does), and the flows whose path was read again.
-    const lcFresh = new Map(), lcAsked = new Map(), LC_FOLLOW_MS = 120000, LC_FOLLOWED = ['queued', 'running'];
+    const lcFresh = new Map(), lcResumed = new Map(), lcAsked = new Map(), LC_FOLLOW_MS = 120000, LC_FOLLOWED = ['queued', 'running'];
     // v7: a waiting run is read slowly (a person has to answer first), a paused or interrupted one not at all (it only changes when someone acts, and
     // the page reads again on return to the tab and after each of its own writes); queued and running runs at the live rate.
     const LC_SLOW_MS = LC_POLL_MS * 15, LC_QUIET = ['waiting', 'paused', 'interrupted'];
@@ -3592,10 +3592,18 @@
     }
     // One timer, only while the page is shown and the open flow has a run that is not over (queued, running, waiting) or one the
     // page just started that the list does not hold yet: it reads the loops again, which reads the open run. Nothing else polls.
+    const lcSaid = run => run.status + '\n' + text(run.reason);
     function lcFollowing() {
       if (!lcHere() || document.hidden) return false;
       const now = Date.now(), id = selected.key;
-      return lcRunsOf(id).some(lcActive) || [...lcFresh.values()].some(item => item.flow === id && now - item.at < LC_FOLLOW_MS);
+      // v10: a run just resumed is followed until the list says something other than what it said when Resume was pressed (the controller
+      // writes a moment after it answers, so the first read can still say paused or interrupted), for at most LC_FOLLOW_MS.
+      const resumed = [...lcResumed].some(([run, item]) => {
+        const now_ = lcRunsOf(item.flow).find(one => one.run === run);
+        if (now - item.at >= LC_FOLLOW_MS || (now_ && lcSaid(now_) !== item.from)) { lcResumed.delete(run); return false; }
+        return item.flow === id;
+      });
+      return resumed || lcRunsOf(id).some(lcActive) || [...lcFresh.values()].some(item => item.flow === id && now - item.at < LC_FOLLOW_MS);
     }
     // How often to read: the live rate, the slow one (only waiting runs), or never (0).
     function lcPace() {
@@ -4083,7 +4091,10 @@
       body.append(box);
     }
     function lcRunOp(run, request, said, wanted) {
-      lcWrite(run.flow, request, reply => { lcNotes.set(run.flow, { kind: 'ok', text: reply?.result === 'cancelled' ? 'The run is cancelled.' : said, run: run.run }); }, wanted, run.run);
+      lcWrite(run.flow, request, reply => {
+        lcNotes.set(run.flow, { kind: 'ok', text: reply?.result === 'cancelled' ? 'The run is cancelled.' : said, run: run.run });
+        if (request.op === 'resume') lcResumed.set(run.run, { flow: run.flow, at: Date.now(), from: lcSaid(run) });
+      }, wanted, run.run);
     }
     // ---- compare ----
     function lcPickRun(id) {
