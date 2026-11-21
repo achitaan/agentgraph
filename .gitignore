@@ -15,3 +15,6 @@ structure/flows/
 structure/teams/
 # Saved setups (agentgraph setup save): copies of each user's own presets and agent files.
 setups/
+
+# Personal sync settings (sync.sh reads them; sync.conf.example shows the format).
+sync.conf

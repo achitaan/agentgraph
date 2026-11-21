@@ -16,15 +16,15 @@ import sys
 import tempfile
 import unicodedata
 
-from . import names, sources
+from . import names, paths, sources
 from .snapshot_json import skills_document
 
 CONFIG = sources.CONFIG_DIR / "oh-my-opencode-slim.json"
-MAP = Path(__file__).resolve().parent.parent / "SKILLS.md"
+MAP = paths.resolve("skills_map")  # your personal copy when there is one (agentgraph.paths), else the toolkit's
 BACKUPS = sources.CONFIG_DIR / "backups"
 # The task profiles (which skills each agent's brief starts from), the toolkit's own copy beside SKILLS.md: the
 # toolkit reads nothing from inside an installed skill, which can be removed.
-PROFILES = Path(__file__).resolve().parent.parent / "task-profiles.md"
+PROFILES = paths.resolve("profiles")
 AGENTS_DIR = sources.CONFIG_DIR / "agents"  # OpenCode's agents folder: added agents keep their skills in their file
 RESTART = "OpenCode reads this file when it starts; the change applies after a restart."
 SEAT_REASON = ("Council seats are model calls defined in the council's own table; "

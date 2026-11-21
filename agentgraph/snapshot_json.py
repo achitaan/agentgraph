@@ -11,7 +11,7 @@ from itertools import pairwise
 from math import isfinite
 from pathlib import Path
 
-from . import contract, names
+from . import contract, names, paths
 from .contract import Agent, Session, Snapshot, TaskGraph
 from .demo import demo_activity, demo_snapshot
 from .sources import CONFIG_DIR, ORCHESTRATION_GRAPH_DIR, build_snapshot, top_level_session
@@ -152,7 +152,7 @@ def _active_graph(graphs: list[TaskGraph], sessions: list[Session], task: str | 
     return (graphs[0] if graphs else None), []
 
 
-STRUCTURE_DIR = ORCHESTRATION_GRAPH_DIR.parent.parent / "structure"
+STRUCTURE_DIR = paths.resolve("structure")
 SETTING_KEYS = ("pool", "escalates_to", "seats", "use_when")  # use_when: agentgraph.routing
 HEAD_BYTES = 4096  # only the start of an agent's file is read for its settings and description
 SETTING_LINES = 12

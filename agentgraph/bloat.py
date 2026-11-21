@@ -19,7 +19,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
-from . import sources
+from . import paths, sources
 
 TOKEN_RULE = "tokens are estimated as characters / 4"
 BUDGET_CHARS = 48_000     # per agent, about 12,000 tokens of fixed text a turn
@@ -70,8 +70,7 @@ class Paths:
 
 
 def default_paths(project: Path | None = None) -> Paths:
-    return Paths.under(sources.CONFIG_DIR, project or Path.cwd(),
-                       Path(__file__).resolve().parent.parent / "structure")
+    return Paths.under(sources.CONFIG_DIR, project or Path.cwd(), paths.resolve("structure"))
 
 
 # ---------------------------------------------------------------- reading

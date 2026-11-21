@@ -62,10 +62,10 @@ import shutil
 import stat
 import sys
 
-from . import agentfiles, flowcommands, names, skillset
+from . import agentfiles, flowcommands, names, paths, skillset
 from .snapshot_json import STRUCTURE_DIR
 
-SETUPS = Path(__file__).resolve().parent.parent / "setups"
+SETUPS = paths.resolve("setups")  # your personal folder's when there is one (agentgraph.paths)
 ENV = "OH_MY_OPENCODE_SLIM_PRESET"
 PRESET_MESSAGE = "The default preset applies at the next start of OpenCode; a session already open keeps its models."
 SETUP_MESSAGE = ("The preset and skills apply at the next start of OpenCode; agent files apply at once; path commands "

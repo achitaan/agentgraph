@@ -1,0 +1,8 @@
+# Copy to sync.conf (git ignores it) to tell sync.sh what is personal to you. sync.conf is read as shell.
+
+# Skills in your config folder that must NOT be copied into this repository, space separated.
+SEPARATE_SKILLS="my-private-skill another-private-skill"
+
+# Where your own notes start in ~/.config/opencode/AGENTS.md: the first line that starts with this text, and
+# everything after it, stays out of config/AGENTS.md. Leave empty to not sync AGENTS.md at all.
+AGENTS_CUT_MARKER="# My own notes"

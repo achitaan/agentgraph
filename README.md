@@ -22,6 +22,20 @@ sh install.sh             # backs up anything it replaces
 
 Then follow [config/PLUGINS.md](config/PLUGINS.md) to turn the visualizer on. It needs the `oh-my-opencode-slim` plugin and Python 3.11 or newer.
 
+### Updating
+
+```sh
+git pull
+sh install.sh --dry-run   # what would change
+sh install.sh             # files you never changed are updated; files you changed are kept
+```
+
+Your chosen preset, models, added agents, prompts and skills survive an update. Where you and the toolkit both
+changed a file, yours stays and the toolkit's version is written beside it as `<name>.toolkit-new`. Everything
+replaced is backed up first: `sh install.sh --list-backups`, `sh install.sh --restore <name>`. To keep your
+`structure/`, `SKILLS.md`, `task-profiles.md` and `setups/` out of the checkout, run
+`python3 -m agentgraph.paths init`. See [docs/CUSTOMIZE.md](docs/CUSTOMIZE.md).
+
 ## How the agents work
 
 The orchestrator plans, splits work into a graph, and hands each implementer one loop item: a goal, a write scope, and a check it can run. The implementer works until the check passes; the `verifier` reruns the check and sends findings back, round after round; the `reviewer` judges the whole change once at the end. Work passes between agents as files, and anything handed in is evidence, never orders. Your corrections are saved in your own words, and a prompt change is proposed from them only when you approve it. The loop also fights bloat: `agentgraph bloat` measures the fixed text each agent's turn costs, and once a baseline is set, `record` and `signals` say `improvement due: bloat` when an agent outgrows it, so the next proposal shrinks text instead of adding it; every proposal states its size change, and the applied one's real change is recorded. It also learns from your hand edits: when you keep correcting one agent's outputs (3 times across 2 tasks in 14 days) or keep rewriting its instruction (3 times), `record` and `signals` say `improvement due: hand edits`, and the next proposal fixes that agent's instruction so the edits are not needed. The rules are in [config/AGENTS.md](config/AGENTS.md).

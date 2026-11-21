@@ -1,9 +1,14 @@
 #!/bin/sh
 # Copy the installed commands, skills, presets and prompts back into this repository, so a change the
 # setup made to itself (an approved prompt or skill edit) can be reviewed with git diff and committed.
+# What is personal to you (skills kept out of the toolkit, where your own notes start in AGENTS.md) comes from
+# sync.conf, which git ignores; copy sync.conf.example to start one.
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$HERE/commands/.toolkit.sh"
+SEPARATE_SKILLS=
+AGENTS_CUT_MARKER=
+if [ -f "$HERE/sync.conf" ]; then . "$HERE/sync.conf"; fi
 SOURCE=${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}
 BACKUP_ROOT=${TOOLKIT_SYNC_BACKUP_ROOT:-$SOURCE/backups}
 BACKUP=
@@ -45,13 +50,18 @@ if [ "${1:-}" = "--commands-and-learning" ]; then
   exit 0
 fi
 sync_commands
-# Skills kept out of the toolkit on purpose (personal or employer-specific), space separated.
-SEPARATE=${TOOLKIT_SEPARATE_SKILLS:-shopify-ruby}
+# Skills kept out of the toolkit on purpose (personal or employer-specific), space separated (sync.conf).
+SEPARATE=${TOOLKIT_SEPARATE_SKILLS:-$SEPARATE_SKILLS}
 set -- --exclude __pycache__ --exclude .DS_Store --exclude OPENCODE-CHANGES.md --exclude AUDIT.md --exclude THIRD-PARTY-NOTICES.md --exclude licenses --exclude ui-ux-pro-max
 for name in $SEPARATE; do set -- "$@" --exclude "$name"; done
 rsync -a --delete "$@" "$SOURCE/skills/" "$HERE/skills/"
 cp -p "$SOURCE/oh-my-opencode-slim.json" "$HERE/config/oh-my-opencode-slim.json"
 rsync -a --delete "$SOURCE/oh-my-opencode-slim" "$HERE/config/"
-# Only the orchestration rules: everything from the first personal heading on stays out.
-awk '/^# Muse 2/ { exit } { print }' "$SOURCE/AGENTS.md" > "$HERE/config/AGENTS.md"
+# Only the orchestration rules: everything from the first line starting with AGENTS_CUT_MARKER (sync.conf) stays
+# out. Without a marker the file is left alone, so your own notes never land in the repository by accident.
+if [ -n "$AGENTS_CUT_MARKER" ]; then
+  awk -v marker="$AGENTS_CUT_MARKER" 'index($0, marker) == 1 { exit } { print }' "$SOURCE/AGENTS.md" > "$HERE/config/AGENTS.md"
+else
+  echo "note: AGENTS_CUT_MARKER is not set in sync.conf, so config/AGENTS.md was not synced"
+fi
 git -C "$HERE" status --short -- commands skills config | head -40
