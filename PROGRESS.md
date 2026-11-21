@@ -174,7 +174,10 @@ What remains:
 1. Your decision on the items under "Waiting for your review" (A, B, C, D, J, K, L and the earlier sections). Item K is not drafted.
 2. Install into the live configuration only after you approve (n14, n15). Nothing is installed.
 3. Total spend at the closing sample is in `docs/REPORT.md` section 7.
-4. The six minor findings of the final review are not fixed (`docs/REPORT.md` section 3.6). Nothing in the temporary folders was deleted
+4. After the report was closed, the loops graph was recorded in the `memory-fast` ledger (`bin/agentgraph record`), so the ledger fingerprint is now
+   `d7201d28c3276af0` (13 files); the config fingerprint is unchanged (`86f9673fc3ff6a77`). The record says an improvement is due
+   (1 pending run, 78 pending feedback items); none was proposed or applied in this session.
+5. The six minor findings of the final review are not fixed (`docs/REPORT.md` section 3.6). Nothing in the temporary folders was deleted
    (`docs/REPORT.md` section 7).
 
 A next session should first run `bin/agentgraph check --task agentgraph-loops` and `bin/agentgraph check --task agentgraph-improve`,
