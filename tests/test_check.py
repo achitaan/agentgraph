@@ -543,6 +543,32 @@ class Check(unittest.TestCase):
                 result = main(["--dir", str(self.directory)])
             self.assertEqual(result, 0)
 
+    def test_a_passing_graph_leaves_a_history_that_is_never_listed_as_a_graph(self):
+        self.write_graph(valid_graph())
+        self.assertEqual(self.run_check()[0], 0)
+        self.assertEqual([p.name for p in (self.directory / ".history").iterdir()], ["test-task.state"])
+        result, output = self.run_check()  # the history folder is not read as a graph file
+        self.assertEqual(result, 0, output)
+        self.assertEqual(output.count("OK "), 1, output)
+
+    def test_history_rule_rejects_lost_work_and_no_history_skips_it(self):
+        self.write_graph(valid_graph())
+        self.assertEqual(self.run_check()[0], 0)
+        data = valid_graph()
+        data["nodes"][0]["status"] = "running"
+        data["status"] = "running"
+        self.write_graph(data)
+        result, output = self.run_check()
+        self.assertEqual(result, 1, output)
+        self.assertIn("was passed and is now running", output)
+        self.assertEqual(self.run_check(None, "--no-history")[0], 0)
+
+    def test_history_free_warning_for_a_task_that_differs_from_the_file_name(self):
+        self.write_graph(valid_graph(), "other-name.json")
+        result, output = self.run_check()
+        self.assertEqual(result, 0, output)
+        self.assertIn("warning: task 'test-task' differs from the file name 'other-name.json'", output)
+
 
 if __name__ == "__main__":
     unittest.main()

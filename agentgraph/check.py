@@ -2,10 +2,14 @@
 
 Exits 1 for invalid graphs, 2 if a file cannot be read or a requested
 directory or task cannot be found, and 0 otherwise.
+
+A graph that passes leaves a record of its state (agentgraph.transitions); the next run reports what changed that a
+graph may not do (passed work lost, history rewritten, criteria weakened, ...). `--no-history` skips that.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import re
 import sys
@@ -20,7 +24,7 @@ from .contract import (
 from .sources import find_graph_dir, graph_files, graph_from_raw, read_graph_text
 from .snapshot_json import flow_steps, hub_names, is_self_loop, load_structure
 from .teams import problems as team_problems
-from . import outputs
+from . import outputs, transitions
 
 
 _NODE_STRINGS = ("id", "type", "agent", "goal", "done_when", "status")
@@ -467,6 +471,26 @@ def _graph_and_issues(raw: dict, path: Path, flows=(), hubs=frozenset(), seats=N
     return graph, issues
 
 
+def _history_step(folder: int, path: Path, raw: dict, issues: list[str]) -> list[str]:
+    """The history rules for one graph that has passed the type checks, then (when `issues` and the result are both
+    empty) its new record. Runs under the graph folder's lock. Returns the history problems."""
+    stem = Path(path).stem
+    found: list[str] = []
+    try:
+        previous = transitions.load_state(folder, stem)
+    except transitions.HistoryError as exc:
+        _print(f"warning: {exc}")
+        previous = None
+    if previous is not None:
+        found = transitions.problems(previous, raw)
+    if not issues and not found:
+        try:
+            transitions.save_state(folder, stem, transitions.state_of(raw))
+        except OSError as exc:
+            _print(f"warning: history of {stem} not saved: {exc.strerror or exc}")
+    return found
+
+
 def file_problems(path: Path) -> list[str] | None:
     """Every problem `check` would report, or None if no graph can be read."""
     graph, issues = read_graph(path)
@@ -482,6 +506,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--home", type=Path, metavar="DIR",
                         help="memory home whose edit log says which outputs were edited by hand (agentgraph.outputs; "
                              "default: $AGENTGRAPH_HOME, else the active preset's memory folder)")
+    parser.add_argument("--no-history", action="store_true",
+                        help="skip the rules that compare a graph with its last passing state (and do not save one)")
     args = parser.parse_args(argv)
     edits = outputs.edit_home(args.home)
     # A missing default folder means no drawn flows; a folder named on the command line must exist,
@@ -521,27 +547,39 @@ def main(argv: list[str] | None = None) -> int:
     graphs: list[tuple[str, TaskGraph | None, list[str]]] = []
     warnings: list[str] = []
     unsaved: dict[int, list[str]] = {}
-    for path in files:
-        raw, issues = _read_raw(path)
-        graph = None
-        if raw is not None:
-            if args.task is not None and raw.get("task") != args.task:
-                continue  # Another task's graph: never validated, so it cannot slow this check.
-            graph, issues = _graph_and_issues(raw, path, flows, hubs, seats, teams, escalation)
-            issues = issues + outputs.lost_edits(graph, edits)  # an edit by hand the graph no longer records
-            unsaved[id(graph)] = outputs.unsaved_edits(graph, edits)  # a save stopped before the graph: a warning
-        if graph is None:
-            # A non-object is readable JSON with a schema problem; preserve
-            # the CLI's distinction between it and a read or decode failure.
-            if issues == [_NOT_OBJECT]:
-                if args.task is None:
-                    graphs.append((path.name, None, issues))
-            else:
-                warnings.append(f"UNREADABLE  {path.name}: {issues[0]}")
-            continue
-        declared_task = graph.task if _INVALID_TASK not in issues else None
-        if args.task is None or args.task == declared_task:
-            graphs.append((declared_task or path.name, graph, issues))
+    drift: dict[int, list[str]] = {}  # history-free warnings (agentgraph.transitions.warnings)
+    with contextlib.ExitStack() as stack:
+        folder = None  # the graph folder, locked: a graph, its history record and the save are one step
+        if not args.no_history:
+            try:
+                folder = stack.enter_context(outputs._GraphFolder(graph_dir))
+            except outputs.OutputError as exc:
+                _print(f"warning: history rules skipped: {exc}")
+        for path in files:
+            raw, issues = _read_raw(path)
+            graph = None
+            if raw is not None:
+                if args.task is not None and raw.get("task") != args.task:
+                    continue  # Another task's graph: never validated, so it cannot slow this check.
+                graph, issues = _graph_and_issues(raw, path, flows, hubs, seats, teams, escalation)
+                issues = issues + outputs.lost_edits(graph, edits)  # an edit by hand the graph no longer records
+                unsaved[id(graph)] = outputs.unsaved_edits(graph, edits)  # a save stopped before the graph: a warning
+                if not _raw_issues(raw):
+                    drift[id(graph)] = transitions.warnings(raw, path)
+                    if folder is not None:
+                        issues = issues + _history_step(folder, path, raw, issues)
+            if graph is None:
+                # A non-object is readable JSON with a schema problem; preserve
+                # the CLI's distinction between it and a read or decode failure.
+                if issues == [_NOT_OBJECT]:
+                    if args.task is None:
+                        graphs.append((path.name, None, issues))
+                else:
+                    warnings.append(f"UNREADABLE  {path.name}: {issues[0]}")
+                continue
+            declared_task = graph.task if _INVALID_TASK not in issues else None
+            if args.task is None or args.task == declared_task:
+                graphs.append((declared_task or path.name, graph, issues))
 
     if args.task is not None and not graphs:
         for warning in warnings:
@@ -567,7 +605,7 @@ def main(argv: list[str] | None = None) -> int:
         if graph is not None:
             for advice in shape_advice(graph):
                 _print(f"advice: {advice}")
-            for warning in folder_warnings(graph, pools, seats) + unsaved.get(id(graph), []):
+            for warning in folder_warnings(graph, pools, seats) + unsaved.get(id(graph), []) + drift.get(id(graph), []):
                 _print(f"warning: {warning}")
         failed = failed or bool(issues)
 

@@ -118,6 +118,32 @@ It reports:
 
 After the problems, `check` prints lines that start with `advice:`. They never fail the check. They point out a graph that is a single chain, a reworked gate with no `feedback_to`, and fix rounds strung out as separate nodes.
 
+### History: what a graph may change between two runs
+
+A graph that passes `check` leaves a record of its state in `.opencode/graph/.history/<file name>.state` (a folder the graph readers never list; written atomically under the graph folder's lock, only when `check` finds no problem; per node its status, attempts, verdict, stalled, started, finished, input and artifact revisions and a hash of `done_when`; a hash of each objective's text; `revision`, the number of amendments, `created`, `updated`; the number of events, a hash of the event list and the last event's time; no text). The next `check` compares the graph with it and reports, as problems (exit 1), what a graph may not do. The first run, a graph with no record, and `check --no-history` run only the lint above, so no graph is broken retroactively; delete the `.state` file to start a graph's history again.
+
+- Passed work stays passed: a node that was `passed` and changes status or disappears, unless an `invalidated` event for it was appended since (the way to reopen or remove passed work: write the event and change the node in one step, or `graph set TASK NODE --invalidate`).
+- A node newly `passed` needs every dependency passed (a node added to the graph already passed, as imported work or in a graph written whole, is held to this rule only); a worker node (any agent but `orchestrator` or `user`, type not `check`, `join` or `human`) needs a `dispatched` or `attempt` event and a `session` or at least one attempt; any node needs an `evaluated`, `joined` or `completed` event for it after it last started (its last `dispatched`, `retried` or `invalidated`): no completion without evaluation.
+- A retry (`failed`, `blocked` or `returned` to `running`) raises `attempts`; `attempts` never goes down; `stalled` is not newly true on a passed node; a pending `gate` does not already carry the verdict `confirmed`.
+- Events are append-only: earlier events are not edited or deleted, a new event is not dated before the one before it (or more than an hour ahead), names a node the graph knows, and `completed` only comes with a graph that is `passed`.
+- `revision` does not go down; an objective's text or any node's `done_when` changes only with `revision` raised and a new line in `amendments`; `updated` does not go back or below `created`; a node's `started` is not newly later than its `finished`.
+- An artifact's revision does not go down; a node that stays `passed` does not read a newer input revision without a new attempt.
+
+Without any history, `check` also prints `warning:` lines (never a failure): the `task` differs from the file's name, a passed node's declared artifact file is missing on disk, two nodes of different agents share one `session`, and a node that is not passed has 3 or more attempts and is not `stalled` (a stall candidate).
+
+### Changing a graph with `agentgraph graph`
+
+Writing the whole file stays valid. For the usual steps there is a helper that makes the write one locked, validated step (`agentgraph/graphedit.py`):
+
+```
+agentgraph graph set TASK NODE [--status S] [--evidence TEXT | --evidence-file F|-] [--session ID]
+                     [--attempts +1|N] [--verdict V] [--stalled true|false] [--note TEXT] [--invalidate]
+                     [--expect-updated T] [--dir D]
+agentgraph graph event TASK [NODE] KIND --note TEXT [--expect-updated T] [--dir D]
+```
+
+Under the graph folder's lock it reads the file as it is, refuses when `--expect-updated` is not the file's `updated` (somebody wrote in between), changes the node, appends the matching event (to `running`: `dispatched` from `pending`, else `retried`; `returned`; `passed`: `evaluated`, or `joined` for a `join` node; `failed`: `attempt`; `blocked`; with `--invalidate` or `graph event TASK NODE invalidated`: `invalidated` and status `pending`), sets `started` and `finished`, raises `updated`, then checks the new graph with the rules above against the history (or, with none, against the file as it was). It refuses (exit 1, the file unchanged, the reason printed) when the write would add a problem, and writes through a temporary file in the same folder, fsync and rename. It prints one line with the node's new state, including the new `updated` to pass back as `--expect-updated`. A first dispatch is `graph set T n3 --status running --session ses_x --attempts +1`; a pass is `graph set T n3 --status passed --evidence "..."` (a gate also needs `--verdict confirmed`); the graph is finished with `graph event T completed --note "..."`, which marks the graph `passed` and is refused while a node is not. It exits 2 for an unknown task or node or a bad value.
+
 ### Flows from the structure folder
 
 `check` also enforces the flows drawn in the structure folder (`structure/flows/`, see `structure/README.md`; `--structure DIR` reads another folder, and exits 2 when that folder does not exist or holds no group folder; a missing default folder just means no flows). A flow applies to every `implement`, `design`, `research` or `decision` node of its first agent (the second when the hub is first) that has not passed, and wants the rest of the path as a chain from that node: a step to a new agent needs a node run by that agent that follows the current one (lists it in `depends_on`, or is a `gate` whose `feedback_to` names it); a step back to an agent already on the path needs the current node to be a `gate` whose `feedback_to` names that agent's node on the chain, and the chain goes on from there. A node run by a council seat counts as the council's (the lead's `seats` prefix). The hub as the last step adds nothing. An agent's loop on itself (a path `A → A`: it checks its own work against the task's evaluation and repeats until it passes) adds no rule either; `check` prints it with the others. A missing step is one problem per starting node, such as `n12 (impl-openai) is not followed by verifier: flow impl-openai → verifier → impl-openai`. After its result lines, `check` prints every flow (path, id and the user's instruction, under `flows:`) so the orchestrator follows them when it shapes a graph; this changes neither the exit code nor the first line.

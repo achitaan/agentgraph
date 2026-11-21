@@ -32,6 +32,7 @@
 #   agentgraph sidechat ask --main ID --text-file F|-   ask the read-only side chat (sidechat status|brief|install|uninstall|undo; --json, --demo)
 #   agentgraph route [--json]       who gets which work, from the structure folder (route use-when NAME --text T,
 #                                   route restore RECORD; flow scaffold P --task T writes a path's task graph)
+#   agentgraph graph set TASK NODE --status S ...   change one node under the lock, refused if check would object (graph event TASK [NODE] KIND --note T)
 #   agentgraph status --task T [--json]    read-only resume view: ready, running (live/quiet/orphan), returned, stale, stall candidates
 #   agentgraph bench scratch-config --to DIR   a fixed-task bench on a scratch copy of the config (bench run|probe|report|scenarios)
 # -P: do not put the current directory on the import path, so a project that
@@ -90,6 +91,9 @@ case "$1" in
   team)
     shift
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.teams "$@" ;;
+  graph)
+    shift
+    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.graphedit "$@" ;;
   status)
     shift
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.status "$@" ;;
