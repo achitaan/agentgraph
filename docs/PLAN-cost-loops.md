@@ -15,8 +15,15 @@ no per-change approval. The graphs `agentgraph-improve` and `agentgraph-loops` a
 - A summary (compaction) call is billed at 1.06 (Opus) to 1.16 (Sonnet) weighted tokens per context token, about ten
   times a normal cached read. Summary calls: about $69 of $886 worker spend.
 - Opus lanes compact at 249k of context (57k after), Sonnet at 161k (46k after); growth 2.3k to 2.9k tokens a turn.
-- Best rollover point with a summary that needs no model call: 100k to 120k. What-if saving: 22% of worker spend
-  ($192), 29% on the nine long lanes. With today's summary call the best is 9%.
+- Best rollover point with a summary that needs no model call: 100k to 120k. What-if saving (a replay, before
+  anything was built): 22% of worker spend ($192), 29% on the nine long lanes. With today's summary call the best is 9%.
+- **Measured after the build** (real runs on a scratch config, Sonnet 5.5, weighted tokens; `docs/ROLLOVER.md`,
+  `.opencode/artifacts/agentgraph-cost-loops/r2/results.md`): a worker started by a chat, plugin on, mean 537,074
+  (three runs) against 739,594 with it off (one run), -27.4%; a lane as its own session 568,856 (four runs) against
+  688,226 (six runs), -17.3%; every run passed its check and its recall questions. These are long lanes that cross the
+  rollover point; a short lane saves nothing. A main chat with the cover on (`chat_agents`, ask at 90,000): level
+  with today on a six-message chat (358,381 and 360,569 against 363,572), no model summary, recall 4 of 4; with the
+  needed global setting and no cover a session pays more for its summary (one run: +31.8%).
 - Cache-read share of input is 93 to 98% per agent (chat 94.7%). Worker cold turns: 149, $83.90 (pause over 5 minutes
   97/$57.18, over an hour 20/$10.53, after compaction 16/$5.34, other 16/$10.85).
 - Context growth per turn in long lanes: p50 1.4k, p90 4.8k, p99 15k; the largest 5% of turns add 26% of growth.
