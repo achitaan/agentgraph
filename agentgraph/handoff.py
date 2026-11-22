@@ -41,6 +41,7 @@ LOG_NAME = "rollover.log"
 SESSION = re.compile(r"[A-Za-z0-9_-]{1,100}")
 MAX_AGE, LIMIT, TASK_CHARS, EVIDENCE_CHARS, FILE_NAMES, NOTES_TAIL, MIN_LIMIT = 1800, 24_000, 6_000, 1_500, 60, 2_000, 1_000
 STALE_EXIT, NO_TASK_EXIT = 3, 4
+CHAT_LIMIT, USER_MESSAGE_CHARS, USER_CHARS, SUBAGENT_CHARS, GRAPH_CHARS = 30_000, 4_000, 12_000, 3_500, 2_500
 GIT_SECONDS = 5
 GIT_TIMED_OUT = "git timed out"
 DB_SECONDS = 1.0
@@ -159,6 +160,148 @@ def first_message(session: str, db_path, timeout: float = DB_SECONDS) -> tuple[s
     return (text if isinstance(text, str) else ""), (created if isinstance(created, (int, float)) else None)
 
 
+def _open_db(db_path, timeout: float):
+    try:
+        return sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=timeout)
+    except (sqlite3.Error, OSError):
+        return None
+
+
+def is_root(session: str, db_path, timeout: float = DB_SECONDS) -> bool:
+    """True when the session has no parent session (a main chat); False when it has one or the database cannot say."""
+    db = _open_db(db_path, timeout)
+    if db is None:
+        return False
+    try:
+        row = db.execute("SELECT parent_id FROM session_v2 WHERE id=?", (session,)).fetchone()
+    except sqlite3.Error:
+        return False
+    finally:
+        db.close()
+    return bool(row) and row[0] is None
+
+
+def user_messages(session: str, db_path, timeout: float = DB_SECONDS) -> list[str] | None:
+    """What the user typed in this session, oldest first, word for word; None when the database cannot be read.
+
+    Only rows of type `user` count: the messages OpenCode makes for other reasons are rows of type `synthetic` (a subagent's report,
+    a shell job, the rollover plugin's own ask) or `system`, and are left out. What cannot be told apart in the stored data: a `user`
+    row made by a command or skill expansion, or sent by a script, looks like typing. The rows stay in the database after a compaction
+    (the model no longer sees them), so every summary can carry them again."""
+    db = _open_db(db_path, timeout)
+    if db is None:
+        return None
+    try:
+        rows = db.execute("SELECT data FROM session_message WHERE session_id=? AND type='user' ORDER BY seq", (session,)).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        db.close()
+    out = []
+    for (raw,) in rows:
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            continue
+        text = data.get("text") if isinstance(data, dict) else None
+        if isinstance(text, str) and text.strip():
+            out.append(text.strip())
+    return out
+
+
+def user_block(messages: list[str], per_message: int, total: int) -> str:
+    """The user's messages for the summary: the first (it states the job) and the newest that fit `total` characters, each cut in the
+    middle at `per_message`; one line says which ones were left out."""
+    cut = [cut_middle(m, per_message) for m in messages]
+    n = len(cut)
+    keep = {0}
+    used = len(cut[0])
+    for i in range(n - 1, 0, -1):
+        if used + len(cut[i]) > total:
+            break
+        keep.add(i)
+        used += len(cut[i])
+    parts, skipped_from = [], None
+    for i in range(n):
+        if i in keep:
+            if skipped_from is not None:
+                parts.append(f"[messages {skipped_from + 1} to {i} of {n} are left out: the size limit of {total} characters; the first and the newest are kept]")
+                skipped_from = None
+            parts.append(f"### Message {i + 1} of {n}\n\n{cut[i]}")
+        elif skipped_from is None:
+            skipped_from = i
+    return "\n\n".join(parts)
+
+
+def child_sessions(session: str, db_path, timeout: float = DB_SECONDS) -> list[dict] | None:
+    """The sessions this chat started: id, agent, title, state. The state is what the subagent's report in the chat says (completed, error,
+    cancelled), else what the session row says (succeeded, failed, interrupted); with neither it is running. Running ones come first."""
+    db = _open_db(db_path, timeout)
+    if db is None:
+        return None
+    try:
+        rows = db.execute("SELECT id, agent, title, idle_outcome FROM session_v2 WHERE parent_id=? ORDER BY time_created DESC", (session,)).fetchall()
+        reports = {}
+        for (raw,) in db.execute("SELECT data FROM session_message WHERE session_id=? AND type='synthetic'", (session,)):
+            try:
+                meta = (json.loads(raw) or {}).get("metadata") or {}
+            except ValueError:
+                continue
+            if isinstance(meta, dict) and meta.get("source") == "subagent" and meta.get("childID"):
+                reports[meta["childID"]] = str(meta.get("state") or "")
+    except sqlite3.Error:
+        return None
+    finally:
+        db.close()
+    out = [{"id": r[0], "agent": r[1] or "?", "title": " ".join(str(r[2] or "").split()), "state": reports.get(r[0]) or r[3] or "running"} for r in rows]
+    return sorted(out, key=lambda c: c["state"] != "running")
+
+
+def subagents_text(children: list[dict], size: int) -> str:
+    lines = []
+    for c in children:
+        lines.append(f"- {c['id']} ({c['agent']}, {c['state']}): {cut_middle(c['title'], 120)}")
+    text = "\n".join(lines)
+    if len(text) <= size:
+        return text
+    shown = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > size - 60:
+            break
+        shown.append(line)
+        used += len(line) + 1
+    return "\n".join(shown) + f"\n- ... and {len(lines) - len(shown)} more sessions (older ones)"
+
+
+def graphs_text(directory: Path, size: int) -> str:
+    """The task graphs in `<dir>/.opencode/graph`: name and the nodes that are not passed, with status; graphs that have passed entirely are only counted."""
+    folder = Path(directory) / ".opencode" / "graph"
+    try:
+        files = sorted(folder.glob("*.json"))
+    except OSError:
+        return ""
+    lines, done = [], 0
+    for file in files:
+        try:
+            graph = json.loads(file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        nodes = [n for n in graph.get("nodes", []) if isinstance(n, dict)] if isinstance(graph, dict) else []
+        open_nodes = [n for n in nodes if n.get("status") != "passed"]
+        if not nodes:
+            continue
+        if not open_nodes:
+            done += 1
+            continue
+        shown = ", ".join(f"{n.get('id', '?')} ({n.get('status', '?')})" for n in open_nodes[:12])
+        more = f", and {len(open_nodes) - 12} more" if len(open_nodes) > 12 else ""
+        lines.append(f"- {file.stem}: {len(nodes) - len(open_nodes)} of {len(nodes)} nodes passed; not passed: {shown}{more}")
+    if done:
+        lines.append(f"({done} other graphs have passed entirely)")
+    return cut_middle("\n".join(lines), size)
+
+
 def cut_notes(text: str, size: int) -> str:
     """Notes cut to `size`: the head and the last NOTES_TAIL characters stay (the next step is at the end), the middle goes."""
     if size <= 0:
@@ -267,12 +410,19 @@ def _files_text(names, scope) -> str:
     return text or "(none in the node's scope)"
 
 
-def build(session: str, directory=None, *, db_path=None, notes_dir=None, limit: int = LIMIT, max_age: float | None = None,
+def build(session: str, directory=None, *, db_path=None, notes_dir=None, limit: int | None = None, max_age: float | None = None,
           allow_stale: bool = False, newer_than: float | None = None, task_chars: int = TASK_CHARS,
-          db_timeout: float = DB_SECONDS) -> tuple[int, str]:
+          db_timeout: float = DB_SECONDS, chat: bool | None = None, user_message_chars: int = USER_MESSAGE_CHARS,
+          user_chars: int = USER_CHARS) -> tuple[int, str]:
     """(exit code, summary text). Exit 3 with an empty text when the notes are missing, empty, or older than `newer_than`
-    (epoch seconds) or, when that is not given, than `max_age`; exit 4 when the task cannot be read."""
+    (epoch seconds) or, when that is not given, than `max_age`; exit 4 when the task cannot be read (for a chat: when the user's
+    messages cannot be read). `chat` True builds the summary of a main chat (the user's own messages, the chat's subagent sessions,
+    the task graphs, then the notes), False the lane's; None chooses by the database: a session without a parent is a chat."""
     _session(session)
+    if chat is None:
+        chat = is_root(session, db_path or default_db(), db_timeout)
+    if limit is None:
+        limit = CHAT_LIMIT if chat else LIMIT
     work = Path(os.path.abspath(directory if directory else os.getcwd()))
     path = notes_path(session, work, notes_dir)
     state = notes_state(path, MAX_AGE if max_age is None else max_age)
@@ -287,6 +437,8 @@ def build(session: str, directory=None, *, db_path=None, notes_dir=None, limit: 
     elif state["state"] == "stale" and not allow_stale:
         return STALE_EXIT, ""
     notes = path.read_text(encoding="utf-8", errors="replace").strip()
+    if chat:
+        return _build_chat(session, work, notes, db_path or default_db(), limit, db_timeout, user_message_chars, user_chars)
     task, started = first_message(session, db_path or default_db(), db_timeout)
     task = task.strip()
     if not task:
@@ -315,6 +467,37 @@ def build(session: str, directory=None, *, db_path=None, notes_dir=None, limit: 
         if title == task_title:
             parts.append(task_block)
             continue
+        if body is None:
+            continue
+        block = f"## {title}\n\n"
+        fit = left - len(block) - 2
+        if fit < 40:
+            continue
+        text = block + cut_middle(body, fit) + "\n"
+        left -= len(text) + 1
+        parts.append(text)
+    return 0, head + "\n" + "\n".join(parts) + "\n" + notes_part
+
+
+def _build_chat(session: str, work: Path, notes: str, db_path, limit: int, db_timeout: float, per_message: int, total: int) -> tuple[int, str]:
+    messages = user_messages(session, db_path, db_timeout)
+    if not messages:
+        return NO_TASK_EXIT, ""
+    children = child_sessions(session, db_path, db_timeout) or []
+    head = ("# Handoff summary (main chat)\n\nThis chat was rolled over: the earlier conversation was replaced by this text, which code put together "
+            "from the user's own messages (word for word), the sessions this chat started, the task graphs of the project and the notes the "
+            "orchestrator wrote. Anything else from the earlier conversation is gone. Carry on from the next steps in the notes; where a user "
+            "message and the notes disagree, the later user message wins; ask the user nothing that these already answer.\n")
+    room = max(0, limit - len(head) - 40)
+    user_part = "## The user's messages (word for word, oldest first)\n\n" + user_block(messages, per_message, total) + "\n"
+    notes_head = "## Notes written by the orchestrator (word for word)\n\n"
+    notes_part = notes_head + cut_notes(notes, max(0, room - len(user_part) - len(notes_head) - 4)) + "\n"
+    left = room - len(user_part) - len(notes_part) - 2
+    sections = [("Work folder", str(work)),
+                ("Sessions this chat started (id, agent, state, what it was asked)", subagents_text(children, SUBAGENT_CHARS) if children else None),
+                ("Task graphs in the project", graphs_text(work, GRAPH_CHARS) or None)]
+    parts = [user_part]
+    for title, body in sections:   # what is left after the user's messages and the notes goes to these, in order
         if body is None:
             continue
         block = f"## {title}\n\n"
@@ -402,7 +585,12 @@ def _parser() -> argparse.ArgumentParser:
         if name == "build":
             sp.add_argument("--allow-stale", action="store_true", help="use old notes too (not with --newer-than)")
             sp.add_argument("--db", help="the OpenCode database (default: the user's, opened read-only)")
-            sp.add_argument("--limit", type=int, default=LIMIT, help=f"most characters in the summary (default {LIMIT})")
+            sp.add_argument("--limit", type=int, default=None, help=f"most characters in the summary (default {LIMIT}, {CHAT_LIMIT} for a chat)")
+            kind = sp.add_mutually_exclusive_group()
+            kind.add_argument("--chat", action="store_true", help="the summary of a main chat: the user's own messages word for word, the chat's subagent sessions, the task graphs, then the notes")
+            kind.add_argument("--lane", action="store_true", help="the summary of a lane (the default for a session that has a parent; without either flag a session with no parent is built as a chat)")
+            sp.add_argument("--user-message-chars", type=int, default=USER_MESSAGE_CHARS, help=f"chat: most characters of one user message (the middle is cut; default {USER_MESSAGE_CHARS})")
+            sp.add_argument("--user-chars", type=int, default=USER_CHARS, help=f"chat: most characters of user messages in all (the first and the newest are kept; default {USER_CHARS})")
     return parser
 
 
@@ -430,10 +618,12 @@ def main(argv=None) -> int:
             print(f"{state['state']}: notes written {int(state['age'])}s ago, {state['bytes']} bytes, {path}")
             return 0 if state["state"] == "fresh" else STALE_EXIT
         else:
-            if args.limit < MIN_LIMIT:
+            if args.limit is not None and args.limit < MIN_LIMIT:
                 raise HandoffError(f"--limit must be at least {MIN_LIMIT}")
             code, text = build(args.session, args.dir, db_path=args.db, notes_dir=args.notes_dir, limit=args.limit,
-                               max_age=args.max_age, allow_stale=args.allow_stale, newer_than=args.newer_than)
+                               max_age=args.max_age, allow_stale=args.allow_stale, newer_than=args.newer_than,
+                               chat=True if args.chat else False if args.lane else None,
+                               user_message_chars=max(200, args.user_message_chars), user_chars=max(1000, args.user_chars))
             if code:
                 print("handoff: notes missing or stale" if code == STALE_EXIT else "handoff: the task (first user message) could not be read", file=sys.stderr)
                 return code

@@ -25,6 +25,10 @@ const DEFAULTS = {
   skip_agents: ["orchestrator", "build", "plan", "side-chat", "council"], // orchestrating agents: never touched (the team leads, hubs and council leads of the structure folder too)
   skip_leads: true,      // also leave alone the agents `agentgraph handoff leads` names (hubs, council leads, team leads of the structure folder; read once at start)
   only_agents: [],       // when not empty, act only on these agents (an unknown agent is then left alone)
+  chat_agents: [],       // agents whose ROOT chat is covered too, with a chat-shaped ask and summary (default none: root chats stay untouched); e.g. ["orchestrator"]. Their child sessions follow the rules above
+  chat_ask_at: null,     // ask_at for those chats (null = ask_at); ignored when it is not below hard_at
+  chat_message_chars: 4000, // the chat summary carries the user's own messages word for word: at most this many characters of one message (the middle is cut) ...
+  chat_user_chars: 12000,   // ... and this many in all (the first message and the newest ones are kept; one line says how many were left out)
   cache_seconds: 300,    // a session idle for longer than this has lost its prompt cache
   pause_min: 60000,      // after such a pause, roll over if the context is over this
   notes_gap: 10000,      // the notes cover the context when it grew at most this many tokens since they were written (well under one reading step; the roll and the pause trigger)
@@ -43,10 +47,10 @@ const DEFAULTS = {
 // keys that are numbers, with their allowed range; thresholds must be at least 20,000
 const RANGES = {
   ask_at: [20000, 5e6], hard_at: [20000, 5e6], cache_seconds: [0, 86400], pause_min: [0, 5e6], notes_gap: [1000, 1e6],
-  reask_steps: [1, 50], reask_growth: [1000, 1e6], max_asks: [1, 20], build_timeout_ms: [1000, 120000], hook_growth: [1000, 1e6], compaction_patience_ms: [100, 3600000],
+  reask_steps: [1, 50], reask_growth: [1000, 1e6], max_asks: [1, 20], chat_message_chars: [200, 100000], chat_user_chars: [1000, 500000], build_timeout_ms: [1000, 120000], hook_growth: [1000, 1e6], compaction_patience_ms: [100, 3600000],
 };
 const BOOLS = new Set(["enabled", "workers_only", "skip_leads"]);
-const LISTS = new Set(["skip_agents", "only_agents"]);
+const LISTS = new Set(["skip_agents", "only_agents", "chat_agents"]);
 const FAMILIES = ["opus", "sonnet", "other"];
 const SESSION_ID = /^[A-Za-z0-9_-]{1,100}$/;   // the same pattern agentgraph/handoff.py uses
 const SOURCE = "agentgraph-rollover";
@@ -89,6 +93,8 @@ function validated(raw, label, problems) {
       if (typeof v === "boolean") out[k] = v; else problems.push(`${label}.${k}: must be true or false`);
     } else if (LISTS.has(k)) {
       if (Array.isArray(v) && v.every((x) => typeof x === "string")) out[k] = v; else problems.push(`${label}.${k}: must be a list of names`);
+    } else if (k === "chat_ask_at") {
+      if (v === null || (isNum(v) && v >= 20000 && v <= 5e6)) out[k] = v; else problems.push(`${label}.${k}: must be null or a number from 20000 to 5000000`);
     } else if (k === "roll_at") {      // the key of earlier versions: the rollover no longer has a threshold of its own
       problems.push(`${label}.roll_at: no longer used (the rollover starts where the notes cover the context at or above ask_at); ignored`);
     } else if (k === "notes_dir") {
@@ -133,6 +139,17 @@ function askText(notesFile) {
   ].join("\n\n");
 }
 
+// the ask for a main chat (a root session of a chat_agents agent): its notes must hold what a lane's do not, because the summary that replaces
+// the conversation is the notes plus the user's own messages (word for word), the chat's subagent sessions and the task graphs, and nothing else
+function chatAskText(notesFile) {
+  return [
+    "Checkpoint from the rollover plugin (automatic, not from the user). This chat's context is large and will be replaced by a short summary right after your notes are saved. That summary is made by code from exactly three things: your notes, the user's own messages (word for word, up to a size limit; old ones may be left out), and a list of the subagent sessions this chat started and the task graphs of the project. Anything that is in none of them is lost: tool results, files you read, what a subagent reported, your own earlier reasoning.",
+    `Write your handoff notes NOW to ${notesFile} with the write tool (create the folder if it is missing, overwrite the file). Finish the tool call you are in first; start nothing else and read nothing first. This file is allowed even if your rules limit where you may write. The folder holds a .gitignore of \`*\` so the notes are never committed; leave it alone.`,
+    "Put in it, in this order: (1) the objective of this chat; (2) the user's requirements and limits, with the user's own words quoted wherever they set a rule, a name or a number; (3) the decisions and approvals given so far, each with the earlier decision it replaced, so that the latest one is clear; (4) the work state: what is done, what is running (the session id of each running subagent and what it was asked), what is blocked and on what; (5) the next steps, in order; (6) the files that matter and what each holds; (7) facts that were expensive to find (numbers, commands, ids, paths, findings of subagents) that you would otherwise have to look up again. Write it so that you could carry on from it alone.",
+    "If you had already finished your answer to the user when this arrived: write the notes, then end with one short line (for example `Notes saved.`). Do not start new work and do not repeat your answer. If you were in the middle of work: write the notes, then carry on from your next step.",
+  ].join("\n\n");
+}
+
 module.exports = {
   id: "agentgraph-rollover",
   async setup(ctx) {
@@ -158,7 +175,12 @@ module.exports = {
       return cache.cfg;
     };
     const active = () => settings().enabled !== false && String(process.env.AGENTGRAPH_ROLLOVER || "").toLowerCase() !== "off";
-    const limits = (s) => settings().families[s.family] || settings();
+    // a root chat of an agent in chat_agents (the agent is matched by name, case-insensitively)
+    const isChat = (s) => !!s.info && !s.info.parentID && typeof s.agent === "string" && settings().chat_agents.some((a) => a.toLowerCase() === s.agent.toLowerCase());
+    const limits = (s) => {
+      const base = settings().families[s.family] || settings();
+      return isChat(s) && isNum(base.chat_ask_at) && base.chat_ask_at < base.hard_at ? { ...base, ask_at: base.chat_ask_at } : base;
+    };
 
     // ---- the plugin's own folder: state/<session>.json and rollover.log, outside every project ----
     const homeDir = () => {
@@ -237,6 +259,7 @@ module.exports = {
     const scopeOk = (s) => {
       if (!s.info) return false;
       const cfg = settings();
+      if (isChat(s)) return !!dirOf(s);      // a listed agent's root chat is in scope whatever workers_only, skip_agents, only_agents and the leads say
       if (cfg.workers_only !== false && !s.info.parentID) return false;
       const skip = cfg.skip_agents.map((a) => a.toLowerCase()), only = cfg.only_agents.map((a) => a.toLowerCase());
       if (skip.length || only.length || leadNames.size) {
@@ -304,6 +327,8 @@ module.exports = {
       const bin = agentgraphBin();
       if (!bin) return resolve({ fail: "agentgraph command not found", broken: true });
       const args = ["handoff", "build", "--session", s.sid, "--dir", dirOf(s), "--notes-dir", settings().notes_dir, "--newer-than", String(newerThan(s))];
+      if (isChat(s)) args.push("--chat", "--user-message-chars", String(settings().chat_message_chars), "--user-chars", String(settings().chat_user_chars));
+      else args.push("--lane");
       try {
         cp.execFile(bin, args, { timeout: num(settings().build_timeout_ms) || 15000, maxBuffer: 8 * 1024 * 1024, encoding: "utf8", windowsHide: true }, (err, stdout) => {
           if (!err) return stdout && stdout.trim() ? resolve({ text: stdout }) : resolve({ fail: "empty summary" });
@@ -423,7 +448,7 @@ module.exports = {
       s.asked = { at: Date.now(), ctx: ctxNow, step: s.steps };
       try {
         ensureFolder(s);
-        await ctx.session.synthetic({ sessionID: s.sid, text: askText(notesFile(s)), description: "rollover: write handoff notes", metadata: { source: SOURCE }, delivery: "steer" });
+        await ctx.session.synthetic({ sessionID: s.sid, text: (isChat(s) ? chatAskText : askText)(notesFile(s)), description: "rollover: write handoff notes", metadata: { source: SOURCE }, delivery: "steer" });
         if (!s.firstAskAt) s.firstAskAt = s.asked.at;
         log(s, "asked", { notes: path.basename(notesFile(s)), reason: notWhy(s, lim), count: s.askCount });
       } catch (e) { log(s, "error", { reason: "ask: " + shortError(e) }); }
@@ -452,7 +477,8 @@ module.exports = {
       const ctxNow = s.lastCtx, isCovered = covered(s, lim);
       if (isCovered && ctxNow >= num(lim.ask_at)) { requestCompaction(s, "context " + ctxNow); return; }
       if (ctxNow >= num(lim.hard_at) && !isCovered && !s.fellBack) { s.fellBack = true; log(s, "fell_back", { reason: notWhy(s, lim) + " at hard_at; OpenCode's own compaction will run, with a model summary" }); }
-      if (ctxNow >= num(lim.ask_at) && !isCovered) await maybeAsk(s, lim, d.finish === "tool-calls");
+      // a chat is asked at the end of its answer too: the ask is delivered to the running turn or waits for the next one, and says what to do in both cases
+      if (ctxNow >= num(lim.ask_at) && !isCovered) await maybeAsk(s, lim, d.finish === "tool-calls" || isChat(s));
     };
 
     // The pause trigger: a new turn that starts after the prompt cache has gone cold (`cache_seconds` since the last step) on a big

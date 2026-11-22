@@ -14,7 +14,12 @@ and no model call. Full description, settings and measurements: `docs/ROLLOVER.m
 **under `.opencode/`**, never elsewhere), beside a `.gitignore` of `*` that the plugin creates. Everything else (`state/<session id>.json`, `rollover.log`): `<data home>/agentgraph/rollover/` (`$XDG_DATA_HOME` or
 `~/.local/share`), outside every project. Nothing is written for a session the plugin does not act on.
 
-**What it never touches:** `opencode.json`, the lane's code, git, root sessions, the agents in `skip_agents` (default orchestrator,
+**Main chats (off by default).** `"chat_agents": ["orchestrator"]` in `rollover.json` covers the root chat of that agent (the child sessions and every other agent keep the rules below):
+a chat-shaped ask (what the notes must hold: objective, the user's rules in their words, decisions with what they replaced, work state with subagent ids, next steps, files, expensive facts; if the answer
+was finished, notes and one short line), then a summary built by `handoff build --chat`: the user's own messages word for word (capped by `chat_message_chars` / `chat_user_chars`), the chat's
+subagent sessions, the open nodes of the task graphs, then the notes. `chat_ask_at` moves the ask for chats only (90,000 is safer when one step can read 24,000 tokens). See `docs/ROLLOVER.md`, "Main chats".
+
+**What it never touches:** `opencode.json`, the lane's code, git, root sessions (unless listed in `chat_agents`), the agents in `skip_agents` (default orchestrator,
 build, plan, side-chat, council) and the hubs, council leads and team leads that `agentgraph handoff leads` prints (read once at start;
 `skip_leads: false` turns that off). It sets a compaction summary only for a compaction it started; any other compaction gets a normal model summary.
 

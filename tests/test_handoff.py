@@ -404,6 +404,128 @@ class Leads(Base):
         self.assertTrue({"council", "orchestrator"} <= set(out.split()))
 
 
+class ChatBuild(Base):
+    """`handoff build --chat`: the summary of a main chat. The database has session_v2 (the chat is a root session; two child sessions) and
+    the message rows of a real chat: the user's typing is type `user`; a subagent's report, a shell job and the plugin's ask are `synthetic`."""
+
+    def setUp(self):
+        super().setUp()
+        db = sqlite3.connect(self.db)
+        db.execute("CREATE TABLE session_v2 (id TEXT, parent_id TEXT, agent TEXT, title TEXT, idle_outcome TEXT, time_created INTEGER)")
+        db.execute("INSERT INTO session_v2 VALUES (?,?,?,?,?,?)", (SID, None, "orchestrator", "the chat", None, 1))
+        db.execute("INSERT INTO session_v2 VALUES (?,?,?,?,?,?)", ("ses_child_done", SID, "explorer", "inventory-scan (@explorer subagent)", "succeeded", 2))
+        db.execute("INSERT INTO session_v2 VALUES (?,?,?,?,?,?)", ("ses_child_run", SID, "impl-openai", "long job\nwith a break (@impl-openai subagent)", None, 3))
+        db.execute("INSERT INTO session_v2 VALUES (?,?,?,?,?,?)", ("ses_lane_child", "ses_other", "explorer", "of another chat", None, 4))
+        db.execute("DELETE FROM session_message WHERE session_id=?", (SID,))
+        rows = [(1, "user", {"text": "FIRST: the sign-off word is KESTREL-4471; never edit protected.txt; the limit is 7"}),
+                (2, "assistant", {"content": [{"type": "text", "text": "ASSISTANT-REPLY-TEXT"}]}),
+                (3, "synthetic", {"text": "SUBAGENT-REPORT-TEXT", "metadata": {"source": "subagent", "childID": "ses_child_done", "state": "completed"}}),
+                (4, "user", {"text": "SECOND: the limit is now 9"}),
+                (5, "synthetic", {"text": "ROLLOVER-ASK-TEXT", "metadata": {"source": "agentgraph-rollover"}}),
+                (6, "system", {"text": "SYSTEM-REMINDER-TEXT"}),
+                (7, "compaction", {"status": "done"}),
+                (8, "user", {"text": "THIRD: after the compaction the user speaks again"})]
+        for seq, kind, data in rows:
+            db.execute("INSERT INTO session_message VALUES (?,?,?,?)", (SID, seq, kind, json.dumps(data)))
+        db.commit()
+        db.close()
+        self.notes("## Objective\nNOTES-OF-THE-ORCHESTRATOR\n## Next steps\nstep one\n")
+
+    def test_the_users_messages_come_word_for_word_in_order_and_nothing_else_does(self):
+        code, out, err = self.build("--chat")
+        self.assertEqual(code, 0, err)
+        order = [out.index(x) for x in ("FIRST: the sign-off word is KESTREL-4471; never edit protected.txt; the limit is 7", "SECOND: the limit is now 9", "THIRD: after the compaction the user speaks again")]
+        self.assertEqual(order, sorted(order))
+        for left_out in ("ASSISTANT-REPLY-TEXT", "SUBAGENT-REPORT-TEXT", "ROLLOVER-ASK-TEXT", "SYSTEM-REMINDER-TEXT", SECRET):
+            self.assertNotIn(left_out, out)
+        self.assertLess(out.index("THIRD:"), out.index("NOTES-OF-THE-ORCHESTRATOR"), "the notes come last")
+        self.assertIn("Message 3 of 3", out)
+        self.assertNotIn("first task", out, "not the lane's task block")
+
+    def test_messages_from_before_a_compaction_are_carried_again(self):
+        code, out, _ = self.build("--chat")
+        self.assertIn("FIRST:", out)          # its row sits before the compaction row: the database keeps it, so a second rollover carries it
+
+    def test_one_long_message_is_cut_in_the_middle(self):
+        db = sqlite3.connect(self.db)
+        db.execute("INSERT INTO session_message VALUES (?,?,?,?)", (SID, 9, "user", json.dumps({"text": "HEAD-" + "x" * 6000 + "-TAIL"})))
+        db.commit(); db.close()
+        code, out, _ = self.build("--chat", "--user-message-chars", "1000")
+        self.assertIn("HEAD-", out); self.assertIn("-TAIL", out); self.assertIn("[... cut ...]", out); self.assertNotIn("x" * 1100, out)
+
+    def test_over_the_total_cap_the_first_and_the_newest_are_kept_and_one_line_says_how_many_were_left_out(self):
+        db = sqlite3.connect(self.db)
+        for i in range(10, 30):
+            db.execute("INSERT INTO session_message VALUES (?,?,?,?)", (SID, i, "user", json.dumps({"text": f"MID{i}-" + "y" * 400})))
+        db.commit(); db.close()
+        code, out, _ = self.build("--chat", "--user-chars", "2000")
+        self.assertIn("FIRST:", out); self.assertIn("MID29-", out); self.assertNotIn("MID10-", out); self.assertNotIn("SECOND:", out)
+        line = [ln for ln in out.splitlines() if ln.startswith("[messages ")]
+        self.assertEqual(len(line), 1); self.assertIn("are left out", line[0]); self.assertIn("of 23", line[0])
+
+    def test_the_chats_subagent_sessions_are_listed_with_their_state_running_first_and_no_other_chats_sessions(self):
+        code, out, _ = self.build("--chat")
+        section = out[out.index("## Sessions this chat started"):]
+        self.assertLess(section.index("ses_child_run"), section.index("ses_child_done"))
+        self.assertIn("ses_child_run (impl-openai, running): long job with a break", section)
+        self.assertIn("ses_child_done (explorer, completed): inventory-scan", section)
+        self.assertNotIn("ses_lane_child", out)
+
+    def test_task_graphs_list_the_nodes_that_are_not_passed(self):
+        folder = self.work / ".opencode" / "graph"; folder.mkdir(parents=True)
+        (folder / "alpha.json").write_text(json.dumps({"task": "alpha", "nodes": [{"id": "a1", "status": "passed"}, {"id": "a2", "status": "running"}, {"id": "a3", "status": "failed"}]}))
+        (folder / "beta.json").write_text(json.dumps({"task": "beta", "nodes": [{"id": "b1", "status": "passed"}]}))
+        code, out, _ = self.build("--chat")
+        section = out[out.index("## Task graphs in the project"):]
+        self.assertIn("alpha: 1 of 3 nodes passed; not passed: a2 (running), a3 (failed)", section)
+        self.assertNotIn("b1", section); self.assertIn("1 other graphs have passed entirely", section)
+
+    def test_it_is_chosen_by_the_session_a_root_is_a_chat_a_child_is_a_lane_and_the_flags_win(self):
+        code, out, _ = self.build()
+        self.assertIn("main chat", out)
+        db = sqlite3.connect(self.db)
+        db.execute("UPDATE session_v2 SET parent_id='ses_parent' WHERE id=?", (SID,)); db.commit(); db.close()
+        code, out, _ = self.build()
+        self.assertIn("This session was rolled over", out); self.assertIn("## The task as the lane was given it", out)
+        code, out, _ = self.build("--chat")
+        self.assertIn("main chat", out)
+        db = sqlite3.connect(self.db)
+        db.execute("UPDATE session_v2 SET parent_id=NULL WHERE id=?", (SID,)); db.commit(); db.close()
+        code, out, _ = self.build("--lane")
+        self.assertIn("This session was rolled over", out)
+
+    def test_a_user_message_sent_between_the_ask_and_the_compaction_is_in_the_summary(self):
+        db = sqlite3.connect(self.db)
+        db.execute("INSERT INTO session_message VALUES (?,?,?,?)", (SID, 10, "synthetic", json.dumps({"text": "ASK-2", "metadata": {"source": "agentgraph-rollover"}})))
+        db.execute("INSERT INTO session_message VALUES (?,?,?,?)", (SID, 11, "user", json.dumps({"text": "LATE-USER-MESSAGE typed after the ask"})))
+        db.execute("INSERT INTO session_message VALUES (?,?,?,?)", (SID, 12, "synthetic", json.dumps({"text": "REPORT-2", "metadata": {"source": "subagent", "childID": "ses_child_run", "state": "completed"}})))
+        db.commit(); db.close()
+        code, out, _ = self.build("--chat")
+        self.assertIn("LATE-USER-MESSAGE typed after the ask", out)
+        self.assertNotIn("REPORT-2", out); self.assertNotIn("ASK-2", out)
+        self.assertIn("ses_child_run (impl-openai, completed)", out, "a report that arrived makes the child finished")
+
+    def test_the_summary_is_small_and_never_over_the_limit(self):
+        code, out, _ = self.build("--chat")
+        self.assertLess(len(out), 3000)
+        self.notes("n" * 60000)
+        code, out, _ = self.build("--chat", "--limit", "5000")
+        self.assertEqual(code, 0); self.assertLessEqual(len(out), 5000); self.assertIn("FIRST:", out)
+
+    def test_exit_codes_stale_notes_3_and_no_user_messages_4(self):
+        code, out, err = self.build("--chat", "--newer-than", str(time.time() + 100))
+        self.assertEqual((code, out), (3, ""))
+        db = sqlite3.connect(self.db)
+        db.execute("DELETE FROM session_message WHERE session_id=? AND type='user'", (SID,)); db.commit(); db.close()
+        code, out, err = self.build("--chat")
+        self.assertEqual((code, out), (4, ""))
+
+    def test_a_chat_summary_is_not_chosen_when_the_database_has_no_session_table(self):
+        db = sqlite3.connect(self.db); db.execute("DROP TABLE session_v2"); db.commit(); db.close()
+        code, out, _ = self.build()
+        self.assertIn("This session was rolled over", out)
+
+
 @unittest.skipUnless(shutil.which("node"), "node missing")
 class PluginScript(unittest.TestCase):
     def test_fake_event_test_passes(self):

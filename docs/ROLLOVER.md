@@ -125,6 +125,9 @@ one line (`leads_unreadable`) and only `skip_agents` applies. `skip_leads: false
 | `skip_agents` | orchestrator, build, plan, side-chat, council | agent names never touched |
 | `skip_leads` | `true` | also skip the hubs, council leads and team leads that `agentgraph handoff leads` prints (read once at start) |
 | `only_agents` | `[]` | when not empty, act only on these agents |
+| `chat_agents` | `[]` | agents whose **root chat** is covered too (see "Main chats"); empty means root chats stay untouched. Their child sessions follow the rules above |
+| `chat_ask_at` | `null` | `ask_at` for those chats (`null` = `ask_at`; ignored when it is not below `hard_at`) |
+| `chat_message_chars`, `chat_user_chars` | 4000, 12000 | the chat summary carries the user's messages word for word: at most this many characters of one message (the middle is cut) and in all (the first and the newest are kept) |
 | `workers_only` | `true` | only sessions that have a parent; `false` also acts on a top-level session |
 | `notes_gap` | 10000 | the notes cover the context (roll and pause) when it grew at most this much since they were written |
 | `hook_growth` | 15000 | how much the context may grow between the request for a compaction and OpenCode's call for the summary |
@@ -165,6 +168,53 @@ notes are fresh; `handoff path` and `handoff build` are what the plugin calls. T
 read `<project>/.opencode/handoff/<session id>.md` (the lane's own words) and run `handoff build` by hand for the same session
 (`--newer-than 0`; `handoff leads` lists the agents the plugin leaves alone): the summary is the code-written parts plus those notes. Set `AGENTGRAPH_ROLLOVER_DEBUG=1` to log every
 compaction-hook call too.
+
+## Main chats (`chat_agents`)
+
+Off by default: with `chat_agents` empty a root chat gets no ask, no state file and no summary (a test says so). With `"chat_agents": ["orchestrator"]`
+the **root** session of that agent (matched by name, any case) is covered even though the agent is in `skip_agents` and `workers_only` is true; its
+child sessions and every other agent follow the old rules. Nothing is added to an agent file: the ask carries everything.
+
+**The ask** (at `chat_ask_at`, else `ask_at`) tells the orchestrator that code will build the new context from three things only (its notes, the user's own
+messages, the list of its subagent sessions with the task graphs), so anything else is lost, and what the notes must hold: the objective; the user's
+requirements and limits with the user's words quoted where they set a rule, a name or a number; the decisions and approvals, each with the one it replaced;
+the work state (done, running with each subagent's session id and what it was asked, blocked and on what); the next steps in order; the files that matter;
+facts that were expensive to find. If the answer to the user was already finished it writes the notes and ends with one short line; mid-work it writes them
+and carries on. A chat is asked at the end of an answer as well as mid-turn. **Measured in a headless multi-message run: both happen.** Mid-turn the ask
+arrives between two steps and the notes are one more step; after an answer it starts a new turn (also after the turn went idle), with the notes and the
+one line. Both ended in a rollover with the work resumed.
+
+**The summary** (`handoff build --chat`; chosen by the plugin, and by the database for a session with no parent when no flag is given) is, in order:
+the user's messages word for word, oldest first (per message and in all capped by the two settings above; the first and the newest are kept and one line says
+how many were left out); the sessions this chat started (id, agent, what it was asked, running or finished; running first); the task graphs of the project
+(`.opencode/graph/*.json`: the nodes that are not passed with their status; graphs that passed are only counted); then the notes. The notes come last, so
+that their next steps are at the end. Limit 30,000 characters; the user's messages and the notes get their room first.
+
+- **Which messages count as the user's.** Only stored rows of type `user`. A subagent's report, a shell job, a goal and the plugin's own ask are rows of type `synthetic`
+  (with `metadata.source`), a reminder is `system`: all left out. Not told apart: a `user` row made by a command or skill expansion or sent by a script looks like typing.
+- **After a second rollover.** The earlier user messages are not gone: OpenCode keeps every row in its database (only the model stops seeing them), and the build reads
+  all rows of the session each time, so each summary carries them again. Nothing is copied forward and no extra file exists (tested: a message from before a
+  compaction row is in the summary).
+- **Running subagents.** A child is "running" until its report is in the chat (or the session row says it finished). A report that arrives between the ask and the roll is
+  a step that grew the context: inside `notes_gap` the roll goes on, beyond it the chat is asked again or, at OpenCode's own compaction, gets a model summary, never a
+  stale code summary. A user message sent between the ask and the compaction is in the summary (it is also in OpenCode's kept tail).
+- **Exit codes** as for a lane: 3 stale notes; 4 when the user's messages cannot be read.
+
+**Measured** (scripted 6-message chat with the `orchestrator` agent, Sonnet 5.5 as stored in the turns; sign-off word, a rule, a number that is later changed, one worker; reads to about 146k; `r1/measure.py --chat`, `r1/runs.jsonl`):
+
+| run | dollars | weighted tokens | asks / rollovers / compactions (model summaries) | largest context | recall of word, rule, number, worker | code summary |
+|---|---|---|---|---|---|---|
+| plugin off | 0.7271 | 363,572 | 0 / 0 / 1 (1) | 146,617 | 4 of 4 | none |
+| on, default `ask_at` (run 1) | 0.7877 | 393,857 | 1 / 1 / 1 (0) | 147,767 | 4 of 4 | 6,453 chars |
+| on, default `ask_at` (run 2) | 0.9723 | 486,133 | 1 / 0 / 1 (1) | 146,621 | 4 of 4 | none |
+| on, `chat_ask_at` 90000 (run 1) | 0.7168 | 358,381 | 2 / 2 / 2 (0) | 105,525 | 4 of 4 | 3,475 and 5,611 chars |
+| on, `chat_ask_at` 90000 (run 2) | 0.7211 | 360,569 | 2 / 2 / 2 (0) | 105,510 | 4 of 4 | 3,394 and 5,252 chars |
+
+The notes turn cost $0.05 to $0.10 (25,656 to 48,496 weighted tokens). **Run 2 at the default failed**: the ask went out at 122,791, but the next read added
+about 24,000 tokens and OpenCode started its own compaction before the chat had written anything, so the code summary could not be used and a model summary
+($0.43) was made. A chat that reads big files in one step needs `chat_ask_at` lower: at 90,000 both runs got code summaries and no model summary, at the
+price of one more roll. On this short chat the plugin is only level with the plugin off (-1.4% and -0.9% weighted tokens, one run each at 90,000 against one off run);
+what it removes is the model summary and the dependence on what that summary keeps. A longer chat is not measured.
 
 ## `handoff build`: exit codes and size
 
@@ -254,6 +304,9 @@ Both tasks passed their check and the sign-off word was right in all three. A ki
 finished. A lane started through the task tool is seen, rolled over and finishes, and its parent gets the result.
 
 ## Not covered
+
+- Main chats: single runs; a chat whose single step adds more tokens than the room between the ask and OpenCode's own compaction (a 24,000-token read at 122,791 against a compaction at about 146,000) can still get a
+  model summary; the `user` rows that are really a command or skill expansion are carried as typing; a chat whose notes the model writes thinly loses what is not in them (the user's messages and the subagent list are carried by code); the plugin does not read the subagents' results, only the notes can carry them.
 
 - Single runs; the spread between runs is not known. The 3-against-3 comparison is separate.
 - The lane's own decisions survive only if it writes them into the notes (the first user message is always kept). A lane told

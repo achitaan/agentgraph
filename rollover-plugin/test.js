@@ -568,6 +568,94 @@ const cases = {
     assert.deepEqual([...keys].sort(), [...declared].sort(), "every default is in rollover.json and nothing else is");
     const h = await harness({}, { rawSettings: file }); await h.step(116000); assert.ok(!h.has("settings_invalid"), JSON.stringify(h.logRows())); assert.equal(h.calls.synthetic.length, 1); h.stop();
   },
+  // ---- chat rollover (x1): a root chat of an agent in chat_agents ----
+  async "chat: by default a root chat of the orchestrator is left alone: no ask, no compaction, no summary, no file"() {
+    const h = await harness({}); const c = h.add("ses_chat", { parent: null, agent: "orchestrator" });
+    await h.step(130000, "tool-calls", c.sid); await h.step(150000, "stop", c.sid); h.notes(c.sid); await h.step(152000, "stop", c.sid);
+    assert.equal(h.calls.synthetic.length, 0); assert.equal(h.calls.compact.length, 0);
+    const ev = { sessionID: c.sid, agent: "orchestrator" }; await h.hooks.compaction(ev); assert.equal(ev.result, undefined);
+    assert.deepEqual(h.buildArgs(), []); assert.equal(h.state(c.sid), null, "no state file"); assert.ok(!fs.existsSync(path.join(c.work, ".opencode", "handoff", ".gitignore")));
+    h.stop();
+  },
+  async "chat: a listed agent's root chat is asked with the chat ask; lanes, other root agents and a listed agent's child sessions keep the old rules"() {
+    const h = await harness({ chat_agents: ["Orchestrator"] }); const c = h.add("ses_chat", { parent: null, agent: "orchestrator" });
+    await h.step(116000, "tool-calls", c.sid);
+    assert.equal(h.calls.synthetic.length, 1); const text = h.calls.synthetic[0].text;
+    assert.ok(text.includes("ses_chat.md")); assert.ok(/user's own messages/.test(text) && /session id of each running subagent/.test(text) && /one short line/.test(text) && /quoted/.test(text) && /replaced/.test(text) && /lost/.test(text), "the chat ask carries what the notes must hold");
+    assert.ok(!/task as you were given it/.test(text), "not the lane's ask");
+    assert.ok(h.has("asked")); assert.equal(h.logRows().find((r) => r.event === "asked").agent, "orchestrator");
+    const lane = h.add("ses_lane", { agent: "impl-openai" }); await h.step(116000, "tool-calls", lane.sid);
+    assert.equal(h.calls.synthetic.length, 2); assert.ok(/task as you were given it/.test(h.calls.synthetic[1].text), "a lane still gets the lane's ask");
+    const other = h.add("ses_build", { parent: null, agent: "build" }); await h.step(130000, "tool-calls", other.sid);
+    const child = h.add("ses_orchchild", { parent: "ses_chat", agent: "orchestrator" }); await h.step(130000, "tool-calls", child.sid);
+    const council = h.add("ses_council", { agent: "council" }); await h.step(130000, "tool-calls", council.sid);
+    assert.equal(h.calls.synthetic.length, 2, "root build chat, orchestrator child session and council stay out"); h.stop();
+  },
+  async "chat: the build is told to make the chat summary (with the caps), a lane's build is told --lane"() {
+    const h = await harness({ chat_agents: ["orchestrator"], chat_message_chars: 3000, chat_user_chars: 9000 }); const c = h.add("ses_chat", { parent: null, agent: "orchestrator" });
+    await h.step(116000, "tool-calls", c.sid); h.notes(c.sid); await h.step(117000, "tool-calls", c.sid);
+    assert.equal(h.calls.compact.length, 1); const ev = { sessionID: c.sid, agent: "orchestrator" }; await h.hooks.compaction(ev);
+    assert.equal(ev.result && ev.result.summary.trim(), "SUMMARY");
+    const line = h.buildArgs()[0]; assert.ok(/--chat /.test(line + " ") && /--user-message-chars 3000/.test(line) && /--user-chars 9000/.test(line) && !/--lane/.test(line), line);
+    await h.emit("session.compaction.ended", { reason: "manual" }, { sid: c.sid }); assert.ok(h.has("rolled"));
+    const lane = h.add("ses_lane", { agent: "impl-openai" }); await h.step(116000, "tool-calls", lane.sid); h.notes(lane.sid); await h.step(117000, "tool-calls", lane.sid);
+    await h.hooks.compaction({ sessionID: lane.sid, agent: "impl-openai" });
+    const laneLine = h.buildArgs()[1]; assert.ok(/--lane/.test(laneLine) && !/--chat/.test(laneLine), laneLine); h.stop();
+  },
+  async "chat: chat_ask_at moves the ask for a chat only; a value at or over hard_at, or not a number, is ignored with one log line"() {
+    const h = await harness({ chat_agents: ["orchestrator"], chat_ask_at: 90000 }); const c = h.add("ses_chat", { parent: null, agent: "orchestrator" });
+    await h.step(89000, "tool-calls", c.sid); assert.equal(h.calls.synthetic.length, 0); await h.step(91000, "tool-calls", c.sid); assert.equal(h.calls.synthetic.length, 1);
+    const lane = h.add("ses_lane", { agent: "impl-openai" }); await h.step(100000, "tool-calls", lane.sid); assert.equal(h.calls.synthetic.length, 1, "a lane still asks at 115,000"); h.stop();
+    const over = await harness({ chat_agents: ["orchestrator"], chat_ask_at: 170000 }); const o = over.add("ses_chat", { parent: null, agent: "orchestrator" });
+    await over.step(116000, "tool-calls", o.sid); assert.equal(over.calls.synthetic.length, 1, "ask_at is used"); over.stop();
+    const bad = await harness({ chat_agents: ["orchestrator"], chat_ask_at: "90000" }); const b = bad.add("ses_chat", { parent: null, agent: "orchestrator" });
+    await bad.step(100000, "tool-calls", b.sid); assert.equal(bad.calls.synthetic.length, 0); assert.ok(bad.has("settings_invalid", /chat_ask_at/)); bad.stop();
+    const list = await harness({ chat_agents: "orchestrator" }); await list.step(116000); assert.ok(list.has("settings_invalid", /chat_agents/)); list.stop();
+  },
+  async "chat: the ask goes out at the end of the answer too (finish stop), a lane's does not; the chat then rolls over like a lane"() {
+    const h = await harness({ chat_agents: ["orchestrator"] }); const c = h.add("ses_chat", { parent: null, agent: "orchestrator" });
+    await h.step(120000, "stop", c.sid); assert.equal(h.calls.synthetic.length, 1, "asked at the end of the answer");
+    const lane = h.add("ses_lane", { agent: "impl-openai" }); await h.step(120000, "stop", lane.sid); assert.equal(h.calls.synthetic.length, 1, "a lane's turn end asks nothing");
+    h.notes(c.sid); await h.step(121000, "stop", c.sid);          // the answer to the ask: notes written, one short line
+    assert.equal(h.calls.compact.length, 1, "the notes cover the context: the compaction is requested at once");
+    const ev = { sessionID: c.sid, agent: "orchestrator" }; await h.hooks.compaction(ev); assert.equal(ev.result && ev.result.summary.trim(), "SUMMARY");
+    await h.emit("session.compaction.ended", { reason: "manual" }, { sid: c.sid }); assert.ok(h.has("rolled")); h.stop();
+  },
+  async "chat: OpenCode's own compaction of a chat gets the code summary when the notes are fresh, and a model summary when they are not"() {
+    const h = await harness({ chat_agents: ["orchestrator"] }); const c = h.add("ses_chat", { parent: null, agent: "orchestrator" });
+    await h.step(129000, "tool-calls", c.sid);
+    const stale = { sessionID: c.sid, agent: "orchestrator" }; await h.hooks.compaction(stale); assert.equal(stale.result, undefined); assert.ok(h.has("own_compaction", /left, no notes file/));
+    h.notes(c.sid);
+    const own = { sessionID: c.sid, agent: "orchestrator" }; await h.hooks.compaction(own); assert.equal(own.result && own.result.summary.trim(), "SUMMARY"); assert.ok(h.has("own_compaction", /supplied/)); h.stop();
+  },
+  async "chat: a subagent's report between the ask and the roll: before the notes it changes nothing, after the request a small one is covered, a big one falls back to a model summary (never a stale code summary)"() {
+    const mk = async () => { const h = await harness({ chat_agents: ["orchestrator"] }); const c = h.add("ses_chat", { parent: null, agent: "orchestrator" }); return { h, c, ev: () => ({ sessionID: c.sid, agent: "orchestrator" }) }; };
+    const a = await mk();                                                        // the report arrives before the notes are written
+    await a.h.step(116000, "tool-calls", a.c.sid); await a.h.step(140000, "stop", a.c.sid);
+    assert.equal(a.h.calls.compact.length, 0); assert.equal(a.h.calls.synthetic.length, 1, "no second ask yet");
+    a.h.notes(a.c.sid); await a.h.step(141000, "stop", a.c.sid); assert.equal(a.h.calls.compact.length, 1, "the notes step covers it"); a.h.stop();
+    const b = await mk();                                                        // a small report between the request and the hook
+    await b.h.step(116000, "tool-calls", b.c.sid); b.h.notes(b.c.sid); await b.h.step(117000, "tool-calls", b.c.sid); await b.h.step(120000, "stop", b.c.sid);
+    const e1 = b.ev(); await b.h.hooks.compaction(e1); assert.equal(e1.result && e1.result.summary.trim(), "SUMMARY"); b.h.stop();
+    const c = await mk();                                                        // a big one: the notes do not cover it, so no code summary
+    await c.h.step(116000, "tool-calls", c.c.sid); c.h.notes(c.c.sid); await c.h.step(117000, "tool-calls", c.c.sid); await c.h.step(142000, "stop", c.c.sid);
+    const e2 = c.ev(); await c.h.hooks.compaction(e2); assert.equal(e2.result, undefined); assert.ok(c.h.has("fell_back", /grew/));
+    await c.h.emit("session.compaction.ended", { reason: "manual" }, { sid: c.c.sid }); assert.ok(c.h.has("compacted")); assert.equal(c.h.calls.compact.length, 1, "no second request"); c.h.stop();
+  },
+  async "chat: a settings edit that takes the agent out of chat_agents stops the summary at once, and the chat is out of scope again"() {
+    const k = await harness({ chat_agents: ["orchestrator"] }); const kc = k.add("ses_chat", { parent: null, agent: "orchestrator" });
+    await k.step(129000, "tool-calls", kc.sid); k.notes(kc.sid);
+    const control = { sessionID: kc.sid, agent: "orchestrator" }; await k.hooks.compaction(control); assert.equal(control.result && control.result.summary.trim(), "SUMMARY", "in scope before the edit"); k.stop();
+    const h = await harness({ chat_agents: ["orchestrator"] }); const c = h.add("ses_chat", { parent: null, agent: "orchestrator" });
+    await h.step(129000, "tool-calls", c.sid); h.notes(c.sid);
+    fs.writeFileSync(h.settingsFile, JSON.stringify({ agentgraph_bin: JSON.parse(fs.readFileSync(h.settingsFile, "utf8")).agentgraph_bin })); const f = Date.now() / 1000 + 5; fs.utimesSync(h.settingsFile, f, f);
+    const ev = { sessionID: c.sid, agent: "orchestrator" }; await h.hooks.compaction(ev); assert.equal(ev.result, undefined); assert.deepEqual(h.buildArgs(), []); h.stop();
+  },
+  async "chat: a listed agent in skip_agents and workers_only true is in scope for its root chat only; chat_agents is in rollover.json with the other defaults"() {
+    const s = JSON.parse(fs.readFileSync(path.join(__dirname, "rollover.json"), "utf8"));
+    assert.deepEqual(s.chat_agents, []); assert.equal(s.chat_ask_at, null); assert.ok(s.skip_agents.includes("orchestrator")); assert.equal(s.workers_only, true);
+    assert.ok(s.chat_message_chars > 0 && s.chat_user_chars > s.chat_message_chars);
+  },
   async "N3: a request is dropped by a reload and then gets no summary either"() {
     const d = await harness({}); await d.step(116000); d.notes(); await d.step(117000); assert.equal(d.calls.compact.length, 1);
     await sleep(10);
