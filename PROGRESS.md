@@ -175,20 +175,22 @@ No release is called complete until it has been run through the real page and re
 
 ## Part 3: cost and loops plan (graph `agentgraph-cost-loops`)
 
-State on 2026-11-21: 13 of 15 nodes passed; open are `a1` (the user's answer on the rollover install) and `f1` (final check).
-Commits on `design-lab`, local only: `7ecb91f` to `139a60e` (not pushed; a push waits for the user's word).
+State on 2026-11-21: the rollover install is approved and done (`a1` passed); `f1` (final check) closes the graph.
+Commits on `design-lab`, local only, from `7ecb91f` on (not pushed; a push waits for the user's word).
 
 - **Installed with the user's approval** (in force from the next OpenCode start; records in
   `.opencode/artifacts/agentgraph-cost-loops/a1/approvals.md`, backups under `~/.config/opencode/backups/`): policy
   proposals M and O, proposal K, the reviewer's permission to run `review-copy` (hand check: 23 attempts,
   `v1/handcheck/results.md`), six ledger backfill rows.
-- **Built, measured, not installed: automatic rollover** (`rollover-plugin/`, `agentgraph handoff`, `docs/ROLLOVER.md`).
+- **Automatic rollover, installed on the user's "yes" (2026-11-21)** (`rollover-plugin/`, `agentgraph handoff`, `docs/ROLLOVER.md`): the plugin in
+  `~/.config/opencode/plugins/agentgraph-rollover/` with `chat_agents: ["orchestrator"]` and `chat_ask_at: 90000`, and `compaction.background: false` in
+  `opencode.json`; backup `~/.config/opencode/backups/20261121-231948-rollover-install`; in force from the next OpenCode start. Undo: remove the folder and the key, restart.
+  Nobody has yet watched it work in the live config: after the restart, `bin/agentgraph handoff log` shows what it asked and rolled.
   A plugin asks a long session to write notes, then replaces the conversation with a summary that code builds from the
   notes (no model call); OpenCode's own summary is the fallback. Workers: -27.4% (child lane, three runs against one)
   and -17.3% (lane as its own session, four against six) in weighted tokens. Main chat (off by default, `chat_agents`):
   level with today on a six-message chat, no model summary, recall 4 of 4. An independent reviewer read the worker part (`r1/review-r6.md`) and read the chat part three times; the last verdict
-  is "ready" for workers and for a main chat (`x1/review-r3.md`). It needs `compaction.background: false` in
-  `opencode.json` and an OpenCode restart.
+  is "ready" for workers and for a main chat (`x1/review-r3.md`). 
 - **Not shown by a real run**: a long chat; three or more rollovers in one chat; the main chat's real model (all runs are
   Sonnet 5.5); a message typed, or a worker's report arriving, while the notes are being written (scripted tests only);
   only one baseline run for the child-lane figure.
