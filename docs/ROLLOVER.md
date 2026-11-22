@@ -146,6 +146,11 @@ bad family override, or thresholds that are not in order give the defaults (both
 
 ## Install and turn off
 
+**Name the agent your chats really run as.** `chat_agents` is matched against the agent of the root session (the newest `agent-switched` row,
+or the session's `agent`). OpenCode Desktop chats run as `build` unless another primary agent was picked; a chat run with `--agent orchestrator`
+is `orchestrator`. All measured chat runs were `orchestrator`; a first live install listed only that name and did not cover the user's `build`
+chats while the global setting was on. Check with `agentgraph handoff log` after the first long chat: a covered chat shows `asked`.
+
 Copy `rollover-plugin/` to `<opencode config>/plugins/agentgraph-rollover/`; OpenCode loads it at the next start. **One setting is
 needed**, one line in `opencode.json`:
 
