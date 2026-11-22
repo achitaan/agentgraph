@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from agentgraph import installer
+from agentgraph import installer, portable
 
 ROOT = Path(__file__).resolve().parent.parent
 SKILLS = ("code-assurance", "engineering-delivery", "grilling")
@@ -40,7 +40,7 @@ class InstallCase(unittest.TestCase):
         self.home = self.base / "home"
         self.t = self.home / ".config" / "opencode"
         (self.kit / "agentgraph").mkdir(parents=True)
-        for name in ("install.sh", "agentgraph/installer.py"):
+        for name in ("install.sh", "agentgraph/installer.py", "agentgraph/portable.py"):
             if (ROOT / name).exists():
                 shutil.copy2(ROOT / name, self.kit / name)
         shutil.copytree(ROOT / "commands", self.kit / "commands")
@@ -105,7 +105,9 @@ class FirstInstall(InstallCase):
     def test_first_install_copies_toolkit_files(self):
         out = self.sh().stdout
         self.assertIn("item(s) installed", out)
-        self.assertEqual((self.t / PRESET).read_bytes(), (self.kit / "config" / PRESET).read_bytes())
+        # the mirror holds portable.TOKEN where the installed file names this folder
+        mirror = (self.kit / "config" / PRESET).read_bytes()
+        self.assertEqual((self.t / PRESET).read_bytes(), mirror.replace(portable.TOKEN.encode(), str(self.t).encode()))
         self.assertEqual((self.t / "skills" / "grilling" / "SKILL.md").read_bytes(),
                          (self.kit / "skills" / "grilling" / "SKILL.md").read_bytes())
         self.assertTrue((self.t / SLIM / "fast").is_dir())
@@ -383,6 +385,10 @@ class Sync(InstallCase):
     def setUp(self):
         super().setUp()
         shutil.copy2(ROOT / "sync.sh", self.kit / "sync.sh")
+        # sync.sh also runs agentgraph.policygen against config/policy, so the copy needs them
+        shutil.copytree(ROOT / "agentgraph", self.kit / "agentgraph", dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(ROOT / "config" / "policy", self.kit / "config" / "policy", dirs_exist_ok=True)
         self.sh()
         (self.t / "skills" / "private-one").mkdir()
         (self.t / "skills" / "private-one" / "SKILL.md").write_text("private\n")

@@ -217,7 +217,9 @@
             "git diff*": "allow",
             "git status*": "allow",
             "git log*": "allow",
-            "git show*": "allow"
+            "git show*": "allow",
+            "@OPENCODE_CONFIG_DIR@/orchestration/bin/agentgraph review-copy *": "allow",
+            "*>*": "deny"
           },
           "websearch": "deny",
           "experimental_image_generate": "deny",
@@ -464,7 +466,9 @@
             "git diff*": "allow",
             "git status*": "allow",
             "git log*": "allow",
-            "git show*": "allow"
+            "git show*": "allow",
+            "@OPENCODE_CONFIG_DIR@/orchestration/bin/agentgraph review-copy *": "allow",
+            "*>*": "deny"
           },
           "websearch": "deny",
           "experimental_image_generate": "deny",
@@ -715,7 +719,9 @@
             "git diff*": "allow",
             "git status*": "allow",
             "git log*": "allow",
-            "git show*": "allow"
+            "git show*": "allow",
+            "@OPENCODE_CONFIG_DIR@/orchestration/bin/agentgraph review-copy *": "allow",
+            "*>*": "deny"
           },
           "websearch": "deny",
           "experimental_image_generate": "deny",
@@ -966,7 +972,9 @@
             "git diff*": "allow",
             "git status*": "allow",
             "git log*": "allow",
-            "git show*": "allow"
+            "git show*": "allow",
+            "@OPENCODE_CONFIG_DIR@/orchestration/bin/agentgraph review-copy *": "allow",
+            "*>*": "deny"
           },
           "websearch": "deny",
           "experimental_image_generate": "deny",

@@ -29,6 +29,11 @@ import tempfile
 import time
 from pathlib import Path
 
+try:
+    from . import portable
+except ImportError:  # install.sh runs this file as a script
+    import portable
+
 MANIFEST = ".toolkit-install.json"
 NEW_SUFFIX = ".toolkit-new"
 PRESET_FILE = "oh-my-opencode-slim.json"
@@ -68,12 +73,20 @@ def atomic_write(path: Path, data: bytes) -> None:
         raise
 
 
-def atomic_copy(src: Path, dst: Path) -> None:
-    """`shutil.copy2` that swaps the finished copy in, so a failure leaves the old file whole."""
+def sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def atomic_copy(src: Path, dst: Path, data: bytes | None = None) -> None:
+    """`shutil.copy2` that swaps the finished copy in, so a failure leaves the old file whole. With `data` the
+    copy holds those bytes instead of the file's (the same mode and times)."""
     fd, name = tempfile.mkstemp(prefix=f".{dst.name}.", dir=dst.parent)
     os.close(fd)
     try:
         shutil.copy2(src, name)
+        if data is not None:
+            with open(name, "wb") as handle:
+                handle.write(data)
         os.replace(name, dst)
     except BaseException:
         Path(name).unlink(missing_ok=True)
@@ -128,8 +141,10 @@ def _tree(folder: Path, rel: str) -> list[tuple[str, Path]]:
 
 class Installer:
     def __init__(self, source: Path, target: Path, commands: list[str], dry: bool = False, out=print):
+        config_dir = os.path.abspath(target)  # what portable.TOKEN becomes: the path as the user gave it
         target = target.resolve()  # the config folder may be a link (a dotfiles repo); links below it are refused
         self.source, self.target, self.commands, self.dry, self.out = source, target, commands, dry, out
+        self.config_dir = config_dir
         self.backup_root = target / "backups"
         self.backup: Path | None = None
         self.changed = 0
@@ -177,12 +192,25 @@ class Installer:
         keep.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(dst, keep)
 
-    def _copy(self, src: Path, dst: Path) -> None:
+    def _data(self, rel: str, src: Path) -> bytes:
+        """The bytes to install: the toolkit file, with portable.TOKEN made this folder's absolute path in the
+        preset file and the prompt files (the only files sync.sh tokenizes)."""
+        data = src.read_bytes()
+        if rel == PRESET_FILE or rel.startswith("oh-my-opencode-slim/"):
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                return data
+            if portable.TOKEN in text:
+                data = portable.render(text, self.config_dir, rel.endswith(".json")).encode("utf-8")
+        return data
+
+    def _copy(self, src: Path, dst: Path, data: bytes | None = None) -> None:
         if self.dry:
             return
         no_links(dst, self.target)
         dst.parent.mkdir(parents=True, exist_ok=True)
-        atomic_copy(src, dst)
+        atomic_copy(src, dst, data)
 
     def _say(self, verb: str, dst: Path) -> None:
         self.out(f"{verb:<7} {dst}")
@@ -196,16 +224,16 @@ class Installer:
             self.added.add(unit)
             self._say("add", self.target / unit)
 
-    def _beside(self, src: Path, dst: Path) -> None:
+    def _beside(self, src: Path, dst: Path, data: bytes) -> None:
         new = dst.with_name(dst.name + NEW_SUFFIX)
         self.beside.append(new)
-        if new.is_file() and digest(new) == digest(src):
+        if new.is_file() and digest(new) == sha(data):
             return
         if new.is_file():  # an earlier copy you may have started merging into: keep it in this run's backup
             self._backup(new.relative_to(self.target).as_posix(), new)
             self.out(f"note    {new} held other text; your earlier copy goes to backups/ with the replaced files")
         self._say("new", new)
-        self._copy(src, new)
+        self._copy(src, new, data)
 
     def _drop_stale(self, dst: Path, sh: str) -> None:
         """The toolkit's copy beside a file that now matches it is no longer needed."""
@@ -217,15 +245,16 @@ class Installer:
     def file(self, rel: str, src: Path) -> None:
         dst = self.target / rel
         no_links(dst, self.target)
-        sh = digest(src)
+        data = self._data(rel, src)
+        sh = sha(data)
         old = self.files.get(rel)
         if not dst.exists():
             if old is None:
                 self._add(rel, dst)
-                self._copy(src, dst)
+                self._copy(src, dst, data)
                 self.files[rel] = sh
             elif old != sh:  # you removed it and the toolkit has changed it since
-                self._beside(src, dst)
+                self._beside(src, dst, data)
             return
         if not dst.is_file():
             raise InstallError(f"refusing non-regular file: {dst}")
@@ -236,26 +265,27 @@ class Installer:
         elif old is not None and have == old:  # never changed by you
             self._say("update", dst)
             self._backup(rel, dst)
-            self._copy(src, dst)
+            self._copy(src, dst, data)
             self.files[rel] = sh
         elif old is not None and sh == old:  # you changed it, the toolkit did not
             return
         else:  # you changed it and the toolkit moved on, or it is unknown which
-            self._beside(src, dst)
+            self._beside(src, dst, data)
 
     # -- the preset file
     def preset_file(self) -> object:
         src = self.source / "config" / PRESET_FILE
         dst = self.target / PRESET_FILE
         no_links(dst, self.target)
-        sh = digest(src)
+        data = self._data(PRESET_FILE, src)
+        sh = sha(data)
         try:
-            theirs = json.loads(src.read_text(encoding="utf-8"))
+            theirs = json.loads(data.decode("utf-8"))
         except ValueError as exc:
             raise InstallError(f"toolkit {PRESET_FILE} is not valid JSON: {exc}")
         if not dst.exists():
             self._say("add", dst)
-            self._copy(src, dst)
+            self._copy(src, dst, data)
             self.files[PRESET_FILE] = sh
             return theirs
         if not dst.is_file():
@@ -267,7 +297,7 @@ class Installer:
         if mine is _MISSING or not isinstance(mine, dict) or not isinstance(theirs, dict):
             if digest(dst) != sh:
                 self.out(f"note    {dst} is not a JSON object; it was left alone")
-                self._beside(src, dst)
+                self._beside(src, dst, data)
             return self.base
         merged = merge3(self.base, theirs, mine)
         if merged != mine:

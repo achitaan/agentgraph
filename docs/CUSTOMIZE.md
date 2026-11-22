@@ -112,3 +112,6 @@ Other precedence that already applies:
 reviewed with `git diff`. What is personal to you comes from `sync.conf` (git-ignored; copy
 `sync.conf.example`): `SEPARATE_SKILLS`, skills to keep out of the repository, and `AGENTS_CUT_MARKER`, the line
 where your own notes start in `AGENTS.md`. Without a marker `config/AGENTS.md` is not synced.
+
+The reviewer's permission rule and one prompt line must name the launcher by its exact absolute path, so `sync.sh` writes your config folder's path as `@OPENCODE_CONFIG_DIR@` in `config/oh-my-opencode-slim.json` and `config/oh-my-opencode-slim/*`, and `install.sh` writes the target folder's absolute path back (`agentgraph/portable.py`).
+Only the whole path is replaced, never a longer folder name that starts with it; never type the token by hand in a file you want left alone.

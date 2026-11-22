@@ -57,6 +57,9 @@ for name in $SEPARATE; do set -- "$@" --exclude "$name"; done
 rsync -a --delete "$@" "$SOURCE/skills/" "$HERE/skills/"
 cp -p "$SOURCE/oh-my-opencode-slim.json" "$HERE/config/oh-my-opencode-slim.json"
 rsync -a --delete "$SOURCE/oh-my-opencode-slim" "$HERE/config/"
+# The live folder's absolute path (permission rule for the launcher, one prompt line) becomes a token in the
+# mirror; install.sh writes the target folder's path back. See agentgraph/portable.py.
+(cd "$HERE" && python3 -m agentgraph.portable tokenize --dir "$SOURCE" "$HERE/config/oh-my-opencode-slim.json" "$HERE/config/oh-my-opencode-slim")
 # The three orchestrator policy files have one source (config/policy/). When an approved edit changed a live file
 # directly, make the source again from the live files, so it never falls behind and the edit shows in git diff.
 if ! (cd "$HERE" && python3 -m agentgraph.policygen check --against "$HERE/config/oh-my-opencode-slim" >/dev/null 2>&1); then
