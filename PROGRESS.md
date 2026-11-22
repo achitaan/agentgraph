@@ -176,7 +176,7 @@ No release is called complete until it has been run through the real page and re
 ## Part 3: cost and loops plan (graph `agentgraph-cost-loops`)
 
 State on 2026-11-21: the rollover install is approved and done (`a1` passed); `f1` (final check) closes the graph.
-Commits on `design-lab` from `7ecb91f` on, pushed to `origin/design-lab` on the user's "yes push" (2026-11-22); `main` is unchanged.
+Commits on `design-lab` from `7ecb91f` on, pushed to `origin/design-lab` on the user's "yes push" and fast-forwarded onto `origin/main` on the user's "push to main" (2026-11-22).
 
 - **Installed with the user's approval** (in force from the next OpenCode start; records in
   `.opencode/artifacts/agentgraph-cost-loops/a1/approvals.md`, backups under `~/.config/opencode/backups/`): policy
