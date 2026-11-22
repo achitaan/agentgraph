@@ -5,7 +5,8 @@
 // compaction OpenCode starts itself (automatic, at about 150k) when the same freshness rule holds (notes written after the last ask
 // and covering the context), and a second compaction that arrives before any step has ended since the last rollover gets the same
 // summary again. In every other case the plugin sets nothing and OpenCode's normal model summary is made. Root chats and the
-// orchestrating agents are never touched.
+// orchestrating agents are never touched, unless an agent is named in chat_agents (default none): its ROOT chat then gets a chat-shaped ask
+// and the summary of `handoff build --chat` (the user's messages word for word, late subagent reports, the notes). See docs/ROLLOVER.md.
 // Files: the lane's notes in <session folder>/.opencode/handoff/<session>.md (with a .gitignore of `*`); everything else (state,
 // decision log) in one folder outside any project: <data home>/agentgraph/rollover/. Nothing is written for a session this plugin
 // does not act on. Several OpenCode processes (desktop server, CLI runs) can work on one session: before every decision the
@@ -141,8 +142,10 @@ function askText(notesFile) {
 
 // the ask for a main chat (a root session of a chat_agents agent): its notes must hold what a lane's do not, because the summary that replaces
 // the conversation is the notes plus the user's own messages (word for word), the chat's subagent sessions and the task graphs, and nothing else
-function chatAskText(notesFile) {
+const CHAT_NOTES_FLOOR = 300;   // bytes: chat notes under this are not a handoff (the build checks the topics too)
+function chatAskText(notesFile, thin) {
   return [
+    ...(thin ? [`The notes you wrote are too short to carry on from (at least ${CHAT_NOTES_FLOOR} characters are needed, and they must cover the seven points below). Write them again in full.`] : []),
     "Checkpoint from the rollover plugin (automatic, not from the user). This chat's context is large and will be replaced by a short summary right after your notes are saved. That summary is made by code from exactly three things: your notes, the user's own messages (word for word, up to a size limit; old ones may be left out), and a list of the subagent sessions this chat started and the task graphs of the project. Anything that is in none of them is lost: tool results, files you read, what a subagent reported, your own earlier reasoning.",
     `Write your handoff notes NOW to ${notesFile} with the write tool (create the folder if it is missing, overwrite the file). Finish the tool call you are in first; start nothing else and read nothing first. This file is allowed even if your rules limit where you may write. The folder holds a .gitignore of \`*\` so the notes are never committed; leave it alone.`,
     "Put in it, in this order: (1) the objective of this chat; (2) the user's requirements and limits, with the user's own words quoted wherever they set a rule, a name or a number; (3) the decisions and approvals given so far, each with the earlier decision it replaced, so that the latest one is clear; (4) the work state: what is done, what is running (the session id of each running subagent and what it was asked), what is blocked and on what; (5) the next steps, in order; (6) the files that matter and what each holds; (7) facts that were expensive to find (numbers, commands, ids, paths, findings of subagents) that you would otherwise have to look up again. Write it so that you could carry on from it alone.",
@@ -286,7 +289,11 @@ module.exports = {
 
     // ---- notes: where they are, whether they cover the context ----
     // the file's mtime in whole milliseconds, like Date.now(): its fraction would make notes written in the same millisecond as an event look newer than it
-    const readNotes = (s) => { try { const st = fs.statSync(notesFile(s)); return st.size > 0 ? Math.floor(st.mtimeMs) : 0; } catch { return 0; } };
+    // a chat's notes under CHAT_NOTES_FLOOR bytes count as no notes (the chat is asked again, see thinNotes)
+    const readNotes = (s) => { try { const st = fs.statSync(notesFile(s)); return st.size >= (isChat(s) ? CHAT_NOTES_FLOOR : 1) ? Math.floor(st.mtimeMs) : 0; } catch { return 0; } };
+    const thinNotes = (s) => { if (!isChat(s) || !s.asked) return false; try { const st = fs.statSync(notesFile(s)); return st.size > 0 && st.size < CHAT_NOTES_FLOOR && Math.floor(st.mtimeMs) > s.asked.at; } catch { return false; } };
+    // a step that began after the request (or, with no request, is running now) and whose end the plugin has not seen: what it added is not in the growth the hook checks
+    const unseenStep = (s, since) => s.lastStart > s.lastEnd && s.lastStart > since;
     // one rule for the roll and the pause: the notes were written after the previous step ended and the context has grown past them by at most `notes_gap`
     const covered = (s, lim) => s.notesCtx != null && s.notesMtime > s.lastRollover && s.lastCtx - s.notesCtx <= num(lim.notes_gap);
     const notWhy = (s, lim) => (s.notesCtx == null || s.notesMtime <= s.lastRollover ? "no notes written since the last rollover"
@@ -333,8 +340,9 @@ module.exports = {
         cp.execFile(bin, args, { timeout: num(settings().build_timeout_ms) || 15000, maxBuffer: 8 * 1024 * 1024, encoding: "utf8", windowsHide: true }, (err, stdout) => {
           if (!err) return stdout && stdout.trim() ? resolve({ text: stdout }) : resolve({ fail: "empty summary" });
           if (err.killed) return resolve({ fail: "build timed out" });
-          if (err.code === 3) return resolve({ fail: "notes missing or older than the last rollover or request" });
+          if (err.code === 3) return resolve({ fail: "notes missing or older than the last rollover or request (a chat: or too thin, or subagent reports that arrived after them do not fit)" });
           if (err.code === 4) return resolve({ fail: "the task could not be read from the database", noTask: true });
+          if (err.code === 5) return resolve({ fail: "the database or the user's messages could not be read (a one-off: the session is tried again at its next compaction)" });
           if (err.code === 2 || typeof err.code === "string") return resolve({ fail: "build could not start (exit " + err.code + ")", broken: true });
           resolve({ fail: "build failed, exit " + err.code });
         });
@@ -394,6 +402,7 @@ module.exports = {
         let roll = s.rolling;                           // held here: the 180 s limit or an event can clear s.rolling while the build runs
         const lim = limits(s);
         let own = false;
+        const unseen = unseenStep(s, roll ? roll.at : 0);   // before the roll record of an own compaction is made
         if (!roll && reusable(s)) {
           // a second compaction before any step has ended since the last rollover (e.g. the plugin's request queued behind OpenCode's own): the
           // same summary again, with no build. The model summary of [summary + a few messages] would only paraphrase it.
@@ -420,8 +429,8 @@ module.exports = {
           event.result = { summary: got.text }; roll.hookUsed = true; s.supplied = roll;
           s.lastSummary = { text: got.text, at: Date.now() };
           s.ownRoll = { ctx: s.lastCtx };      // the step end that arrives late (after this compaction) belongs to the replaced context, whoever asked for the compaction
-          if (own) { log(s, "own_compaction", { reason: "own-compaction: supplied", chars: got.text.length }); }
-          else log(s, "summary_supplied", { chars: got.text.length, reason: roll.reason });
+          if (own) { log(s, "own_compaction", { reason: "own-compaction: supplied", chars: got.text.length, unseen_step: unseen }); }
+          else log(s, "summary_supplied", { chars: got.text.length, reason: roll.reason, unseen_step: unseen });
         } else {
           if (own) { if (s.rolling === roll) s.rolling = null; s.ownRoll = { ctx: s.lastCtx }; log(s, "own_compaction", { reason: "own-compaction: left, " + got.fail + "; a normal model summary is made" }); }
           else log(s, "fell_back", { reason: got.fail });
@@ -440,7 +449,8 @@ module.exports = {
 
     const maybeAsk = async (s, lim, turnContinues) => {
       const ctxNow = s.lastCtx;
-      const due = !s.asked || (s.steps - s.asked.step >= num(lim.reask_steps) && ctxNow - s.asked.ctx >= num(lim.reask_growth));
+      const thin = thinNotes(s);          // a chat whose notes are under the floor is asked again at once (the ask limits below still hold)
+      const due = !s.asked || thin || (s.steps - s.asked.step >= num(lim.reask_steps) && ctxNow - s.asked.ctx >= num(lim.reask_growth));
       if (!due) return;
       if (s.askCount >= num(lim.max_asks)) { skipOnce(s, `asked ${s.askCount} times since the last rollover; not asking again`); return; }
       if (!turnContinues) { skipOnce(s, "turn ended; will ask on a later step"); return; }
@@ -448,7 +458,7 @@ module.exports = {
       s.asked = { at: Date.now(), ctx: ctxNow, step: s.steps };
       try {
         ensureFolder(s);
-        await ctx.session.synthetic({ sessionID: s.sid, text: (isChat(s) ? chatAskText : askText)(notesFile(s)), description: "rollover: write handoff notes", metadata: { source: SOURCE }, delivery: "steer" });
+        await ctx.session.synthetic({ sessionID: s.sid, text: isChat(s) ? chatAskText(notesFile(s), thin) : askText(notesFile(s)), description: "rollover: write handoff notes", metadata: { source: SOURCE }, delivery: "steer" });
         if (!s.firstAskAt) s.firstAskAt = s.asked.at;
         log(s, "asked", { notes: path.basename(notesFile(s)), reason: notWhy(s, lim), count: s.askCount });
       } catch (e) { log(s, "error", { reason: "ask: " + shortError(e) }); }

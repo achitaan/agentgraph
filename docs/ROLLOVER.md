@@ -68,7 +68,7 @@ and cover the context (written after the last step end the plugin saw, i.e. in t
 and no step has started and not ended since the notes were written (notes from before a step that is running do not cover its growth: left. This rule is for OpenCode's own compaction only: a first version applied it to the plugin's own
 request too, and the round 7 run showed why that is wrong: the next step normally starts before the hook of a requested compaction runs, so the requested summary fell back to a model summary, $0.40), and `handoff build --newer-than` exits 0. Notes and events are compared in whole milliseconds, so notes written in the same millisecond as an event count as older (the safe side). In every other case `event.result` stays unset and
 OpenCode's normal model summary is the fallback. One log line each: `own_compaction`, reason `own-compaction: supplied` or `own-compaction: left, <reason>`.
-Root chats and `skip_agents` (and the leads) stay out as before: the hook checks the scope rules again each time (a settings edit that moves a session out of scope stops the summary at once). After the hook answers, the plugin holds that
+Root chats and `skip_agents` (and the leads) stay out as before, unless an agent is named in `chat_agents` (see "Main chats"): the hook checks the scope rules again each time (a settings edit that moves a session out of scope stops the summary at once). After the hook answers, the plugin holds that
 compaction as its pending request (so the step end that follows requests no second one) and ignores the one step end that carries a context at least as large
 as the one that was replaced (it can arrive after the compaction ended); the next step counts normally. This applies whenever the hook supplies a summary, also for a compaction the plugin requested.
 A compaction that then fails clears both, so the next end is not logged as a rollover and the next step counts.
@@ -185,8 +185,10 @@ arrives between two steps and the notes are one more step; after an answer it st
 one line. Both ended in a rollover with the work resumed.
 
 **The summary** (`handoff build --chat`; chosen by the plugin, and by the database for a session with no parent when no flag is given) is, in order:
-the user's messages word for word, oldest first (per message and in all capped by the two settings above; the first and the newest are kept and one line says
-how many were left out); the sessions this chat started (id, agent, what it was asked, running or finished; running first); the task graphs of the project
+a header with **what to do now** (below); the user's messages word for word, oldest first (per message and in all capped by the two settings above, and
+both clamped to the limit: the messages never take more than half the room, one message never more than half of that; the first, the newest and any that arrived
+after the notes are kept and one line says how many were left out; a message newer than the notes is always kept and marked "arrived after the notes were
+written"); the subagent reports that arrived after the notes were written (word for word, up to `--report-chars`, 8,000); the sessions this chat started (id, agent, what it was asked, running or finished; the newest report of a resumed child decides its state (`ORDER BY seq`); running first, "(the oldest finished ones)" are the ones cut); the sessions this chat started (id, agent, what it was asked, running or finished; running first); the task graphs of the project
 (`.opencode/graph/*.json`: the nodes that are not passed with their status; graphs that passed are only counted); then the notes. The notes come last, so
 that their next steps are at the end. Limit 30,000 characters; the user's messages and the notes get their room first.
 
@@ -195,10 +197,28 @@ that their next steps are at the end. Limit 30,000 characters; the user's messag
 - **After a second rollover.** The earlier user messages are not gone: OpenCode keeps every row in its database (only the model stops seeing them), and the build reads
   all rows of the session each time, so each summary carries them again. Nothing is copied forward and no extra file exists (tested: a message from before a
   compaction row is in the summary).
-- **Running subagents.** A child is "running" until its report is in the chat (or the session row says it finished). A report that arrives between the ask and the roll is
-  a step that grew the context: inside `notes_gap` the roll goes on, beyond it the chat is asked again or, at OpenCode's own compaction, gets a model summary, never a
-  stale code summary. A user message sent between the ask and the compaction is in the summary (it is also in OpenCode's kept tail).
-- **Exit codes** as for a lane: 3 stale notes; 4 when the user's messages cannot be read.
+- **State at the roll (the header).** The build reads the stored rows: this cycle's ask (a `synthetic` row from the plugin, after the last compaction) and the assistant row
+  before it. *Answered* (that row finished with `stop` and is newer than the last user message): "reply with one short line, start no work, call no tool, wait"; a chat that was
+  asked at a finished answer must not start unrequested work after the roll. *Mid-turn* (any other finish): "carry on from the next steps in the notes", so a chat rolled mid-work
+  is not stopped. *Late* (a user message after the ask): "read it and act on it first". *Unknown* (OpenCode's own compaction, no ask this cycle): either, as the notes say. Tests:
+  `test_the_header_says_what_to_do_at_a_finished_answer_...`.
+- **Running subagents and late reports.** A child is "running" until its report is in the chat (or the session row says it finished). A subagent report (a `synthetic` row,
+  `metadata.source` subagent) whose time is later than the notes file is **quoted word for word** in its own section ("arrived after the notes were written") above the notes,
+  so a chat with several workers does not fall back to a paid model summary each time; it is exit 3 only when the late reports are more than `--report-chars` (or a third of the
+  room). A user message newer than the notes is always quoted and marked the same way. Reports older than the notes are not quoted (the notes have them). A report that arrives
+  between the ask and the roll is also a step that grew the context: inside `notes_gap` the roll goes on, beyond it the chat is asked again or, at OpenCode's own compaction, gets
+  a model summary.
+- **Notes floor.** Chat notes are valid only with at least 300 characters and at least 3 of the 6 topics the ask names (objective, requirements/limits, decisions, work state,
+  next steps, files; matched by words, so this is a cheap check and not proof of quality). Under it the build exits 3; the plugin counts a chat's notes under 300 bytes as no notes,
+  asks again at the next step end (not after `reask_steps`; the ask limits still hold) with a line saying they were too short, and at OpenCode's own compaction gives no code summary.
+  Lanes keep any non-empty notes.
+- **One step not seen.** The compaction hook measures growth as `lastCtx - roll.ctx` from the step ends it saw. A step that began after the request and whose end was not seen
+  counts as 0 growth, so what it added is not checked; the summary replaces it (the user's messages and late reports are read from the database, not from the steps). The bound is
+  one step. `summary_supplied` and `own_compaction` log `unseen_step` (true when the last step started after the request and has not ended).
+- **Exit codes** as for a lane: 3 stale or thin notes, or late reports that do not fit; 4 for a lane whose task cannot be read (the plugin then leaves the session alone); **5** for a
+  chat whose database or user messages (or the child list) cannot be read: a one-off, the compaction gets a model summary and the chat is asked and rolled again later.
+- **Real layout.** OpenCode stores a compaction summary as a `compaction` row (text in `data.summary`, never a `user` row), no message is stored to continue after a compaction, the
+  plugin's ask and a subagent's report are `synthetic` rows; so the second summary carries no earlier summary inside a "### Message" block (`RealLayout` tests, built on the real columns).
 
 **Measured** (scripted 6-message chat with the `orchestrator` agent, Sonnet 5.5 as stored in the turns; sign-off word, a rule, a number that is later changed, one worker; reads to about 146k; `r1/measure.py --chat`, `r1/runs.jsonl`):
 

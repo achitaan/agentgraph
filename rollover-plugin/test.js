@@ -56,9 +56,9 @@ async function harness(settings, { build, leads = "true", from = null, rawSettin
   };
   h.step = (context, finish = "tool-calls", sid = main.sid) => h.emit("session.step.ended", { finish, tokens: { input: 5, output: 10, cache: { read: context - 15, write: 10 } } }, { sid });
   h.notesPath = (sid = main.sid) => path.join(infos.get(sid).location.directory, ".opencode", "handoff", `${sid}.md`);
-  h.notes = (sid = main.sid, ageSeconds = 0) => {
+  h.notes = (sid = main.sid, ageSeconds = 0, size = 5) => {
     const t0 = Date.now(); while (Date.now() === t0) { /* the notes get a later millisecond than every event before them (the plugin compares whole milliseconds) */ }
-    const f = h.notesPath(sid); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, "notes");
+    const f = h.notesPath(sid); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, "notes".padEnd(size, " "));
     if (ageSeconds) { const t = (Date.now() - ageSeconds * 1000) / 1000; fs.utimesSync(f, t, t); }
   };
   h.logRows = () => { try { return fs.readFileSync(path.join(home, "rollover.log"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
@@ -571,7 +571,7 @@ const cases = {
   // ---- chat rollover (x1): a root chat of an agent in chat_agents ----
   async "chat: by default a root chat of the orchestrator is left alone: no ask, no compaction, no summary, no file"() {
     const h = await harness({}); const c = h.add("ses_chat", { parent: null, agent: "orchestrator" });
-    await h.step(130000, "tool-calls", c.sid); await h.step(150000, "stop", c.sid); h.notes(c.sid); await h.step(152000, "stop", c.sid);
+    await h.step(130000, "tool-calls", c.sid); await h.step(150000, "stop", c.sid); h.notes(c.sid, 0, 400); await h.step(152000, "stop", c.sid);
     assert.equal(h.calls.synthetic.length, 0); assert.equal(h.calls.compact.length, 0);
     const ev = { sessionID: c.sid, agent: "orchestrator" }; await h.hooks.compaction(ev); assert.equal(ev.result, undefined);
     assert.deepEqual(h.buildArgs(), []); assert.equal(h.state(c.sid), null, "no state file"); assert.ok(!fs.existsSync(path.join(c.work, ".opencode", "handoff", ".gitignore")));
@@ -593,12 +593,12 @@ const cases = {
   },
   async "chat: the build is told to make the chat summary (with the caps), a lane's build is told --lane"() {
     const h = await harness({ chat_agents: ["orchestrator"], chat_message_chars: 3000, chat_user_chars: 9000 }); const c = h.add("ses_chat", { parent: null, agent: "orchestrator" });
-    await h.step(116000, "tool-calls", c.sid); h.notes(c.sid); await h.step(117000, "tool-calls", c.sid);
+    await h.step(116000, "tool-calls", c.sid); h.notes(c.sid, 0, 400); await h.step(117000, "tool-calls", c.sid);
     assert.equal(h.calls.compact.length, 1); const ev = { sessionID: c.sid, agent: "orchestrator" }; await h.hooks.compaction(ev);
     assert.equal(ev.result && ev.result.summary.trim(), "SUMMARY");
     const line = h.buildArgs()[0]; assert.ok(/--chat /.test(line + " ") && /--user-message-chars 3000/.test(line) && /--user-chars 9000/.test(line) && !/--lane/.test(line), line);
     await h.emit("session.compaction.ended", { reason: "manual" }, { sid: c.sid }); assert.ok(h.has("rolled"));
-    const lane = h.add("ses_lane", { agent: "impl-openai" }); await h.step(116000, "tool-calls", lane.sid); h.notes(lane.sid); await h.step(117000, "tool-calls", lane.sid);
+    const lane = h.add("ses_lane", { agent: "impl-openai" }); await h.step(116000, "tool-calls", lane.sid); h.notes(lane.sid, 0, 400); await h.step(117000, "tool-calls", lane.sid);
     await h.hooks.compaction({ sessionID: lane.sid, agent: "impl-openai" });
     const laneLine = h.buildArgs()[1]; assert.ok(/--lane/.test(laneLine) && !/--chat/.test(laneLine), laneLine); h.stop();
   },
@@ -616,7 +616,7 @@ const cases = {
     const h = await harness({ chat_agents: ["orchestrator"] }); const c = h.add("ses_chat", { parent: null, agent: "orchestrator" });
     await h.step(120000, "stop", c.sid); assert.equal(h.calls.synthetic.length, 1, "asked at the end of the answer");
     const lane = h.add("ses_lane", { agent: "impl-openai" }); await h.step(120000, "stop", lane.sid); assert.equal(h.calls.synthetic.length, 1, "a lane's turn end asks nothing");
-    h.notes(c.sid); await h.step(121000, "stop", c.sid);          // the answer to the ask: notes written, one short line
+    h.notes(c.sid, 0, 400); await h.step(121000, "stop", c.sid);          // the answer to the ask: notes written, one short line
     assert.equal(h.calls.compact.length, 1, "the notes cover the context: the compaction is requested at once");
     const ev = { sessionID: c.sid, agent: "orchestrator" }; await h.hooks.compaction(ev); assert.equal(ev.result && ev.result.summary.trim(), "SUMMARY");
     await h.emit("session.compaction.ended", { reason: "manual" }, { sid: c.sid }); assert.ok(h.has("rolled")); h.stop();
@@ -625,7 +625,7 @@ const cases = {
     const h = await harness({ chat_agents: ["orchestrator"] }); const c = h.add("ses_chat", { parent: null, agent: "orchestrator" });
     await h.step(129000, "tool-calls", c.sid);
     const stale = { sessionID: c.sid, agent: "orchestrator" }; await h.hooks.compaction(stale); assert.equal(stale.result, undefined); assert.ok(h.has("own_compaction", /left, no notes file/));
-    h.notes(c.sid);
+    h.notes(c.sid, 0, 400);
     const own = { sessionID: c.sid, agent: "orchestrator" }; await h.hooks.compaction(own); assert.equal(own.result && own.result.summary.trim(), "SUMMARY"); assert.ok(h.has("own_compaction", /supplied/)); h.stop();
   },
   async "chat: a subagent's report between the ask and the roll: before the notes it changes nothing, after the request a small one is covered, a big one falls back to a model summary (never a stale code summary)"() {
@@ -633,28 +633,69 @@ const cases = {
     const a = await mk();                                                        // the report arrives before the notes are written
     await a.h.step(116000, "tool-calls", a.c.sid); await a.h.step(140000, "stop", a.c.sid);
     assert.equal(a.h.calls.compact.length, 0); assert.equal(a.h.calls.synthetic.length, 1, "no second ask yet");
-    a.h.notes(a.c.sid); await a.h.step(141000, "stop", a.c.sid); assert.equal(a.h.calls.compact.length, 1, "the notes step covers it"); a.h.stop();
+    a.h.notes(a.c.sid, 0, 400); await a.h.step(141000, "stop", a.c.sid); assert.equal(a.h.calls.compact.length, 1, "the notes step covers it"); a.h.stop();
     const b = await mk();                                                        // a small report between the request and the hook
-    await b.h.step(116000, "tool-calls", b.c.sid); b.h.notes(b.c.sid); await b.h.step(117000, "tool-calls", b.c.sid); await b.h.step(120000, "stop", b.c.sid);
+    await b.h.step(116000, "tool-calls", b.c.sid); b.h.notes(b.c.sid, 0, 400); await b.h.step(117000, "tool-calls", b.c.sid); await b.h.step(120000, "stop", b.c.sid);
     const e1 = b.ev(); await b.h.hooks.compaction(e1); assert.equal(e1.result && e1.result.summary.trim(), "SUMMARY"); b.h.stop();
     const c = await mk();                                                        // a big one: the notes do not cover it, so no code summary
-    await c.h.step(116000, "tool-calls", c.c.sid); c.h.notes(c.c.sid); await c.h.step(117000, "tool-calls", c.c.sid); await c.h.step(142000, "stop", c.c.sid);
+    await c.h.step(116000, "tool-calls", c.c.sid); c.h.notes(c.c.sid, 0, 400); await c.h.step(117000, "tool-calls", c.c.sid); await c.h.step(142000, "stop", c.c.sid);
     const e2 = c.ev(); await c.h.hooks.compaction(e2); assert.equal(e2.result, undefined); assert.ok(c.h.has("fell_back", /grew/));
     await c.h.emit("session.compaction.ended", { reason: "manual" }, { sid: c.c.sid }); assert.ok(c.h.has("compacted")); assert.equal(c.h.calls.compact.length, 1, "no second request"); c.h.stop();
   },
   async "chat: a settings edit that takes the agent out of chat_agents stops the summary at once, and the chat is out of scope again"() {
     const k = await harness({ chat_agents: ["orchestrator"] }); const kc = k.add("ses_chat", { parent: null, agent: "orchestrator" });
-    await k.step(129000, "tool-calls", kc.sid); k.notes(kc.sid);
+    await k.step(129000, "tool-calls", kc.sid); k.notes(kc.sid, 0, 400);
     const control = { sessionID: kc.sid, agent: "orchestrator" }; await k.hooks.compaction(control); assert.equal(control.result && control.result.summary.trim(), "SUMMARY", "in scope before the edit"); k.stop();
     const h = await harness({ chat_agents: ["orchestrator"] }); const c = h.add("ses_chat", { parent: null, agent: "orchestrator" });
-    await h.step(129000, "tool-calls", c.sid); h.notes(c.sid);
+    await h.step(129000, "tool-calls", c.sid); h.notes(c.sid, 0, 400);
     fs.writeFileSync(h.settingsFile, JSON.stringify({ agentgraph_bin: JSON.parse(fs.readFileSync(h.settingsFile, "utf8")).agentgraph_bin })); const f = Date.now() / 1000 + 5; fs.utimesSync(h.settingsFile, f, f);
     const ev = { sessionID: c.sid, agent: "orchestrator" }; await h.hooks.compaction(ev); assert.equal(ev.result, undefined); assert.deepEqual(h.buildArgs(), []); h.stop();
   },
-  async "chat: a listed agent in skip_agents and workers_only true is in scope for its root chat only; chat_agents is in rollover.json with the other defaults"() {
+  async "chat: rollover.json lists the chat settings with the defaults (workers_only true, orchestrator still in skip_agents)"() {
     const s = JSON.parse(fs.readFileSync(path.join(__dirname, "rollover.json"), "utf8"));
     assert.deepEqual(s.chat_agents, []); assert.equal(s.chat_ask_at, null); assert.ok(s.skip_agents.includes("orchestrator")); assert.equal(s.workers_only, true);
     assert.ok(s.chat_message_chars > 0 && s.chat_user_chars > s.chat_message_chars);
+  },
+  // ---- fix round (x1 review): floor for chat notes, one-off database failure, unseen_step ----
+  async "chat: notes under the floor do not cover the context; the chat is asked again at the next step end with a line that says so, then rolls; a lane's short notes still roll"() {
+    const h = await harness({ chat_agents: ["orchestrator"] }); const c = h.add("ses_chat", { parent: null, agent: "orchestrator" });
+    await h.step(116000, "tool-calls", c.sid); assert.equal(h.calls.synthetic.length, 1);
+    assert.ok(!/too short/.test(h.calls.synthetic[0].text));
+    h.notes(c.sid, 0, 40); await h.step(117000, "stop", c.sid);                       // "Notes saved." and little else
+    assert.equal(h.calls.compact.length, 0, "no roll on thin notes"); assert.equal(h.calls.synthetic.length, 2, "asked again at once, not after reask_steps");
+    assert.ok(/too short/.test(h.calls.synthetic[1].text) && /Write them again in full/.test(h.calls.synthetic[1].text));
+    h.notes(c.sid, 0, 400); await h.step(118000, "stop", c.sid); assert.equal(h.calls.compact.length, 1, "full notes roll");
+    const own = await harness({ chat_agents: ["orchestrator"] }); const o = own.add("ses_chat", { parent: null, agent: "orchestrator" });
+    await own.step(129000, "tool-calls", o.sid); own.notes(o.sid, 0, 40); const ev = { sessionID: o.sid, agent: "orchestrator" }; await own.hooks.compaction(ev);
+    assert.equal(ev.result, undefined, "thin notes: OpenCode's own compaction gets no code summary"); assert.ok(own.has("own_compaction", /left, no notes file/));
+    const l = await harness({}); await l.step(116000); l.notes(); await l.step(117000); assert.equal(l.calls.compact.length, 1, "a lane's 5-byte notes still roll");
+    l.stop(); own.stop(); h.stop();
+  },
+  async "chat: a build that cannot read the database (exit 5) is a one-off: that compaction gets a model summary and the chat is asked and rolled again later; exit 4 still leaves a session alone"() {
+    const h = await harness({ chat_agents: ["orchestrator"] }, { build: "exit 5" }); const c = h.add("ses_chat", { parent: null, agent: "orchestrator" });
+    await h.step(116000, "tool-calls", c.sid); h.notes(c.sid, 0, 400); await h.step(117000, "tool-calls", c.sid);
+    const ev = { sessionID: c.sid, agent: "orchestrator" }; await h.hooks.compaction(ev);
+    assert.equal(ev.result, undefined); assert.ok(h.has("fell_back", /one-off/)); assert.ok(!h.has("task_unreadable"));
+    await h.emit("session.compaction.ended", { reason: "manual" }, { sid: c.sid });
+    await h.step(30000, "stop", c.sid); await h.step(120000, "tool-calls", c.sid);
+    assert.equal(h.calls.synthetic.length, 2, "asked again in the next cycle: not switched off for the life of the process"); h.stop();
+    const g = await harness({ chat_agents: ["orchestrator"] }, { build: "exit 4" }); const d = g.add("ses_chat", { parent: null, agent: "orchestrator" });
+    await g.step(116000, "tool-calls", d.sid); g.notes(d.sid, 0, 400); await g.step(117000, "tool-calls", d.sid); await g.hooks.compaction({ sessionID: d.sid, agent: "orchestrator" });
+    assert.ok(g.has("task_unreadable")); g.stop();
+  },
+  async "chat: unseen_step is logged when a step that began after the request has not ended (its growth is not checked), and not otherwise; the same for OpenCode's own compaction"() {
+    const mk = async () => { const h = await harness({ chat_agents: ["orchestrator"] }); const c = h.add("ses_chat", { parent: null, agent: "orchestrator" }); return { h, c, ev: () => ({ sessionID: c.sid, agent: "orchestrator" }) }; };
+    const row = (h, event) => h.logRows().find((r) => r.event === event);
+    const a = await mk();                                             // requested, a step is running when the hook is called
+    await a.h.step(116000, "tool-calls", a.c.sid); a.h.notes(a.c.sid, 0, 400); await a.h.step(117000, "tool-calls", a.c.sid);
+    await sleep(5); await a.h.emit("session.step.started", { agent: "orchestrator", model: { id: "claude-sonnet-5-5" } }, { sid: a.c.sid });
+    await a.h.hooks.compaction(a.ev()); assert.equal(row(a.h, "summary_supplied").unseen_step, true); a.h.stop();
+    const b = await mk();                                             // requested, every step end seen
+    await b.h.step(116000, "tool-calls", b.c.sid); b.h.notes(b.c.sid, 0, 400); await b.h.step(117000, "tool-calls", b.c.sid);
+    await b.h.hooks.compaction(b.ev()); assert.equal(row(b.h, "summary_supplied").unseen_step, false); b.h.stop();
+    const c = await mk();                                             // OpenCode's own compaction while a step runs, notes written inside it
+    await c.h.step(129000, "tool-calls", c.c.sid); await sleep(5); await c.h.emit("session.step.started", { agent: "orchestrator", model: { id: "claude-sonnet-5-5" } }, { sid: c.c.sid });
+    c.h.notes(c.c.sid, 0, 400); await c.h.hooks.compaction(c.ev()); assert.equal(row(c.h, "own_compaction").unseen_step, true); c.h.stop();
   },
   async "N3: a request is dropped by a reload and then gets no summary either"() {
     const d = await harness({}); await d.step(116000); d.notes(); await d.step(117000); assert.equal(d.calls.compact.length, 1);

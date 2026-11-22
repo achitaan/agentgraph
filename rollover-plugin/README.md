@@ -17,7 +17,9 @@ and no model call. Full description, settings and measurements: `docs/ROLLOVER.m
 **Main chats (off by default).** `"chat_agents": ["orchestrator"]` in `rollover.json` covers the root chat of that agent (the child sessions and every other agent keep the rules below):
 a chat-shaped ask (what the notes must hold: objective, the user's rules in their words, decisions with what they replaced, work state with subagent ids, next steps, files, expensive facts; if the answer
 was finished, notes and one short line), then a summary built by `handoff build --chat`: the user's own messages word for word (capped by `chat_message_chars` / `chat_user_chars`), the chat's
-subagent sessions, the open nodes of the task graphs, then the notes. `chat_ask_at` moves the ask for chats only (90,000 is safer when one step can read 24,000 tokens). See `docs/ROLLOVER.md`, "Main chats".
+subagent sessions, the open nodes of the task graphs, then the notes. `chat_ask_at` moves the ask for chats only (90,000 is safer when one step can read 24,000 tokens). The summary header says what to do now (rolled at a finished answer: one line, start nothing; rolled mid-turn: carry on);
+user messages and subagent reports newer than the notes are quoted and marked; chat notes under 300 characters (or naming fewer than 3 of the ask's topics) are asked for again; an unreadable database (exit 5) is a
+one-off model summary, not a switch-off; `unseen_step` in the log marks a step whose end was not seen (the one-step bound). See `docs/ROLLOVER.md`, "Main chats".
 
 **What it never touches:** `opencode.json`, the lane's code, git, root sessions (unless listed in `chat_agents`), the agents in `skip_agents` (default orchestrator,
 build, plan, side-chat, council) and the hubs, council leads and team leads that `agentgraph handoff leads` prints (read once at start;

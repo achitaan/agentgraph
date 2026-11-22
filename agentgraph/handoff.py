@@ -40,8 +40,12 @@ NOTES_SUBDIR = Path(".opencode") / "handoff"
 LOG_NAME = "rollover.log"
 SESSION = re.compile(r"[A-Za-z0-9_-]{1,100}")
 MAX_AGE, LIMIT, TASK_CHARS, EVIDENCE_CHARS, FILE_NAMES, NOTES_TAIL, MIN_LIMIT = 1800, 24_000, 6_000, 1_500, 60, 2_000, 1_000
-STALE_EXIT, NO_TASK_EXIT = 3, 4
+STALE_EXIT, NO_TASK_EXIT, DB_EXIT = 3, 4, 5   # 5: the database could not be read (a one-off: the caller may try again later); 4: the lane's task is not in it
 CHAT_LIMIT, USER_MESSAGE_CHARS, USER_CHARS, SUBAGENT_CHARS, GRAPH_CHARS = 30_000, 4_000, 12_000, 3_500, 2_500
+CHAT_NOTES_MIN, REPORT_CHARS = 300, 8_000
+# the topics the chat ask names; notes that mention fewer than 3 of them (or are under CHAT_NOTES_MIN characters) are not a handoff
+NOTE_TOPICS = (("objective", "goal"), ("requirement", "limit", "rule"), ("decision", "approv"), ("done", "running", "blocked", "state"), ("next",), ("file",))
+WHY = [""]   # why the last build gave exit 3 (for the one line on stderr)
 GIT_SECONDS = 5
 GIT_TIMED_OUT = "git timed out"
 DB_SECONDS = 1.0
@@ -181,42 +185,87 @@ def is_root(session: str, db_path, timeout: float = DB_SECONDS) -> bool:
     return bool(row) and row[0] is None
 
 
-def user_messages(session: str, db_path, timeout: float = DB_SECONDS) -> list[str] | None:
-    """What the user typed in this session, oldest first, word for word; None when the database cannot be read.
+def _created(data: dict):
+    created = (data.get("time") or {}).get("created") if isinstance(data.get("time"), dict) else None
+    return created if isinstance(created, (int, float)) else None
 
-    Only rows of type `user` count: the messages OpenCode makes for other reasons are rows of type `synthetic` (a subagent's report,
-    a shell job, the rollover plugin's own ask) or `system`, and are left out. What cannot be told apart in the stored data: a `user`
-    row made by a command or skill expansion, or sent by a script, looks like typing. The rows stay in the database after a compaction
-    (the model no longer sees them), so every summary can carry them again."""
+
+def read_chat(session: str, db_path, timeout: float = DB_SECONDS) -> dict | None:
+    """What the summary of a main chat is made of, read from the stored rows; None when the database cannot be read.
+
+    Row layout of OpenCode 2.3 (checked on real chats): the user's typing is a row of type `user` (data.text, data.time.created in ms);
+    a subagent's report is a `synthetic` row with metadata {source: subagent, childID, agent, state} whose text is the report; this plugin's
+    ask is a `synthetic` row with metadata.source agentgraph-rollover; the summary of a compaction is a row of type `compaction` with its text
+    in data.summary (not a user row), and no message is stored to continue after a compaction; "Loaded AGENTS.md" and shell output are other
+    `synthetic` rows. So only `user` rows are quoted as the user's words. What cannot be told apart: a `user` row made by a command or skill
+    expansion or a script looks like typing. The rows stay after a compaction (the model stops seeing them), so each summary can carry them again.
+
+    Returns {users: [{seq, text, ms}], reports: [{seq, text, ms, child, agent, state}], state, children}; `state` is what the latest roll
+    came into: answered (the latest user message was answered before the ask), midturn, late (a user message came after the ask) or unknown."""
     db = _open_db(db_path, timeout)
     if db is None:
         return None
     try:
-        rows = db.execute("SELECT data FROM session_message WHERE session_id=? AND type='user' ORDER BY seq", (session,)).fetchall()
+        users = []
+        for seq, raw in db.execute("SELECT seq, data FROM session_message WHERE session_id=? AND type='user' ORDER BY seq", (session,)):
+            try:
+                data = json.loads(raw)
+            except ValueError:
+                continue
+            text = data.get("text") if isinstance(data, dict) else None
+            if isinstance(text, str) and text.strip() and not text.lstrip().startswith("# Handoff summary"):
+                users.append({"seq": seq, "text": text.strip(), "ms": _created(data)})
+        reports, asks = [], []
+        for seq, src, raw in db.execute("SELECT seq, json_extract(data, '$.metadata.source'), data FROM session_message WHERE session_id=? AND type='synthetic' "
+                                        "AND json_extract(data, '$.metadata.source') IN ('subagent', 'agentgraph-rollover') ORDER BY seq", (session,)):
+            if src == "agentgraph-rollover":
+                asks.append(seq)
+                continue
+            try:
+                data = json.loads(raw)
+            except ValueError:
+                continue
+            meta = data.get("metadata") if isinstance(data, dict) and isinstance(data.get("metadata"), dict) else {}
+            if meta.get("childID") and isinstance(data.get("text"), str):
+                reports.append({"seq": seq, "text": data["text"].strip(), "ms": _created(data), "child": str(meta["childID"]),
+                                "agent": str(meta.get("agent") or "?"), "state": str(meta.get("state") or "")})
+        # the compaction being built has its row already (found in a real run: no summary yet): only a compaction with a summary spends an ask
+        last_compaction = db.execute("SELECT MAX(seq) FROM session_message WHERE session_id=? AND type='compaction' "
+                                     "AND length(COALESCE(json_extract(data, '$.summary'), '')) > 0", (session,)).fetchone()[0] or 0
+        mine = [a for a in asks if a > last_compaction]
+        state = "unknown"
+        if mine:
+            first_ask = mine[0]
+            before = db.execute("SELECT seq, json_extract(data, '$.finish') FROM session_message WHERE session_id=? AND type='assistant' AND seq<? ORDER BY seq DESC LIMIT 1",
+                                (session, first_ask)).fetchone()
+            last_user = max((u["seq"] for u in users if u["seq"] < first_ask), default=0)
+            if any(u["seq"] > first_ask for u in users):
+                state = "late"
+            elif before and before[0] > last_user:
+                state = "answered" if before[1] == "stop" else "midturn"
+        rows = db.execute("SELECT id, agent, title, idle_outcome FROM session_v2 WHERE parent_id=? ORDER BY time_created DESC", (session,)).fetchall()
     except sqlite3.Error:
         return None
     finally:
         db.close()
-    out = []
-    for (raw,) in rows:
-        try:
-            data = json.loads(raw)
-        except ValueError:
-            continue
-        text = data.get("text") if isinstance(data, dict) else None
-        if isinstance(text, str) and text.strip():
-            out.append(text.strip())
-    return out
+    latest = {}
+    for r in reports:          # ORDER BY seq: a child that was resumed ends with its newest state
+        latest[r["child"]] = r["state"]
+    children = [{"id": r[0], "agent": r[1] or "?", "title": " ".join(str(r[2] or "").split()), "state": latest.get(r[0]) or r[3] or "running"} for r in rows]
+    children.sort(key=lambda c: c["state"] != "running")
+    return {"users": users, "reports": reports, "state": state, "children": children}
 
 
-def user_block(messages: list[str], per_message: int, total: int) -> str:
-    """The user's messages for the summary: the first (it states the job) and the newest that fit `total` characters, each cut in the
-    middle at `per_message`; one line says which ones were left out."""
-    cut = [cut_middle(m, per_message) for m in messages]
+def user_block(messages: list[dict], per_message: int, total: int) -> str:
+    """The user's messages for the summary: the first (it states the job), every one that arrived after the notes, and the newest that fit
+    `total` characters, each cut in the middle at `per_message`; one line says which ones were left out."""
+    cut = [cut_middle(m["text"], per_message) for m in messages]
     n = len(cut)
-    keep = {0}
-    used = len(cut[0])
+    keep = {0} | {i for i, m in enumerate(messages) if m.get("newer")}
+    used = sum(len(cut[i]) for i in keep)
     for i in range(n - 1, 0, -1):
+        if i in keep:
+            continue
         if used + len(cut[i]) > total:
             break
         keep.add(i)
@@ -225,36 +274,13 @@ def user_block(messages: list[str], per_message: int, total: int) -> str:
     for i in range(n):
         if i in keep:
             if skipped_from is not None:
-                parts.append(f"[messages {skipped_from + 1} to {i} of {n} are left out: the size limit of {total} characters; the first and the newest are kept]")
+                parts.append(f"[messages {skipped_from + 1} to {i} of {n} are left out: the size limit of {total} characters; the first, the newest and any that arrived after the notes are kept]")
                 skipped_from = None
-            parts.append(f"### Message {i + 1} of {n}\n\n{cut[i]}")
+            tag = " (arrived after the notes were written: the notes do not mention it)" if messages[i].get("newer") else ""
+            parts.append(f"### Message {i + 1} of {n}{tag}\n\n{cut[i]}")
         elif skipped_from is None:
             skipped_from = i
     return "\n\n".join(parts)
-
-
-def child_sessions(session: str, db_path, timeout: float = DB_SECONDS) -> list[dict] | None:
-    """The sessions this chat started: id, agent, title, state. The state is what the subagent's report in the chat says (completed, error,
-    cancelled), else what the session row says (succeeded, failed, interrupted); with neither it is running. Running ones come first."""
-    db = _open_db(db_path, timeout)
-    if db is None:
-        return None
-    try:
-        rows = db.execute("SELECT id, agent, title, idle_outcome FROM session_v2 WHERE parent_id=? ORDER BY time_created DESC", (session,)).fetchall()
-        reports = {}
-        for (raw,) in db.execute("SELECT data FROM session_message WHERE session_id=? AND type='synthetic'", (session,)):
-            try:
-                meta = (json.loads(raw) or {}).get("metadata") or {}
-            except ValueError:
-                continue
-            if isinstance(meta, dict) and meta.get("source") == "subagent" and meta.get("childID"):
-                reports[meta["childID"]] = str(meta.get("state") or "")
-    except sqlite3.Error:
-        return None
-    finally:
-        db.close()
-    out = [{"id": r[0], "agent": r[1] or "?", "title": " ".join(str(r[2] or "").split()), "state": reports.get(r[0]) or r[3] or "running"} for r in rows]
-    return sorted(out, key=lambda c: c["state"] != "running")
 
 
 def subagents_text(children: list[dict], size: int) -> str:
@@ -271,7 +297,7 @@ def subagents_text(children: list[dict], size: int) -> str:
             break
         shown.append(line)
         used += len(line) + 1
-    return "\n".join(shown) + f"\n- ... and {len(lines) - len(shown)} more sessions (older ones)"
+    return "\n".join(shown) + f"\n- ... and {len(lines) - len(shown)} more sessions (the oldest finished ones)"
 
 
 def graphs_text(directory: Path, size: int) -> str:
@@ -413,12 +439,14 @@ def _files_text(names, scope) -> str:
 def build(session: str, directory=None, *, db_path=None, notes_dir=None, limit: int | None = None, max_age: float | None = None,
           allow_stale: bool = False, newer_than: float | None = None, task_chars: int = TASK_CHARS,
           db_timeout: float = DB_SECONDS, chat: bool | None = None, user_message_chars: int = USER_MESSAGE_CHARS,
-          user_chars: int = USER_CHARS) -> tuple[int, str]:
+          user_chars: int = USER_CHARS, report_chars: int = REPORT_CHARS) -> tuple[int, str]:
     """(exit code, summary text). Exit 3 with an empty text when the notes are missing, empty, or older than `newer_than`
-    (epoch seconds) or, when that is not given, than `max_age`; exit 4 when the task cannot be read (for a chat: when the user's
-    messages cannot be read). `chat` True builds the summary of a main chat (the user's own messages, the chat's subagent sessions,
+    (epoch seconds) or, when that is not given, than `max_age`; exit 4 when the lane's task cannot be read; for a chat exit 5 when the
+    database or the user's messages cannot be read (a one-off, not a verdict on the session), and exit 3 also when the notes are too thin or the
+    subagent reports that arrived after them do not fit. `chat` True builds the summary of a main chat (the user's own messages, the chat's subagent sessions,
     the task graphs, then the notes), False the lane's; None chooses by the database: a session without a parent is a chat."""
     _session(session)
+    WHY[0] = ""
     if chat is None:
         chat = is_root(session, db_path or default_db(), db_timeout)
     if limit is None:
@@ -438,7 +466,11 @@ def build(session: str, directory=None, *, db_path=None, notes_dir=None, limit: 
         return STALE_EXIT, ""
     notes = path.read_text(encoding="utf-8", errors="replace").strip()
     if chat:
-        return _build_chat(session, work, notes, db_path or default_db(), limit, db_timeout, user_message_chars, user_chars)
+        try:
+            notes_ms = path.stat().st_mtime * 1000
+        except OSError:
+            return STALE_EXIT, ""
+        return _build_chat(session, work, notes, db_path or default_db(), limit, db_timeout, user_message_chars, user_chars, notes_ms, report_chars)
     task, started = first_message(session, db_path or default_db(), db_timeout)
     task = task.strip()
     if not task:
@@ -479,25 +511,65 @@ def build(session: str, directory=None, *, db_path=None, notes_dir=None, limit: 
     return 0, head + "\n" + "\n".join(parts) + "\n" + notes_part
 
 
-def _build_chat(session: str, work: Path, notes: str, db_path, limit: int, db_timeout: float, per_message: int, total: int) -> tuple[int, str]:
-    messages = user_messages(session, db_path, db_timeout)
-    if not messages:
-        return NO_TASK_EXIT, ""
-    children = child_sessions(session, db_path, db_timeout) or []
+STATE_LINES = {
+    "answered": ("State at the roll: the latest user message (the last one below) was already answered before the notes were asked for. Reply with one short "
+                 "line (for example `Rolled over; ready.`), start no work, call no tool, do not repeat the answer, and wait. A user message or a subagent "
+                 "report that arrives later is new input: act on it."),
+    "midturn": ("State at the roll: the roll came in the middle of the work on the latest user message (the last one below). Carry on from the next steps "
+                "in the notes until that work is done."),
+    "late": ("State at the roll: the last user message below arrived after the notes were written, so the notes do not mention it: read it and act on it "
+             "first, then carry on with the notes."),
+    "unknown": ("State at the roll is not known. If the notes say the latest user message is answered, reply with one short line and wait; if its work "
+                "is not finished, carry on from the next steps in the notes."),
+}
+
+
+def _thin(notes: str) -> bool:
+    low = notes.lower()
+    return len(notes) < CHAT_NOTES_MIN or sum(1 for topic in NOTE_TOPICS if any(w in low for w in topic)) < 3
+
+
+def _build_chat(session: str, work: Path, notes: str, db_path, limit: int, db_timeout: float, per_message: int, total: int,
+                notes_ms: float = 0, report_chars: int = REPORT_CHARS) -> tuple[int, str]:
+    if _thin(notes):
+        WHY[0] = f"the notes are too thin for a handoff (under {CHAT_NOTES_MIN} characters, or fewer than 3 of the topics the ask names)"
+        return STALE_EXIT, ""
+    chat = read_chat(session, db_path, db_timeout)
+    if chat is None or not chat["users"]:
+        WHY[0] = "the database or the user's messages could not be read"
+        return DB_EXIT, ""
+    messages = chat["users"]
+    for m in messages:
+        m["newer"] = m["ms"] is not None and m["ms"] > notes_ms
     head = ("# Handoff summary (main chat)\n\nThis chat was rolled over: the earlier conversation was replaced by this text, which code put together "
-            "from the user's own messages (word for word), the sessions this chat started, the task graphs of the project and the notes the "
-            "orchestrator wrote. Anything else from the earlier conversation is gone. Carry on from the next steps in the notes; where a user "
-            "message and the notes disagree, the later user message wins; ask the user nothing that these already answer.\n")
+            "from the user's own messages (word for word), the subagent reports that arrived after the notes, the sessions this chat started, the task "
+            "graphs of the project and the notes the orchestrator wrote. Anything else from the earlier conversation is gone. Where a user message and "
+            "the notes disagree, the later user message wins; ask the user nothing that these already answer.\n\n**" + STATE_LINES[chat["state"]] + "**\n")
     room = max(0, limit - len(head) - 40)
+    total = min(total, room // 2)                 # the user's messages never take more than half the room, one message never more than all of it
+    per_message = min(per_message, max(200, total // 2))   # so the first and the newest message always fit together
+    late = [r for r in chat["reports"] if r["ms"] is not None and r["ms"] > notes_ms]
+    size = sum(len(r["text"]) for r in late)
+    if size > min(report_chars, room // 3):
+        WHY[0] = f"{len(late)} subagent report(s) of {size} characters arrived after the notes and do not fit the {min(report_chars, room // 3)} allowed"
+        return STALE_EXIT, ""
     user_part = "## The user's messages (word for word, oldest first)\n\n" + user_block(messages, per_message, total) + "\n"
+    report_part = ""
+    if late:
+        report_part = ("## Subagent reports that arrived after the notes were written (word for word; the notes do not have them)\n\n"
+                       + "\n\n".join(f"### Report from {r['agent']} session {r['child']} ({r['state'] or '?'})\n\n{r['text']}" for r in late) + "\n")
+    if len(user_part) + len(report_part) > room * 0.8:
+        WHY[0] = "the user's messages and the late reports leave too little room for the notes"
+        return STALE_EXIT, ""
     notes_head = "## Notes written by the orchestrator (word for word)\n\n"
-    notes_part = notes_head + cut_notes(notes, max(0, room - len(user_part) - len(notes_head) - 4)) + "\n"
-    left = room - len(user_part) - len(notes_part) - 2
+    notes_part = notes_head + cut_notes(notes, max(0, room - len(user_part) - len(report_part) - len(notes_head) - 4)) + "\n"
+    left = room - len(user_part) - len(report_part) - len(notes_part) - 2
+    children = chat["children"]
     sections = [("Work folder", str(work)),
                 ("Sessions this chat started (id, agent, state, what it was asked)", subagents_text(children, SUBAGENT_CHARS) if children else None),
                 ("Task graphs in the project", graphs_text(work, GRAPH_CHARS) or None)]
-    parts = [user_part]
-    for title, body in sections:   # what is left after the user's messages and the notes goes to these, in order
+    parts = [user_part] + ([report_part] if report_part else [])
+    for title, body in sections:   # what is left after the user's messages, the reports and the notes goes to these, in order
         if body is None:
             continue
         block = f"## {title}\n\n"
@@ -590,6 +662,7 @@ def _parser() -> argparse.ArgumentParser:
             kind.add_argument("--chat", action="store_true", help="the summary of a main chat: the user's own messages word for word, the chat's subagent sessions, the task graphs, then the notes")
             kind.add_argument("--lane", action="store_true", help="the summary of a lane (the default for a session that has a parent; without either flag a session with no parent is built as a chat)")
             sp.add_argument("--user-message-chars", type=int, default=USER_MESSAGE_CHARS, help=f"chat: most characters of one user message (the middle is cut; default {USER_MESSAGE_CHARS})")
+            sp.add_argument("--report-chars", type=int, default=REPORT_CHARS, help=f"chat: most characters of subagent reports that arrived after the notes (more means exit 3; default {REPORT_CHARS})")
             sp.add_argument("--user-chars", type=int, default=USER_CHARS, help=f"chat: most characters of user messages in all (the first and the newest are kept; default {USER_CHARS})")
     return parser
 
@@ -623,9 +696,10 @@ def main(argv=None) -> int:
             code, text = build(args.session, args.dir, db_path=args.db, notes_dir=args.notes_dir, limit=args.limit,
                                max_age=args.max_age, allow_stale=args.allow_stale, newer_than=args.newer_than,
                                chat=True if args.chat else False if args.lane else None,
-                               user_message_chars=max(200, args.user_message_chars), user_chars=max(1000, args.user_chars))
+                               user_message_chars=max(200, args.user_message_chars), user_chars=max(1000, args.user_chars), report_chars=max(0, args.report_chars))
             if code:
-                print("handoff: notes missing or stale" if code == STALE_EXIT else "handoff: the task (first user message) could not be read", file=sys.stderr)
+                print(("handoff: notes missing or stale" + (f" ({WHY[0]})" if WHY[0] else "")) if code == STALE_EXIT
+                      else f"handoff: {WHY[0]}" if code == DB_EXIT else "handoff: the task (first user message) could not be read", file=sys.stderr)
                 return code
             sys.stdout.write(text)
     except HandoffError as exc:

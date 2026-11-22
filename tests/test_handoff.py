@@ -404,6 +404,11 @@ class Leads(Base):
         self.assertTrue({"council", "orchestrator"} <= set(out.split()))
 
 
+CHAT_NOTES = ("## Objective\nNOTES-OF-THE-ORCHESTRATOR: keep the retry limit and the sign-off word straight.\n## Requirements and limits\nThe user said never to edit protected.txt "
+              "and that the limit is 9.\n## Decisions\nThe limit 9 replaced 7.\n## Work state\nDone: reading. Running: nothing. Blocked: nothing.\n## Next steps\nstep one, then step two.\n"
+              "## Files\nsrc/mod01.py holds the ids.\n")
+
+
 class ChatBuild(Base):
     """`handoff build --chat`: the summary of a main chat. The database has session_v2 (the chat is a root session; two child sessions) and
     the message rows of a real chat: the user's typing is type `user`; a subagent's report, a shell job and the plugin's ask are `synthetic`."""
@@ -429,7 +434,7 @@ class ChatBuild(Base):
             db.execute("INSERT INTO session_message VALUES (?,?,?,?)", (SID, seq, kind, json.dumps(data)))
         db.commit()
         db.close()
-        self.notes("## Objective\nNOTES-OF-THE-ORCHESTRATOR\n## Next steps\nstep one\n")
+        self.notes(CHAT_NOTES)
 
     def test_the_users_messages_come_word_for_word_in_order_and_nothing_else_does(self):
         code, out, err = self.build("--chat")
@@ -505,25 +510,179 @@ class ChatBuild(Base):
         self.assertNotIn("REPORT-2", out); self.assertNotIn("ASK-2", out)
         self.assertIn("ses_child_run (impl-openai, completed)", out, "a report that arrived makes the child finished")
 
+    # ---- the fix round (x1 review): state at the roll, late reports, late messages, floor, caps, real layout ----
+
+    def put(self, rows):
+        """Replace the chat's rows: (seq, type, data)."""
+        db = sqlite3.connect(self.db)
+        db.execute("DELETE FROM session_message WHERE session_id=?", (SID,))
+        for seq, kind, data in rows:
+            db.execute("INSERT INTO session_message VALUES (?,?,?,?)", (SID, seq, kind, json.dumps(data)))
+        db.commit(); db.close()
+
+    ASK = {"text": "ASK", "metadata": {"source": "agentgraph-rollover"}}
+
+    def test_the_header_says_what_to_do_at_a_finished_answer_and_does_not_stop_a_chat_that_was_rolled_mid_turn(self):
+        user = lambda s, x: (s, "user", {"text": x, "time": {"created": 1}})
+        asst = lambda s, f: (s, "assistant", {"finish": f, "content": []})
+        self.put([user(1, "do the first thing"), asst(2, "tool-calls"), asst(3, "stop"), (4, "idle", {}), (5, "synthetic", self.ASK), asst(6, "tool-calls")])
+        code, out, _ = self.build("--chat")
+        self.assertIn("already answered", out); self.assertIn("start no work", out); self.assertNotIn("Carry on from the next steps", out)
+        self.put([user(1, "do the first thing"), asst(2, "tool-calls"), (3, "synthetic", self.ASK), asst(4, "tool-calls")])
+        code, out, _ = self.build("--chat")
+        self.assertIn("middle of the work", out); self.assertIn("Carry on from the next steps in the notes", out); self.assertNotIn("start no work", out)
+        self.put([user(1, "do the first thing"), asst(2, "stop"), (3, "synthetic", self.ASK), asst(4, "tool-calls"), user(5, "LATE: a new request")])
+        code, out, _ = self.build("--chat")
+        self.assertIn("arrived after the notes were written", out); self.assertNotIn("start no work", out)
+        self.put([user(1, "do the first thing"), asst(2, "stop")])        # no ask in this cycle (OpenCode's own compaction)
+        code, out, _ = self.build("--chat")
+        self.assertIn("State at the roll is not known", out); self.assertIn("if its work is not finished, carry on", out)
+        self.put([user(1, "do the first thing"), asst(2, "stop"), (3, "synthetic", self.ASK), (4, "compaction", {"summary": "S"}), user(5, "second request"), asst(6, "tool-calls")])
+        code, out, _ = self.build("--chat")      # an ask from before the last compaction does not describe this roll
+        self.assertIn("State at the roll is not known", out)
+
+    def test_a_user_message_that_is_newer_than_the_notes_is_always_quoted_and_marked(self):
+        now = time.time() * 1000
+        rows = [(1, "user", {"text": "FIRST " + "a" * 3000, "time": {"created": now - 9000}})]
+        for i in range(2, 12):
+            rows.append((i, "user", {"text": f"OLDER{i} " + "b" * 3000, "time": {"created": now - 8000 + i}}))
+        rows.append((20, "user", {"text": "NEWER-THAN-THE-NOTES: use 12", "time": {"created": now + 5000}}))
+        self.put(rows)
+        code, out, _ = self.build("--chat", "--user-chars", "5000", "--user-message-chars", "3500")
+        self.assertEqual(code, 0)
+        self.assertIn("NEWER-THAN-THE-NOTES: use 12", out); self.assertIn("(arrived after the notes were written: the notes do not mention it)", out)
+        self.assertIn("FIRST", out); self.assertIn("are left out", out)
+        self.assertEqual(out.count("arrived after the notes were written: the notes"), 1, "only the newer message is marked")
+
+    def test_subagent_reports_that_arrived_after_the_notes_are_quoted_word_for_word_and_older_ones_are_not(self):
+        now = time.time() * 1000
+        report = lambda s, ms, child, text, state="completed": (s, "synthetic", {"text": text, "time": {"created": ms}, "metadata": {"source": "subagent", "childID": child, "agent": "explorer", "state": state}})
+        self.put([(1, "user", {"text": "FIRST", "time": {"created": now - 9000}}), report(2, now - 5000, "ses_child_done", "OLD-REPORT-ALREADY-IN-THE-NOTES"),
+                  report(3, now + 4000, "ses_child_run", "LATE-REPORT-ONE found the id xyz-77"), report(4, now + 5000, "ses_child_done", "LATE-REPORT-TWO failed", "error")])
+        code, out, _ = self.build("--chat")
+        self.assertEqual(code, 0)
+        self.assertIn("LATE-REPORT-ONE found the id xyz-77", out); self.assertIn("LATE-REPORT-TWO failed", out); self.assertNotIn("OLD-REPORT-ALREADY-IN-THE-NOTES", out)
+        self.assertIn("## Subagent reports that arrived after the notes were written", out)
+        self.assertLess(out.index("LATE-REPORT-ONE"), out.index("NOTES-OF-THE-ORCHESTRATOR"), "the notes stay last")
+        self.assertIn("ses_child_run (impl-openai, completed)", out)
+        code, out, _ = self.build("--chat", "--report-chars", "30")        # they do not fit: exit 3 (a normal model summary sees them), never a summary without them
+        self.assertEqual((code, out), (3, "")); 
+
+    def test_the_newest_report_of_a_resumed_child_decides_its_state(self):
+        db = sqlite3.connect(self.db)   # inserted in the wrong order on purpose: the newest seq must win, not the last row
+        db.execute("INSERT INTO session_message VALUES (?,?,?,?)", (SID, 30, "synthetic", json.dumps({"text": "r", "metadata": {"source": "subagent", "childID": "ses_child_done", "state": "error"}})))
+        db.execute("INSERT INTO session_message VALUES (?,?,?,?)", (SID, 20, "synthetic", json.dumps({"text": "r", "metadata": {"source": "subagent", "childID": "ses_child_done", "state": "completed"}})))
+        db.commit(); db.close()
+        code, out, _ = self.build("--chat")
+        self.assertIn("ses_child_done (explorer, error)", out)
+
+    def test_notes_that_are_only_a_line_or_have_no_handoff_content_are_not_a_summary(self):
+        for text in ("Notes saved.", "x" * 400, "This is a long enough line " * 20):
+            self.notes(text)
+            code, out, err = self.build("--chat")
+            self.assertEqual((code, out), (3, ""), text[:20]); self.assertIn("too thin", err)
+        self.notes(CHAT_NOTES)
+        self.assertEqual(self.build("--chat")[0], 0)
+
+    def test_big_user_caps_cannot_push_the_summary_over_the_limit(self):
+        self.put([(1, "user", {"text": "FIRST " + "a" * 40000}), (2, "user", {"text": "SECOND " + "b" * 40000}), (3, "user", {"text": "THIRD " + "c" * 40000})])
+        code, out, _ = self.build("--chat", "--user-chars", "500000", "--user-message-chars", "100000", "--limit", "8000")
+        self.assertEqual(code, 0); self.assertLessEqual(len(out), 8000); self.assertIn("THIRD", out); self.assertIn("NOTES-OF-THE-ORCHESTRATOR", out)
+
     def test_the_summary_is_small_and_never_over_the_limit(self):
         code, out, _ = self.build("--chat")
         self.assertLess(len(out), 3000)
-        self.notes("n" * 60000)
+        self.notes(CHAT_NOTES + "n" * 60000)
         code, out, _ = self.build("--chat", "--limit", "5000")
         self.assertEqual(code, 0); self.assertLessEqual(len(out), 5000); self.assertIn("FIRST:", out)
 
-    def test_exit_codes_stale_notes_3_and_no_user_messages_4(self):
+    def test_exit_codes_stale_notes_3_and_no_user_messages_5(self):
         code, out, err = self.build("--chat", "--newer-than", str(time.time() + 100))
         self.assertEqual((code, out), (3, ""))
         db = sqlite3.connect(self.db)
         db.execute("DELETE FROM session_message WHERE session_id=? AND type='user'", (SID,)); db.commit(); db.close()
         code, out, err = self.build("--chat")
-        self.assertEqual((code, out), (4, ""))
+        self.assertEqual((code, out), (5, ""), "a chat without readable user messages is a one-off failure (5), never the lane's sticky 4")
+
+    def test_a_database_that_cannot_be_read_is_exit_5_for_every_part_of_the_chat_summary(self):
+        db = sqlite3.connect(self.db); db.execute("DROP TABLE session_v2"); db.commit(); db.close()
+        code, out, err = self.build("--chat")                 # the child list cannot be read: the summary is not made without it
+        self.assertEqual((code, out), (5, "")); self.assertIn("could not be read", err)
+        code, out, err = run_main(["build", "--session", SID, "--dir", str(self.work), "--db", str(self.tmp / "nothing.db"), "--chat"])
+        self.assertEqual((code, out), (5, ""))
 
     def test_a_chat_summary_is_not_chosen_when_the_database_has_no_session_table(self):
         db = sqlite3.connect(self.db); db.execute("DROP TABLE session_v2"); db.commit(); db.close()
         code, out, _ = self.build()
         self.assertIn("This session was rolled over", out)
+
+
+class RealLayout(unittest.TestCase):
+    """The layout OpenCode 2.3 really stores (columns and row shapes taken from a scratch run and from real chats: types, flags and sizes), with two
+    compactions: the summary of a compaction is a `compaction` row (text in data.summary), the plugin's ask and a subagent's report are `synthetic`
+    rows, "Loaded AGENTS.md" is another `synthetic` row, the typing is `user`. The second summary must carry the typing once and nothing else."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.work = self.tmp / "work"; self.work.mkdir()
+        self.db = self.tmp / "opencode.db"
+        db = sqlite3.connect(self.db)
+        db.execute('CREATE TABLE "session_message" (`id` text PRIMARY KEY, `session_id` text NOT NULL, `type` text NOT NULL, `seq` integer NOT NULL, `time_created` integer NOT NULL, `time_updated` integer NOT NULL, `data` text NOT NULL)')
+        db.execute("CREATE TABLE session_v2 (id TEXT, parent_id TEXT, agent TEXT, model TEXT, directory TEXT, title TEXT, cost REAL, idle_outcome TEXT, time_created INTEGER)")
+        db.execute("INSERT INTO session_v2 (id, parent_id, agent, title, time_created) VALUES (?,?,?,?,?)", (SID, None, "orchestrator", "chat", 1))
+        db.execute("INSERT INTO session_v2 (id, parent_id, agent, title, idle_outcome, time_created) VALUES (?,?,?,?,?,?)", ("ses_child", SID, "explorer", "inventory-scan (@explorer subagent)", "succeeded", 2))
+        self.n = 0
+        self.db_conn = db
+
+    def row(self, kind, data):
+        self.n += 1
+        self.db_conn.execute("INSERT INTO session_message VALUES (?,?,?,?,?,?,?)", (f"msg_{self.n:04d}", SID, kind, self.n, 1000 + self.n, 1000 + self.n, json.dumps(data)))
+        return self.n
+
+    def layout(self, now):
+        ask = {"description": "rollover: write handoff notes", "text": "ASK-TEXT", "time": {"created": now}, "metadata": {"source": "agentgraph-rollover"}}
+        self.row("agent-switched", {"agent": "orchestrator"})
+        self.row("synthetic", {"description": "Loaded .config/opencode/AGENTS.md", "text": "INSTRUCTIONS-TEXT " * 50, "time": {"created": now}, "metadata": {"path": "AGENTS.md"}})
+        self.row("user", {"text": "REAL-TYPING-ONE the word is KESTREL", "files": [], "time": {"created": now}})
+        self.row("assistant", {"finish": "tool-calls", "content": [{"type": "tool"}]})
+        self.row("synthetic", ask)
+        self.row("assistant", {"finish": "tool-calls", "content": [{"type": "tool"}]})
+        self.row("compaction", {"status": "done", "reason": "manual", "model": {"id": "m"}, "summary": "# Handoff summary (main chat)\n\n### Message 1 of 1\n\nREAL-TYPING-ONE", "time": {"created": now}, "metadata": {"keepID": "msg_x"}})
+        self.row("assistant", {"finish": "tool-calls", "content": [{"type": "tool"}]})
+        self.row("user", {"text": "REAL-TYPING-TWO a new request", "files": [], "agents": [], "metadata": {"agent": "orchestrator", "attachments": [], "comments": [], "displayText": "x", "model": {}}, "time": {"created": now}})
+        self.row("synthetic", {"description": "inventory-scan", "text": "<report>REPORT-TEXT</report>", "time": {"created": now - 10_000_000}, "metadata": {"source": "subagent", "childID": "ses_child", "agent": "explorer", "state": "completed"}})
+        self.row("assistant", {"finish": "stop", "content": [{"type": "text"}]})
+        self.row("synthetic", ask)
+        self.row("assistant", {"finish": "tool-calls", "content": [{"type": "tool"}]})
+        # the compaction being built: OpenCode writes its row before the hook is asked for the summary (seen in a real run), with no summary text yet
+        self.row("compaction", {"status": "running", "reason": "manual", "model": {"id": "m"}, "time": {"created": now}})
+        self.db_conn.commit()
+
+    def build(self, *extra):
+        return run_main(["build", "--session", SID, "--dir", str(self.work), "--db", str(self.db), "--chat", *extra])
+
+    def test_the_second_summary_carries_the_typing_once_and_no_earlier_summary_or_instruction_text(self):
+        self.layout(time.time() * 1000 - 1000)
+        path = handoff.notes_path(SID, self.work); path.parent.mkdir(parents=True, exist_ok=True); path.write_text(CHAT_NOTES, encoding="utf-8")
+        code, out, err = self.build()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.count("# Handoff summary"), 1, "no earlier summary inside this one")
+        blocks = out.split("### Message ")[1:]
+        self.assertEqual(len(blocks), 2)
+        for block in blocks:
+            self.assertNotIn("# Handoff summary", block.split("\n## ")[0])
+        self.assertIn("REAL-TYPING-ONE the word is KESTREL", out); self.assertIn("REAL-TYPING-TWO a new request", out)
+        for gone in ("INSTRUCTIONS-TEXT", "ASK-TEXT", "REPORT-TEXT"):
+            self.assertNotIn(gone, out)
+        self.assertIn("ses_child (explorer, completed)", out)
+        self.assertIn("already answered", out, "the first ask of this cycle came after a stop step")
+
+    def test_a_user_row_that_holds_a_summary_is_not_quoted_as_typing(self):
+        self.layout(time.time() * 1000 - 1000)
+        self.row("user", {"text": "# Handoff summary (main chat)\n\nstored as a user row by some other version", "time": {"created": 1}}); self.db_conn.commit()
+        path = handoff.notes_path(SID, self.work); path.parent.mkdir(parents=True, exist_ok=True); path.write_text(CHAT_NOTES, encoding="utf-8")
+        code, out, _ = self.build()
+        self.assertNotIn("stored as a user row", out); self.assertEqual(out.count("# Handoff summary"), 1)
 
 
 @unittest.skipUnless(shutil.which("node"), "node missing")
