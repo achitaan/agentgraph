@@ -195,7 +195,8 @@ Commits on `design-lab`, local only, from `7ecb91f` on (not pushed; a push waits
   First rollover of the real main chat: not used. OpenCode applied a summary it had prepared before the install, and the plugin's
   request queued behind it got a second model summary ($0.76 extra). Second rollover, asked at 91,013 tokens: the code summary was
   used, $0, 122 ms, and the chat carried on by itself. The queued-request gap is fixed in the repo (tests named `live:`, 92 pass;
-  review "fix first", then "ship"; `docs/ROLLOVER.md`, Fallback). The live folder still holds the old `index.js` until the user says "yes".
+  review "fix first", then "ship"; `docs/ROLLOVER.md`, Fallback). Copied to the live folder on the user's "1" (02:05, 11-22; backup
+  `~/.config/opencode/backups/20261122-020540-rollover-queued-fix`); the fixed path itself has not yet been seen in a real run.
 - **Not shown by a real run**: a long chat; three or more rollovers in one chat; the main chat's real model (all runs are
   Sonnet 5.5); a message typed, or a worker's report arriving, while the notes are being written (scripted tests only);
   only one baseline run for the child-lane figure.
