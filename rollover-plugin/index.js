@@ -142,10 +142,14 @@ function askText(notesFile) {
 
 // the ask for a main chat (a root session of a chat_agents agent): its notes must hold what a lane's do not, because the summary that replaces
 // the conversation is the notes plus the user's own messages (word for word), the chat's subagent sessions and the task graphs, and nothing else
-const CHAT_NOTES_FLOOR = 300;   // bytes: chat notes under this are not a handoff (the build checks the topics too)
+// ONE floor for chat notes, the same as `_thin` in agentgraph/handoff.py (a test compares the numbers and the topic words): under CHAT_NOTES_FLOOR characters,
+// or naming fewer than 3 of the topics the ask lists, the notes are not a handoff: the chat is asked again, never given a paid model summary for want of the check.
+const CHAT_NOTES_FLOOR = 300;
+const NOTE_TOPICS = [["objective", "goal"], ["requirement", "limit", "rule"], ["decision", "approv"], ["done", "running", "blocked", "state"], ["next"], ["file"]];
+const notesThin = (text) => { const low = text.trim().toLowerCase(); return low.length < CHAT_NOTES_FLOOR || NOTE_TOPICS.filter((topic) => topic.some((w) => low.includes(w))).length < 3; };
 function chatAskText(notesFile, thin) {
   return [
-    ...(thin ? [`The notes you wrote are too short to carry on from (at least ${CHAT_NOTES_FLOOR} characters are needed, and they must cover the seven points below). Write them again in full.`] : []),
+    ...(thin ? [`The notes you wrote are too short to carry on from (at least ${CHAT_NOTES_FLOOR} characters are needed, and they must name at least 3 of: the objective, requirements and limits, decisions, work state (done, running, blocked), next steps, files; cover all the points below). Write them again in full.`] : []),
     "Checkpoint from the rollover plugin (automatic, not from the user). This chat's context is large and will be replaced by a short summary right after your notes are saved. That summary is made by code from exactly three things: your notes, the user's own messages (word for word, up to a size limit; old ones may be left out), and a list of the subagent sessions this chat started and the task graphs of the project. Anything that is in none of them is lost: tool results, files you read, what a subagent reported, your own earlier reasoning.",
     `Write your handoff notes NOW to ${notesFile} with the write tool (create the folder if it is missing, overwrite the file). Finish the tool call you are in first; start nothing else and read nothing first. This file is allowed even if your rules limit where you may write. The folder holds a .gitignore of \`*\` so the notes are never committed; leave it alone.`,
     "Put in it, in this order: (1) the objective of this chat; (2) the user's requirements and limits, with the user's own words quoted wherever they set a rule, a name or a number; (3) the decisions and approvals given so far, each with the earlier decision it replaced, so that the latest one is clear; (4) the work state: what is done, what is running (the session id of each running subagent and what it was asked), what is blocked and on what; (5) the next steps, in order; (6) the files that matter and what each holds; (7) facts that were expensive to find (numbers, commands, ids, paths, findings of subagents) that you would otherwise have to look up again. Write it so that you could carry on from it alone.",
@@ -289,9 +293,19 @@ module.exports = {
 
     // ---- notes: where they are, whether they cover the context ----
     // the file's mtime in whole milliseconds, like Date.now(): its fraction would make notes written in the same millisecond as an event look newer than it
-    // a chat's notes under CHAT_NOTES_FLOOR bytes count as no notes (the chat is asked again, see thinNotes)
-    const readNotes = (s) => { try { const st = fs.statSync(notesFile(s)); return st.size >= (isChat(s) ? CHAT_NOTES_FLOOR : 1) ? Math.floor(st.mtimeMs) : 0; } catch { return 0; } };
-    const thinNotes = (s) => { if (!isChat(s) || !s.asked) return false; try { const st = fs.statSync(notesFile(s)); return st.size > 0 && st.size < CHAT_NOTES_FLOOR && Math.floor(st.mtimeMs) > s.asked.at; } catch { return false; } };
+    // a chat's notes that fail the floor (notesThin: the build's own check) count as no notes, and the chat is asked again (thinNotes)
+    const readNotes = (s) => {
+      try {
+        const st = fs.statSync(notesFile(s));
+        if (!(st.size > 0)) return 0;
+        if (isChat(s) && notesThin(fs.readFileSync(notesFile(s), "utf8"))) return 0;
+        return Math.floor(st.mtimeMs);
+      } catch { return 0; }
+    };
+    const thinNotes = (s) => {
+      if (!isChat(s) || !s.asked) return false;
+      try { const st = fs.statSync(notesFile(s)); return st.size > 0 && Math.floor(st.mtimeMs) > s.asked.at && notesThin(fs.readFileSync(notesFile(s), "utf8")); } catch { return false; }
+    };
     // a step that began after the request (or, with no request, is running now) and whose end the plugin has not seen: what it added is not in the growth the hook checks
     const unseenStep = (s, since) => s.lastStart > s.lastEnd && s.lastStart > since;
     // one rule for the roll and the pause: the notes were written after the previous step ended and the context has grown past them by at most `notes_gap`

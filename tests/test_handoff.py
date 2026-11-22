@@ -507,7 +507,7 @@ class ChatBuild(Base):
         db.commit(); db.close()
         code, out, _ = self.build("--chat")
         self.assertIn("LATE-USER-MESSAGE typed after the ask", out)
-        self.assertNotIn("REPORT-2", out); self.assertNotIn("ASK-2", out)
+        self.assertIn("REPORT-2", out, "stored after the ask: the notes step was running, the notes may not have it"); self.assertNotIn("ASK-2", out)
         self.assertIn("ses_child_run (impl-openai, completed)", out, "a report that arrived makes the child finished")
 
     # ---- the fix round (x1 review): state at the roll, late reports, late messages, floor, caps, real layout ----
@@ -531,7 +531,7 @@ class ChatBuild(Base):
         self.put([user(1, "do the first thing"), asst(2, "tool-calls"), (3, "synthetic", self.ASK), asst(4, "tool-calls")])
         code, out, _ = self.build("--chat")
         self.assertIn("middle of the work", out); self.assertIn("Carry on from the next steps in the notes", out); self.assertNotIn("start no work", out)
-        self.put([user(1, "do the first thing"), asst(2, "stop"), (3, "synthetic", self.ASK), asst(4, "tool-calls"), user(5, "LATE: a new request")])
+        self.put([user(1, "do the first thing"), asst(2, "stop"), (3, "synthetic", self.ASK), asst(4, "tool-calls"), (5, "user", {"text": "LATE: a new request", "time": {"created": time.time() * 1000 + 5000}})])
         code, out, _ = self.build("--chat")
         self.assertIn("arrived after the notes were written", out); self.assertNotIn("start no work", out)
         self.put([user(1, "do the first thing"), asst(2, "stop")])        # no ask in this cycle (OpenCode's own compaction)
@@ -676,6 +676,96 @@ class RealLayout(unittest.TestCase):
             self.assertNotIn(gone, out)
         self.assertIn("ses_child (explorer, completed)", out)
         self.assertIn("already answered", out, "the first ask of this cycle came after a stop step")
+
+    # ---- second re-read (x1 review r2): the last ask, a report stored during the notes step, `late` by the tag's rule; all on the real layout ----
+
+    def notes_at(self, ms):
+        path = handoff.notes_path(SID, self.work); path.parent.mkdir(parents=True, exist_ok=True); path.write_text(CHAT_NOTES, encoding="utf-8")
+        os.utime(path, (ms / 1000, ms / 1000))
+
+    def ask(self, ms):
+        return self.row("synthetic", {"description": "rollover: write handoff notes", "text": "ASK-TEXT", "time": {"created": ms}, "metadata": {"source": "agentgraph-rollover"}})
+
+    def asst(self, finish, ms=None):
+        data = {"finish": finish, "content": [{"type": "tool"}] if finish != "stop" else [{"type": "text"}]}
+        if ms is not None:
+            data["time"] = {"created": ms}          # a step's row is made when the step starts
+        return self.row("assistant", data)
+
+    def typing(self, text, ms):
+        return self.row("user", {"text": text, "files": [], "time": {"created": ms}})
+
+    def report(self, text, ms, state="completed"):
+        return self.row("synthetic", {"description": "worker", "text": text, "time": {"created": ms}, "metadata": {"source": "subagent", "childID": "ses_child", "agent": "explorer", "state": state}})
+
+    def building(self, ms):
+        self.row("compaction", {"status": "running", "reason": "manual", "model": {"id": "m"}, "time": {"created": ms}})   # the row of the compaction being built
+        self.db_conn.commit()
+
+    def test_thin_notes_re_ask_after_a_stop_gives_the_answered_header_not_the_first_asks_midturn(self):
+        T = 1_800_000_000_000
+        self.typing("REAL-TYPING-ONE", T)
+        self.asst("tool-calls"); self.ask(T + 1000); self.asst("tool-calls")      # the first ask came mid-turn; the thin notes were its step
+        self.asst("stop"); self.ask(T + 5000); self.asst("tool-calls")             # the answer finished; the thin notes bring a re-ask at the stop
+        self.building(T + 9000); self.notes_at(T + 8000)
+        code, out, err = self.build()
+        self.assertEqual(code, 0, err); self.assertIn("already answered", out); self.assertNotIn("middle of the work", out); self.assertNotIn("Carry on from the next steps", out)
+
+    def test_a_report_stored_while_the_notes_step_was_running_is_quoted_even_if_older_than_the_notes_file(self):
+        T = 1_800_000_000_000
+        self.typing("REAL-TYPING-ONE", T)
+        self.report("OLD-REPORT-IN-THE-NOTES", T + 500)                              # before the ask: the notes have it
+        self.asst("tool-calls"); self.ask(T + 1000)
+        self.report("DURING-NOTES-REPORT id zz-9", T + 2000)                         # created while the notes step ran, before the file was written
+        self.asst("tool-calls"); self.building(T + 9000); self.notes_at(T + 4000)
+        code, out, err = self.build()
+        self.assertEqual(code, 0, err)
+        self.assertIn("DURING-NOTES-REPORT id zz-9", out); self.assertNotIn("OLD-REPORT-IN-THE-NOTES", out)
+
+    def test_late_header_only_for_a_message_stored_after_the_notes_file_by_the_same_rule_as_the_tag(self):
+        T = 1_800_000_000_000
+        self.typing("REAL-TYPING-ONE", T); self.asst("stop"); self.ask(T + 1000)
+        self.asst("tool-calls"); self.building(T + 9000); self.notes_at(T + 4000)
+        code, out, err = self.build()
+        self.assertEqual(code, 0, err); self.assertNotIn("arrived after the notes were written", out); self.assertNotIn("act on it first", out)
+        self.assertIn("already answered", out)
+        self.typing("AFTER-THE-NOTES new request", T + 6000); self.db_conn.commit()
+        code, out, err = self.build()
+        self.assertIn("act on it first", out); self.assertEqual(out.count("arrived after the notes were written: the notes"), 1)
+
+    def test_a_message_typed_while_the_notes_were_being_written_is_not_called_answered(self):
+        T = 1_800_000_000_000
+        self.typing("REAL-TYPING-ONE", T); self.asst("stop", T + 100); self.ask(T + 1000)
+        self.asst("tool-calls", T + 1500)                                     # the step that writes the notes starts
+        self.typing("TYPED-DURING-THE-NOTES-STEP a new request", T + 2000)    # after that start, before the notes file was saved: the model did not see it
+        self.building(T + 9000); self.notes_at(T + 4000)
+        code, out, err = self.build()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("already answered", out); self.assertNotIn("start no work", out)
+        self.assertIn("unless the notes show it was handled, act on it first", out)
+        self.assertEqual(out.count("arrived while the notes were being written: the notes may not mention it"), 1)
+        self.assertIn("TYPED-DURING-THE-NOTES-STEP a new request", out)
+        self.typing("AFTER-THE-NOTES", T + 6000); self.db_conn.commit()      # a later one, after the file: the stronger header wins
+        code, out, err = self.build()
+        self.assertIn("so the notes do not mention it: read it and act on it", out)
+
+    def test_a_message_the_notes_step_started_after_is_handled_by_the_notes(self):
+        T = 1_800_000_000_000
+        self.typing("REAL-TYPING-ONE", T); self.asst("stop", T + 100); self.ask(T + 1000)
+        self.typing("SEEN-BY-THE-NOTES-STEP", T + 1200)                       # after the ask, before the step that wrote the notes began
+        self.asst("tool-calls", T + 1500); self.building(T + 9000); self.notes_at(T + 4000)
+        code, out, err = self.build()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("act on it first", out); self.assertNotIn("being written", out); self.assertIn("SEEN-BY-THE-NOTES-STEP", out)
+
+    def test_a_step_that_started_after_the_notes_were_saved_does_not_hide_a_message_typed_during_the_notes_step(self):
+        T = 1_800_000_000_000
+        self.typing("REAL-TYPING-ONE", T); self.asst("stop", T + 100); self.ask(T + 1000)
+        self.asst("tool-calls", T + 1500); self.typing("TYPED-DURING", T + 2000)
+        self.asst("tool-calls", T + 5000)                                     # the next step began before the requested compaction's hook ran (seen in a real run)
+        self.building(T + 9000); self.notes_at(T + 4000)
+        code, out, err = self.build()
+        self.assertEqual(code, 0, err); self.assertIn("unless the notes show it was handled, act on it first", out)
 
     def test_a_user_row_that_holds_a_summary_is_not_quoted_as_typing(self):
         self.layout(time.time() * 1000 - 1000)

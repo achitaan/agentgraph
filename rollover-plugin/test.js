@@ -56,9 +56,11 @@ async function harness(settings, { build, leads = "true", from = null, rawSettin
   };
   h.step = (context, finish = "tool-calls", sid = main.sid) => h.emit("session.step.ended", { finish, tokens: { input: 5, output: 10, cache: { read: context - 15, write: 10 } } }, { sid });
   h.notesPath = (sid = main.sid) => path.join(infos.get(sid).location.directory, ".opencode", "handoff", `${sid}.md`);
-  h.notes = (sid = main.sid, ageSeconds = 0, size = 5) => {
+  // size 5: "notes" (a lane's); bigger: text of that many characters that names the topics of the chat floor; `body` overrides the text
+  const topical = (size) => "Objective: x. Requirements and limits: y. Decisions: z. Work state: done. Next steps: a. Files: b. ".repeat(Math.ceil(size / 100)).slice(0, size);
+  h.notes = (sid = main.sid, ageSeconds = 0, size = 5, body = null) => {
     const t0 = Date.now(); while (Date.now() === t0) { /* the notes get a later millisecond than every event before them (the plugin compares whole milliseconds) */ }
-    const f = h.notesPath(sid); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, "notes".padEnd(size, " "));
+    const f = h.notesPath(sid); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, body !== null ? body : size <= 5 ? "notes".padEnd(size, " ") : topical(size));
     if (ageSeconds) { const t = (Date.now() - ageSeconds * 1000) / 1000; fs.utimesSync(f, t, t); }
   };
   h.logRows = () => { try { return fs.readFileSync(path.join(home, "rollover.log"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
@@ -696,6 +698,22 @@ const cases = {
     const c = await mk();                                             // OpenCode's own compaction while a step runs, notes written inside it
     await c.h.step(129000, "tool-calls", c.c.sid); await sleep(5); await c.h.emit("session.step.started", { agent: "orchestrator", model: { id: "claude-sonnet-5-5" } }, { sid: c.c.sid });
     c.h.notes(c.c.sid, 0, 400); await c.h.hooks.compaction(c.ev()); assert.equal(row(c.h, "own_compaction").unseen_step, true); c.h.stop();
+  },
+  async "chat: one floor in the plugin and the build: notes over the length but naming fewer than 3 topics bring a re-ask, not a roll and not a model summary; the numbers and topic words equal the build's"() {
+    const src = fs.readFileSync(path.join(__dirname, "..", "agentgraph", "handoff.py"), "utf8");
+    const pyMin = Number(/CHAT_NOTES_MIN, REPORT_CHARS = (\d+)/.exec(src)[1]);
+    const pyTopics = [...(/NOTE_TOPICS = \(([^\n]+)\)\n/.exec(src)[1]).matchAll(/\(([^()]*)\)/g)].map((m) => [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]));
+    const js = fs.readFileSync(path.join(__dirname, "index.js"), "utf8");
+    const jsMin = Number(/const CHAT_NOTES_FLOOR = (\d+);/.exec(js)[1]);
+    const jsTopics = JSON.parse(/const NOTE_TOPICS = (\[\[.*\]\]);/.exec(js)[1]);
+    assert.equal(pyMin, 300); assert.equal(jsMin, pyMin); assert.deepEqual(jsTopics, pyTopics);
+    const h = await harness({ chat_agents: ["orchestrator"] }); const c = h.add("ses_chat", { parent: null, agent: "orchestrator" });
+    await h.step(116000, "tool-calls", c.sid); assert.equal(h.calls.synthetic.length, 1);
+    h.notes(c.sid, 0, 400, "Notes saved. ".repeat(40) + " Objective: finish. Next steps: go."); await h.step(117000, "stop", c.sid);   // 400+ characters, only 2 topics
+    assert.equal(h.calls.compact.length, 0); assert.equal(h.calls.synthetic.length, 2, "asked again at once"); assert.ok(/too short/.test(h.calls.synthetic[1].text));
+    const ev = { sessionID: c.sid, agent: "orchestrator" }; await h.hooks.compaction(ev); assert.equal(ev.result, undefined);
+    h.notes(c.sid, 0, 400); await h.step(118000, "stop", c.sid); assert.equal(h.calls.compact.length, 1, "notes with the topics roll");
+    h.stop();
   },
   async "N3: a request is dropped by a reload and then gets no summary either"() {
     const d = await harness({}); await d.step(116000); d.notes(); await d.step(117000); assert.equal(d.calls.compact.length, 1);

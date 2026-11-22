@@ -200,8 +200,9 @@ def read_chat(session: str, db_path, timeout: float = DB_SECONDS) -> dict | None
     `synthetic` rows. So only `user` rows are quoted as the user's words. What cannot be told apart: a `user` row made by a command or skill
     expansion or a script looks like typing. The rows stay after a compaction (the model stops seeing them), so each summary can carry them again.
 
-    Returns {users: [{seq, text, ms}], reports: [{seq, text, ms, child, agent, state}], state, children}; `state` is what the latest roll
-    came into: answered (the latest user message was answered before the ask), midturn, late (a user message came after the ask) or unknown."""
+    Returns {users: [{seq, text, ms}], reports: [{seq, text, ms, child, agent, state}], state, ask_seq, children, steps (start times of the
+    assistant steps, ms)}; `state` is what the latest ask
+    (the last of this cycle) came into: answered (the latest user message was answered before it), midturn or unknown; ask_seq is its row's seq."""
     db = _open_db(db_path, timeout)
     if db is None:
         return None
@@ -233,16 +234,19 @@ def read_chat(session: str, db_path, timeout: float = DB_SECONDS) -> dict | None
         last_compaction = db.execute("SELECT MAX(seq) FROM session_message WHERE session_id=? AND type='compaction' "
                                      "AND length(COALESCE(json_extract(data, '$.summary'), '')) > 0", (session,)).fetchone()[0] or 0
         mine = [a for a in asks if a > last_compaction]
-        state = "unknown"
+        state, ask_seq = "unknown", None
         if mine:
-            first_ask = mine[0]
+            # the LAST ask of this cycle: thin notes bring an immediate re-ask, and that is the one the notes answer (the first may have come mid-turn
+            # and the re-ask after the answer finished). A user message that came after it is judged in _build_chat against the notes' time.
+            ask_seq = mine[-1]
             before = db.execute("SELECT seq, json_extract(data, '$.finish') FROM session_message WHERE session_id=? AND type='assistant' AND seq<? ORDER BY seq DESC LIMIT 1",
-                                (session, first_ask)).fetchone()
-            last_user = max((u["seq"] for u in users if u["seq"] < first_ask), default=0)
-            if any(u["seq"] > first_ask for u in users):
-                state = "late"
-            elif before and before[0] > last_user:
+                                (session, ask_seq)).fetchone()
+            last_user = max((u["seq"] for u in users if u["seq"] < ask_seq), default=0)
+            if before and before[0] > last_user:
                 state = "answered" if before[1] == "stop" else "midturn"
+        # an assistant row is made when its step starts (data.time.created, checked on real chats): what was stored after that the step never saw
+        steps = [r[0] for r in db.execute("SELECT json_extract(data, '$.time.created') FROM session_message WHERE session_id=? AND type='assistant'", (session,))
+                 if isinstance(r[0], (int, float))]
         rows = db.execute("SELECT id, agent, title, idle_outcome FROM session_v2 WHERE parent_id=? ORDER BY time_created DESC", (session,)).fetchall()
     except sqlite3.Error:
         return None
@@ -253,7 +257,7 @@ def read_chat(session: str, db_path, timeout: float = DB_SECONDS) -> dict | None
         latest[r["child"]] = r["state"]
     children = [{"id": r[0], "agent": r[1] or "?", "title": " ".join(str(r[2] or "").split()), "state": latest.get(r[0]) or r[3] or "running"} for r in rows]
     children.sort(key=lambda c: c["state"] != "running")
-    return {"users": users, "reports": reports, "state": state, "children": children}
+    return {"users": users, "reports": reports, "state": state, "ask_seq": ask_seq, "children": children, "steps": steps}
 
 
 def user_block(messages: list[dict], per_message: int, total: int) -> str:
@@ -261,7 +265,7 @@ def user_block(messages: list[dict], per_message: int, total: int) -> str:
     `total` characters, each cut in the middle at `per_message`; one line says which ones were left out."""
     cut = [cut_middle(m["text"], per_message) for m in messages]
     n = len(cut)
-    keep = {0} | {i for i, m in enumerate(messages) if m.get("newer")}
+    keep = {0} | {i for i, m in enumerate(messages) if m.get("newer") or m.get("during")}
     used = sum(len(cut[i]) for i in keep)
     for i in range(n - 1, 0, -1):
         if i in keep:
@@ -276,7 +280,8 @@ def user_block(messages: list[dict], per_message: int, total: int) -> str:
             if skipped_from is not None:
                 parts.append(f"[messages {skipped_from + 1} to {i} of {n} are left out: the size limit of {total} characters; the first, the newest and any that arrived after the notes are kept]")
                 skipped_from = None
-            tag = " (arrived after the notes were written: the notes do not mention it)" if messages[i].get("newer") else ""
+            tag = (" (arrived after the notes were written: the notes do not mention it)" if messages[i].get("newer") else
+                   " (arrived while the notes were being written: the notes may not mention it)" if messages[i].get("during") else "")
             parts.append(f"### Message {i + 1} of {n}{tag}\n\n{cut[i]}")
         elif skipped_from is None:
             skipped_from = i
@@ -519,12 +524,15 @@ STATE_LINES = {
                 "in the notes until that work is done."),
     "late": ("State at the roll: the last user message below arrived after the notes were written, so the notes do not mention it: read it and act on it "
              "first, then carry on with the notes."),
+    "during": ("State at the roll: the last user message below arrived while the notes were being written, so it may not have been read: unless the "
+               "notes show it was handled, act on it first, then carry on with the notes."),
     "unknown": ("State at the roll is not known. If the notes say the latest user message is answered, reply with one short line and wait; if its work "
                 "is not finished, carry on from the next steps in the notes."),
 }
 
 
 def _thin(notes: str) -> bool:
+    """The one floor for chat notes (rollover-plugin/index.js has the same, and a test compares the two): characters and topics."""
     low = notes.lower()
     return len(notes) < CHAT_NOTES_MIN or sum(1 for topic in NOTE_TOPICS if any(w in low for w in topic)) < 3
 
@@ -539,16 +547,23 @@ def _build_chat(session: str, work: Path, notes: str, db_path, limit: int, db_ti
         WHY[0] = "the database or the user's messages could not be read"
         return DB_EXIT, ""
     messages = chat["users"]
+    ask_seq = chat["ask_seq"]
+    # One rule for the tag and the header. `newer`: stored after the notes file was written. `during`: stored after the step that wrote the notes
+    # had started (the last step start at or before the file's time) and before the file was saved, so the model may never have seen it.
+    step_ms = max((s for s in chat["steps"] if s <= notes_ms), default=None)
     for m in messages:
         m["newer"] = m["ms"] is not None and m["ms"] > notes_ms
+        m["during"] = not m["newer"] and step_ms is not None and m["ms"] is not None and m["ms"] >= step_ms
+    state = "late" if any(m["newer"] for m in messages) else "during" if any(m["during"] for m in messages) else chat["state"]
     head = ("# Handoff summary (main chat)\n\nThis chat was rolled over: the earlier conversation was replaced by this text, which code put together "
             "from the user's own messages (word for word), the subagent reports that arrived after the notes, the sessions this chat started, the task "
             "graphs of the project and the notes the orchestrator wrote. Anything else from the earlier conversation is gone. Where a user message and "
-            "the notes disagree, the later user message wins; ask the user nothing that these already answer.\n\n**" + STATE_LINES[chat["state"]] + "**\n")
+            "the notes disagree, the later user message wins; ask the user nothing that these already answer.\n\n**" + STATE_LINES[state] + "**\n")
     room = max(0, limit - len(head) - 40)
     total = min(total, room // 2)                 # the user's messages never take more than half the room, one message never more than all of it
     per_message = min(per_message, max(200, total // 2))   # so the first and the newest message always fit together
-    late = [r for r in chat["reports"] if r["ms"] is not None and r["ms"] > notes_ms]
+    # a report is late when it was stored after the notes file was written, or after the ask (the notes step was running: the notes may not have it)
+    late = [r for r in chat["reports"] if (r["ms"] is not None and r["ms"] > notes_ms) or (ask_seq is not None and r["seq"] > ask_seq)]
     size = sum(len(r["text"]) for r in late)
     if size > min(report_chars, room // 3):
         WHY[0] = f"{len(late)} subagent report(s) of {size} characters arrived after the notes and do not fit the {min(report_chars, room // 3)} allowed"

@@ -23,6 +23,8 @@ class ServerTests(unittest.TestCase):
         (self.web_dir / "index.html").write_bytes(b"<title>agentgraph test</title>")
         self.live = self.enterContext(patch.object(server, "build_snapshot",
                                                    side_effect=AssertionError("unexpected live read")))
+        # The demo snapshots are dated 900: against the user's real database the spend rate would read every row of it.
+        self.enterContext(patch.object(server, "DB_PATH", self.cwd / "no-sessions.db"))
         self.httpd = server.make_server(0, web_dir=self.web_dir, graph_dir=self.cwd / "graphs",
                                         cwd=self.cwd, session="root")
         self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
