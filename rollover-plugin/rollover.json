@@ -1,0 +1,29 @@
+{
+  "enabled": true,
+  "ask_at": 115000,
+  "hard_at": 160000,
+  "workers_only": true,
+  "skip_agents": [
+    "orchestrator",
+    "build",
+    "plan",
+    "side-chat",
+    "council"
+  ],
+  "skip_leads": true,
+  "only_agents": [],
+  "cache_seconds": 300,
+  "pause_min": 60000,
+  "notes_gap": 10000,
+  "hook_growth": 15000,
+  "reask_steps": 2,
+  "reask_growth": 10000,
+  "max_asks": 4,
+  "notes_dir": ".opencode/handoff",
+  "compaction_patience_ms": 180000,
+  "structure_dir": null,
+  "build_timeout_ms": 15000,
+  "agentgraph_bin": null,
+  "state_dir": null,
+  "families": {}
+}
