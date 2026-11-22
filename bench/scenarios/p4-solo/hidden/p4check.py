@@ -167,7 +167,16 @@ def check_artifact(state, args):
     return best >= args["files"] and mentions, f"artifact names {best} of {len(names)}; final message names an artifact path {'yes' if mentions else 'no'}"
 
 
-MODES = {"solo": check_solo, "graph": check_graph, "loop": check_loop, "artifact": check_artifact}
+def check_graph_if_workers(state, args):
+    n = len(workers(state))
+    if n == 0:
+        return True, "no worker session, so no graph is needed"
+    ok, detail = check_graph(state, args)
+    return ok, f"subagent sessions {n}; {detail}"
+
+
+MODES = {"solo": check_solo, "graph": check_graph, "graph-if-workers": check_graph_if_workers, "loop": check_loop,
+         "artifact": check_artifact}
 
 
 def main(argv):

@@ -57,6 +57,12 @@ for name in $SEPARATE; do set -- "$@" --exclude "$name"; done
 rsync -a --delete "$@" "$SOURCE/skills/" "$HERE/skills/"
 cp -p "$SOURCE/oh-my-opencode-slim.json" "$HERE/config/oh-my-opencode-slim.json"
 rsync -a --delete "$SOURCE/oh-my-opencode-slim" "$HERE/config/"
+# The three orchestrator policy files have one source (config/policy/). When an approved edit changed a live file
+# directly, make the source again from the live files, so it never falls behind and the edit shows in git diff.
+if ! (cd "$HERE" && python3 -m agentgraph.policygen check --against "$HERE/config/oh-my-opencode-slim" >/dev/null 2>&1); then
+  (cd "$HERE" && python3 -m agentgraph.policygen split --from "$HERE/config/oh-my-opencode-slim" --to "$HERE/config/policy/orchestrator_append.src.md" --force >/dev/null)
+  echo "note: a live policy file differed from config/policy/orchestrator_append.src.md, so the source was made again from the live files"
+fi
 # Only the orchestration rules: everything from the first line starting with AGENTS_CUT_MARKER (sync.conf) stays
 # out. Without a marker the file is left alone, so your own notes never land in the repository by accident.
 if [ -n "$AGENTS_CUT_MARKER" ]; then

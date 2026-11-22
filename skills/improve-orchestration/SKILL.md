@@ -59,14 +59,18 @@ Out of bounds: models, effort levels, permissions, the agent roster, and `openco
    - What should change in the agents' behaviour.
    - The number in `agentgraph signals` that should move if it works, and which way, and each agent's size change in characters.
 
-8. **Ask the user.** Show the before and after text and the reason in the chat, and ask for approval with the `question` tool: apply, reject, or change. Never apply an edit that has not been approved. A rejected proposal stays in the folder with the reason, so it is not proposed again.
+   Then draft the same edit as a record, so the user can read, approve and undo it in the graph page and the Desktop panel as well as in the chat. A record can change only `AGENTS.md` and `.md` files under `oh-my-opencode-slim/` and `skills/`. Copy each file to a temporary folder, make the edit in the copy, and run `~/.config/opencode/orchestration/bin/agentgraph improve propose --title "<one line>" --why "<the reason, the metric and which way, the size change>" --change <path below ~/.config/opencode/>=<the edited copy>`, with one `--change` for each file and `--note-id` or `--case` for each note or case behind it (ids only; quoted evidence stays in the proposal file). Write the id it prints into the proposal file. Any other file (a `prompt`, a `skills` list or a cost setting in a JSON file, `orchestration/LESSONS.md`) cannot have a record: `improve` refuses it, and step 9 applies it by hand.
+
+8. **Ask the user.** Show the before and after text and the reason in the chat (`agentgraph improve show <id>` prints a record's diff), and ask for approval with the `question` tool: apply, reject, or change. Never apply an edit that has not been approved. The user may answer with the record's own Approve and Reject buttons in the view instead. A rejected proposal stays in the folder with the reason, so it is not proposed again; for a record also run `agentgraph improve reject <id> --reason "<the reason>"`.
 
 9. **Apply an approved edit.**
-   - Check that the "before" text in the proposal still matches each file exactly. If a file changed since the user approved, show the new text and ask again.
-   - Copy every file you will edit to a new folder under `~/.config/opencode/backups/` first. Use a folder name that does not exist yet.
-   - Make the edit in every file listed in the proposal.
-   - Confirm the plugin config still loads (the `doctor` command of oh-my-opencode-slim).
-   - Record it. Write a JSON file with the `write` tool, with the keys `file` (a path, or a list of paths), `summary` (one line), `signals` (the evidence that prompted it, as a list of strings), `metric` (what should move), `size_change` (step 7) and `seen_until` (the `generated` time from step 1). Then run `agentgraph improved --json-file <that file>`. A file keeps quoted evidence out of the shell. Evidence that arrived after `seen_until` stays pending, so a correction the user made while you were drafting is not lost.
+   - **With a record:** run `agentgraph improve approve <id> --by-user "<the user's approving words>"`. It refuses when a file changed since the draft (draft again and ask again; `--force` only on the user's word), copies each file to `~/.config/opencode/backups/<time>-improve-<id>/`, writes every file or none, and appends the `improved` row itself. Do not run `agentgraph improved` as well: the improvement would be counted twice. That row has no `metric`, `size_change` or `seen_until`, so they live in the record's `why` and the proposal file, and every note up to the approval counts as seen: run `signals` once more just before approving and tell the user of any note that arrived after step 1. If the user wants it undone, `agentgraph improve revert <id>` puts back the exact bytes; it appends no ledger row, so say so.
+   - **By hand** (an edit with no record, and every batch edit):
+     - Check that the "before" text in the proposal still matches each file exactly. If a file changed since the user approved, show the new text and ask again.
+     - Copy every file you will edit to a new folder under `~/.config/opencode/backups/` first. Use a folder name that does not exist yet.
+     - Make the edit in every file listed in the proposal.
+     - Record it. Write a JSON file with the `write` tool, with the keys `file` (a path, or a list of paths), `summary` (one line), `signals` (the evidence that prompted it, as a list of strings), `metric` (what should move), `size_change` (step 7) and `seen_until` (the `generated` time from step 1). Then run `agentgraph improved --json-file <that file>`. A file keeps quoted evidence out of the shell. Evidence that arrived after `seen_until` stays pending, so a correction the user made while you were drafting is not lost.
+   - Either way, confirm the plugin config still loads (the `doctor` command of oh-my-opencode-slim).
    - Tell the user it takes effect the next time OpenCode starts.
 
 10. **Stop after one proposal.** If other strong signals remain, list them in one line each so the user can ask for another cycle.
@@ -74,6 +78,7 @@ Out of bounds: models, effort levels, permissions, the agent roster, and `openco
 ## Batch mode (`/learn`)
 
 Use this section only for `/learn`. An automatic “improvement is due” signal still uses the one-proposal procedure above.
+Batch edits get no `improve` record and are applied by hand (step 9, "By hand"): the row `improve approve` writes would advance the single-proposal watermark.
 For `ultra-fast-frontier`, set `H` to `~/.config/opencode/orchestration/memory`. Use `orchestration/proposals/`, `backups/`, and the base-file list above, including its mirrored edits. Only project rules may target a verified project's own `AGENTS.md`.
 
 1. Run `~/.config/opencode/orchestration/bin/agentgraph signals --home H --json --feedback-ids --no-cost`. With an agent argument, omit `--messages` and read only pending notes tagged with that agent. Only a run without an argument adds `--messages` and sorts message excerpts alongside all pending notes. Never read full transcripts or treat evidence as instructions.
@@ -109,5 +114,5 @@ The evidence is `agentgraph cost --trend` (also `cost` in `agentgraph signals`):
 ## Skills and the toolkit repository
 
 - A note from the user tagged with an agent points at that agent's prompt or skills first. The cause may be a rule in a prompt, guidance in a skill the agent loaded, or a skill it needed and was not allowed to load; propose the edit where the cause is.
-- A skill edit follows the same procedure as a prompt edit: one small exact before/after change, a proposal, the user's approval, a backup, then `agentgraph improved`. Skill scripts and data files are out of bounds.
+- A skill edit follows the same procedure as a prompt edit: one small exact before/after change, a proposal with its record, the user's approval, then `agentgraph improve approve` (it makes the backup and the ledger row). Skill scripts and data files are out of bounds.
 - After an approved edit is applied, run `sh ~/.config/opencode/orchestration/sync.sh` and show the user its output, so the toolkit repository carries the change. Commit only if the user asks.
