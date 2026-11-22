@@ -206,8 +206,8 @@ that their next steps are at the end. Limit 30,000 characters; the user's messag
   *Unknown* (OpenCode's own compaction, no ask this cycle): either, as the notes say. Tests:
   `test_the_header_says_what_to_do_at_a_finished_answer_...`.
 - **Running subagents and late reports.** A child is "running" until its report is in the chat (or the session row says it finished). A subagent report (a `synthetic` row,
-  `metadata.source` subagent) whose time is later than the notes file, or whose row comes after the last ask (stored while the notes step was running, so the
-  model never saw it), is **quoted word for word** in its own section ("arrived after the notes were written") above the notes,
+  `metadata.source` subagent) whose time is later than the notes file, or whose row comes after the last ask, or (no ask in the cycle) which was stored after the step that
+  wrote the notes had started (the notes step was running, so the model never saw it), is **quoted word for word** in its own section ("arrived after the notes were written") above the notes,
   so a chat with several workers does not fall back to a paid model summary each time; it is exit 3 only when the late reports are more than `--report-chars` (or a third of the
   room). A user message newer than the notes is always quoted and marked the same way; one typed while the notes were being written is always quoted and marked "the notes may not
   mention it". Reports from before the last ask are not quoted (the notes have them). A report that arrives

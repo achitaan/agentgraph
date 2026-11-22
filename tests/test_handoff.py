@@ -722,6 +722,26 @@ class RealLayout(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("DURING-NOTES-REPORT id zz-9", out); self.assertNotIn("OLD-REPORT-IN-THE-NOTES", out)
 
+    def test_without_an_ask_a_report_stored_while_the_notes_step_was_running_is_quoted(self):
+        T = 1_800_000_000_000
+        self.typing("REAL-TYPING-ONE", T)
+        self.report("OLD-REPORT-IN-THE-NOTES", T + 500)                              # before the notes step began: the notes have it
+        self.asst("tool-calls", T + 1500)                                            # the step that writes the notes; no ask row in this cycle
+        self.report("DURING-NOTES-REPORT id zz-9", T + 2000)
+        self.building(T + 9000); self.notes_at(T + 4000)
+        code, out, err = self.build()
+        self.assertEqual(code, 0, err)
+        self.assertIn("DURING-NOTES-REPORT id zz-9", out); self.assertNotIn("OLD-REPORT-IN-THE-NOTES", out)
+
+    def test_a_step_that_began_in_the_same_millisecond_as_the_notes_file_is_not_the_notes_step(self):
+        T = 1_800_000_000_000
+        self.typing("REAL-TYPING-ONE", T); self.asst("stop", T + 100); self.ask(T + 1000)
+        self.asst("tool-calls", T + 1500); self.typing("TYPED-DURING", T + 2000)
+        self.asst("tool-calls", T + 4000)                                            # the next step, in the millisecond the file was saved in
+        self.building(T + 9000); self.notes_at(T + 4000.7)
+        code, out, err = self.build()
+        self.assertEqual(code, 0, err); self.assertIn("unless the notes show it was handled, act on it first", out)
+
     def test_late_header_only_for_a_message_stored_after_the_notes_file_by_the_same_rule_as_the_tag(self):
         T = 1_800_000_000_000
         self.typing("REAL-TYPING-ONE", T); self.asst("stop"); self.ask(T + 1000)

@@ -550,7 +550,7 @@ def _build_chat(session: str, work: Path, notes: str, db_path, limit: int, db_ti
     ask_seq = chat["ask_seq"]
     # One rule for the tag and the header. `newer`: stored after the notes file was written. `during`: stored after the step that wrote the notes
     # had started (the last step start at or before the file's time) and before the file was saved, so the model may never have seen it.
-    step_ms = max((s for s in chat["steps"] if s <= notes_ms), default=None)
+    step_ms = max((s for s in chat["steps"] if s < int(notes_ms)), default=None)   # whole milliseconds: a step that began in the file's own millisecond is a later one
     for m in messages:
         m["newer"] = m["ms"] is not None and m["ms"] > notes_ms
         m["during"] = not m["newer"] and step_ms is not None and m["ms"] is not None and m["ms"] >= step_ms
@@ -562,8 +562,10 @@ def _build_chat(session: str, work: Path, notes: str, db_path, limit: int, db_ti
     room = max(0, limit - len(head) - 40)
     total = min(total, room // 2)                 # the user's messages never take more than half the room, one message never more than all of it
     per_message = min(per_message, max(200, total // 2))   # so the first and the newest message always fit together
-    # a report is late when it was stored after the notes file was written, or after the ask (the notes step was running: the notes may not have it)
-    late = [r for r in chat["reports"] if (r["ms"] is not None and r["ms"] > notes_ms) or (ask_seq is not None and r["seq"] > ask_seq)]
+    # a report is late when it was stored after the notes file was written, after the ask, or (no ask this cycle) after the step that wrote the notes
+    # had started: the notes step was running, so the notes may not have it
+    late = [r for r in chat["reports"] if (r["ms"] is not None and r["ms"] > notes_ms) or (ask_seq is not None and r["seq"] > ask_seq)
+            or (step_ms is not None and r["ms"] is not None and r["ms"] >= step_ms)]
     size = sum(len(r["text"]) for r in late)
     if size > min(report_chars, room // 3):
         WHY[0] = f"{len(late)} subagent report(s) of {size} characters arrived after the notes and do not fit the {min(report_chars, room // 3)} allowed"
