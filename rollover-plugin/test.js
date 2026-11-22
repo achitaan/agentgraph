@@ -509,6 +509,62 @@ const cases = {
     await h.emit("session.compaction.ended", { reason: "auto" });
     const second = await h.hook(); assert.equal(second.result && second.result.summary.trim(), "SUMMARY"); assert.equal(h.buildArgs().length, 1); assert.equal(h.calls.compact.length, 1); h.stop();
   },
+  // ---- the first live rollover (11-22): OpenCode applied a summary it had prepared earlier, the hook was never called for it ----
+  async "live: a compaction the hook never saw ends while the plugin's request is queued: the queued one gets the code summary, built against the old cycle's time"() {
+    const h = await harness({}); await h.step(116000); h.notes(); await h.step(117000); assert.equal(h.calls.compact.length, 1);
+    const written = Math.floor(fs.statSync(h.notesPath()).mtimeMs);
+    await h.emit("session.compaction.ended", { reason: "auto", cost: 1.18 });   // no hook call came before it
+    assert.ok(h.has("compacted"));
+    await h.step(59000);                                                          // the one step that ran before the queued request
+    assert.equal(h.calls.compact.length, 1, "no new request"); assert.equal(h.calls.synthetic.length, 1, "no new ask");
+    const ev = await h.hook(); assert.equal(ev.result && ev.result.summary.trim(), "SUMMARY", "not a second model summary");
+    const newer = Number(/--newer-than (\d{13})\b/.exec(h.buildArgs()[0])[1]); assert.ok(newer <= written, "the notes are not stale for the build");
+    assert.ok(h.has("own_compaction", /supplied, the request queued behind/));
+    await h.emit("session.compaction.ended", { reason: "manual" }); assert.ok(h.has("rolled"));
+    await h.step(9000); const later = await h.hook(); assert.equal(later.result, undefined, "used once"); assert.equal(h.buildArgs().length, 1); h.stop();
+  },
+  async "live: the queued request is left to OpenCode after two steps, after a failed compaction, and when the hook had already been asked"() {
+    const a = await harness({}); await a.step(116000); a.notes(); await a.step(117000);
+    await a.emit("session.compaction.ended", { reason: "auto" }); await a.step(59000); await a.step(70000);
+    const two = await a.hook(); assert.equal(two.result, undefined); assert.deepEqual(a.buildArgs(), []); assert.ok(a.has("own_compaction", /notes older than the last rollover/)); a.stop();
+    const b = await harness({}); await b.step(116000); b.notes(); await b.step(117000);
+    await b.emit("session.compaction.ended", { reason: "auto" }); await b.emit("session.compaction.failed", { error: { type: "x" } });
+    const failed = await b.hook(); assert.equal(failed.result, undefined); assert.deepEqual(b.buildArgs(), []); b.stop();
+    const c = await harness({}); await c.step(116000); c.notes(); await c.step(117000); await c.step(133000);   // 16,000 past the request
+    const fell = await c.hook(); assert.equal(fell.result, undefined); assert.ok(c.has("fell_back", /grew 16000/));
+    await c.emit("session.compaction.ended", { reason: "manual" });               // that was the plugin's own request: nothing is queued
+    const next = await c.hook(); assert.equal(next.result, undefined); assert.deepEqual(c.buildArgs(), []); c.stop();
+  },
+  async "live: the queued request is refused when the step in between wrote a lot, when a second step is running, and when the ended compaction was a manual one"() {
+    const big = await harness({}); await big.step(116000); big.notes(); await big.step(117000);
+    await big.emit("session.compaction.ended", { reason: "auto" });
+    await big.emit("session.step.ended", { finish: "tool-calls", tokens: { input: 5, output: 16000, cache: { read: 43000, write: 10 } } });   // 16,000 written, none of it in the notes
+    const a = await big.hook(); assert.equal(a.result, undefined); assert.deepEqual(big.buildArgs(), []); big.stop();
+    const run = await harness({}); await run.step(116000); run.notes(); await run.step(117000);
+    await run.emit("session.compaction.ended", { reason: "auto" }); await run.step(59000); await sleep(8);
+    await run.emit("session.step.started", { agent: "impl-openai" });           // a second step began; its end has not been seen
+    const b = await run.hook(); assert.equal(b.result, undefined); assert.deepEqual(run.buildArgs(), []); run.stop();
+    const man = await harness({}); await man.step(116000); man.notes(); await man.step(117000);
+    await man.emit("session.compaction.ended", { reason: "manual" });           // the plugin's own request, served without a hook call: nothing is queued
+    await man.step(59000);
+    const c = await man.hook(); assert.equal(c.result, undefined); assert.deepEqual(man.buildArgs(), []); man.stop();
+  },
+  async "live: the hook is called before the plugin has seen the end of the step in between: still the code summary, that late step end is ignored and the next one counts"() {
+    const h = await harness({}); await h.step(116000); h.notes(); await h.step(117000);
+    await h.emit("session.compaction.ended", { reason: "auto" }); await sleep(8);
+    await h.emit("session.step.started", { agent: "impl-openai" });
+    const ev = await h.hook(); assert.equal(ev.result && ev.result.summary.trim(), "SUMMARY");
+    await h.step(59000); assert.ok(h.has("step_ignored"));
+    await h.emit("session.compaction.ended", { reason: "manual" }); assert.ok(h.has("rolled"));
+    const before = h.state().steps; await h.step(9000); assert.equal(h.state().steps, before + 1, "the first step after the rollover counts"); h.stop();
+  },
+  async "live: with the step in between already seen, the first step after the rollover is counted (not ignored)"() {
+    const h = await harness({}); await h.step(116000); h.notes(); await h.step(117000);
+    await h.emit("session.compaction.ended", { reason: "auto" }); await h.step(59000);
+    const ev = await h.hook(); assert.equal(ev.result && ev.result.summary.trim(), "SUMMARY");
+    await h.emit("session.compaction.ended", { reason: "manual" });
+    const before = h.state().steps; await h.step(60000); assert.equal(h.state().steps, before + 1); assert.ok(!h.has("step_ignored")); h.stop();
+  },
   // ---- round 7 ----
   async "round 7 item 1: notes written before a step that started and has not ended: the big read is not covered (own compaction; a requested one is not refused for it)"() {
     const h = await harness({}); await h.step(100000); h.notes(); await h.step(101000); await sleep(8);   // notes cover 101k; below ask_at

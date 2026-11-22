@@ -265,6 +265,22 @@ needs Python 3.11 or newer), the plugin logs one line, `build_unavailable`, and 
 catches and logs its own errors; the plugin never throws into OpenCode. Events are queued per session, so a slow call for one session
 does not hold up another, and nothing waits on the compaction itself (`compact` returns when the request is queued: 2 ms measured).
 
+**A request queued behind a compaction the hook was never asked about.** Seen at the first rollover of a real main chat (2026-11-22,
+agent `build`): the plugin requested its compaction at 148,227 tokens, and within 10 ms OpenCode recorded an `auto` compaction that
+completed in 2 ms: it applied a model summary it had prepared about two hours earlier, a minute before `compaction.background: false`
+was installed ($1.18, most likely paid then). The hook was not called for it. The plugin's own request ran 8 seconds later on a
+context of 58,945 tokens; the notes were 29 ms older than the rollover just recorded, so the hook left it and OpenCode wrote a second
+model summary ($0.76). Since then the plugin remembers such a request (`queued`): when an `auto` compaction ends that the hook was
+not asked about while a request of the plugin's is pending, the next hook call is answered from the same notes, built against the old
+cycle's time. The bounds: the notes file is unchanged, at most one step since (ended or still running), that step wrote no more than
+`hook_growth` tokens when its end was seen, within `compaction_patience_ms`, and never behind a `manual` compaction (which may be the
+request itself). Not measurable at a step boundary, as on the normal path: the tool results of that one step, and the output of a
+step that is still running when the hook fires. The log line is `own_compaction` with `supplied, the request queued behind a
+compaction the hook was not asked about`. Covered by the tests named `live:`; not yet seen in a real run.
+
+The second rollover of the same chat, asked at 91,013 tokens with nothing prepared beforehand, went as designed: `asked`, `roll_requested`,
+`summary_supplied`, `rolled`, cost 0, the compaction row completed in 122 ms, and the chat carried on from its notes.
+
 ## What was measured
 
 OpenCode 2.3.2, Sonnet 5.5, one task of 12 generated modules (about 280,000 tokens of reading, a sign-off word given only in the

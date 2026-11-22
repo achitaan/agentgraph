@@ -238,7 +238,7 @@ module.exports = {
       const now = stamp(s.sid);
       if (!now || now === s.stamp) return;
       loadSaved(s);
-      s.rolling = null; s.supplied = null; s.ownRoll = null; s.lastSummary = null; s.fellBack = false; s.skipped.clear();
+      s.rolling = null; s.supplied = null; s.ownRoll = null; s.lastSummary = null; s.queued = null; s.fellBack = false; s.skipped.clear();
       log(s, "state_reloaded", { reason: "another process changed this session's state" });
     };
 
@@ -344,10 +344,10 @@ module.exports = {
     leadsRead = readLeads();
     const newerThan = (s) => Math.max(s.lastRollover || 0, s.firstAskAt || 0);   // notes older than this are the last cycle's, or older than the ask
     // the summary text, or {fail: reason}; never rejects
-    const build = (s) => new Promise((resolve) => {
+    const build = (s, newer = newerThan(s)) => new Promise((resolve) => {
       const bin = agentgraphBin();
       if (!bin) return resolve({ fail: "agentgraph command not found", broken: true });
-      const args = ["handoff", "build", "--session", s.sid, "--dir", dirOf(s), "--notes-dir", settings().notes_dir, "--newer-than", String(newerThan(s))];
+      const args = ["handoff", "build", "--session", s.sid, "--dir", dirOf(s), "--notes-dir", settings().notes_dir, "--newer-than", String(newer)];
       if (isChat(s)) args.push("--chat", "--user-message-chars", String(settings().chat_message_chars), "--user-chars", String(settings().chat_user_chars));
       else args.push("--lane");
       try {
@@ -414,6 +414,8 @@ module.exports = {
         if (process.env.AGENTGRAPH_ROLLOVER_DEBUG) log(s, "hook_seen", { keys: Object.keys(event).join(","), rolling: !!s.rolling });
         syncState(s);                                     // another process may have rolled this session over since
         let roll = s.rolling;                           // held here: the 180 s limit or an event can clear s.rolling while the build runs
+        if (roll) roll.seen = true;                     // this compaction is the one the request was made for (see `queued` in onCompactionEnded)
+        const queued = s.queued; s.queued = null;       // good for the first compaction after the one it was queued behind, and no other
         const lim = limits(s);
         let own = false;
         const unseen = unseenStep(s, roll ? roll.at : 0);   // before the roll record of an own compaction is made
@@ -425,7 +427,15 @@ module.exports = {
           log(s, "own_compaction", { reason: "own-compaction: supplied, the last summary again (no step has ended since the last rollover)", chars: s.lastSummary.text.length });
           return;
         }
-        if (!roll) {
+        if (!roll && queued && queued.notes && readNotes(s) === queued.notes && s.steps - queued.step + (unseen ? 1 : 0) <= 1 && queued.out <= num(lim.hook_growth)
+            && Date.now() - queued.at <= num(settings().compaction_patience_ms) && !buildBroken && !s.noTask) {
+          // the plugin's request, which was queued behind a compaction the hook was never asked about (seen live: OpenCode applied a summary
+          // it had prepared earlier). The notes the request was made for cover what is being replaced now: that summary, the tail they were
+          // written in and at most one step (ended or still running, and when ended one that wrote no more than `hook_growth` tokens).
+          // They are older than the rollover just recorded, so the build is given the old cycle's time.
+          own = true;
+          roll = s.rolling = { at: Date.now(), reason: "the request queued behind opencode's compaction", ctx: s.lastCtx, hookUsed: false, own: true, newer: queued.newer };
+        } else if (!roll) {
           // not ours: OpenCode's own automatic compaction (or a manual one). Supplied only when the notes are fresh; else its normal model summary
           const why = ownStale(s, lim);
           if (why) { log(s, "own_compaction", { reason: "own-compaction: left, " + why + "; a normal model summary is made" }); return; }
@@ -438,12 +448,14 @@ module.exports = {
           if (s.notesCtx == null || s.notesMtime <= s.lastRollover) { log(s, "fell_back", { reason: "no notes written since the last rollover; a normal model summary is made" }); return; }
           if (grew > num(lim.hook_growth)) { log(s, "fell_back", { reason: `the context grew ${grew} tokens since the request (limit ${lim.hook_growth}); a normal model summary is made` }); return; }
         }
-        const got = await build(s);
+        const got = await build(s, roll.newer);
         if (got.text) {
           event.result = { summary: got.text }; roll.hookUsed = true; s.supplied = roll;
           s.lastSummary = { text: got.text, at: Date.now() };
-          s.ownRoll = { ctx: s.lastCtx };      // the step end that arrives late (after this compaction) belongs to the replaced context, whoever asked for the compaction
-          if (own) { log(s, "own_compaction", { reason: "own-compaction: supplied", chars: got.text.length, unseen_step: unseen }); }
+          // the step end that arrives late (after this compaction) belongs to the replaced context, whoever asked for the compaction; the queued
+          // request with its one step already seen has no late step end to wait for
+          s.ownRoll = roll.newer != null && !unseen ? null : { ctx: s.lastCtx };
+          if (own) { log(s, "own_compaction", { reason: "own-compaction: supplied" + (roll.newer != null ? ", the request queued behind a compaction the hook was not asked about" : ""), chars: got.text.length, unseen_step: unseen }); }
           else log(s, "summary_supplied", { chars: got.text.length, reason: roll.reason, unseen_step: unseen });
         } else {
           if (own) { if (s.rolling === roll) s.rolling = null; s.ownRoll = { ctx: s.lastCtx }; log(s, "own_compaction", { reason: "own-compaction: left, " + got.fail + "; a normal model summary is made" }); }
@@ -487,6 +499,7 @@ module.exports = {
         if (contextOf(d.tokens) >= r.ctx) { log(s, "step_ignored", { reason: "the step ended after OpenCode's compaction was answered with the notes" }); return; }
       }
       const prevEnd = s.lastEnd;
+      if (s.queued) s.queued.out += isObj(d.tokens) ? num(d.tokens.output) : 0;
       s.lastCtx = contextOf(d.tokens);
       s.lastEnd = Date.now();
       s.steps += 1;
@@ -525,14 +538,18 @@ module.exports = {
       if (!(await inScope(s))) return;
       const roll = s.rolling || s.supplied, ours = !!(roll && roll.hookUsed);
       if (!ours) s.lastSummary = null;
+      // a request of the plugin's that the hook has not been asked about is still queued behind the compaction that ended: the next hook call is its
+      // (only behind an automatic one: a manual compaction that ends with no hook call may be that request itself)
+      const queued = roll && roll === s.rolling && !roll.own && !roll.seen && s.notesMtime && d.reason === "auto" ? { at: Date.now(), newer: newerThan(s), notes: s.notesMtime, step: s.steps, out: 0 } : null;
       log(s, ours ? "rolled" : "compacted", { cost: num(d.cost), tokens: isObj(d.tokens) ? contextOf(d.tokens) : 0, reason: roll ? roll.reason : (d.reason || "opencode") });
       resetCycle(s);
+      s.queued = queued;
       saveState(s);
     };
     const onCompactionFailed = async (s, d) => {
       if (!(await inScope(s))) return;
       const kind = isObj(d.error) && typeof d.error.type === "string" ? d.error.type.slice(0, 60) : "unknown";   // never the message: it can carry prompt text
-      s.rolling = null; s.supplied = null; s.ownRoll = null; s.lastSummary = null;   // nothing was replaced: the next compaction is a new one
+      s.rolling = null; s.supplied = null; s.ownRoll = null; s.lastSummary = null; s.queued = null;   // nothing was replaced: the next compaction is a new one
       noteFailure(s, "compaction ended in failure (" + kind + ")");
     };
 
