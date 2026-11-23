@@ -2733,6 +2733,24 @@ test("orbit 3D: names stay where they are while the view turns a little; they mo
   assert.ok(moved <= compared * 0.05, `${moved} of ${compared} name positions changed between frames 100 ms apart`);
 });
 
+test("orbit 3D: a body nearer than the side chat's ball keeps its mark where it lands on the ball (the ball is only raised against the sun's flames)", () => {
+  // 100 x 30 at 60.5 s (side chat busy): a councillor's moon (depth about 0.66) lands on the ball (depth about 0.08, a ball a tenth of a figure radius deep)
+  const doc = orbitSideDoc(demoWorn, true);
+  const f = orbitTrace(doc, 100, 30, 60500);
+  const side = f.bodies.find((b) => b.id === "side");
+  assert.ok(side && side.ball && side.depth >= 0 && side.depth < 0.2, "the ball is near the middle of the figure's depth");
+  const { x, y, rx, ry } = side.ball;
+  const onBall = (b) => ((b.col * 2 + 1 - x) / rx) ** 2 + ((b.row * 4 + 2 - y) / ry) ** 2 <= 1;
+  const nearer = f.bodies.filter((b) => b.id !== "side" && onBall(b) && b.depth > side.depth + 0.3);
+  assert.ok(nearer.length > 0, "a body nearer than the ball lands on it");
+  for (const b of nearer) {
+    assert.equal(b.hidden, false, b.id + " is in front of the ball");
+    assert.equal(b.drawn, true, b.id + " keeps its mark");
+  }
+  // the ball still covers the sun's flames (drawn above the figure) when it is in front of the hub's middle
+  assert.ok(side.drawn);
+});
+
 test("orbit 3D: the side chat's moon is a shaded ball when installed, nothing when not; it follows its own plane, moves only while busy, stands still under reduced motion", () => {
   const SHADES = /[░▒▓█]/;
   const plain = JSON.parse(JSON.stringify(demoWorn));
