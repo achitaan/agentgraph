@@ -1,0 +1,32 @@
+[
+  {
+    "name": "Ada Lovelace",
+    "phone": "555-0100",
+    "email": "ada@example.com"
+  },
+  {
+    "name": "Mary Ann Smith",
+    "phone": "555-0111",
+    "email": null
+  },
+  {
+    "name": "Cher",
+    "phone": null,
+    "email": null
+  },
+  {
+    "name": "Jean-Luc de la Mer",
+    "phone": "555-0122",
+    "email": "jl@example.com"
+  },
+  {
+    "name": "Grace Hopper",
+    "phone": null,
+    "email": "grace@example.com"
+  },
+  {
+    "name": "Alan Turing",
+    "phone": "555-0133",
+    "email": null
+  }
+]

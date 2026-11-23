@@ -1,0 +1,7 @@
+{
+  "agent": "orchestrator",
+  "prompt": "Please write `parse_duration` in `durations/parse.py`: it turns text like \"1h30m\" into seconds. What it has to do is written down as ten numbered rules in `SPEC.md` at the top of the project; follow all ten, not only the ones the tests in `tests/test_durations.py` happen to try. `format_duration` and the `Countdown` class already work and must keep working. Run `python3 -m unittest discover -s tests -t . -q` when you are done.",
+  "check": "python3 -m unittest discover -s tests -t . -q",
+  "timeout": 900,
+  "check_timeout": 60
+}

@@ -1,0 +1,7 @@
+{
+  "agent": "orchestrator",
+  "prompt": "Bug report from the order desk: on the order list screen, the footer says \"Page 1 of 2\" when there are 45 orders at 20 per page, so the last 5 orders can never be reached. It should say \"Page 1 of 3\": a last page that is only partly full still counts as a page. An empty list stays at 0 pages, as it is today.\n\nFix it in the `shopkit` package. Everything else must keep working as it does now. In particular the outbox (`shopkit/outbox.py`) must keep sending only full batches and holding the leftover messages for the next run, and bad page sizes must still raise ValueError. Run `python3 -m unittest discover -s tests -t . -q` when you are done.",
+  "check": "python3 -m unittest discover -s tests -t . -q",
+  "timeout": 900,
+  "check_timeout": 60
+}

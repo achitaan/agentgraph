@@ -1,0 +1,1 @@
+{"name": "hard", "note": "Four harder tasks where the quick fix passes the visible check and fails the hidden one.", "scenarios": ["h1-page-count", "h2-contact-shape", "h3-todo-flags", "h4-duration-spec"]}

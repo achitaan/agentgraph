@@ -1,0 +1,7 @@
+{
+  "agent": "orchestrator",
+  "prompt": "Two features for the `todo` package, please. Both change how a task is stored and drawn, so they touch `todo/render.py` and `todo/store.py`.\n\n1. Due dates: `add TITLE --due YYYY-MM-DD`. A task gets a `due` field (the date as text, or None) and the list shows ` (due 2026-01-05)` after the title. The date must be written exactly YYYY-MM-DD and be a real calendar date; anything else makes `add` print `error: bad due date: <value>` on stderr, exit with 2 and store nothing.\n2. Priority: `add TITLE --priority high|normal` (normal is the default). A task gets a `priority` field (`\"normal\"` or `\"high\"`) and a high task shows `! ` between its id and its title, e.g. `[ ] 3 ! Buy milk`. Any other value: `error: bad priority: <value>`, exit 2, nothing stored.\n\nBoth fields are stored in the JSON file as `due` and `priority`, and `store.add_task(path, title, due=None, priority=\"normal\")` takes them. A task with both reads `[ ] 3 ! Buy milk (due 2026-01-05)`. The existing 30-character title cut still applies to the title alone; the due suffix goes after the cut title and is never cut.\n\nWhat exists today must not change: a task with neither field draws exactly as it does now, task files written before this change (with no `due` or `priority` keys) must still load, list and accept `done`, and `done` must keep a task's due date and priority. Run `python3 -m unittest discover -s tests -t . -q` when you are done.",
+  "check": "python3 -m unittest discover -s tests -t . -q",
+  "timeout": 1200,
+  "check_timeout": 60
+}
