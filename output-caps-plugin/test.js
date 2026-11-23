@@ -106,22 +106,80 @@ const cases = {
     const g2 = a2.findIndex((l) => GAP.test(l)); const hc = a2.slice(0, g2).join("\n").length, tc = a2.slice(g2 + 1).join("\n").length;
     assert.ok(Math.abs(hc / (hc + tc) - 0.5) < 0.03);
   },
-  async "several text parts: the cap applies to their total"() {
+  async "several text parts: every part stays in place and in order; the cap applies to their total, each part cut by its share"() {
     const h = await harness();
-    const parts = [{ type: "text", text: lines(200) }, { type: "text", text: lines(200) }, { type: "text", text: lines(200) }];   // three of 10,000
+    const parts = [{ type: "text", text: lines(200), id: "a" }, { type: "text", text: lines(200), id: "b" }, { type: "text", text: lines(200), id: "c" }];   // three of 10,000
     const e = h.run("shell", { content: parts });
-    assert.equal(e.result.content.length, 1); assert.ok(chars(e.result.content) < 20500 && chars(e.result.content) > 18000);
+    assert.equal(e.result.content.length, 3); assert.deepEqual(e.result.content.map((p) => p.id), ["a", "b", "c"], "order and other fields kept");
+    for (const p of e.result.content) { assert.equal(p.type, "text"); assert.equal(p.text.split("\n").filter((l) => GAP.test(l)).length, 1, "one gap line a cut part"); assert.ok(p.text.startsWith("00001| ")); }
+    assert.ok(chars(e.result.content) < 20000 + 3 * 200 && chars(e.result.content) > 18000, String(chars(e.result.content)));
+    assert.equal(e.result.metadata.capped.original, 30000); assert.equal(e.result.metadata.capped.kept, chars(e.result.content));
     const under = [{ type: "text", text: lines(100) }, { type: "text", text: lines(100) }];
     const r = { content: under }; assert.strictEqual(h.run("shell", r).result, r, "two parts of 5,000 each are under the cap");
+  },
+  async "parts are cut in proportion to their length, and none is fused with another"() {
+    const h = await harness();
+    const big = "b".repeat(3000) + "\n" + "c".repeat(60000), small = "no newline at the end of this part " + "d".repeat(1200);   // no part ends with a newline
+    const e = h.run("shell", { content: [{ type: "text", text: big }, { type: "text", text: small }] });
+    assert.equal(e.result.content.length, 2);
+    const [x, y] = e.result.content.map((p) => p.text);
+    assert.ok(x.length < big.length / 2 && y.length < small.length, "both over their share are cut");
+    assert.ok(x.startsWith("bbb") && !x.includes("no newline at the end"), "the first part holds only its own text");
+    assert.ok(y.startsWith("no newline at the end") && y.endsWith("d") && !y.includes("c".repeat(100)), "the second part holds only its own text");
+    assert.ok(x.length > y.length * 5, "the longer part keeps more");
   },
   async "a file part beside capped text is left alone, in its place"() {
     const h = await harness();
     const file = { type: "file", uri: "data:image/png;base64,AAAA", mime: "image/png", name: "a.png" };
-    const e = h.run("shell", { content: [{ type: "text", text: lines(1000) }, file, { type: "text", text: "tail text" }] });
-    assert.equal(e.result.content.length, 2); assert.strictEqual(e.result.content[1], file); assert.equal(e.result.content[0].type, "text");
+    const tail = { type: "text", text: "tail text" };
+    const e = h.run("shell", { content: [{ type: "text", text: lines(1000) }, file, tail] });
+    assert.equal(e.result.content.length, 3); assert.strictEqual(e.result.content[1], file); assert.strictEqual(e.result.content[2], tail, "a small part is not touched");
+    assert.equal(e.result.content[0].type, "text"); assert.ok(e.result.content[0].text.length < 20500);
+    const two = h.run("shell", { content: [{ type: "text", text: lines(600) }, file, { type: "text", text: lines(600) }] });
+    assert.deepEqual(two.result.content.map((p) => p.type), ["text", "file", "text"]); assert.strictEqual(two.result.content[1], file);
+    assert.ok(two.result.content[0].text.length < 12000 && two.result.content[2].text.length < 12000);
     const onlyFile = { content: [file] }; assert.strictEqual(h.run("read", onlyFile).result, onlyFile);
     const big = { type: "file", uri: "data:application/pdf;base64," + "A".repeat(200000), mime: "application/pdf" };
     const pdf = { content: [big] }; assert.strictEqual(h.run("read", pdf).result, pdf, "a large file part is never cut");
+  },
+  async "one long line with no newline: cut by characters, within the cap plus the gap line, head budget used"() {
+    const h = await harness();
+    const e = h.run("shell", { content: "x".repeat(100000) });
+    const c = e.result.content; const gapAt = c.search(/\[\d+ characters/);
+    assert.ok(c.length <= 20000 + 200, String(c.length)); assert.equal(c.slice(0, gapAt), "x".repeat(14000) + "\n", "70% of the cap kept at the start");
+    assert.equal(c.split("\n").filter((l) => GAP.test(l)).length, 1); assert.equal(c.slice(c.indexOf("\n", gapAt) + 1), "x".repeat(6000), "30% kept at the end");
+    const r = h.run("read", { content: "y".repeat(300000) }); assert.ok(r.result.content.length <= 40000 + 200);
+  },
+  async "a short line then one very long line: the head budget is not wasted"() {
+    const h = await harness();
+    const e = h.run("shell", { content: "short first line\n" + "y".repeat(100000) });
+    const c = e.result.content; const gapAt = c.search(/\[\d+ characters/);
+    assert.ok(c.length <= 20000 + 200, String(c.length)); assert.ok(gapAt > 13000, "head holds about 14,000 characters, not just the short line: " + gapAt);
+    assert.ok(c.startsWith("short first line\nyyy")); assert.ok(c.endsWith("y".repeat(5000)));
+    const tailOnly = h.run("shell", { content: "z".repeat(100000) + "\nlast short line\n" });   // a very long line then a short one
+    assert.ok(tailOnly.result.content.length <= 20000 + 200); assert.ok(tailOnly.result.content.endsWith("last short line\n"));
+    assert.ok(tailOnly.result.content.endsWith("z".repeat(5000) + "\nlast short line\n") || tailOnly.result.content.length > 19000);
+  },
+  async "a cut inside a long line never splits a surrogate pair"() {
+    const h = await harness({ other_chars: 20001 });
+    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    const E = "\u{1F600}";
+    const texts = [E.repeat(200000), "a" + E.repeat(200000), E.repeat(200000) + "a", "ab" + E.repeat(200000) + "c", "x\n" + E.repeat(200000)];
+    let cutOnes = 0;
+    for (const text of texts) {
+      for (const tool of ["shell", "read"]) {
+        const e = h.run(tool, { content: text }); assert.notStrictEqual(typeof e.result.content, "undefined");
+        assert.ok(e.result.content.length < text.length, "cut"); cutOnes += 1;
+        assert.ok(!lone.test(e.result.content), "no lone surrogate in the capped text");
+        const asParts = h.run(tool, { content: [{ type: "text", text }] }); assert.ok(!lone.test(asParts.result.content[0].text));
+      }
+    }
+    assert.equal(cutOnes, 10);
+    // every cut point of a head budget lands on a pair edge or is stepped off it
+    for (let cap = 1000; cap < 1010; cap++) {
+      const g = await harness({ other_chars: cap });
+      for (const text of [E.repeat(5000), "a" + E.repeat(5000), E.repeat(5000) + "a"]) assert.ok(!lone.test(g.run("shell", { content: text }).result.content), `cap ${cap}`);
+    }
   },
   async "an error result is untouched"() {
     const h = await harness();
@@ -148,9 +206,11 @@ const cases = {
   },
   async "empty content with a long string output: the output is capped (OpenCode would use it as the text)"() {
     const h = await harness();
-    for (const content of [undefined, []]) {
-      const e = h.run("shell", { output: lines(1000), content }); assert.ok(e.result.output.length < 20500); assert.match(e.result.output, GAP);
+    for (const content of [undefined, [], ""]) {
+      const e = h.run("shell", { output: lines(1000), content }); assert.ok(e.result.output.length < 20500, String(content)); assert.match(e.result.output, GAP);
+      assert.strictEqual(e.result.content, content, "the empty content is left as it was"); assert.equal(e.result.metadata.capped.original, 50000);
     }
+    const shortOut = { output: "short", content: "" }; assert.strictEqual(h.run("shell", shortOut).result, shortOut, "a short output is left alone");
     const w = { output: { big: "x".repeat(90000) } }; assert.strictEqual(h.run("shell", w).result, w, "an output that is not a string is left alone");
     const keep = { output: lines(1000), content: "short" }; assert.strictEqual(h.run("shell", keep).result, keep, "output is not the text when content has some");
   },
@@ -204,6 +264,22 @@ const cases = {
     const locked = Object.freeze({ tool: "shell", sessionID: "ses_test1", status: "completed", result: { content: lines(1000) } });
     assert.doesNotThrow(() => h.fn(locked)); assert.ok(h.rows().some((r) => r.event === "error"));
     assert.ok(h.rows().filter((r) => r.event === "error").every((r) => !("text" in r) && JSON.stringify(r).length < 400));
+  },
+  async "the error row holds the error's class name or a fixed code, never any part of its message"() {
+    const h = await harness();
+    const secret = "MADE-UP-MESSAGE-4711";
+    class OddFailure extends RangeError {}
+    for (const make of [() => new Error(secret), () => new TypeError(secret), () => new OddFailure(secret), () => secret, () => ({ message: secret }), () => null]) {
+      const event = { tool: "shell", sessionID: "ses_test1", status: "completed" };
+      Object.defineProperty(event, "result", { get() { throw make(); } });
+      assert.doesNotThrow(() => h.fn(event));
+    }
+    const raw = fs.readFileSync(path.join(h.home, "output-caps.log"), "utf8");
+    assert.ok(!raw.includes(secret) && !raw.includes("4711"), "no part of the message in the log");
+    const reasons = h.rows().filter((r) => r.event === "error").map((r) => r.reason);
+    assert.deepEqual(reasons, ["Error", "TypeError", "OddFailure", "String", "Object", "error"]);
+    const f = await harness({}, { hookFails: true });
+    const rawF = fs.readFileSync(path.join(f.home, "output-caps.log"), "utf8"); assert.ok(!rawF.includes("no hook"), "the registration error's message is not logged");
   },
   async "the log holds sizes only: no output text, no tool input"() {
     const h = await harness();
