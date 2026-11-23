@@ -2763,7 +2763,7 @@ test("rooms: no name overlaps another name or a title, in the demo at every size
           }
         }
         const hub = roomsAt(doc, w, h, now).chars.find((c) => c.hub);
-        if (hub && w >= 62 && h >= 22 && now === 1500) assert.ok(hub.name_cells, `${w}x${h}: the hub keeps its name`);
+        if (hub && w >= 62 && h >= 38 && now === 1500) assert.ok(hub.name_cells, `${w}x${h}: the hub keeps its name`);
       }
     }
   }
@@ -2851,6 +2851,129 @@ test("rooms: a 200x60 frame stays within the orbit's frame cost limit, counted i
   console.log(`     frame 200x60: reference ${best.ref.toFixed(3)} ms; rooms ${best.rooms.toFixed(3)} ms (${(best.rooms / best.ref).toFixed(1)} ref), rooms new ${best["rooms new"].toFixed(3)} ms (${(best["rooms new"] / best.ref).toFixed(1)} ref)`);
   assert.ok(best.rooms / best.ref < FRAME_COST_LIMIT * FRAME_COST_TODAY["2d"], `rooms: ${(best.rooms / best.ref).toFixed(1)} reference frames, limit ${FRAME_COST_LIMIT * FRAME_COST_TODAY["2d"]}`);
   assert.ok(best["rooms new"] / best.ref < FRAME_COST_LIMIT * FRAME_COST_TODAY["2d new"], `rooms new: ${(best["rooms new"] / best.ref).toFixed(1)} reference frames, limit ${FRAME_COST_LIMIT * FRAME_COST_TODAY["2d new"]}`);
+});
+
+const GOLD = "#facc15";
+const HUB_ROOM = { terminal: "terminal", files: "files", web: "web", search: "search", thinking: "thinking", spawn: "team", messaging: "team", tasks: "team", tools: "terminal" };
+const roomsSettled = (doc) => hubOf(doc).activity.time * 1000 + 5000; // after the walk
+// gold pixels of the sprite (not the labels) inside the room's cells
+function goldIn(lines, r) {
+  let n = 0;
+  for (let row = r.y0 >> 1; row <= r.y1 >> 1; row += 1) {
+    let col = 0;
+    for (const sp of lines[row]) {
+      const w = R.displayWidth(sp.text);
+      if (/^[ ▀]+$/.test(sp.text) && col + w > r.x0 && col <= r.x1 && (sp.bg === GOLD || sp.color === GOLD)) n += 1;
+      col += w;
+    }
+  }
+  return n;
+}
+// no two sprites touch, none leaves its room's inner bounds (walls and the title row are outside them)
+function assertRoomsTidy(info, what) {
+  const sprites = info.chars.filter((c) => !(c.hub && info.walking));
+  for (const c of sprites) {
+    const r = info.rooms[c.room];
+    assert.ok(c.x0 > r.x0 && c.x1 < r.x1 && c.y0 > r.y0 && c.y1 < r.y1, `${what}: ${c.name || c.kind} inside ${c.room}`);
+    for (const t of info.titles) if (t.room === c.room) assert.ok(c.y0 > t.r * 2 + 1, `${what}: ${c.name || c.kind} under the title`);
+  }
+  for (let i = 0; i < sprites.length; i += 1) {
+    for (let j = i + 1; j < sprites.length; j += 1) {
+      const a = sprites[i];
+      const b = sprites[j];
+      assert.ok(a.x1 < b.x0 || b.x1 < a.x0 || a.y1 < b.y0 || b.y1 < a.y0, `${what}: ${a.name || a.kind} overlaps ${b.name || b.kind}`);
+    }
+  }
+}
+
+test("rooms: the hub is drawn in gold inside its room, whatever its zone, at 36x14, 48x20, 62x38 and 100x30", () => {
+  for (const zone of Object.keys(HUB_ROOM)) {
+    const doc = copy(demoWorn);
+    hubOf(doc).activity.zone = zone;
+    for (const [w, h] of [[36, 14], [48, 20], [62, 38], [100, 30]]) {
+      for (const now of [roomsSettled(doc), roomsSettled(doc) + 500]) {
+        const info = roomsAt(doc, w, h, now);
+        const hub = info.chars.find((c) => c.hub);
+        assert.ok(hub, `${zone} ${w}x${h}: the hub has a sprite`);
+        assert.equal(hub.room, HUB_ROOM[zone], `${zone} ${w}x${h}: its room`);
+        assert.ok(inside(hub, info.rooms[hub.room]), `${zone} ${w}x${h}: inside its room`);
+        assert.ok(goldIn(RM.roomsLines(doc, w, h, now), info.rooms[hub.room]) > 0, `${zone} ${w}x${h}: gold pixels in its room`);
+      }
+    }
+  }
+});
+
+test("rooms: the crowded team room at 62x38 keeps the hub full size with its bubble; the idle ones give way; the rest is +N", () => {
+  const info = roomsAt(demoWorn, 62, 38, roomsSettled(demoWorn));
+  const hub = info.chars.find((c) => c.hub);
+  assert.equal(hub.room, "team");
+  assert.deepEqual([hub.x1 - hub.x0 + 1, hub.y1 - hub.y0 + 1], [5, 9], "the full-size hero");
+  assert.ok(info.bubble, "the bubble is shown");
+  assert.ok(info.bubble.r * 2 + 1 < hub.y0 + 1, "the bubble is over the hub");
+  const idle = info.chars.filter((c) => c.room === "team" && c.kind === "idle");
+  assert.ok(idle.length >= 3 && idle.every((c) => c.x1 - c.x0 + 1 <= 3 && c.y1 - c.y0 + 1 <= 3), "idle agents are small");
+  const needs = info.chars.filter((c) => c.room === "team" && c.kind === "needs");
+  assert.ok(needs.length >= 1, "agents that need the user are drawn");
+  // many more idle agents than room: some are hidden, counted in the title row, the hub and the needs keep their places
+  const crowd = copy(demoWorn);
+  for (let i = 0; i < 40; i += 1) crowd.agents.push({ ...copy(crowd.agents.find((a) => a.group !== "hub" && !a.busy)), name: "idle-" + i });
+  const many = roomsAt(crowd, 62, 38, roomsSettled(crowd));
+  const hub2 = many.chars.find((c) => c.hub);
+  assert.deepEqual([hub2.x1 - hub2.x0 + 1, hub2.y1 - hub2.y0 + 1], [5, 9]);
+  assert.ok(many.bubble, "the bubble stays");
+  assert.equal(many.chars.filter((c) => c.kind === "needs").length, needs.length, "the needs stay");
+  assert.equal(many.more.length, 1);
+  assert.match(many.more[0].text, /^\+\d+$/);
+  assert.equal(many.more[0].room, "team");
+  assert.equal(many.more[0].count, idle.length + 40 - many.chars.filter((c) => c.room === "team" && c.kind === "idle").length, "the +N counts the hidden");
+  assertRoomsTidy(many, "crowded team");
+});
+
+test("rooms: no two sprites overlap and none crosses a wall or a title row, with and without bobbing (36x14 and 62x38)", () => {
+  const crowd = copy(demoWorn);
+  const model = crowd.agents.find((a) => a.group !== "hub");
+  const doc300 = copy(demoWorn);
+  for (let i = 0; i < 300; i += 1) doc300.agents.push({ ...copy(model), name: "w-" + i, busy: 1, activity: { kind: "tool", tool: "bash", zone: "terminal", target: "x", time: 1 } });
+  for (const [label, doc] of [["demo", demoWorn], ["300", doc300]]) {
+    const t0 = hubOf(doc).activity.time * 1000;
+    for (const [w, h] of [[36, 14], [62, 38]]) {
+      for (const [now, options] of [[1500, { motion: "reduced" }], [t0 + 5000, {}], [t0 + 5500, {}]]) {
+        assertRoomsTidy(roomsAt(doc, w, h, now, options), `${label} ${w}x${h} @${now - t0}`);
+      }
+    }
+  }
+});
+
+test("rooms: 300 working agents with one tool fit a 62x38 frame fast and exactly; reduced motion still gives equal frames", () => {
+  const doc = copy(demoWorn);
+  const model = doc.agents.find((a) => a.group !== "hub");
+  for (let i = 0; i < 300; i += 1) doc.agents.push({ ...copy(model), name: "w-" + i, busy: 1, activity: { kind: "tool", tool: "bash", zone: "terminal", target: "x", time: 1 } });
+  const t = performance.now();
+  const lines = RM.roomsScene(doc, { width: 62, height: 38, now: 1500 });
+  const ms = performance.now() - t;
+  assertRoomsExact(lines, 62, 38, "300 agents");
+  assert.ok(ms < 200, `300 agents took ${ms.toFixed(1)} ms`);
+  const a = RM.roomsLines(demoWorn, 62, 38, 1500, { motion: "reduced" });
+  assert.deepEqual(RM.roomsLines(demoWorn, 62, 38, 1500 + 500, { motion: "reduced" }), a);
+  assert.deepEqual(RM.roomsLines(demoWorn, 62, 38, 1500 + 777, { motion: "reduced" }), a);
+});
+
+test("rooms: a tool called constructor and a zone called __proto__ never put a function in a span", () => {
+  const doc = copy(demoWorn);
+  const act = hubOf(doc).activity;
+  act.tool = "constructor";
+  act.zone = "__proto__";
+  act.recent = [{ tool: "constructor", zone: "__proto__", target: "x" }, { tool: "toString", zone: "constructor", target: "y" }];
+  doc.agents.find((a) => a.group !== "hub" && a.busy).activity = { kind: "tool", tool: "constructor", zone: "hasOwnProperty" };
+  for (const [w, h] of [[36, 14], [62, 38], [100, 30]]) {
+    for (const lines of [RM.roomsLines(doc, w, h, 1500), RM.roomsScene(doc, { width: w, height: h, now: 1500 })]) {
+      for (const line of lines) for (const sp of line) assert.ok(typeof sp.text === "string" && !sp.text.includes("function"), `${w}x${h}: ${JSON.stringify(sp)}`);
+    }
+  }
+  const hostile = chatDoc((d) => { d.agents.find((a) => a.name === "orchestrator").activity = { time: d.generated - 1, kind: "tool", tool: "constructor", text: "", zone: "__proto__", target: "x", status: "running", recent: [{ zone: "__proto__", tool: "constructor", target: "y" }, { zone: "constructor", tool: "toString" }] }; });
+  for (const width of [22, 42, 80]) {
+    for (const line of R.layout(hostile, { width, now: 1795075100000, activity: true }).lines) for (const sp of line) assert.ok(typeof sp.text === "string" && !sp.text.includes("function"), JSON.stringify(sp));
+  }
 });
 
 test("demo: demoDocument adds a growing wear history and moving costs; the runner spawns nothing", async () => {

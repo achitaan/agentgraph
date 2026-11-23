@@ -1070,6 +1070,7 @@ export const TOOL_VERBS = Object.freeze({
   patch: "editing", apply_patch: "editing", grep: "searching", glob: "searching", websearch: "searching", codesearch: "searching", question: "asking",
   skill: "loading", subagent: "starting", task: "starting",
 });
+const own = (o, k) => (typeof k === "string" && Object.hasOwn(o, k) ? o[k] : undefined); // never a name from the prototype
 const TRAIL_MAX = 5;
 
 // What a working agent is doing now, one line under its row: the tool it runs, or the first words of what it thinks
@@ -1083,11 +1084,12 @@ function activityRow(agent, width) {
   if (!kind) return null;
   const text = clean(kind === "tool" ? a.tool : a.text);
   if (!text) return null;
-  const glyph = kind === "tool" && typeof a.zone === "string" ? ZONE_GLYPHS[a.zone] : undefined;
+  const glyph = kind === "tool" && own(ZONE_GLYPHS, a.zone);
   if (glyph) {
     const tool = text.toLowerCase();
-    const verb = TOOL_VERBS[tool] || ZONE_VERBS[a.zone];
-    const what = TOOL_VERBS[tool] ? verb : `${verb} ${tool}`;
+    const known = own(TOOL_VERBS, tool);
+    const verb = known || own(ZONE_VERBS, a.zone);
+    const what = known ? verb : `${verb} ${tool}`;
     const target = clean(a.target);
     const room = width - 2 - displayWidth(glyph) - 1;
     if (room < 1) return null;
@@ -1106,12 +1108,12 @@ function activityRow(agent, width) {
 // when it has none. Only as many as fit are drawn.
 function trailRow(agent, width) {
   const a = agent && isObject(agent.activity) ? agent.activity : null;
-  const known = a && typeof a.zone === "string" && ZONE_GLYPHS[a.zone];
+  const known = a && own(ZONE_GLYPHS, a.zone);
   const recent = known && Array.isArray(a.recent) ? a.recent.filter(isObject).slice(0, TRAIL_MAX) : [];
   const spans = [];
   let used = 2;
   for (const item of recent) {
-    const glyph = typeof item.zone === "string" && ZONE_GLYPHS[item.zone] ? ZONE_GLYPHS[item.zone] : ZONE_GLYPHS.tools;
+    const glyph = own(ZONE_GLYPHS, item.zone) || ZONE_GLYPHS.tools;
     const bad = item.status === "error";
     const need = displayWidth(glyph) + (bad ? 1 : 0) + (spans.length ? 1 : 0);
     if (used + need > width) break;

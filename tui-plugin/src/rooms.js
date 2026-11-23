@@ -322,20 +322,40 @@ function modelOf(doc, options) {
   return { hub: hubItem, items, lit: hubItem && working ? hubItem.room : null, act, start, agents };
 }
 
-// One room's characters in slots: rows from the bottom of the stage up, the hub first, each row centred. Sprites shrink
-// (the hub 5x9, 3x5, 3x3, a pixel pair; the others 3x5, 3x3, a pair) only when no names fit; names go least important first
-// (the hub's last); characters go, least important first, only when the smallest will not fit. -> placements.
-function fitRoom(items, stage) {
+// One room's characters. The hub comes first and keeps the biggest sprite its stage holds (5x9, 3x5, 3x3, a pixel pair);
+// then the agents that need the user, then the working ones (in `lead`, a tier of their own that shrinks first); the idle
+// ones are a neat grid above them at the smallest sprites, and go (as a `+N` in the title row) before anything else does.
+// A bubble row is kept above the hub's line when `want.bubble`, a pixel row off the hub when it can be. Every candidate setup is tried and the best one kept:
+// fewest working agents hidden, then the bubble, big sprites, the hub's name, the fewest idle ones hidden, then names.
+// -> { placed, hidden, bubbleRow } with `placed` as slots.
+function fitRoom(items, stage, want = {}) {
   const W = stage.x1 - stage.x0 + 1;
-  if (W < 1 || stage.y1 - stage.y0 < 1) return [];
-  const flow = (all, tier, named) => {
-    const cells = all.map((item) => {
-      const rows = item.hub ? HUB_TIERS[tier] : BOT_TIERS[tier];
-      const label = named.has(item) ? (item.mark ? item.mark + " " : "") + item.name : null;
-      const nw = label ? displayWidth(label) : 0;
-      return { item, rows, sw: rows[0].length, sh: rows.length, label, nw, iw: Math.max(rows[0].length, nw) };
-    });
-    if (cells.some((c) => c.iw > W)) return null;
+  const H = stage.y1 - stage.y0 + 1;
+  const total = items.length;
+  if (W < 1 || H < 2) return { placed: [], hidden: total, bubbleRow: -1 };
+  const cap = Math.max(1, ((W + 1) >> 1) * Math.floor((H + 1) / 3)); // no more than the smallest pairs could ever hold
+  const hubItem = items.find((i) => i.hub) || null;
+  const lead = items.filter((i) => !i.hub && i.kind !== "idle");
+  const idle = items.filter((i) => !i.hub && i.kind === "idle");
+  const leadAt = lead.slice(0, cap);
+  const idleAt = idle.slice(0, cap);
+  const ht = hubItem ? HUB_TIERS.findIndex((r) => r[0].length <= W && r.length <= H) : -1;
+  const hub = ht >= 0 ? hubItem : null;
+  const labels = new Map();
+  for (const it of items) if (it.name) labels.set(it, { text: (it.mark ? it.mark + " " : "") + it.name, w: displayWidth((it.mark ? it.mark + " " : "") + it.name) });
+  // `named` is true to name it; for the hub 2 names it in full, 1 cut to its sprite's width, 0 not at all
+  const cell = (item, rows, named) => {
+    const l = named ? labels.get(item) : null;
+    let text = l ? l.text : "";
+    let nw = l ? l.w : 0;
+    if (named === 1 && nw > rows[0].length) {
+      text = truncate(text, rows[0].length);
+      nw = displayWidth(text);
+    }
+    if (nw > W) nw = 0;
+    return { item, rows, sw: rows[0].length, sh: rows.length, label: nw ? text : null, nw, iw: Math.max(rows[0].length, nw) };
+  };
+  const wrap = (cells) => {
     const lines = [];
     let cur = null;
     for (const c of cells) {
@@ -346,48 +366,118 @@ function fitRoom(items, stage) {
       cur.cells.push(c);
       cur.w += 1 + c.iw;
     }
-    const out = [];
-    let B = stage.y1;
-    for (const line of lines) {
-      const has = line.cells.some((c) => c.label);
-      if (has && B % 2 === 0) B -= 1;
-      const band = has ? 3 : 0;
-      const sh = Math.max(...line.cells.map((c) => c.sh));
-      const top = B - band - sh + 1;
-      if (top < stage.y0) return null;
-      let x = stage.x0 + ((W - line.w) >> 1);
-      for (const c of line.cells) {
-        const sx = x + ((c.iw - c.sw) >> 1);
-        const sy = B - band - c.sh + 1;
-        out.push({ item: c.item, rows: c.rows, x: sx, y: sy, sw: c.sw, sh: c.sh, label: c.label, nx: x + ((c.iw - c.nw) >> 1), nr: c.label ? (B - 1) >> 1 : -1, ix: x, iw: c.iw, top: sy, bottom: c.label ? B : sy + c.sh - 1 });
-        x += c.iw + 1;
-      }
-      B = top - 2;
-    }
-    return out;
+    return lines;
   };
-  let all = items.slice();
-  for (;;) {
-    for (let tier = 0; tier < 4; tier += 1) {
-      const namable = all.filter((i) => i.name);
-      const floor = namable.length && namable[0].hub ? 1 : 0;
-      for (let n = namable.length; n >= floor; n -= 1) {
-        const placed = flow(all, tier, new Set(namable.slice(0, n)));
-        if (placed) return placed;
+  // one line of cells with its bottom pixel at B: -> its top pixel, or null when it leaves the stage
+  const lay = (line, B, out) => {
+    const has = line.cells.some((c) => c.label);
+    if (has && B % 2 === 0) B -= 1;
+    const band = has ? 3 : 0;
+    const top = B - band - Math.max(...line.cells.map((c) => c.sh)) + 1;
+    if (top < stage.y0) return null;
+    let x = stage.x0 + ((W - line.w) >> 1);
+    for (const c of line.cells) {
+      const sy = B - band - c.sh + 1;
+      out.push({ item: c.item, rows: c.rows, x: x + ((c.iw - c.sw) >> 1), y: sy, sw: c.sw, sh: c.sh, label: c.label, nx: x + ((c.iw - c.nw) >> 1), nr: c.label ? (B - 1) >> 1 : -1, ix: x, iw: c.iw, top: sy, bottom: c.label ? B : sy + c.sh - 1 });
+      x += c.iw + 1;
+    }
+    return top;
+  };
+  // the hub and the first `kn` of the others, `n` of them named
+  const lower = (c, kn, n) => {
+    const cells = hub ? [cell(hub, HUB_TIERS[ht], c.hubName)] : [];
+    for (let i = 0; i < kn; i += 1) cells.push(cell(leadAt[i], BOT_TIERS[c.T], i < n));
+    if (cells.some((x) => x.iw > W)) return null;
+    const out = [];
+    const lines = wrap(cells);
+    let B = stage.y1;
+    let bubbleRow = -1;
+    for (let i = 0; i < lines.length; i += 1) {
+      const top = lay(lines[i], B, out);
+      if (top === null) return null;
+      B = top - 2;
+      if (i === 0 && hub && c.gap >= 0) {
+        const br = (top - 2 - c.gap) >> 1;
+        if (br * 2 < stage.y0) return null;
+        bubbleRow = br;
+        B = br * 2 - 2;
       }
     }
-    if (all.length <= 1) return [];
-    all = all.slice(0, -1);
+    return { out, B, bubbleRow };
+  };
+  const run = (c, n) => {
+    let best = lower(c, 0, n);
+    if (!best) return null;
+    let lo = 0;
+    let hi = leadAt.length;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      const r = lower(c, mid, n);
+      if (r) {
+        lo = mid;
+        best = r;
+      } else hi = mid - 1;
+    }
+    const rows = BOT_TIERS[c.IT];
+    const sw = rows[0].length;
+    const sh = rows.length;
+    const cols = Math.floor((W + 1) / (sw + 1));
+    const gx = stage.x0 + ((W - (cols * (sw + 1) - 1)) >> 1);
+    let shown = 0;
+    for (let b = best.B; cols > 0 && b - sh + 1 >= stage.y0 && shown < idleAt.length; b -= sh + 1) {
+      for (let k = 0; k < cols && shown < idleAt.length; k += 1) {
+        const x = gx + k * (sw + 1);
+        best.out.push({ item: idleAt[shown], rows, x, y: b - sh + 1, sw, sh, label: null, nx: 0, nr: -1, ix: x, iw: sw, top: b - sh + 1, bottom: b });
+        shown += 1;
+      }
+    }
+    return { out: best.out, bubbleRow: best.bubbleRow, lost: lead.length - lo, idleLost: idle.length - shown };
+  };
+  let found = null;
+  let foundKey = null;
+  for (const gap of want.bubble && hub ? [1, 0, -1] : [-1]) { // the bubble's gap to the hub; -1: no bubble
+    for (const hubName of hub && labels.has(hub) ? [2, 1, 0] : [0]) {
+      for (const T of leadAt.length ? [0, 1, 2, 3] : [0]) {
+        for (const IT of idleAt.length && T < 3 ? [2, 3] : [3]) {
+          const c = { gap, hubName, T, IT };
+          const base = run(c, 0);
+          if (!base) continue;
+          const score = (r) => r.lost * 1e6 + r.idleLost;
+          let r = base;
+          let lo = 0;
+          let hi = leadAt.length;
+          while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            const t = run(c, mid);
+            if (t && score(t) <= score(base)) {
+              lo = mid;
+              r = t;
+            } else hi = mid - 1;
+          }
+          const named = r.out.filter((p) => p.label && !p.item.hub).length;
+          const hubLabel = r.out.find((p) => p.label && p.item.hub);
+          const key = [r.lost, gap < 0 ? 2 : 1 - gap, T, hubLabel ? (hubLabel.label === labels.get(hub).text ? 0 : 1) : 2, r.idleLost, IT, -named];
+          let better = !foundKey;
+          for (let i = 0; !better && i < key.length && key[i] <= foundKey[i]; i += 1) if (key[i] < foundKey[i]) better = true;
+          if (better) {
+            found = r;
+            foundKey = key;
+          }
+        }
+      }
+    }
   }
+  return { placed: found ? found.out : [], hidden: total - (found ? found.out.length : 0), bubbleRow: found ? found.bubbleRow : -1 };
 }
 
+const pick = (o, k) => (typeof k === "string" && Object.hasOwn(o, k) ? o[k] : undefined); // never a name from the prototype
 const colorFor = (c, dark) => (dark ? c : undefined);
 
 // The picture alone: { lines, info }. `rows` text rows of `w` cells.
 function buildRooms(doc, w, rows, now, options) {
   const pix = new Pix(w, rows);
   const rooms = geometry(w, rows);
-  const info = { rooms, titles: [], chars: [], bubble: null, walking: false, lit: null };
+  const info = { rooms, titles: [], chars: [], bubble: null, more: [], walking: false, lit: null };
   const reduced = options.motion === "reduced";
   const model = modelOf(isObject(doc) ? doc : {}, options);
   const lit = model.lit;
@@ -436,24 +526,48 @@ function buildRooms(doc, w, rows, now, options) {
     const avail = r.x1 - r.x0 - 2;
     const title = avail >= displayWidth(glyph + " " + word) ? glyph + " " + word : avail >= displayWidth(glyph) ? glyph : "";
     let top = r.y0 + 1;
+    let bob = top; // the highest row a bobbing sprite may reach: not into the wall, not into the title
     if (title && tr * 2 + 1 <= r.y1 - 1) {
       const tw = displayWidth(title);
       pix.take(r.x0 + 2, tr * 2, r.x0 + 2 + tw - 1, tr * 2 + 1);
       titleDraws.push({ name, tr, text: title, x: r.x0 + 2 });
       info.titles.push({ room: name, text: title, c0: r.x0 + 2, c1: r.x0 + 2 + tw - 1, r: tr });
       top = tr * 2 + 3;
+      bob = top - 1;
     }
-    stages[name] = { x0: r.x0 + 2, x1: r.x1 - 2, y0: top, y1: r.y1 - 2 };
+    stages[name] = { x0: r.x0 + 2, x1: r.x1 - 2, y0: top, y1: r.y1 - 2, bob };
   }
 
   // the characters in their rooms
   const placed = [];
+  const bubbleRows = {};
+  const moreDraws = [];
+  const target = model.hub && model.hub.working && model.act ? clean(model.act.target) : "";
+  let bubbleText = "";
+  if (model.hub && target) {
+    const r = rooms[model.hub.room];
+    const limit = r.x1 - r.x0 - 3;
+    const text = truncate(target, Math.min(limit, 24));
+    if (limit >= 3 && displayWidth(text) >= 3) bubbleText = text;
+  }
   for (const [name] of ROOMS) {
     const mine = model.items.filter((i) => i.room === name);
     if (!mine.length) continue;
-    for (const p of fitRoom(mine, stages[name])) {
+    const fit = fitRoom(mine, stages[name], { bubble: !!bubbleText && model.hub.room === name });
+    bubbleRows[name] = fit.bubbleRow;
+    for (const p of fit.placed) {
       placed.push({ ...p, room: name });
       pix.take(p.ix, p.top, p.ix + p.iw - 1, p.bottom);
+    }
+    // the ones that did not fit: `+N` at the right end of the title row, when the title leaves room
+    const t = titleDraws.find((d) => d.name === name);
+    const text = "+" + fit.hidden;
+    const c1 = stages[name].x1;
+    if (fit.hidden > 0 && t && c1 - text.length + 1 > t.x + displayWidth(t.text) + 1) {
+      const c0 = c1 - text.length + 1;
+      pix.take(c0, t.tr * 2, c1, t.tr * 2 + 1);
+      moreDraws.push({ name, text, c0, r: t.tr });
+      info.more.push({ room: name, text, count: fit.hidden, c0, c1, r: t.tr });
     }
   }
   const hubAt = placed.find((p) => p.item.hub) || null;
@@ -477,13 +591,11 @@ function buildRooms(doc, w, rows, now, options) {
 
   // the bubble over the hub: what it does, cut to the room
   let bubble = null;
-  const target = model.hub && model.hub.working && model.act ? clean(model.act.target) : "";
-  if (hubAt && target && !walkAt) {
+  if (hubAt && bubbleText && !walkAt) {
     const r = rooms[hubAt.room];
-    const br = (hubAt.y - 2) >> 1;
-    const limit = r.x1 - 1 - (r.x0 + 1) + 1 - 2;
-    const text = truncate(target, Math.min(limit, 24));
-    if (limit >= 3 && br >= 1 && displayWidth(text) >= 3) {
+    const br = bubbleRows[hubAt.room];
+    const text = bubbleText;
+    if (br >= 1) {
       const bw = displayWidth(text) + 2;
       for (const bx of [hubAt.x + (hubAt.sw >> 1) - (bw >> 1), r.x1 - 1 - bw + 1, r.x0 + 1]) {
         const x0 = Math.max(r.x0 + 1, Math.min(bx, r.x1 - 1 - bw + 1));
@@ -521,7 +633,9 @@ function buildRooms(doc, w, rows, now, options) {
     const marks = Math.floor(total / 3);
     for (let i = 0; i < marks; i += 1) {
       const [x, y] = pointAt(walk.pts, walk.lens, i * 3 + 2);
-      pix.set(Math.round(x), Math.round(y) + (i % 2 ? 1 : 0), mix(BG, ANTENNA, Math.min(0.7, 0.15 + 0.05 * i)));
+      const tx = Math.round(x);
+      const ty = Math.round(y) + (i % 2 ? 1 : 0);
+      if (pix.free(tx, ty, tx, ty)) pix.set(tx, ty, mix(BG, ANTENNA, Math.min(0.7, 0.15 + 0.05 * i)));
     }
   }
   for (const p of propsAt) pix.sprite(p.x, p.y, p.rowsOf, p.pal);
@@ -534,7 +648,7 @@ function buildRooms(doc, w, rows, now, options) {
       info.chars.push({ name: it.name, hub: true, kind: it.kind, room: p.room, x0: Math.round(walkAt[0]) - (p.sw >> 1), x1: Math.round(walkAt[0]) - (p.sw >> 1) + p.sw - 1, y0: Math.round(walkAt[1]) - p.sh + 1, y1: Math.round(walkAt[1]), name_cells: null });
       continue;
     }
-    const dy = it.working && bobs ? -1 : 0;
+    const dy = it.working && bobs && p.y - 1 >= stages[p.room].bob && pix.free(p.x, p.y - 1, p.x + p.sw - 1, p.y - 1) ? -1 : 0;
     pix.sprite(p.x, p.y + dy, p.rows, pal);
     info.chars.push({ name: it.name, hub: it.hub, kind: it.kind, room: p.room, x0: p.x, x1: p.x + p.sw - 1, y0: p.y + dy, y1: p.y + dy + p.sh - 1, name_cells: p.label ? { c0: p.nx, c1: p.nx + displayWidth(p.label) - 1, r: p.nr } : null });
   }
@@ -543,6 +657,7 @@ function buildRooms(doc, w, rows, now, options) {
     const z = ZONE_RGB[t.name];
     pix.text(t.x, t.tr, t.text, on ? z : mix(BG, z, 0.75), undefined, on);
   }
+  for (const m of moreDraws) pix.text(m.c0, m.r, m.text, mix(BG, ZONE_RGB[m.name], 0.75));
   for (const p of placed) {
     if (!p.label || (p.item.hub && walkAt)) continue;
     const it = p.item;
@@ -635,7 +750,7 @@ function describe(act, dark) {
   const zone = zoneOfActivity(act) || "tools";
   const room = ROOM_OF_ZONE[zone];
   const tool = clean(act.tool).toLowerCase();
-  let verb = act.kind === "text" ? "replying" : act.kind === "reasoning" ? "thinking" : TOOL_VERBS[tool] || (tool ? `${ZONE_VERBS[zone]} ${tool}` : ZONE_VERBS[zone]);
+  let verb = act.kind === "text" ? "replying" : act.kind === "reasoning" ? "thinking" : pick(TOOL_VERBS, tool) || (tool ? `${ZONE_VERBS[zone]} ${tool}` : ZONE_VERBS[zone]);
   if (act.kind === "tool" && !tool) verb = ZONE_VERBS[zone];
   return { zone, glyph: ZONE_GLYPH[zone], color: colorFor(hex(ZONE_RGB[room]), dark), verb, target: act.kind === "tool" ? clean(act.target) : "" };
 }
@@ -683,7 +798,7 @@ function workingRows(doc, model, width, dark) {
   return found.map((i) => {
     const act = isObject(i.agent.activity) ? i.agent.activity : null;
     const zone = zoneOfActivity(act) || "thinking";
-    const verb = act && act.kind === "tool" ? TOOL_VERBS[clean(act.tool).toLowerCase()] || ZONE_VERBS[zone] : ZONE_VERBS[zone];
+    const verb = act && act.kind === "tool" ? pick(TOOL_VERBS, clean(act.tool).toLowerCase()) || ZONE_VERBS[zone] : ZONE_VERBS[zone];
     const cost = formatDollars(i.cost);
     const task = clean(currentGoal(graph, i.agent.name));
     const dim = colorFor(hex(ZONE_RGB.team), dark);
