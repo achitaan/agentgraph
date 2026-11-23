@@ -6501,7 +6501,7 @@
             teams: [...root.querySelectorAll('[data-team-line]')].map(line => line.dataset.teamLine).sort(),
             badges: [...root.querySelectorAll('.ag-busy-count[data-shown="true"]')].map(badge => badge.dataset.busyCount + badge.textContent).sort(),
             edges: [...root.querySelectorAll('line[data-edge], path[data-edge]')].map(line => line.dataset.edge).sort(),
-            text: [...root.querySelectorAll('.ag-drawing text')].map(item => item.textContent).filter(Boolean).sort()
+            text: [...root.querySelectorAll('.ag-drawing text')].filter(item => !item.closest('[data-copy]')) /* (the top-layer copies of the orchestrator's name and chip are aria-hidden drawings of the same text) */.map(item => item.textContent).filter(Boolean).sort()
           });
           const flat = inventory();
           press(viewportOf(root), 'd'); await until(() => in3d(root)); assert(in3d(root), 'd did not switch to 3D');

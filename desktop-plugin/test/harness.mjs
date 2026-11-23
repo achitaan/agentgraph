@@ -3556,15 +3556,15 @@ function lcrowd(n, seed) {
   return Array.from({ length: n }, (_, i) => litem("p" + i, 100 + next() * 500, 80 + next() * 300, { z: next() * 100 - 50, tier: 1 + Math.floor(next() * 5), r: 8 + next() * 20 }));
 }
 
-await check("labels: a lone name goes below its planet, and a crowd of 40 never has two shown names meeting, one meeting a planet in front of it, or one meeting the chip", () => {
+await check("labels: a lone name goes below its planet, and a crowd of 40 never has two shown names meeting, one meeting any planet (in front or behind), or one meeting the chip", () => {
   const lone = LABELS.placeLabels([litem("a", 100, 100)], { now: 0 }).places.a;
   assert.equal(lone.place, "below");
   assert.ok(lone.shown);
   const chips = [{ left: 250, top: 200, right: 450, bottom: 240 }];
   for (const seed of [1, 7, 42, 99]) {
-    for (const frontOnly of [false, true]) {
+    for (const depth of [false, true]) {
       const items = lcrowd(40, seed);
-      const result = LABELS.placeLabels(items, { now: 0, chips, frontOnly });
+      const result = LABELS.placeLabels(items, { now: 0, chips, depth });
       const shown = items.filter((item) => result.places[item.id].shown);
       assert.ok(shown.length > 0 && shown.length < 41);
       shown.forEach((item, i) => {
@@ -3572,8 +3572,8 @@ await check("labels: a lone name goes below its planet, and a crowd of 40 never 
         shown.slice(i + 1).forEach((other) => assert.ok(!lmeet(box, lbox(result.places[other.id])), `${item.id} meets ${other.id} (seed ${seed})`));
         chips.forEach((chip) => assert.ok(!lmeet(box, chip), `${item.id} meets the chip`));
         items.forEach((planet) => {
-          if (planet === item || (frontOnly && !(planet.z > item.z))) return;
-          assert.ok(!ldisc(box, planet), `${item.id} meets the planet ${planet.id} (seed ${seed}, front ${frontOnly})`);
+          if (planet === item) return;
+          assert.ok(!ldisc(box, planet), `${item.id} meets the planet ${planet.id} (seed ${seed}, depth ${depth}): a name never lies over any planet, in front or behind`);
         });
       });
     }
@@ -3587,7 +3587,65 @@ await check("labels: a name tries below, above, right, then left, and fades out 
   assert.equal(at(blocker("x", 300, 345)).place, "above");
   assert.equal(at(blocker("x", 300, 345), blocker("y", 300, 255)).place, "right");
   assert.equal(at(blocker("x", 300, 345), blocker("y", 300, 255), blocker("z", 335, 300)).place, "left");
-  assert.equal(at(blocker("x", 300, 345), blocker("y", 300, 255), blocker("z", 335, 300), blocker("w", 265, 300)).shown, false);
+  const four = [blocker("x", 300, 345), blocker("y", 300, 255), blocker("z", 335, 300), blocker("w", 265, 300)];
+  assert.equal(at(...four).shown, true, "after the four places it tries the diagonals");
+  const exact = LABELS.placeLabels([litem("a", 300, 300, { tier: 4 }), ...four], { now: 0, places: ["below", "above", "right", "left"] }).places.a;
+  assert.equal(exact.shown, false, "with only those four places, it fades out");
+});
+
+await check("labels: after the four places it tries the four diagonals, then all eight again at a wider gap, before it gives up", () => {
+  assert.deepEqual([...LABELS.labelOrder().slice(0, 8)], ["below", "above", "right", "left", "below-right", "below-left", "above-right", "above-left"]);
+  assert.deepEqual([...LABELS.labelOrder().slice(8)], [...LABELS.labelOrder().slice(0, 8)].map((place) => place + "+"));
+  assert.deepEqual([...LABELS.labelOrder(["above"]).slice(0, 4)], ["above", "below", "right", "left"]);
+  const blocker = (id, cx, cy) => litem(id, cx, cy, { tier: 0, w: 4, h: 4, r: 12 });
+  const four = [blocker("x", 300, 345), blocker("y", 300, 255), blocker("z", 335, 300), blocker("w", 265, 300)];
+  const item = litem("a", 300, 300, { tier: 4 });
+  const first = LABELS.placeLabels([item, ...four], { now: 0 }).places.a;
+  assert.ok(first.shown && /^(below|above)-(right|left)$/.test(first.place), "a diagonal: " + first.place);
+  const box = lbox(first);
+  [...four, litem("o", 300, 300)].forEach((other) => { if (other.id !== "o") assert.ok(!ldisc(box, other), "clear of " + other.id); });
+  // block every place at the small gap (a speck at the nearest point of each box to the planet): it goes to a wider place (id ends in +)
+  const speck = (id, at) => litem(id, Math.max(at.x, Math.min(300, at.x + at.w)), Math.max(at.y, Math.min(300, at.y + at.h)), { tier: 0, w: 0, h: 0, r: 2 });
+  const ring = [...LABELS.labelOrder().slice(0, 8)].map((place, i) => speck("r" + i, LABELS.placeLabels([item], { now: 0, places: [place] }).places.a));
+  const wide = LABELS.placeLabels([item, ...ring], { now: 0 }).places.a;
+  assert.ok(wide.shown && wide.place.endsWith("+"), "a wider place: " + wide.place);
+  ring.forEach((other) => assert.ok(!ldisc(lbox(wide), other), "the wider place is clear of " + other.id));
+  // a name that must be shown goes where it covers least when nothing is free; one that need not be is hidden
+  const wall = [...LABELS.labelOrder()].map((place, i) => speck("m" + i, LABELS.placeLabels([item], { now: 0, places: [place] }).places.a));
+  assert.equal(LABELS.placeLabels([item, ...wall], { now: 0 }).places.a.shown, false);
+  assert.equal(LABELS.placeLabels([{ ...item, forced: true }, ...wall], { now: 0 }).places.a.shown, true);
+});
+
+await check("labels: with depth, the name of a planet that planets in front cover for 60% or more is hidden, and returns when it comes out (after 300 ms), on hover or on selection", () => {
+  const behind = litem("behind", 300, 300, { r: 20, z: -10, tier: 4 });
+  const cover = (dx) => litem("front", 300 + dx, 300, { r: 20, z: 10, tier: 4, w: 4, h: 4 });
+  const run = (extra, front, depth = true, now = 0, prev) => LABELS.placeLabels([{ ...behind, ...extra, prev }, ...(front ? [front] : [])], { now, hold: 300, depth }).places.behind;
+  assert.equal(run({}, cover(0)).shown, false, "fully covered: hidden");
+  assert.ok(run({}, cover(0)).buried);
+  assert.equal(run({}, cover(0), false).shown, true, "no depth (2D): shown");
+  assert.equal(run({}, cover(35)).shown, true, "a sliver covered: shown");
+  assert.equal(run({ asked: true }, cover(0)).shown, true, "hovered, focused or chosen: shown");
+  // it was shown, then gets covered: it goes after the hold, no flicker; then comes back only after 300 ms uncovered
+  let r = run({}, null);
+  assert.ok(r.shown);
+  r = run({}, cover(0), true, 100, r); assert.ok(r.shown && r.held, "held for now");
+  r = run({}, cover(0), true, 450, r); assert.equal(r.shown, false);
+  r = run({}, null, true, 500, r); assert.equal(r.shown, false, "not back at once");
+  r = run({}, null, true, 850, r); assert.equal(r.shown, true, "back after 300 ms uncovered");
+});
+
+await check("labels: the orchestrator's name keeps its spot under the sun whatever is there, and the others yield to it", () => {
+  const hub = litem("hub", 300, 300, { tier: 0, r: 30, claim: true, places: ["below"], w: 90, h: 24 });
+  const moon = litem("moon", 300, 360, { tier: 1, r: 10, z: 100, forced: true });
+  const planets = [hub, moon, litem("p", 330, 345, { tier: 1, r: 14, z: 50 })];
+  const out = LABELS.placeLabels(planets, { now: 0, depth: true }).places;
+  assert.ok(out.hub.shown && out.hub.place === "below", "the spot is kept");
+  assert.equal(out.hub.y, 300 + 30 + 2, "directly under the sun (its radius and the gap)");
+  assert.equal(out.hub.x, 300 - 45, "centred on the sun");
+  const hubBox = lbox(out.hub);
+  ["moon", "p"].forEach((id) => { if (out[id].shown) assert.ok(!lmeet(hubBox, lbox(out[id])), id + " meets the orchestrator's name"); });
+  const later = LABELS.placeLabels([{ ...hub, prev: out.hub }, moon], { now: 5000, depth: true }).places;
+  assert.equal(later.hub.place, "below"); assert.equal(later.hub.y, out.hub.y);
 });
 
 await check("labels: the order of standing is kept: the orchestrator, then agents that need the user, working ones, the rest nearer to the viewer first", () => {
@@ -3627,7 +3685,7 @@ await check("labels: hysteresis: a shown name keeps its place while it is free, 
   r = step(500, result, false); assert.equal(r.places.a.place, "above");
   // a name with no place at all goes after 300 ms, and comes back only after 300 ms free
   const wall = [[300, 345], [300, 255], [335, 300], [265, 300]].map(([x, y], i) => litem("w" + i, x, y, { tier: 0, w: 4, h: 4, r: 12 }));
-  const alone = (now, prev, walled) => LABELS.placeLabels([litem("a", 300, 300, { prev }), ...(walled ? wall : [])], { now, hold: 300 });
+  const alone = (now, prev, walled) => LABELS.placeLabels([litem("a", 300, 300, { prev }), ...(walled ? wall : [])], { now, hold: 300, places: ["below", "above", "right", "left"] });
   let a = alone(0, null, false).places.a;
   a = alone(10, a, true).places.a; assert.ok(a.shown && a.held);
   a = alone(400, a, true).places.a; assert.equal(a.shown, false);
@@ -3643,16 +3701,22 @@ await check("labels: the chip goes below the sun, above when that covers fewer p
   const covered = [planet(300, 400)];
   const first = LABELS.placeChip(chip, covered, { now: 0 });
   assert.equal(first.side, "above", "decided at once the first time");
-  assert.equal(first.covers.below, 2);
+  assert.equal(first.covers.below, 1);
+  assert.equal(first.covers.above, 0);
   assert.ok(first.box.bottom <= 300 && first.box.top >= 180, "the box is above the sun's centre");
   assert.equal(LABELS.placeChip(chip, [], { now: 100, prev: first }).side, "above", "equal cover: it stays");
   const stay = LABELS.placeChip(chip, [planet(300, 200)], { now: 100, prev: first });
   assert.equal(stay.side, "above"); assert.ok(stay.since !== null, "it waits");
   assert.equal(LABELS.placeChip(chip, [planet(300, 200)], { now: 250, prev: stay }).side, "above");
   assert.equal(LABELS.placeChip(chip, [planet(300, 200)], { now: 450, prev: stay }).side, "below");
-  // in 3D a planet behind the sun counts less than one in front of it
-  assert.equal(LABELS.placeChip(chip, [{ cx: 300, cy: 400, r: 20, z: -5 }, { cx: 300, cy: 200, r: 20, z: 5 }], { now: 0, frontOnly: true, z: 0 }).side, "below");
-  assert.equal(LABELS.placeChip(chip, [{ cx: 300, cy: 400, r: 20, z: 5 }, { cx: 300, cy: 200, r: 20, z: -5 }], { now: 0, frontOnly: true, z: 0 }).side, "above");
+  // the chip is never put under a planet when a side is clear: below, above and right all covered -> left
+  const three = [planet(300, 400), planet(300, 200), planet(470, 300)];
+  const side = LABELS.placeChip(chip, three, { now: 0 });
+  assert.equal(side.side, "left"); assert.equal(side.covers.left, 0);
+  assert.ok(side.box.right < 300 - 40, "beside the sun, off its disc");
+  three.forEach((p) => assert.ok(!ldisc(side.box, p), "no planet under the chip"));
+  // a planet behind the sun counts as much as one in front: the chip hides it either way
+  assert.equal(LABELS.placeChip(chip, [{ cx: 300, cy: 400, r: 20, z: -5 }], { now: 0 }).side, "above");
 });
 
 await check("the harness replaces an existing temporary bundle before reading it", () => {
