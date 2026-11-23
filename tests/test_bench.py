@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import sqlite3
 import stat
 import tempfile
@@ -74,6 +75,9 @@ class Base(unittest.TestCase):
         self.real_home = self.base / "home"
         (self.real_home / ".cache" / "opencode").mkdir(parents=True)
         self.addCleanup(self.tmp.cleanup)
+        patch = unittest.mock.patch.object(bench, "TEMP_ROOT", self.root)  # the run folders go under the test's temp folder
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def scratch(self, name="s1", **kw):
         return bench.scratch_config(self.root / name, live=self.live, temp_root=self.root, real_home=self.real_home, **kw)
@@ -161,7 +165,7 @@ class PlainConfigTests(Base):
         super().setUp()
         (self.live / "opencode.json").write_text(json.dumps({
             "$schema": "https://example.invalid/schema.json", "model": "openai/gpt-6-sol", "small_model": "openai/gpt-6-luna",
-            "provider": {"acme": {"options": {"baseURL": f"{self.live}/proxy"}, "models": {"m1": {}}}},
+            "provider": {"acme": {"options": {"baseURL": "https://proxy.example.invalid/v1"}, "models": {"m1": {}}}},
             "plugin": ["some-plugin"], "mcp": {"srv": {"command": ["x"]}}, "agent": {"explore": {"model": "openai/y"}},
             "command": {"c": {"template": "t"}}, "instructions": ["AGENTS.md"], "permission": {"bash": "allow"}}))
         (self.live / "skills" / "x" / "bench" / "scenarios" / "t1" / "hidden").mkdir(parents=True)
@@ -185,7 +189,6 @@ class PlainConfigTests(Base):
             self.assertNotIn(gone, data)
         self.assertEqual((data["model"], data["small_model"]), (MODEL, MODEL))
         self.assertEqual(data["provider"]["acme"]["models"], {"m1": {}})
-        self.assertIn(str(config), data["provider"]["acme"]["options"]["baseURL"])  # the live path points at the copy
         self.assertNotIn(str(self.live), json.dumps(data))
         self.assertEqual(stat.S_IMODE(os.stat(info["dir"]).st_mode), 0o700)
         for name in ("AGENTS.md", "agents", "commands", "skills", "oh-my-opencode-slim", "orchestration", "node_modules", "cli.json"):
@@ -221,6 +224,32 @@ class PlainConfigTests(Base):
         before = bench.live_fingerprint(self.live)
         self.plain()
         self.assertEqual(bench.live_fingerprint(self.live), before)
+
+    def test_plain_copy_refuses_settings_that_refer_to_a_file_and_names_only_the_key(self):
+        cases = {"file-ref": {"provider": {"acme": {"options": {"apiKey": "{file:/made/up/secret-VALUE-1}"}}}},
+                 "absolute": {"provider": {"acme": {"options": {"baseURL": f"{self.live}/proxy-VALUE-2"}}}},
+                 "tilde": {"small_model": "~/.config/opencode/VALUE-3"},
+                 "in a list": {"enabled_providers": ["ok", "{file:x-VALUE-4}"]}}
+        for name, settings in cases.items():
+            with self.subTest(name=name):
+                (self.live / "opencode.json").write_text(json.dumps({"model": "openai/m", **settings}))
+                with self.assertRaises(bench.BenchError) as caught:
+                    self.plain(f"r-{name.replace(' ', '-')}")
+                message = str(caught.exception)
+                self.assertNotIn("VALUE", message)
+                self.assertNotIn(str(self.live), message)
+                self.assertIn(next(iter(settings)), message)
+                self.assertFalse((self.root / f"r-{name.replace(' ', '-')}").exists())   # nothing was made
+        self.assertIn("provider.acme.options.apiKey", self.refusal({"provider": {"acme": {"options": {"apiKey": "{file:x}"}}}}))
+        self.assertIn("enabled_providers[1]", self.refusal({"enabled_providers": ["ok", "{file:x}"]}))
+        (self.live / "opencode.json").write_text(json.dumps({"agent": {"x": {"prompt": "{file:ignored}"}}, "model": "a/b"}))
+        self.plain("not-kept")      # a setting the plain copy drops anyway is not a reason to refuse
+
+    def refusal(self, settings):
+        (self.live / "opencode.json").write_text(json.dumps(settings))
+        with self.assertRaises(bench.BenchError) as caught:
+            self.plain("refused-" + str(abs(hash(json.dumps(settings)))))
+        return str(caught.exception)
 
     def test_no_copy_holds_the_hidden_checks(self):
         for info in (self.scratch("tk"), self.plain("pl")):
@@ -278,6 +307,61 @@ class RefusalTests(Base):
         self.assertNotIn("OPENCODE_CONFIG_DIR", env)
         self.assertNotIn("OPENCODE_CONFIG", env)
 
+    def test_run_env_drops_variables_that_point_into_the_repository_or_the_real_config_folder(self):
+        scratch = bench.open_scratch(self.scratch()["dir"], live=self.live)
+        env = bench.run_env(scratch, Path("/w"), {
+            "OLDPWD": f"{bench.HERE}/somewhere", "PWD": str(self.live / "orchestration"), "TOOL_DIR": f"{self.live}/bin",
+            "PATH": f"/usr/bin:{bench.HERE}/bin:{self.live}/orchestration/bin:/bin", "OPENCODE_CONFIG_CONTENT": f'{{"x": "{self.live}"}}',
+            "KEEP": "/usr/local/x", "TERM": "xterm"}, live=self.live)
+        for gone in ("OLDPWD", "TOOL_DIR"):
+            self.assertNotIn(gone, env)
+        self.assertEqual(env["PATH"], "/usr/bin:/bin")                     # a PATH loses only the entries that point there
+        self.assertEqual(env["PWD"], "/w")                                 # set again for the run
+        self.assertEqual((env["KEEP"], env["TERM"]), ("/usr/local/x", "xterm"))
+        self.assertIn("OPENCODE_CONFIG_CONTENT", env)
+
+    def test_run_env_for_a_plain_copy_keeps_only_the_plain_keys_of_the_config_content(self):
+        plain = bench.open_scratch(self.plain_copy()["dir"], live=self.live)
+        content = json.dumps({"provider": {"acme": {"models": {}}}, "model": "a/b", "plugin": ["p"], "mcp": {"s": {}},
+                              "agent": {"x": {}}, "instructions": ["i"]})
+        env = bench.run_env(plain, Path("/w"), {"OPENCODE_CONFIG_CONTENT": content}, live=self.live)
+        self.assertEqual(sorted(json.loads(env["OPENCODE_CONFIG_CONTENT"])), ["model", "provider"])
+        for bad in ("not json", "[1, 2]", ""):
+            with self.subTest(bad=bad):
+                self.assertNotIn("OPENCODE_CONFIG_CONTENT", bench.run_env(plain, Path("/w"), {"OPENCODE_CONFIG_CONTENT": bad}, live=self.live))
+        toolkit = bench.open_scratch(self.scratch("tk-env")["dir"], live=self.live)   # a toolkit copy keeps it whole
+        self.assertEqual(bench.run_env(toolkit, Path("/w"), {"OPENCODE_CONFIG_CONTENT": content}, live=self.live)["OPENCODE_CONFIG_CONTENT"], content)
+
+    def plain_copy(self):
+        return bench.plain_config(self.root / "pe", live=self.live, temp_root=self.root, real_home=self.real_home)
+
+    def test_mask_hides_the_home_path_and_key_like_text_and_caps_the_length(self):
+        home = str(Path.home())
+        text = f"failed in {home}/proj with key sk{'a1B2' * 7} and ses_{'x9' * 13} ok"
+        masked = bench.mask(text)
+        self.assertNotIn(home, masked)
+        self.assertIn("~/proj", masked)
+        self.assertEqual(masked.count("[hidden]"), 2)
+        self.assertNotIn("a1B2a1B2", masked)
+        self.assertEqual(bench.mask("plain words and 1234567890123456789012 (22)"), "plain words and 1234567890123456789012 (22)")
+        self.assertEqual(bench.mask("x" * 24), "[hidden]")
+        self.assertEqual(len(bench.mask("word " * 100)), 160)
+        self.assertEqual(bench.mask(None), "")
+        self.assertEqual(bench.mask(masked), masked)                       # masking twice changes nothing
+        self.assertEqual(bench.mask("a/b", home=Path("/made/up/home")), "a/b")
+
+    def test_rows_are_masked_before_they_are_written(self):
+        row = {"label": "m", "scenario": "s", "error": f"boom {Path.home()}/x token{'Z' * 30}",
+               "check": {"passed": False, "detail": f"{Path.home()}/f " + "K" * 40}}
+        path = bench.append_row(row, self.base / "res")
+        text = path.read_text()
+        self.assertNotIn(str(Path.home()), text)
+        self.assertNotIn("K" * 24, text)
+        self.assertNotIn("Z" * 24, text)
+        saved = json.loads(text)
+        self.assertEqual((saved["check"]["passed"], saved["error"].startswith("boom ~/x")), (False, True))
+        self.assertIn("K" * 40, row["check"]["detail"])                    # the caller's row is not changed
+
 
 FAKE = r'''#!/usr/bin/env python3
 import json, os, sys, time
@@ -295,6 +379,24 @@ for name, body in step.get("write", {}).items():
     path = os.path.join(os.getcwd(), name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     open(path, "w").write(body)
+attempts = {}
+if step.get("scan"):  # every folder under the given one that holds a file named like a hidden one
+    attempts["scan"] = sorted(d for d, _, names in os.walk(step["scan"]) if "expect.txt" in names)
+if step.get("try_read"):
+    try:
+        open(step["try_read"]).read()
+        attempts["read"] = True
+    except OSError:
+        attempts["read"] = False
+if step.get("try_write"):
+    try:
+        open(step["try_write"], "w").write("x")
+        attempts["write"] = True
+    except OSError:
+        attempts["write"] = False
+if attempts:
+    with open(os.path.join(here, "attempts.jsonl"), "a") as f:
+        f.write(json.dumps(attempts) + "\n")
 if step.get("sleep"):
     time.sleep(step["sleep"])
 sid = args[args.index("--session") + 1] if "--session" in args else "ses_root"
@@ -351,19 +453,30 @@ class RunTests(Base):
     def calls(self):
         return [json.loads(line) for line in (self.cli_dir / "calls.jsonl").read_text().splitlines()]
 
+    def attempts(self):
+        path = self.cli_dir / "attempts.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
     def run_t1(self, **kw):
+        kw.setdefault("sandbox", False)
         return bench.run_scenarios(["t1"], label="lab", config=self.scratch_dir, executable=str(self.cli), db_path=self.db,
                                    results=self.results, scenarios_root=self.scenarios, live=self.live, **kw)
 
     def test_row_assembly_from_the_fake_cli_and_database(self):
         self.plan([{"write": {"answer.txt": "right\n"}}])
-        rows = self.run_t1(reps=1)
+        rows = self.run_t1(reps=1, sandbox=True)                               # the default sandbox, where there is one
         row = rows[0]
         call = self.calls()[0]
         self.assertEqual(call["message"], "fix the answer")
         self.assertEqual(call["home"], str(Path(self.scratch_dir) / "home"))
         self.assertEqual(call["xdg"], str(Path(self.scratch_dir) / "home" / ".config"))
-        self.assertTrue(call["cwd"].startswith(str(Path(self.scratch_dir) / "work")))
+        work = Path(call["cwd"])
+        self.assertEqual((work.parent, work.name.startswith(bench.WORK_PREFIX)), (self.root, True))   # its own folder, not under the scratch folder
+        self.assertFalse((work.parent / "work").exists())
+        self.assertFalse(work.exists())                                        # deleted once the row was written
+        self.assertEqual(row["sandbox"], bench.sandbox_available())
+        self.assertNotIn("work", row)
+        self.assertNotIn("models_used", row)                                   # the fake database holds no model ids
         for flag in ("--standalone", "--archived", "--auto"):
             self.assertIn(flag, call["args"])
         self.assertEqual(call["args"][call["args"].index("--title") + 1], self.title)
@@ -392,7 +505,7 @@ class RunTests(Base):
         self.assertIn("model not found", row["error"])
         make_db(self.base / "empty.db", [], [])
         rows = bench.run_scenarios(["t1"], label="lab2", config=self.scratch_dir, executable=str(self.cli), db_path=self.base / "empty.db",
-                                   results=self.results, scenarios_root=self.scenarios, live=self.live)
+                                   results=self.results, scenarios_root=self.scenarios, live=self.live, sandbox=False)
         self.assertEqual((rows[0]["sessions"], rows[0]["cost"]), (0, 0.0))
         self.assertIn("not found in the database", rows[0]["error"])
 
@@ -401,13 +514,13 @@ class RunTests(Base):
         t2.mkdir()
         (t2 / "scenario.json").write_text(json.dumps({
             "agent": "orchestrator", "prompt": "x", "timeout": 20,
-            "check": 'echo "${HOME#*/temp/}|${OPENCODE_CONFIG_DIR-unset}|${P4_DB##*/}|${AGENTGRAPH_HOME#*/temp/}"'}))
+            "check": 'echo "${HOME#*/temp/}|${OPENCODE_CONFIG_DIR-unset}|${P4_DB##*/}|${AGENTGRAPH_HOME-unset}|${MADE_UP_KEY-unset}"'}))
         self.plan([{}])
-        with unittest.mock.patch.dict(os.environ, {"OPENCODE_CONFIG_DIR": "/real/config"}):
+        with unittest.mock.patch.dict(os.environ, {"OPENCODE_CONFIG_DIR": "/real/config", "MADE_UP_KEY": "made-up-value"}):
             rows = bench.run_scenarios(["t2"], label="lab", config=self.scratch_dir, executable=str(self.cli), db_path=self.db,
-                                       results=self.results, scenarios_root=self.scenarios, live=self.live)
+                                       results=self.results, scenarios_root=self.scenarios, live=self.live, sandbox=False)
         name = Path(self.scratch_dir).name
-        self.assertEqual(rows[0]["check"]["detail"], f"{name}/home|unset|opencode.db|{name}/home/.config/opencode/orchestration/memory")
+        self.assertEqual(rows[0]["check"]["detail"], f"{name}/home|unset|opencode.db|unset|unset")      # a minimal environment
 
     def test_append_row_refuses_a_label_that_is_not_a_plain_name(self):
         for label in ("../x", "a/b", "", None, "-x"):
@@ -421,7 +534,7 @@ class RunTests(Base):
                 [("ses_root", "user", "{}"), ("ses_root", "assistant", message(12, 1, 0, 0, 15_000, 0.01))])
         self.plan([{}])
         rows = bench.run_probes(["explorer"], label="pl", config=self.scratch_dir, executable=str(self.cli), db_path=self.base / "p.db",
-                                results=self.results, live=self.live)
+                                results=self.results, live=self.live, sandbox=False)
         call = self.calls()[0]
         self.assertEqual(call["message"], bench.PROBE_PROMPT)
         self.assertEqual(call["args"][call["args"].index("--agent") + 1], "explorer")
@@ -429,6 +542,119 @@ class RunTests(Base):
         self.assertEqual((rows[0]["scenario"], rows[0]["probe_agent"]), ("probe", "explorer"))
         self.assertEqual(rows[0]["first_turn_tokens"], {"explorer": 15_012})
         self.assertIsNone(rows[0]["check"]["passed"])
+
+    def work_folders(self):
+        return sorted(p for p in self.root.iterdir() if p.name.startswith(bench.WORK_PREFIX))
+
+    def test_no_folder_that_exists_during_a_run_holds_a_hidden_file(self):
+        self.plan([{"write": {"answer.txt": "right\n"}, "scan": str(self.root)}])
+        rows = self.run_t1(reps=3)
+        self.assertEqual([r["check"]["passed"] for r in rows], [True] * 3)      # the check still found hidden/ in its copy
+        self.assertEqual(self.attempts(), [{"scan": []}] * 3)                   # a run saw no hidden file anywhere under the temp folder
+        self.assertEqual(self.work_folders(), [])                               # every folder is gone once its row is written
+        self.assertFalse((Path(self.scratch_dir) / "work").exists())
+        self.assertEqual([p.name for p in self.root.iterdir()], [Path(self.scratch_dir).name])
+
+    def test_the_work_folders_of_two_runs_are_different_new_folders(self):
+        self.plan([{}])
+        self.run_t1(reps=2, keep_work=True)
+        first, second = (c["cwd"] for c in self.calls())
+        self.assertNotEqual(first, second)
+        for folder in (first, second):
+            self.assertEqual(Path(folder).parent, self.root)
+
+    def test_keep_work_keeps_the_models_folder_without_hidden_files(self):
+        self.plan([{"write": {"answer.txt": "right\n", "notes/x.txt": "kept\n"}}])
+        row = self.run_t1(keep_work=True)[0]
+        kept = Path(row["work"])
+        self.assertEqual(self.work_folders(), [kept])                           # only the model's folder: no aside copy, no check copy
+        self.assertEqual(sorted(p.name for p in kept.iterdir()), [".git", "answer.txt", "notes"])
+        self.assertFalse(list(kept.rglob("expect.txt")))
+        self.assertEqual((kept / "answer.txt").read_text(), "right\n")
+        self.assertEqual(json.loads((self.results / "lab.jsonl").read_text())["work"], str(kept))
+
+    def test_run_check_leaves_the_folder_as_it_was_and_does_not_follow_links_out(self):
+        scenario = bench.load_scenario("t1", self.scenarios)
+        work = self.base / "w"
+        bench.prepare_work(scenario["dir"], work)
+        outside = self.base / "outside.txt"
+        outside.write_text("untouched\n")
+        (work / "expect.txt").symlink_to(outside)                                # a link where a hidden file will land
+        (work / "answer.txt").write_text("right\n")
+        result = bench.run_check(scenario, work, {"PATH": os.environ["PATH"], "HOME": str(self.base)}, self.db)
+        self.assertEqual(result, {"passed": True, "detail": "matches"})
+        self.assertEqual(outside.read_text(), "untouched\n")
+        self.assertTrue((work / "expect.txt").is_symlink())
+        self.assertEqual(sorted(p.name for p in work.iterdir()), [".git", "answer.txt", "expect.txt"])
+        self.assertEqual([p.name for p in self.base.iterdir() if p.name.startswith(bench.WORK_PREFIX)], [])
+        (work / "answer.txt").write_text("wrong\n")
+        self.assertFalse(bench.run_check(scenario, work, {"PATH": os.environ["PATH"]})["passed"])
+
+    def test_a_scratch_folder_with_work_folders_of_the_old_layout_is_refused(self):
+        old = Path(self.scratch_dir) / "work" / "lab-t1-r1-123"
+        old.mkdir(parents=True)
+        (old / "expect.txt").write_text("right\n")
+        self.plan([{}])
+        with self.assertRaisesRegex(bench.BenchError, "older layout.*delete that folder"):
+            self.run_t1()
+        with self.assertRaisesRegex(bench.BenchError, "older layout"):
+            bench.run_probes(["explorer"], label="pl", config=self.scratch_dir, executable=str(self.cli), db_path=self.db,
+                             results=self.results, live=self.live, sandbox=False)
+        self.assertEqual(self.calls() if (self.cli_dir / "calls.jsonl").exists() else [], [])
+        shutil.rmtree(Path(self.scratch_dir) / "work")
+        self.run_t1()                                                           # after the delete it starts
+
+    def test_the_sandbox_profile_denies_reading_and_writing_the_named_folders_only(self):
+        profile = bench.sandbox_profile([self.base / "r one"], [self.base / 'w"two'])
+        self.assertTrue(profile.startswith("(version 1)\n(allow default)\n"))
+        self.assertIn('(deny file-read* (subpath "%s"))' % (self.base / "r one"), profile)
+        self.assertIn('(deny file-write* (subpath "%s"))' % str(self.base / 'w"two').replace('"', '\\"'), profile)
+        self.assertEqual(profile.count("(deny file-write*"), len({str(self.base / 'w"two'), os.path.realpath(self.base / 'w"two')}))
+        reads, writes = bench.protected_paths(self.live)
+        self.assertIn(bench.HERE / "bench" / "scenarios", reads)
+        self.assertIn(self.live / "orchestration" / "bench" / "scenarios", reads)
+        self.assertIn(bench.HERE, writes)
+        self.assertIn(self.live, writes)
+        for path in reads:
+            self.assertTrue(path.name in ("scenarios", ".git") or path.name.endswith(".git"), path)
+        self.assertEqual(bench.sandboxed(["x"], False), ["x"])
+
+    @unittest.skipUnless(bench.sandbox_available(), "needs /usr/bin/sandbox-exec")
+    def test_the_sandbox_blocks_reading_a_hidden_file_and_writing_into_a_protected_folder(self):
+        secret = self.base / "checkout" / "bench" / "scenarios" / "t9" / "hidden" / "expect.txt"
+        secret.parent.mkdir(parents=True)
+        secret.write_text("made-up hidden check\n")
+        denied = self.base / "protected-write"
+        denied.mkdir()
+        target = denied / "planted.txt"
+        step = {"try_read": str(secret), "try_write": str(target)}
+        self.plan([step])
+        with unittest.mock.patch.object(bench, "protected_paths", return_value=([secret.parent.parent.parent], [denied])):
+            on = self.run_t1(sandbox=True)[0]
+            self.assertEqual(self.attempts(), [{"read": False, "write": False}])
+            self.assertFalse(target.exists())
+            off = self.run_t1(sandbox=False)[0]
+        self.assertEqual(self.attempts()[1], {"read": True, "write": True})     # the same attempts work without the sandbox
+        self.assertTrue(target.exists())
+        self.assertEqual((on["sandbox"], off["sandbox"]), (True, False))
+        self.assertEqual(on["exit_code"], 0)                                    # the host itself ran normally under the profile
+
+    def test_the_flags_reach_the_run_functions(self):
+        for command, name in ((["run", "t1", "--label", "x", "--config", "/c"], "run_scenarios"),
+                              (["probe", "explorer", "--label", "x", "--config", "/c"], "run_probes")):
+            for flags, want in (([], (True, False)), (["--no-sandbox", "--keep-work"], (False, True))):
+                with self.subTest(command=command[0], flags=flags), unittest.mock.patch.object(bench, name, return_value=[]) as fake:
+                    self.assertEqual(bench.main(command + flags), 0)
+                    self.assertEqual((fake.call_args.kwargs["sandbox"], fake.call_args.kwargs["keep_work"]), want)
+        result = {"rows": [], "spent": 0.0, "stopped": None, "reason": None}
+        with unittest.mock.patch.object(bench, "run_suite", return_value=result) as fake:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(bench.main(["suite", "pair", "--setup", "A=/a", "--setup", "B=/b", "--append", "--no-sandbox"]), 0)
+            self.assertEqual((fake.call_args.kwargs["append"], fake.call_args.kwargs["sandbox"]), (True, False))
+        for reason, code in (("budget", 3), ("unrecorded", 4)):
+            with unittest.mock.patch.object(bench, "run_suite", return_value={**result, "stopped": "why", "reason": reason}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(bench.main(["suite", "pair", "--setup", "A=/a", "--setup", "B=/b"]), code)
 
     def test_budget_stops_before_the_next_rep(self):
         self.plan([{}])
@@ -499,6 +725,7 @@ class SuiteTests(Base):
                 [("ses_root", "user", "{}"), ("ses_root", "assistant", message(10, 100, 0, 0, 20_000, 0.4))])
 
     def suite(self, setups=None, **kw):
+        kw.setdefault("sandbox", False)
         return bench.run_suite("pair", setups=setups or [("A", self.tk), ("B", self.plain)], executable=str(self.cli), db_path=self.db,
                                results=self.results, scenarios_root=self.scenarios, suites_root=self.suites, live=self.live, **kw)
 
@@ -567,6 +794,57 @@ class SuiteTests(Base):
                                     scenarios_root=self.scenarios, suites_root=self.suites, live=self.live, **kw)
         self.assertEqual(self.calls(), [])
         self.assertFalse(self.results.exists())
+
+    def test_setups_that_pin_different_models_are_refused(self):
+        other = bench.scratch_config(self.root / "other", pin_model="openai/gpt-6-luna", live=self.live, temp_root=self.root,
+                                     real_home=self.real_home)["dir"]
+        with self.assertRaisesRegex(bench.BenchError, "pin different models"):
+            self.suite([("A", self.tk), ("B", other)])
+        self.assertEqual(self.calls(), [])
+
+    def test_the_budget_is_checked_between_complete_rounds(self):
+        third = bench.scratch_config(self.root / "tk3", live=self.live, temp_root=self.root, real_home=self.real_home)["dir"]
+        result = self.suite([("A", self.tk), ("B", self.plain), ("C", third)], budget=0.5, reps=2)
+        self.assertEqual(self.titles(), ["t1 A r1", "t1 B r1", "t1 C r1"])      # 0.4 after the first run is under 0.5; the round finishes
+        self.assertEqual(result["reason"], "budget")
+        self.assertIn("stopped before t1 r2", result["stopped"])
+        self.assertEqual(sorted(r["label"] for r in result["rows"]), ["A", "B", "C"])
+
+    def test_two_runs_in_a_row_without_a_session_stop_the_suite(self):
+        make_db(self.base / "empty.db", [], [])
+        out = io.StringIO()
+        result = bench.run_suite(
+            "pair", setups=[("A", self.tk), ("B", self.plain)], executable=str(self.cli), db_path=self.base / "empty.db",
+            results=self.results, scenarios_root=self.scenarios, suites_root=self.suites, live=self.live, sandbox=False, reps=2, out=out)
+        self.assertEqual(result["reason"], "unrecorded")
+        self.assertEqual(len(result["rows"]), 2)
+        self.assertIn("runs are not being recorded", result["stopped"])
+        self.assertIn("cost cannot be tracked", out.getvalue())
+
+    def test_a_suite_refuses_labels_that_already_have_rows_unless_append_is_given(self):
+        self.suite()
+        with self.assertRaisesRegex(bench.BenchError, "--append"):
+            self.suite()
+        self.assertEqual(len(self.calls()), 4)                                  # the refused call ran nothing
+        self.suite(append=True, reps=2)
+        titles = self.titles()[4:]
+        self.assertEqual(sorted(t.split()[2] for t in titles), ["r2", "r2", "r2", "r2", "r3", "r3", "r3", "r3"])
+        reps = [json.loads(line)["rep"] for line in (self.results / "A.jsonl").read_text().splitlines()]
+        self.assertEqual(sorted(reps), [1, 1, 2, 2, 3, 3])
+        other = bench.scratch_config(self.root / "tk4", live=self.live, temp_root=self.root, real_home=self.real_home)["dir"]
+        self.suite([("A2", other), ("B2", self.plain)])                          # new labels: no flag needed
+
+    def test_rows_list_the_models_the_sessions_used_when_the_database_has_them(self):
+        turn = json.dumps({"cost": 0.1, "model": {"providerID": "anthropic", "id": "claude-test-1"},
+                           "tokens": {"input": 1, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}}})
+        other = json.dumps({"cost": 0.1, "model": {"id": "bare-model"},
+                            "tokens": {"input": 1, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}}})
+        make_db(self.base / "m.db", [("ses_root", None, "orchestrator", "x", 0.2, 1), ("ses_w", "ses_root", "explorer", "w", 0.1, 2)],
+                [("ses_root", "user", "{}"), ("ses_root", "assistant", turn), ("ses_root", "assistant", turn),
+                 ("ses_w", "user", "{}"), ("ses_w", "assistant", other)])
+        tree = bench.read_tree(self.base / "m.db", "ses_root")
+        self.assertEqual(tree["models_used"], ["anthropic/claude-test-1", "bare-model"])
+        self.assertNotIn("models_used", bench.read_tree(self.db, "ses_root"))   # turns without a model id: the key is left out
 
     def test_the_shipped_suites_name_scenarios_that_exist(self):
         self.assertEqual(bench.load_suite("basic")["scenarios"], ["s1-simple", "s2-parallel", "s3-workflow"])

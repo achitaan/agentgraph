@@ -68,3 +68,32 @@ the files that differ from `fixture/`. They are never copied into a run's work f
 only); `tests/test_bench_hard.py` uses them to prove that the fixture fails the visible check, the naive fix passes it
 and fails the hidden check, and the reference passes both. Hidden checks only test what the prompt or the fixture's own
 spec states. The suite has 4 tasks, too few for a verdict alone.
+
+spec states.
+
+## What a run can touch
+
+Shared with the real install: the scratch HOME links three real folders, so sessions are stored and costed in the real
+database (`~/.local/share/opencode`), and OpenCode's state (`~/.local/state/opencode`), plugin package cache
+(`~/.cache/opencode`) and logs (kept under those folders) are the real ones. Everything else a run sees is a scratch copy.
+
+Each run works in a new temporary folder of its own, outside the scratch folder. The hidden check runs in a throwaway copy
+of it (same path, symlinks left out, `hidden/` added), so the model's folder never holds `hidden/`. Both are deleted once the
+row is written. `--keep-work` keeps the model's folder only; remove kept folders before another run. `run`, `suite` and `probe`
+refuse to start if the scratch folder still has a `work/` folder from the old layout (delete it).
+
+On macOS the host runs under `sandbox-exec` unless `--no-sandbox` is given (rows record `"sandbox": true` or `false`; without
+`/usr/bin/sandbox-exec` the run is not sandboxed). The profile denies:
+
+- reading any `bench/scenarios` folder, and the git folder, of this checkout, of every `git worktree list` path and of the live toolkit checkout;
+- writing anywhere under the real config folder or under those checkouts.
+
+It does not block the real database (OpenCode needs it, so a run can read other sessions' text: a known gap), the network,
+running programs, or reading the rest of the home folder. Environment variables that point into a checkout or the config
+folder are dropped, and the check runs with a minimal environment.
+
+Run the suite from a work copy (a git worktree), not from the live install: the sandbox protects the checkout it runs from, and the live install is the one place a mistake would cost.
+
+New flags: `--keep-work` and `--no-sandbox` (`run`, `probe`, `suite`); `--append` (`suite`: add rows to labels that already have
+rows of that suite; rep numbers continue). A suite stops with exit code 3 when the budget is spent between rounds and 4 when two
+runs in a row leave no session in the database.
