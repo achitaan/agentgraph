@@ -178,9 +178,11 @@ room of what it is doing now (spawning, messages and tasks are TEAM's; tools it 
 that is not working stands in TEAM with nothing lit); that room is lit (brighter floor and wall, a solid plaque) while
 the others are dim. Everyone is the same character: the orchestrator is gold, larger and has an antenna; the others take
 a colour from their name, working ones bob a pixel every 500 ms, idle ones rest in TEAM, dimmed and unnamed, and a stuck
-or sent-back one stands in TEAM with its name and mark. Names are centred under the characters and never share a cell.
-A speech bubble with a small tail over the orchestrator shows its target; faint footprints run from the room of its last
-action to its own. The orchestrator walks for 1.2 s when a new action starts; `reducedMotion: true` stops all of it.
+or sent-back one stands in TEAM with its name and mark. Names are centred under the characters and never share a cell;
+the orchestrator's name comes first, and where room is short, idle people become small unnamed figures and a `+N` says
+how many more there are. A speech bubble with a small tail beside the orchestrator shows its target; furniture moves to
+the corner of the room to make space for it. Faint footprints run along the bare floor from the room of its last action
+to its own. The orchestrator walks for 1.2 s when a new action starts; `reducedMotion: true` stops all of it.
 Everything is a function of the snapshot and the time.
 
 Around the picture: a status bar on top (the hub on the left, `4/11  $7.65` on the right) and what needs you as rows
@@ -192,7 +194,18 @@ backgrounds. As the panel shrinks things give way in this order: the working row
 names (the orchestrator's last), NOW, what needs you. Below 15 columns per room or 14 pixel rows per room (36 by 14 is
 the smallest) the picture goes compact: short plaque titles, no furniture; below that size the list shows. `o` swaps the
 rooms and the orbit (remembered while the app runs, named in the key hints); `d`, the arrow keys and the mouse belong
-to the orbit. Option `picture: "orbit"` opens on the orbit instead. The text list (`g`) is unchanged.
+to the orbit. Option `picture: "orbit"` opens on the orbit instead. 
+
+### The text list (`g`)
+
+`g` swaps to the text list, drawn in the same style as the rooms (a dark theme gets backgrounds, a light one tones only;
+the narrow sidebar keeps its plain list): a status bar on top (the hub on the left, steps and spend on the right), then
+sections under a labelled rule (`NEEDS YOU`, `PROPOSALS`, `LOOP RUNS`, `AT WORK` or `AGENTS`, `PATHS`). Rows are in
+aligned columns: mark, name, state (a coloured zone icon and verb for a tool, else `working`, `thinking`, `replying`; `↻n`
+after a loop), task cut with `…`, and the time or the idle count at the right edge. A line under a row, indented and
+dim, holds its target or what it says. One footer block under a thin rule holds progress, spend and context, and the key
+hints (the key plain, its label dim). The selected row (`›`) is tinted on a dark theme. Up, down, return, the mouse, `d`
+and the chat opening under a row work as before.
 
 The idea comes from AgentMove (MIT licence); this is a new implementation (`src/rooms.js`), no code copied.
 

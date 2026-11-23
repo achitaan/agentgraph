@@ -1189,8 +1189,8 @@ test("panel: other panel names render nothing; its own name draws the list with 
     assert.equal(first, 2, "the bar, the NEEDS YOU rule, then the stalled agent");
     assert.match(screen(view)[0], /^ ◉ orchestrator .* 4\/11 +\$[\d.]+ $/);
     assert.match(screen(view)[1], /^ ── NEEDS YOU ─+$/);
-    assert.match(screen(view)[first], /^›! impl-claude +stalled ↻5 +.* +\d+[smhd]\w*$/);
-    assert.match(screen(view)[hubIndex()], / 11 idle$/);
+    assert.match(screen(view)[first], /^›! impl-claude +stalled ↻5 +.* +\d+[smhd]\w* $/);
+    assert.match(screen(view)[hubIndex()], / 11 idle $/);
     assert.match(screen(view).at(-4), /^ ─+$/, "a rule over the footer");
     assert.match(screen(view).at(-3), /4\/11  .*gate reviewer refuted$/);
     assert.equal(screen(view).at(-1), " ↑↓ select  g graph  q close");
@@ -1541,8 +1541,8 @@ test("panel: pending permission requests and questions from the host's data come
     await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
     const lines = screen(view);
     // the bar and the NEEDS YOU rule, then the rows in columns
-    assert.match(lines[2], /^›! designer +wants permission +2 requests +\S+$/);
-    assert.match(lines[3], /^ \? orchestrator +asks you +Add per-user rate limiting +\S+$/);
+    assert.match(lines[2], /^›! designer +wants permission +2 requests +\S+ $/);
+    assert.match(lines[3], /^ \? orchestrator +asks you +Add per-user rate limiting +\S+ $/);
     assert.ok(lines.includes(" ○ 11 idle"), "the hub's row is up there: the idle count has its own row\n" + lines.join("\n"));
     assert.match(lines[4], /^ ! impl-claude +stalled ↻5/);
     assert.ok(!lines.some((l) => l.includes("global")), "the global form is not a session's");
@@ -3249,7 +3249,7 @@ test("styled list: name, state and task start in the same cell on every needs, h
     const stateCol = [...stateAt][0];
     assert.ok(texts.every((t) => t[stateCol - 1] === " " && t[stateCol] !== " "), "the state's first letter is at one column, after a space: " + texts.join("|"));
     // the times (right column) end flush at the width
-    assert.ok(texts.some((t) => /\d+[smhd]\w*$/.test(t)));
+    assert.ok(texts.some((t) => /\d+[smhd]\w* $/.test(t)), "the times end one cell short of the edge, like the bar");
   }
 });
 
@@ -5115,7 +5115,7 @@ test("paths: one path skips the chooser; the goal; the back end's run message is
     assert.deepEqual(screen(p.view).map((l) => l.slice(1)), [
       pad("◉ orchestrator", "$1.50 ", 79),
       "── AGENTS " + "─".repeat(69),
-      pad("◉ orchestrator  idle  t-ses_p1", "1 idle", 79),
+      pad("◉ orchestrator  idle  t-ses_p1", "1 idle ", 79),
       "── PATHS " + "─".repeat(70),
       "1 path",
       "─".repeat(79),

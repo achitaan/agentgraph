@@ -1236,19 +1236,20 @@ function detailRow(agent, width) {
 
 // One row in columns: mark, name, state (a colour), task (cut at its end), time (flush right). `cols` are shared by all the
 // rows so the columns line up.
-function columnRow(width, cols, spec) {
+function columnRow(whole, cols, spec) {
+  const width = whole - 1; // one cell of margin at the right, like the bar
   let { nameW, stateW, rightW } = cols;
   let fixed = 2 + nameW + 2 + stateW + (rightW ? 2 + rightW : 0);
-  while (fixed > width && nameW > 6) {
+  while (fixed + 2 > width && nameW > 6) {
     nameW -= 1;
     fixed -= 1;
   }
-  while (fixed > width && stateW > 4) {
+  while (fixed + 2 > width && stateW > 4) {
     stateW -= 1;
     fixed -= 1;
   }
   let withRight = rightW > 0;
-  if (fixed > width && withRight) {
+  if (fixed + 2 > width && withRight) {
     fixed -= 2 + rightW;
     withRight = false;
   }
@@ -1269,6 +1270,7 @@ function columnRow(width, cols, spec) {
   if (room >= 6 && spec.task) line.push(ssp(padRight(truncate(spec.task, room), room), "muted"));
   else line.push(ssp(" ".repeat(room), "plain"));
   if (withRight) line.push(ssp("  ", "plain"), ssp(padLeftTo(spec.right || "", rightW), spec.rightTone || "muted"));
+  line.push(ssp(" ", "plain"));
   return line;
 }
 
