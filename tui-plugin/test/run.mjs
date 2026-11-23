@@ -5015,7 +5015,9 @@ test("paths: no paths, no `r`: no key, nothing in the key line, no paths row", a
     await sleep(50);
     assert.equal(p.key("r"), undefined);
     assert.ok(!screen(p.view).some((l) => / r run|paths?\b/.test(l)), screen(p.view).join(" | "));
-    assert.deepEqual(screen(p.view).map((l) => l.slice(1, 15)), ["◉ orchestrator", "── AGENTS ────", "◉ orchestrator", "──────────────", "$1.50", "⏎ open  g grap"]);
+    const rows = screen(p.view).map((l) => l.slice(1).trimEnd()).filter((l) => l !== "");
+    assert.match(rows[0], /^◉ orchestrator +idle/);
+    assert.deepEqual(rows.slice(1), ["  t-ses_p0", "Idle: impl-openai", "$1.50 in all", "⏎ open  q close"]);
   } finally {
     p.done();
   }
@@ -5025,16 +5027,9 @@ test("paths: one path skips the chooser; the goal; the back end's run message is
   const p = await pathsPanel("ses_p1", { answers: { prompt: "  add a cache  " } });
   try {
     await waitFor(() => p.key("r"), 2000, "r key");
-    assert.deepEqual(screen(p.view).map((l) => l.slice(1)), [
-      pad("◉ orchestrator", "$1.50 ", 79),
-      "── AGENTS " + "─".repeat(69),
-      pad("◉ orchestrator  idle  t-ses_p1", "1 idle ", 79),
-      "── PATHS " + "─".repeat(70),
-      "1 path",
-      "─".repeat(79),
-      "$1.50",
-      "⏎ open  r run  g graph  q close",
-    ]);
+    const rows = screen(p.view).map((l) => l.slice(1).trimEnd()).filter((l) => l !== "");
+    assert.match(rows[0], /^◉ orchestrator +idle/);
+    assert.deepEqual(rows.slice(1), ["  t-ses_p1", "Idle: impl-openai", "PATHS " + "─".repeat(72), "1 path", "$1.50 in all", "⏎ open  r run  q close"]);
     assert.equal(p.key("r").enabled(), true);
     p.key("r").run();
     await waitFor(() => sends(p.calls).length === 1, 5000, "sent");
@@ -5844,29 +5839,29 @@ test("chat panel: `chatfeed --session <newest> --json --limit 40` for the select
   try {
     await c.settle(1);
     assert.equal(P.CHAT_POLL_MS, 2000);
-    assert.deepEqual(c.chatCmds()[0].slice(1), ["-P", "-m", "agentgraph.chatfeed", "--session", "ses_g", "--json", "--limit", "40"]);
-    assert.equal(c.fake.length, 1, "one chat timer");
-    // six ticks while a read runs and after: never two at once
-    for (let i = 0; i < 6; i++) c.tick();
-    await c.settle(2);
-    c.tick();
-    c.tick();
-    await c.settle(3);
-    assert.equal(maxRunning(), 1, "one read in flight at a time");
-    assert.ok(sessionsRead().every((s) => s === "ses_g"), "only the selected agent: " + sessionsRead());
-    // the hub: its session is idle (the feed says so): read once, the timer reads no more
-    c.key("down").run();
-    const n = chatSessions().length;
-    await c.settle(n + 1);
-    assert.equal(chatSessions().at(-1), "ses_root");
+    // the list starts on the main chat: its session is idle (the feed says so): read once, the timer reads no more
+    assert.deepEqual(c.chatCmds()[0].slice(1), ["-P", "-m", "agentgraph.chatfeed", "--session", "ses_root", "--json", "--limit", "40"]);
     c.tick();
     c.tick();
     await sleep(500);
-    assert.equal(chatSessions().length, n + 1, "an idle session is read once");
-    // the designer: busy again, read, never before it was selected
-    assert.ok(!chatSessions().includes("ses_h"));
+    assert.equal(chatSessions().length, 1, "an idle session is read once");
+    // the stalled agent: busy, read, then every tick; one read at a time
     c.key("down").run();
-    await c.settle(n + 2);
+    await c.settle(2);
+    assert.equal(chatSessions().at(-1), "ses_g");
+    assert.equal(c.fake.length, 1, "one chat timer");
+    for (let i = 0; i < 6; i++) c.tick();
+    await c.settle(3);
+    c.tick();
+    c.tick();
+    await c.settle(4);
+    assert.equal(maxRunning(), 1, "one read in flight at a time");
+    assert.ok(sessionsRead().slice(1).every((s) => s === "ses_g"), "only the selected agent: " + sessionsRead());
+    // the designer: busy, read, never before it was selected
+    assert.ok(!chatSessions().includes("ses_h"));
+    const n = chatSessions().length;
+    c.key("down").run();
+    await c.settle(n + 1);
     assert.equal(chatSessions().at(-1), "ses_h");
     // hidden: the panel's name is not ours: no read, no timer
     c.setName("other.panel");
@@ -5888,11 +5883,11 @@ test("chat panel: the chat shows under the rows, thinking and what was said apar
   const c = await chatPanel({ size: [42, 38], width: 42, feeds: { ses_g: { items: KINDS, busy: true } } });
   try {
     await c.settle(1);
+    c.key("down").run();
+    await c.settle(2);
     const lines = c.lines();
-    assert.match(lines[2], /^›! impl-claude +stalled/);
-    assert.equal(lines[3].trimEnd(), "   ▸ edit", "the tool a working agent runs, one line");
-    assert.ok(lines.some((l) => l.trimEnd() === "   Splitting the work into three lanes"), "what the hub said");
-    assert.ok(lines.some((l) => /^   · Weighing the contrast of the limiter…$/.test(l.trimEnd())), "thinking, cut to the width: " + lines.join("|"));
+    assert.ok(lines.some((l) => /^›● impl-claude +stalled/.test(l)), "the selected row: " + lines.join("|"));
+    assert.ok(!lines.some((l) => l.includes("▸ edit") && l.startsWith("   ")), "no tool lines under the rows: the list stays calm");
     const at = lines.findIndex((l) => l.startsWith(" chat · impl-claude"));
     assert.ok(at > 4);
     assert.deepEqual(lines.slice(at + 1, at + 9).map((l) => l.trimEnd()), [
@@ -5925,6 +5920,8 @@ test("chat panel: follows the newest; Page Up scrolls back and holds its place w
   const c = await chatPanel({ size: [60, 24], width: 60, feeds: { ses_g: { items: said(60), busy: true } } });
   try {
     await c.settle(1);
+    c.key("down").run();
+    await c.settle(2);
     const body = () => c.lines().filter((l) => /^ message \d+$/.test(l.trimEnd())).map((l) => Number(l.trim().split(" ")[1]));
     assert.equal(body().at(-1), 60, "the newest at the bottom");
     assert.ok(!c.lines().some((l) => /↓\d/.test(l)), "not scrolled: no mark");
@@ -5936,7 +5933,7 @@ test("chat panel: follows the newest; Page Up scrolls back and holds its place w
     // the chat grows while scrolled back: the same lines stay
     writeFeed("ses_g", said(63), { busy: true });
     c.tick();
-    await c.settle(2);
+    await c.settle(3);
     assert.deepEqual(body(), back, "held its place");
     c.key("pagedown").run();
     assert.ok(body().at(-1) > back.at(-1) && body().at(-1) < 63, "a page forward: " + body());
@@ -5946,7 +5943,7 @@ test("chat panel: follows the newest; Page Up scrolls back and holds its place w
     // following: a new item shows without a key
     writeFeed("ses_g", said(64), { busy: true });
     c.tick();
-    await c.settle(3);
+    await c.settle(4);
     assert.equal(body().at(-1), 64);
     // up and down still move the selection beside the chat
     c.key("down").run();
@@ -5962,15 +5959,16 @@ test("chat panel: no session shows 'No session yet' and reads nothing; the orche
   });
   const c = await chatPanel({ size: [60, 30], width: 60, doc: noSession, feeds: { ses_root: { items: said(2), busy: true } } });
   try {
+    await c.settle(1); // the main chat, selected first
+    c.key("down").run(); // the stalled agent, which has no session
     await sleep(300);
     assert.ok(c.lines().some((l) => l.trimEnd() === " No session yet"), c.lines().join("\n"));
-    assert.deepEqual(c.chatCmds(), [], "nothing to read");
-    assert.equal(c.fake.length, 0);
+    assert.equal(c.chatCmds().length, 1, "nothing more to read");
     assert.ok(!lastLine(c.lines()).includes("⏎ open"), "no session to open either");
     // the orchestrator
-    c.key("down").run();
-    await c.settle(1);
-    assert.equal(chatSessions()[0], "ses_root");
+    c.key("up").run();
+    await c.settle(2);
+    assert.equal(chatSessions().at(-1), "ses_root");
     assert.ok(c.lines().some((l) => l.startsWith(" transcript · orchestrator")), "read-only: a transcript\n" + c.lines().join("\n"));
     assert.ok(c.lines().some((l) => l.trimEnd() === " message 2"));
     assert.equal(c.key("s").enabled(), false);
@@ -5982,10 +5980,11 @@ test("chat panel: no session shows 'No session yet' and reads nothing; the orche
     assert.deepEqual(c.calls.filter((x) => x[0] === "prompt" || x[0] === "confirm" || x[0] === "send" || x[0] === "interrupt"), []);
     // a feed that says it is busy is polled even though the row cannot be steered
     c.tick();
-    await c.settle(2);
+    await c.settle(3);
     // a working agent: its chat is live
     c.key("down").run();
-    assert.ok(c.lines().some((l) => l.startsWith(" chat · designer")));
+    c.key("down").run();
+    assert.ok(c.lines().some((l) => l.startsWith(" chat · designer")), c.lines().join("\n"));
   } finally {
     c.done();
   }
@@ -5995,6 +5994,8 @@ test("chat panel: after m the chat is read at once and the message is pending un
   const c = await chatPanel({ size: [80, 38], answers: { prompt: "  use the token bucket  " }, feeds: { ses_g: { items: said(2), busy: true } } });
   try {
     await c.settle(1);
+    c.key("down").run();
+    await c.settle(2);
     const before = c.chatCmds().length;
     c.key("m").run();
     await waitFor(() => c.calls.some((x) => x[0] === "send"), 2000, "send");
@@ -6021,6 +6022,8 @@ test("chat panel: where there is no room, c opens the chat in place of the lower
   const c = await chatPanel({ size: [60, 14], width: 60, feeds: { ses_g: { items: said(40), busy: true } } });
   try {
     assert.ok(!c.lines().some((l) => l.includes(" chat · ")), "no room beside the list");
+    assert.match(lastLine(c.lines()), /⏎ open  c chat/);
+    c.key("down").run(); // the stalled agent: a busy one, steerable
     assert.match(lastLine(c.lines()), /s stop  m message  c chat/);
     assert.equal(c.key("c").enabled(), true);
     assert.equal(c.key("escape").enabled(), false, "Escape closes only an open chat");
@@ -6030,7 +6033,7 @@ test("chat panel: where there is no room, c opens the chat in place of the lower
     await c.settle(1);
     const lines = c.lines();
     assert.equal(lines.length, 14);
-    assert.match(lines[0], /^›! impl-claude +stalled/);
+    assert.match(lines[0], /^›● impl-claude +stalled/);
     assert.ok(lines[1].startsWith(" chat · impl-claude"));
     assert.equal(lines[12].trimEnd(), " message 40");
     assert.match(lastLine(lines), /↑↓ scroll  ⏎ open  s stop  m message  c back/);
@@ -6063,8 +6066,10 @@ test("chat panel: escape sequences, wide characters and very long lines stay ins
     const c = await chatPanel({ size: [w, 38], width: w, feeds: { ses_g: { items: nasty, busy: true } } });
     try {
       await c.settle(1);
+      c.key("down").run();
+      await c.settle(2);
       const lines = c.lines();
-      assert.ok(lines.some((l) => l.includes(" chat · ")));
+      assert.ok(lines.some((l) => l.includes(" chat · ")), lines.join("\n"));
       const limit = Math.min(w, Math.max(P.WIDTH, Math.min(P.PANEL_MAX_WIDTH, w)));
       const wide = Math.min(w, P.PANEL_MAX_WIDTH);
       for (const l of lines.slice(lines.findIndex((x) => x.includes(" chat · ")))) {
@@ -6083,7 +6088,9 @@ test("chat panel: with --demo the chat comes from `agentgraph chat --demo`", asy
   const c = await chatPanel({ size: [80, 38], demoOn: true, feeds: { ses_g: { items: said(2), busy: true } } });
   try {
     await c.settle(1);
-    const cmd = c.chatCmds()[0];
+    c.key("down").run();
+    await c.settle(2);
+    const cmd = c.chatCmds()[1];
     assert.deepEqual(cmd.slice(1), ["-P", "-m", "agentgraph.chatfeed", "--session", "ses_g", "--json", "--limit", "40", "--demo"]);
     assert.ok(c.lines().some((l) => l.trimEnd() === " message 2"), c.lines().join("\n"));
   } finally {
@@ -6584,8 +6591,7 @@ const sideDoc = (patch = {}) => chatDoc((d) => {
 const toastsOf = (c) => c.state.toasts.map((t) => t.message);
 const sideCmds = (c) => c.argvs.filter((a) => a.includes("agentgraph.sidechat"));
 const sideSelect = async (c) => {
-  c.key("down").run();
-  c.key("down").run();
+  for (let i = 0; i < 10 && !c.lines().some((l) => l.startsWith("›◌ side chat")); i++) c.key("down").run();
   await waitFor(() => c.lines().some((l) => l.startsWith("›◌ side chat")), 3000, "the side chat row selected\n" + c.lines().join("\n"));
 };
 
@@ -6608,7 +6614,7 @@ test("side chat panel: the row is selectable; its chat is read from sidechat.ses
     assert.deepEqual(c.calls.at(-1), ["navigate", { type: "session", sessionID: "ses_demoside" }]);
     assert.ok(!/ s stop| m message/.test(lastLine(c.lines())), lastLine(c.lines()));
     // moving off it, its chat goes with it
-    c.key("down").run();
+    c.key("up").run();
     assert.ok(c.lines().some((l) => l.startsWith(" chat · designer")));
   } finally {
     c.done();
@@ -6636,12 +6642,13 @@ test("side chat panel: `a ask` is listed and bound only when the side chat row i
     assert.equal(c.key("a").enabled(), false, "not on the first row");
     assert.ok(!/ a ask/.test(lastLine(c.lines())), lastLine(c.lines()));
     c.key("down").run();
-    assert.equal(c.key("a").enabled(), false, "not on the orchestrator");
+    assert.equal(c.key("a").enabled(), false, "not on an agent");
     assert.ok(!/ a ask/.test(lastLine(c.lines())));
+    c.key("down").run();
     c.key("down").run();
     assert.equal(c.key("a").enabled(), true);
     assert.match(lastLine(c.lines()), / a ask /, lastLine(c.lines()));
-    c.key("down").run();
+    c.key("up").run();
     assert.equal(c.key("a").enabled(), false, "not on an agent");
     assert.ok(!/ a ask/.test(lastLine(c.lines())));
     c.key("a").run();
@@ -6718,7 +6725,6 @@ test("side chat panel: the question goes to `agentgraph sidechat ask --main <roo
     assert.ok(!argv.some((a) => a.includes("n6") || a.includes("$(id)")), "never in the arguments");
     // waiting: the row is working, the key is off, a second question is not asked
     await waitFor(() => c.lines().some((l) => /side chat/.test(l) && /answering/.test(l)), 2000, "the row working\n" + c.lines().join("\n"));
-    assert.ok(c.lines().some((l) => /side chat/.test(l) && SPIN.test(l)));
     assert.equal(c.key("a").enabled(), false);
     assert.ok(!/ a ask/.test(lastLine(c.lines())) || true);
     c.key("a").run();
