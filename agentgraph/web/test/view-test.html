@@ -7898,6 +7898,7 @@
             await n119Fast(() => n119Lap(root, part => {
               N119_MOONS.forEach(name => {
                 const label = nodeOf(root, name).querySelector('.ag-agent-name'), box = label.getBoundingClientRect(), family = ['council', ...N119_MOONS.filter(other => other !== name)];
+                if (label.dataset.shown === '0' || label.dataset.held === '1') return; // a name with no free place is faded out (labelsPlace), nothing to read; one held in its place for 300 ms while the view moves (hysteresis) is not judged
                 [box.left + 3, (box.left + box.right) / 2, box.right - 3].forEach((x, k) => {
                   const list = document.elementsFromPoint(x, (box.top + box.bottom) / 2), mine = list.findIndex(e => (e.classList.contains('ag-moon-name') && e.dataset.moonName === name) || (e.classList.contains('ag-agent-name') && e.closest('[data-agent]')?.dataset.agent === name && getComputedStyle(e).visibility !== 'hidden'));
                   if (mine < 0) { problems.push('time ' + part + ': ' + name + ' name point ' + k + ' reaches nothing of the name'); return; }
@@ -8769,6 +8770,25 @@
         open(root, 'orchestrator'); await settle();
         assert(!/side chat/i.test(root.querySelector('.ag-detail').textContent), 'the orchestrator\'s details name the moon');
       }, sideMount(host));
+    });
+
+    await test('side chat: the moon is a shaded ball like the planets (the same gradient paint, a rim), flat and in 3D, and no ball is drawn when it is not installed', async () => {
+      await using(sideFixture({ busy: false }), async root => {
+        const moon = moonOf(root), ball = moon.querySelector('.ag-side-ball'), sphere = moon.querySelector('.ag-side-sphere');
+        assert(ball && sphere, 'the ball shapes are not drawn');
+        assert(/^url\(["']?#.+-ball-rest["']?\)$/.test(getComputedStyle(ball).fill) || /ball-rest/.test(ball.getAttribute('fill')), 'the flat ball is not painted with the planets\' gradient: ' + ball.getAttribute('fill'));
+        assert(/sphere/.test(sphere.getAttribute('fill')), 'the 3D ball is not painted with the planets\' sphere gradient: ' + sphere.getAttribute('fill'));
+        const box = ball.getBoundingClientRect();
+        assert(box.width >= 8 && box.height >= 8 && Math.abs(box.width - box.height) < 2, 'the ball is not a round shape: ' + box.width + ' x ' + box.height);
+        assert(getComputedStyle(ball).opacity !== '0' || getComputedStyle(sphere).opacity !== '0', 'neither ball is visible');
+        const flat = box.width;
+        viewportOf(root).focus({ preventScroll: true }); press(viewportOf(root), 'd'); await sleep(1100); await settle(); assert(root.dataset.agView === '3d', 'd did not switch to 3D');
+        const after = moonOf(root).querySelector('.ag-side-sphere').getBoundingClientRect();
+        assert(after.width >= 4 && Math.abs(after.width - after.height) < 2, 'the 3D ball is not drawn: ' + after.width + ' x ' + after.height);
+        assert(flat > 0, 'no flat size');
+      }, sideMount(sideHost()));
+      const none = chatFixture(); none.sidechat = { installed: false };
+      await using(none, async root => { assert(!root.querySelector('.ag-side-ball, .ag-side-sphere'), 'a ball is drawn when side chat is not installed'); }, sideMount(sideHost()));
     });
 
     await test('side chat: it moves only while it works, one lap on the moons\' clock, and stands still when idle or under reduced motion', async () => {

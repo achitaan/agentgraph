@@ -3536,6 +3536,125 @@ await check("v7 r4 main (real python3): a run written as waiting with no control
   }
 });
 
+// ---- Label placement (pure functions of the web view; made-up boxes only) ----
+const LABELS = (() => {
+  const fake = {};
+  const context = vm.createContext({ window: fake, document: {}, console, setTimeout, clearTimeout, performance });
+  vm.runInContext(fs.readFileSync(path.join(ORCHESTRATION, "agentgraph", "web", "app.js"), "utf8"), context, { filename: "app.js" });
+  return fake.AgentGraph;
+})();
+const lbox = (place) => ({ left: place.x, top: place.y, right: place.x + place.w, bottom: place.y + place.h });
+const lmeet = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+const ldisc = (box, d) => {
+  const x = Math.max(box.left, Math.min(d.cx, box.right)), y = Math.max(box.top, Math.min(d.cy, box.bottom));
+  return (x - d.cx) ** 2 + (y - d.cy) ** 2 < d.r * d.r;
+};
+const litem = (id, cx, cy, extra = {}) => ({ id, w: 60, h: 16, asc: 12, cx, cy, r: 20, z: 0, tier: 4, ...extra });
+function lcrowd(n, seed) {
+  let state = seed;
+  const next = () => ((state = (state * 1103515245 + 12345) % 2147483648) / 2147483648);
+  return Array.from({ length: n }, (_, i) => litem("p" + i, 100 + next() * 500, 80 + next() * 300, { z: next() * 100 - 50, tier: 1 + Math.floor(next() * 5), r: 8 + next() * 20 }));
+}
+
+await check("labels: a lone name goes below its planet, and a crowd of 40 never has two shown names meeting, one meeting a planet in front of it, or one meeting the chip", () => {
+  const lone = LABELS.placeLabels([litem("a", 100, 100)], { now: 0 }).places.a;
+  assert.equal(lone.place, "below");
+  assert.ok(lone.shown);
+  const chips = [{ left: 250, top: 200, right: 450, bottom: 240 }];
+  for (const seed of [1, 7, 42, 99]) {
+    for (const frontOnly of [false, true]) {
+      const items = lcrowd(40, seed);
+      const result = LABELS.placeLabels(items, { now: 0, chips, frontOnly });
+      const shown = items.filter((item) => result.places[item.id].shown);
+      assert.ok(shown.length > 0 && shown.length < 41);
+      shown.forEach((item, i) => {
+        const box = lbox(result.places[item.id]);
+        shown.slice(i + 1).forEach((other) => assert.ok(!lmeet(box, lbox(result.places[other.id])), `${item.id} meets ${other.id} (seed ${seed})`));
+        chips.forEach((chip) => assert.ok(!lmeet(box, chip), `${item.id} meets the chip`));
+        items.forEach((planet) => {
+          if (planet === item || (frontOnly && !(planet.z > item.z))) return;
+          assert.ok(!ldisc(box, planet), `${item.id} meets the planet ${planet.id} (seed ${seed}, front ${frontOnly})`);
+        });
+      });
+    }
+  }
+});
+
+await check("labels: a name tries below, above, right, then left, and fades out when no place is free", () => {
+  const blocker = (id, cx, cy) => litem(id, cx, cy, { tier: 0, w: 4, h: 4, r: 12 });
+  const at = (...blocked) => LABELS.placeLabels([litem("a", 300, 300, { tier: 4 }), ...blocked], { now: 0 }).places.a;
+  assert.equal(at().place, "below");
+  assert.equal(at(blocker("x", 300, 345)).place, "above");
+  assert.equal(at(blocker("x", 300, 345), blocker("y", 300, 255)).place, "right");
+  assert.equal(at(blocker("x", 300, 345), blocker("y", 300, 255), blocker("z", 335, 300)).place, "left");
+  assert.equal(at(blocker("x", 300, 345), blocker("y", 300, 255), blocker("z", 335, 300), blocker("w", 265, 300)).shown, false);
+});
+
+await check("labels: the order of standing is kept: the orchestrator, then agents that need the user, working ones, the rest nearer to the viewer first", () => {
+  // Four names that all want the same place: the first by standing gets it, the others go elsewhere or out.
+  const same = (id, extra) => litem(id, 300, 300, extra);
+  const result = LABELS.placeLabels([same("rest-far", { z: -10 }), same("rest-near", { z: 10 }), same("working", { tier: 2 }), same("needs", { tier: 1 }), same("hub", { tier: 0 })], { now: 0, places: ["below"] }).places;
+  assert.ok(result.hub.shown, "the orchestrator is shown");
+  ["needs", "working", "rest-near", "rest-far"].forEach((id) => assert.equal(result[id].shown, false, id + " yields to the one before it"));
+  const two = LABELS.placeLabels([same("rest-far", { z: -10 }), same("rest-near", { z: 10 }), same("needs", { tier: 1 })], { now: 0, places: ["below"] }).places;
+  assert.ok(two.needs.shown && !two["rest-near"].shown);
+  const near = LABELS.placeLabels([same("rest-far", { z: -10 }), same("rest-near", { z: 10 })], { now: 0, places: ["below"] }).places;
+  assert.ok(near["rest-near"].shown && !near["rest-far"].shown, "the nearer one first");
+});
+
+await check("labels: a group's seats yield first, and a chosen name is shown even when there is no free place", () => {
+  const same = (id, extra) => litem(id, 300, 300, extra);
+  const seats = LABELS.placeLabels([same("seat", { tier: 5, z: 100 }), same("other", { tier: 4, z: -100 })], { now: 0, places: ["below"] }).places;
+  assert.ok(seats.other.shown && !seats.seat.shown);
+  const chosen = LABELS.placeLabels([same("first", { tier: 0 }), same("picked", { tier: 3, forced: true })], { now: 0, places: ["below"] }).places;
+  assert.ok(chosen.first.shown && chosen.picked.shown, "chosen names are shown");
+});
+
+await check("labels: hysteresis: a shown name keeps its place while it is free, moves or goes only after ~300 ms blocked, and returns only after ~300 ms free", () => {
+  const blocker = litem("x", 300, 345, { tier: 0, w: 4, h: 4, r: 12 });
+  const step = (now, prev, blocked) => LABELS.placeLabels([litem("a", 300, 300, { prev }), ...(blocked ? [blocker] : [])], { now, hold: 300 });
+  let result = step(0, null, false).places.a;
+  assert.equal(result.place, "below");
+  // blocked at 100: it stays below for now (held), then moves above at 400
+  let r = step(100, result, true);
+  assert.equal(r.places.a.place, "below"); assert.ok(r.places.a.shown && r.places.a.held && r.pending);
+  result = r.places.a;
+  r = step(250, result, true); assert.equal(r.places.a.place, "below"); assert.ok(r.places.a.held);
+  result = r.places.a;
+  r = step(450, result, true); assert.equal(r.places.a.place, "above"); assert.ok(!r.places.a.held);
+  // free again: it stays above (no flipping back), and a blip of blocking shorter than 300 ms changes nothing
+  result = r.places.a;
+  r = step(500, result, false); assert.equal(r.places.a.place, "above");
+  // a name with no place at all goes after 300 ms, and comes back only after 300 ms free
+  const wall = [[300, 345], [300, 255], [335, 300], [265, 300]].map(([x, y], i) => litem("w" + i, x, y, { tier: 0, w: 4, h: 4, r: 12 }));
+  const alone = (now, prev, walled) => LABELS.placeLabels([litem("a", 300, 300, { prev }), ...(walled ? wall : [])], { now, hold: 300 });
+  let a = alone(0, null, false).places.a;
+  a = alone(10, a, true).places.a; assert.ok(a.shown && a.held);
+  a = alone(400, a, true).places.a; assert.equal(a.shown, false);
+  a = alone(500, a, false).places.a; assert.equal(a.shown, false, "not back at once");
+  a = alone(700, a, false).places.a; assert.equal(a.shown, false);
+  a = alone(820, a, false).places.a; assert.equal(a.shown, true, "back after it has been free 300 ms");
+});
+
+await check("labels: the chip goes below the sun, above when that covers fewer planets, and changes only after ~300 ms", () => {
+  const chip = { cx: 300, cy: 300, r: 40, s: 1, top: 70, bottom: 110, width: 200 };
+  const planet = (cx, cy) => ({ cx, cy, r: 20, z: 0 });
+  assert.equal(LABELS.placeChip(chip, [], { now: 0 }).side, "below");
+  const covered = [planet(300, 400)];
+  const first = LABELS.placeChip(chip, covered, { now: 0 });
+  assert.equal(first.side, "above", "decided at once the first time");
+  assert.equal(first.covers.below, 2);
+  assert.ok(first.box.bottom <= 300 && first.box.top >= 180, "the box is above the sun's centre");
+  assert.equal(LABELS.placeChip(chip, [], { now: 100, prev: first }).side, "above", "equal cover: it stays");
+  const stay = LABELS.placeChip(chip, [planet(300, 200)], { now: 100, prev: first });
+  assert.equal(stay.side, "above"); assert.ok(stay.since !== null, "it waits");
+  assert.equal(LABELS.placeChip(chip, [planet(300, 200)], { now: 250, prev: stay }).side, "above");
+  assert.equal(LABELS.placeChip(chip, [planet(300, 200)], { now: 450, prev: stay }).side, "below");
+  // in 3D a planet behind the sun counts less than one in front of it
+  assert.equal(LABELS.placeChip(chip, [{ cx: 300, cy: 400, r: 20, z: -5 }, { cx: 300, cy: 200, r: 20, z: 5 }], { now: 0, frontOnly: true, z: 0 }).side, "below");
+  assert.equal(LABELS.placeChip(chip, [{ cx: 300, cy: 400, r: 20, z: 5 }, { cx: 300, cy: 200, r: 20, z: -5 }], { now: 0, frontOnly: true, z: 0 }).side, "above");
+});
+
 await check("the harness replaces an existing temporary bundle before reading it", () => {
   // build.mjs writes atomically, so even an identical rebuild replaces the existing file.
   assert.notEqual(fs.statSync(BUNDLE).ino, previousBundle.ino, "the existing bundle was reused");
