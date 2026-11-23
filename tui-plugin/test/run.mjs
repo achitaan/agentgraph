@@ -2841,6 +2841,172 @@ test("orbit 3D: 300 agents draw in under 200 ms a frame, exact size, no name ove
 });
 
 // ---------------------------------------------------------------------------------------------------------------
+// The pixel planets (src/planets.js): the Desktop graph in half-block pixels, with made-up data
+
+const PL = await import(src("planets.js"));
+const PLO = { colors: DARK };
+// Like assertExact, but a pixel span has a background too: neighbours must differ in colour, background or weight.
+function plExact(lines, width, height, what) {
+  assert.equal(lines.length, height, what + ": height");
+  lines.forEach((l, i) => {
+    assert.equal(R.displayWidth(l.map((s) => s.text).join("")), width, `${what}: line ${i} width`);
+    for (const s of l) {
+      assert.ok(R.TONES.includes(s.tone) && typeof s.text === "string" && s.text.length > 0, `${what}: span ${JSON.stringify(s)}`);
+      for (const k of ["color", "bg"]) if (k in s) assert.match(s[k], /^#[0-9a-f]{6}$/, `${what}: ${k} ${s[k]}`);
+    }
+    for (let k = 1; k < l.length; k += 1) {
+      const a = l[k - 1], b = l[k];
+      assert.ok(a.tone !== b.tone || a.color !== b.color || a.bg !== b.bg || !!a.bold !== !!b.bold, `${what}: line ${i} has neighbouring spans of one style`);
+    }
+  });
+}
+const plHubDoc = (activity) => {
+  const doc = JSON.parse(JSON.stringify(demoWorn));
+  const hub = doc.agents.find((a) => a.group === "hub");
+  if (activity) hub.activity = activity;
+  return doc;
+};
+const PL_ZONE_ACTIVITY = {
+  web: { kind: "tool", tool: "webfetch", zone: "web", target: "example.test/docs/limits" },
+  terminal: { kind: "tool", tool: "bash", zone: "terminal", target: "npm run check" },
+  files: { kind: "tool", tool: "read", zone: "files", target: "src/pages/Missing.tsx" },
+  thinking: { kind: "reasoning" },
+};
+
+test("planets: every frame is exactly width x height at several sizes and times; null, empty and odd documents never throw", () => {
+  for (const [w, h] of [[36, 14], [37, 15], [62, 30], [62, 38], [100, 30], [160, 45], [20, 8], [1, 1], [0, 0]]) {
+    for (const doc of [demoWorn, plHubDoc(PL_ZONE_ACTIVITY.web), {}, null, undefined, { agents: "x" }, D([])]) {
+      for (const now of [0, 7777, 19000]) {
+        const lines = PL.planetsLines(doc, w, h, now, PLO);
+        assert.equal(lines.length, h, `${w}x${h}: height`);
+        if (w >= 6 && h >= 4) plExact(lines, w, h, `planets ${w}x${h}@${now}`);
+        else lines.forEach((l) => assert.equal(R.displayWidth(l.map((s) => s.text).join("")), w, `${w}x${h}: width`));
+      }
+    }
+  }
+  assert.doesNotThrow(() => PL.planetsLines(null, 62, 30));
+  assert.doesNotThrow(() => PL.planetsLines(demoWorn, "62", "30", "x", null));
+  assert.equal(PL.planetsInfo(demoWorn, 4, 3), null);
+});
+
+test("planets: shapes are pixels only; letters, digits and marks appear only in the names, the pill and the icon row", () => {
+  for (const [w, h] of [[36, 14], [62, 30], [62, 38], [100, 30], [160, 45]]) {
+    for (const now of [3000, 11000, 27000]) {
+      for (const doc of [demoWorn, plHubDoc(PL_ZONE_ACTIVITY.terminal)]) {
+        const info = PL.planetsInfo(doc, w, h, now, PLO);
+        const lines = PL.planetsLines(doc, w, h, now, PLO);
+        const allowed = new Set();
+        const allow = (c0, c1, r) => { for (let c = c0; c <= c1; c += 1) allowed.add(c + "," + r); };
+        for (const l of info.labels) allow(l.c0, l.c1, l.r);
+        if (info.hub.label) allow(info.hub.label.c0, info.hub.label.c1, info.hub.label.r);
+        if (info.pill) allow(info.pill.c0, info.pill.c1, info.pill.r);
+        if (info.icons) allow(info.icons.c0, info.icons.c1, info.icons.r);
+        lines.forEach((line, r) => {
+          let c = 0;
+          for (const s of line) {
+            for (const ch of s.text) {
+              if (ch !== " " && ch !== "\u2580") assert.ok(allowed.has(c + "," + r), `${w}x${h}@${now}: "${ch}" at ${c},${r} is not part of a name, the pill or the icons`);
+              c += R.displayWidth(ch);
+            }
+          }
+        });
+        assert.ok(info.hub.label, `${w}x${h}: the hub is named`);
+      }
+    }
+  }
+});
+
+test("planets: the hub ball is the largest and sits at the centre", () => {
+  for (const [w, h] of [[36, 14], [62, 30], [62, 38], [100, 30], [160, 45]]) {
+    for (const now of [0, 5000, 11000, 27000]) {
+      const info = PL.planetsInfo(demoWorn, w, h, now, PLO);
+      const hub = info.balls.find((b) => b.id === "hub");
+      assert.ok(hub, `${w}x${h}: a hub ball`);
+      assert.ok(Math.abs(hub.x - w / 2) <= 1.5, `${w}x${h}: hub at column ${hub.x}`);
+      assert.ok(Math.abs(hub.y - h) <= h * 0.35, `${w}x${h}: hub at pixel row ${hub.y} of ${h * 2}`);
+      for (const b of info.balls) if (b !== hub) assert.ok(hub.r > b.r, `${w}x${h}@${now}: ${b.id} (${b.r.toFixed(1)}) is not smaller than the hub (${hub.r.toFixed(1)})`);
+    }
+  }
+});
+
+test("planets: the pill and the icon row are never covered by a ball and show the zone of the hub's current action", () => {
+  for (const [w, h] of [[62, 30], [62, 38], [100, 30], [160, 45]]) {
+    for (const now of [0, 3000, 11000, 27000]) {
+      for (const [zone, act] of [["web", PL_ZONE_ACTIVITY.web], ["terminal", PL_ZONE_ACTIVITY.terminal], ["files", PL_ZONE_ACTIVITY.files], ["thinking", PL_ZONE_ACTIVITY.thinking]]) {
+        const info = PL.planetsInfo(plHubDoc(act), w, h, now, PLO);
+        assert.ok(info.pill && info.icons, `${w}x${h}@${now} ${zone}: a pill and an icon row`);
+        assert.equal(info.icons.current, zone, `${w}x${h} ${zone}: the lit icon`);
+        assert.deepEqual(info.icons.cells.filter((c) => c.lit).map((c) => c.zone), [zone]);
+        const lines = PL.planetsLines(plHubDoc(act), w, h, now, PLO);
+        const rowText = (r) => lines[r].map((s) => s.text).join("");
+        assert.ok(rowText(info.pill.r).includes(info.pill.text.split(" ")[1]), `${zone}: the pill says what it does`);
+        for (const [c0, c1, r] of [[info.pill.c0, info.pill.c1, info.pill.r], [info.icons.c0, info.icons.c1, info.icons.r]]) {
+          for (const b of info.balls) {
+            const nx = Math.max(c0, Math.min(c1 + 1, b.x));
+            const ny = Math.max(r * 2, Math.min(r * 2 + 2, b.y));
+            assert.ok(Math.hypot(b.x - nx, b.y - ny) >= b.r - 0.01, `${w}x${h}@${now} ${zone}: ${b.id} covers row ${r}`);
+          }
+        }
+      }
+    }
+  }
+  // no activity of a known zone: nothing is lit; a resting hub says so
+  const spawning = PL.planetsInfo(demoWorn, 62, 38, 11000, PLO);
+  assert.equal(spawning.icons.current, null);
+  assert.equal(spawning.icons.cells.length, 5);
+});
+
+test("planets: a nearer ball covers a farther one", () => {
+  let checked = 0;
+  for (const [w, h] of [[62, 30], [62, 38], [100, 30], [160, 45]]) {
+    for (const now of [0, 3000, 7000, 11000, 19000, 27000]) {
+      const info = PL.planetsInfo(demoWorn, w, h, now, PLO);
+      for (const a of info.balls) {
+        for (const b of info.balls) {
+          if (a === b || a.r >= b.r || a.depth === b.depth) continue;
+          if (Math.hypot(a.x - b.x, a.y - b.y) >= b.r - 0.5) continue; // the small ball's centre lies inside the big one
+          const owner = info.owner(a.x, a.y);
+          const top = info.balls.find((x) => x.id === owner);
+          assert.ok(top, `${w}x${h}@${now}: someone owns the overlap`);
+          assert.ok(top.depth >= Math.max(a.depth, b.depth) - 1e-9, `${w}x${h}@${now}: ${owner} owns where ${a.id} and ${b.id} meet`);
+          checked += 1;
+        }
+      }
+    }
+  }
+  assert.ok(checked >= 10, `only ${checked} overlaps found`);
+});
+
+test("planets: reduced motion is one still frame; the interval says so", () => {
+  const opt = Object.assign({ motion: "reduced" }, PLO);
+  for (const [w, h] of [[36, 14], [62, 30], [160, 45]]) {
+    assert.deepEqual(PL.planetsLines(demoWorn, w, h, 0, opt), PL.planetsLines(demoWorn, w, h, 123456, opt), `${w}x${h}`);
+  }
+  assert.notDeepEqual(PL.planetsLines(demoWorn, 62, 30, 0, PLO), PL.planetsLines(demoWorn, 62, 30, 12000, PLO), "with motion the picture turns");
+  assert.equal(PL.planetsInterval(demoWorn, { motion: "reduced" }, 0), 0);
+  assert.equal(PL.planetsInterval(null, {}, 0), 0);
+  assert.ok(PL.planetsInterval(demoWorn, {}, 0) > 0);
+});
+
+test("planets: 300 agents draw in under 200 ms a frame, exact size", () => {
+  const groups = ["build", "verify", "understand", "decide", "council"];
+  const agents = [A("orchestrator", "hub")];
+  for (let i = 0; i < 300; i += 1) agents.push(A("agent-" + i, groups[i % groups.length], i % 4 === 0 ? 1 : 0, "", i % 7));
+  const doc = Object.assign(D(agents), { sidechat: { installed: true, session: "ses_demoside", model: "x", busy: true } });
+  for (let i = 0; i < 3; i += 1) PL.planetsLines(doc, 160, 45, i * 100, PLO); // warm up
+  let worst = 0;
+  const t0 = process.hrtime.bigint();
+  for (let i = 0; i < 6; i += 1) {
+    const t = process.hrtime.bigint();
+    const lines = PL.planetsLines(doc, 160, 45, 3000 + i * 1300, PLO);
+    worst = Math.max(worst, Number(process.hrtime.bigint() - t) / 1e6);
+    plExact(lines, 160, 45, "planets 300 agents");
+  }
+  console.log(`     planets, 300 agents at 160x45: worst frame ${worst.toFixed(1)} ms, mean ${(Number(process.hrtime.bigint() - t0) / 1e6 / 6).toFixed(1)} ms`);
+  assert.ok(worst < 200, `a frame took ${worst.toFixed(1)} ms`);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
 // The pixel rooms (src/rooms.js): the floor plan, with made-up data
 
 const RM = await import(src("rooms.js"));
