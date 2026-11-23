@@ -329,3 +329,77 @@ def demo_activity(now: float | None = None, *, detail: bool = True) -> dict[str,
                     {"zone": zone, "tool": tool, "target": target, "status": status, "time": round(now - ago, 3),
                      "seconds": seconds} for zone, tool, target, status, seconds, ago in trail])
     return found
+
+
+# ---- the demo's loops: made-up values, nothing is read or written (`GET /api/loops`, `GET /api/loop/run` of a demo server) ----
+_DEMO_FLOWS = (("watch-build", "impl-openai", "Keep the build green: look at it now and then and fix what broke."),
+               ("nightly-review", "impl-claude", "Spend the night tidying: small fixes only, one at a time."))
+_DEMO_RUNS = {"20261123-080000-a1b2": "watch-build", "20261123-064500-c3d4": "nightly-review"}
+
+
+def demo_flows() -> list[dict]:
+    """The structure's `flows` for the demo: two agents each with a loop on itself (the only loops that can run)."""
+    return [{"id": name, "path": [agent, agent], "text": text, "name": None, "command": None, "rev": "0123456789abcdef", "source": "drawn", "stats": None}
+            for name, agent, text in _DEMO_FLOWS]
+
+
+def _demo_settings(flow: str) -> dict:
+    """Valid settings, defaults filled in, as `looprun.validate` would give them."""
+    common = {"version": 1, "flow": flow, "check": {"command": "make test", "timeout": 300, "inconclusive_codes": [75]}, "session": "reuse", "allow_asks": False}
+    if flow == "watch-build":
+        return {**common, "goal": "Keep the build green.", "limits": {"attempts": 3, "attempt_seconds": 600, "cost": 3},
+                "timing": {"kind": "interval", "for": 7200, "every": 600, "watch": "make -q build", "watch_seconds": 60, "wake_codes": [10],
+                           "done_codes": [11], "stop_on_fail": False, "cache_seconds": 300}}
+    return {**common, "goal": "Tidy the code base, one small fix at a time.", "check": {**common["check"], "command": "make lint"},
+            "limits": {"attempts": 6, "attempt_seconds": 900, "cost": 4},
+            "timing": {"kind": "timebox", "for": 14400, "min_attempt_seconds": 60, "cache_seconds": 300}}
+
+
+def _demo_state(run_id: str, now: float) -> dict:
+    flow = _DEMO_RUNS[run_id]
+    counts = {"idle": 2, "woken": 3, "skipped": 0, "failed": 0}
+    if flow == "watch-build":  # running: started 50 minutes ago, ends in 70 minutes, wakes every 10 minutes, the next one in a few minutes
+        anchor = now - 3000
+        timing = {"kind": "interval", "anchor": anchor, "deadline": anchor + 7200, "end": "for 7200 seconds", "every": 600, "ticks_limit": None, "phase": "waiting",
+                  "next_k": 5, "next_at": now + 250, "tick": None, "wake": None, "counts": {"idle": 2, "woken": 3, "skipped": 0, "failed": 0}, "watch_errors": 0,
+                  "idle_run": 0, "last": {"k": 4, "result": "wake_passed", "at": now - 350}, "ticks": [], "spend_by_day": {}, "last_turn": {}, "wakes": 3}
+        return {"flow": flow, "status": "running", "reason": "", "goal": "Keep the build green.", "created": anchor, "ended": None, "limits": {"attempts": 3, "cost": 3, "attempt_seconds": 600},
+                "totals": {"cost": 0.42, "seconds": 410}, "attempts": [], "timing": timing, "trial": False, "passed_by": None, "waiting": None}
+    anchor = now - 5400  # paused: started 90 minutes ago for four hours, stopped on request
+    timing = {"kind": "timebox", "anchor": anchor, "deadline": anchor + 14400, "end": "for 14400 seconds", "every": None, "ticks_limit": None, "phase": None,
+              "next_k": 0, "next_at": None, "tick": None, "wake": None, "counts": counts, "watch_errors": 0, "idle_run": 0, "last": None, "ticks": [], "spend_by_day": {},
+              "last_turn": {}, "wakes": None}
+    return {"flow": flow, "status": "paused", "reason": "paused on request after the step it was on", "goal": "Tidy the code base, one small fix at a time.", "created": anchor,
+            "ended": None, "limits": {"attempts": 6, "cost": 4, "attempt_seconds": 900}, "totals": {"cost": 1.1, "seconds": 2300}, "attempts": [], "timing": timing,
+            "trial": False, "passed_by": None, "waiting": None}
+
+
+def _demo_row(run_id: str, now: float) -> dict:
+    state = _demo_state(run_id, now)
+    timing = {key: state["timing"].get(key) for key in ("kind", "every", "phase", "next_at", "deadline", "end", "ticks_limit", "counts", "last", "spend_by_day", "anchor", "wakes")}
+    waiting = "waiting for the next tick" if state["status"] == "running" else None
+    return {"run": run_id, "flow": state["flow"], "status": state["status"], "reason": state["reason"], "live": state["status"] == "running", "attempts": 0,
+            "limit": state["limits"]["attempts"], "cost": state["totals"]["cost"], "seconds": state["totals"]["seconds"], "created": state["created"], "ended": None,
+            "goal": state["goal"], "check": "make test" if state["flow"] == "watch-build" else "make lint", "last_check": None, "passed_by": None, "waiting": None,
+            "answered": False, "trial": False, "settings_sha256": "0" * 64, "timing": {**timing, "waiting": waiting}}
+
+
+def demo_loops(now: float | None = None) -> dict:
+    """`GET /api/loops` for the demo: both loops saved, one run of each (newest first): an interval loop running and a time-boxed one paused."""
+    now = time.time() if now is None else now
+    loops = [{"flow": flow["id"], "name": "", "path": flow["path"], "agent": flow["path"][0], "runnable": True, "reason": "", "settings": _demo_settings(flow["id"]),
+              "problem": "", "rev": "0123456789abcdef", "versions": []} for flow in demo_flows()]
+    return {"project": "/work/api", "scratch": False, "loops": loops, "orphans": [], "runs": [_demo_row(run_id, now) for run_id in _DEMO_RUNS]}
+
+
+def demo_run(run_id: str, now: float | None = None) -> dict | None:
+    """`GET /api/loop/run?id=` for the demo: None for an id the demo does not have."""
+    if run_id not in _DEMO_RUNS:
+        return None
+    now = time.time() if now is None else now
+    state = _demo_state(run_id, now)
+    flow = state["flow"]
+    path = next(item["path"] for item in demo_flows() if item["id"] == flow)
+    return {"run": {**state, "live": state["status"] == "running", "answered": False, "steps_sha256": "0" * 64, "settings_sha256": "0" * 64},
+            "definition": {"settings": _demo_settings(flow), "path": path, "steps": None, "steps_sha256": "0" * 64, "goal": state["goal"], "workdir": "/work/api", "created": state["created"]},
+            "attempts": []}

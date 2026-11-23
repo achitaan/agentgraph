@@ -244,7 +244,7 @@ def view(state: dict) -> dict | None:
     rt = state.get("timing")
     if not isinstance(rt, dict):
         return None
-    keys = ("kind", "every", "phase", "next_at", "deadline", "end", "ticks_limit", "counts", "last", "spend_by_day")
+    keys = ("kind", "every", "phase", "next_at", "deadline", "end", "ticks_limit", "counts", "last", "spend_by_day", "anchor", "wakes")
     return {**{key: rt.get(key) for key in keys}, "waiting": waiting_hint(state).strip() or None}
 
 
@@ -514,6 +514,7 @@ class Timed:
         attempts = c.state["attempts"]
         if where is None:
             rt["phase"], rt["wake"] = "wake", {"k": k, "base": len(attempts), "started": round(self.clock.now(), 3)}
+            rt["wakes"] = (rt.get("wakes") or 0) + 1  # wakes started, for readers (the failed ones among them are in counts.failed with the watch errors)
             c.save()
         wake = rt["wake"]
         k = wake["k"]
