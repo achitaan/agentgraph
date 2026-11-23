@@ -2947,9 +2947,43 @@ test("planets: shapes are pixels only; letters, digits and marks appear only in 
             }
           }
         });
-        assert.ok(info.hub.label, `${w}x${h}: the hub is named`);
+        assert.equal(info.hub.label, undefined, `${w}x${h}: the hub is not named inside the picture (the header does)`);
       }
     }
+  }
+});
+
+test("planets: the pill is on the picture's first row, from column 1, at 62x38, 100x30 and 36x14; the hub's name is not drawn a second time", () => {
+  const PLT = (l) => l.map((sp) => sp.text).join("");
+  const docs = [["a hub that works", plHubDoc(PL_ZONE_ACTIVITY.terminal)], ["the worn demo", demoWorn]];
+  for (const [w, h] of [[62, 38], [100, 30], [36, 14]]) {
+    for (const [what, doc] of docs) {
+      for (const now of [3000, 27000, 60000]) {
+        const info = PL.planetsInfo(doc, w, h, now, PLO);
+        assert.ok(info.pill, `${w}x${h} ${what}: a pill`);
+        assert.equal(info.pill.r, 0, `${w}x${h} ${what}: the pill's row`);
+        assert.equal(info.pill.c0, 1, `${w}x${h} ${what}: the pill starts under the header's text`);
+        assert.ok(info.pill.c1 <= w - 2, `${w}x${h} ${what}: the pill fits the width`);
+        const lines = PL.planetsLines(doc, w, h, now, PLO);
+        assert.equal(lines.length, h);
+        assert.ok(PLT(lines[0]).includes(info.pill.text.slice(0, 6)), `${w}x${h} ${what}: the pill is drawn on row 0: ${PLT(lines[0])}`);
+        const name = info.hub.name;
+        assert.ok(name.length > 3);
+        assert.ok(!lines.some((l) => PLT(l).includes(name)), `${w}x${h} ${what}: the hub's name is not in the picture`);
+        assert.equal(info.hub.label, undefined);
+        // no ball is on the pill's row
+        for (const b of info.balls) assert.ok(b.y - b.r >= 2, `${w}x${h} ${what}: ${b.id} reaches up to pixel row ${(b.y - b.r).toFixed(1)}, into the pill's row`);
+      }
+    }
+  }
+  // the panel: the header line names the main chat; the pill is the first line of the picture, right under it
+  for (const [w, h] of [[62, 38], [100, 30], [36, 14]]) {
+    const lines = PL.planetsScene(demoWorn, { width: w, height: h, now: 60000, keys: "↑↓ select  g list" }).map(PLT);
+    assert.equal(lines.length, h);
+    assert.ok(lines[0].includes("orchestrator"), `${w}x${h}: the header names the main chat: ${lines[0]}`);
+    const pill = PL.planetsInfo(demoWorn, w, h - 2, 60000, {}).pill;
+    assert.ok(lines[1].includes(pill.text.slice(0, 6)), `${w}x${h}: the pill is the line under the header: ${lines[1]}`);
+    assert.equal(lines.filter((l) => l.includes("orchestrator")).length, 1, `${w}x${h}: the main chat is named once`);
   }
 });
 
