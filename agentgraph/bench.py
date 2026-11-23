@@ -41,7 +41,8 @@ row has `"sandbox": true|false`) that allows everything except: reading any `ben
 checkout, of every `git worktree list` path of it and of the live toolkit checkout; writing anywhere under the real config
 folder or under those checkouts. The runner itself is not sandboxed. The real database stays readable (a known gap).
 `run_env` drops variables whose value points into this repository or the real config folder (a PATH entry is dropped alone);
-for a plain copy `OPENCODE_CONFIG_CONTENT` keeps only the `PLAIN_KEYS` (dropped if it is not JSON).
+for a plain copy `OPENCODE_CONFIG_CONTENT` keeps only the `PLAIN_KEYS` and keys that start with `provider` (dropped if it
+is not JSON).
 
 **Plain copy.** `plain-config` makes a scratch HOME the same way (same checks, same links, same model pin) that holds plain
 OpenCode and nothing of the toolkit: from `opencode.json` only the keys in `PLAIN_KEYS` (the provider entries and the
@@ -468,7 +469,8 @@ def run_env(scratch: dict, work: Path, environ=None, live: Path | None = None) -
         except ValueError:
             content = None
         if isinstance(content, dict):
-            env["OPENCODE_CONFIG_CONTENT"] = json.dumps({k: v for k, v in content.items() if k in PLAIN_KEYS})
+            # the app's own provider table has a longer key name; it is provider access, not toolkit
+            env["OPENCODE_CONFIG_CONTENT"] = json.dumps({k: v for k, v in content.items() if k in PLAIN_KEYS or k.startswith("provider")})
         else:
             del env["OPENCODE_CONFIG_CONTENT"]
     env["HOME"] = str(scratch["dir"] / "home")

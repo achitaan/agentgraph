@@ -323,9 +323,9 @@ class RefusalTests(Base):
     def test_run_env_for_a_plain_copy_keeps_only_the_plain_keys_of_the_config_content(self):
         plain = bench.open_scratch(self.plain_copy()["dir"], live=self.live)
         content = json.dumps({"provider": {"acme": {"models": {}}}, "model": "a/b", "plugin": ["p"], "mcp": {"s": {}},
-                              "agent": {"x": {}}, "instructions": ["i"]})
+                              "agent": {"x": {}}, "instructions": ["i"], "provider_table": {"acme": {}}})
         env = bench.run_env(plain, Path("/w"), {"OPENCODE_CONFIG_CONTENT": content}, live=self.live)
-        self.assertEqual(sorted(json.loads(env["OPENCODE_CONFIG_CONTENT"])), ["model", "provider"])
+        self.assertEqual(sorted(json.loads(env["OPENCODE_CONFIG_CONTENT"])), ["model", "provider", "provider_table"])
         for bad in ("not json", "[1, 2]", ""):
             with self.subTest(bad=bad):
                 self.assertNotIn("OPENCODE_CONFIG_CONTENT", bench.run_env(plain, Path("/w"), {"OPENCODE_CONFIG_CONTENT": bad}, live=self.live))

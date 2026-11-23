@@ -38,6 +38,8 @@ agentgraph bench card toolkit plain --suite compare --html card.html
 
 - `plain-config` makes a scratch HOME like `scratch-config`, but keeps only an allow-list of settings keys (`PLAIN_KEYS`
   in `bench.py`). No agent files, prompts, plugins, skills, `AGENTS.md`, MCP servers or commands. It takes `--pin-model` too.
+  From the app's `OPENCODE_CONFIG_CONTENT` a plain run keeps the same keys plus any key that starts with `provider`
+  (the app's provider table: without it the pinned model is unavailable).
 - Each copy holds a `bench-setup.json` marker (`plain` or `toolkit`). For a plain copy the runner uses its agent (`build`)
   instead of the scenario's agent. Copies never include `bench/scenarios` (the hidden checks).
 - `suite NAME` runs every scenario in `bench/suites/<name>.json` on every `--setup LABEL=DIR`, interleaved (task 1 rep 1
