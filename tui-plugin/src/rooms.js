@@ -221,7 +221,7 @@ const IDLE_TIERS = [[".h.", "bbb", "l.l"], ["h", "b", "l"], BOT_TIERS[3]];
 function palette(hub, body, dim) {
   const k = dim ? (c) => mix(c, BG, 0.5) : (c) => c;
   const skin = dim ? mix(SKIN, BG, 0.3) : SKIN;
-  return { a: ANTENNA, h: skin, E: dim ? mix(skin, BG, 0.35) : EYE, b: k(body), l: dim ? mix(LEG, BG, 0.15) : LEG };
+  return { a: ANTENNA, h: skin, E: dim ? mix(skin, BG, 0.35) : EYE, b: k(body), l: dim ? mix(LEG, WHITE, 0.2) : LEG };
 }
 
 // The furniture, two sizes a room, the larger first: parts of [sprite rows, palette, dx, dy]. It stands against the back
@@ -745,7 +745,7 @@ const PLAQUE_DARK = [8, 12, 18];
 function buildRooms(doc, w, rows, now, options) {
   const pix = new Pix(w, rows);
   const rooms = geometry(w, rows);
-  const info = { rooms, titles: [], plaques: [], furniture: [], chars: [], bubble: null, more: [], walking: false, lit: null, compact: false };
+  const info = { rooms, titles: [], plaques: [], furniture: [], chars: [], bubble: null, trail: [], more: [], walking: false, lit: null, compact: false };
   const reduced = options.motion === "reduced";
   const model = modelOf(isObject(doc) ? doc : {}, options);
   const lit = model.lit;
@@ -950,7 +950,10 @@ function buildRooms(doc, w, rows, now, options) {
       const [x, y] = pointAt(walk.pts, walk.lens, i * 3 + 2);
       const tx = Math.round(x);
       const ty = Math.round(y) + (i % 2 ? 1 : 0);
-      if (pix.free(tx, ty, tx, ty) && pass[ty * pix.w + tx]) pix.set(tx, ty, mix(pix.get(tx, ty), ANTENNA, Math.min(0.4, 0.1 + 0.025 * i)));
+      if (pix.free(tx, ty, tx, ty) && pass[ty * pix.w + tx]) {
+        pix.set(tx, ty, mix(pix.get(tx, ty), ANTENNA, Math.min(0.4, 0.1 + 0.025 * i)));
+        info.trail.push([tx, ty]);
+      }
     }
   }
   for (const f of furnitureAt) for (const [rowsOf, pal, dx, dy] of f.tier.parts) pix.sprite(f.x + dx, f.y + dy, rowsOf, pal);

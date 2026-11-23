@@ -3098,6 +3098,82 @@ test("rooms chrome: furniture is in every room at 62 x 29 and 62 x 38, never und
   assert.equal(JSON.stringify(RM.roomsLines(doc, 62, 29, 1500)), JSON.stringify(RM.roomsLines(copy(doc), 62, 29, 1500)));
 });
 
+// the cells (pixels) of everything that stands on the floor of a picture: furniture, plaques, characters, names, the bubble
+function standingBoxes(info) {
+  const boxes = [];
+  for (const f of info.furniture) boxes.push(["furniture", f.x0, f.y0, f.x1, f.y1]);
+  for (const t of info.plaques) boxes.push(["plaque", t.c0, t.r * 2, t.c1, t.r * 2 + 1]);
+  for (const c of info.chars) {
+    boxes.push([c.name || c.kind, c.x0, c.y0, c.x1, c.y1]);
+    if (c.name_cells) boxes.push(["name " + c.name, c.name_cells.c0, c.name_cells.r * 2, c.name_cells.c1, c.name_cells.r * 2 + 1]);
+  }
+  for (const m of info.more) boxes.push(["count", m.c0, m.r * 2, m.c1, m.r * 2 + 1]);
+  if (info.bubble) boxes.push(["bubble", info.bubble.c0, info.bubble.r * 2, info.bubble.c1, info.bubble.r * 2 + 1]);
+  return boxes;
+}
+
+test("rooms round 2: footprints stay on bare floor and doors, never on furniture, a plaque, a character, a name or the bubble", () => {
+  let seen = 0;
+  for (const zone of ["terminal", "files", "web", "search", "thinking", "messaging"]) {
+    for (const from of ["webfetch", "read", "grep", "bash"]) {
+      const doc = copy(demoWorn);
+      hubOf(doc).activity.zone = zone;
+      hubOf(doc).activity.recent = [{ kind: "tool", tool: from, text: "made-up" }];
+      for (const [w, h] of [[62, 29], [62, 38], [100, 30], [160, 36], [100, 40]]) {
+        const info = roomsAt(doc, w, h, roomsSettled(doc));
+        const boxes = standingBoxes(info);
+        for (const [x, y] of info.trail) {
+          seen += 1;
+          for (const [what, x0, y0, x1, y1] of boxes) assert.ok(x < x0 || x > x1 || y < y0 || y > y1, `${zone} from ${from} ${w}x${h}: a footprint at ${x},${y} on ${what}`);
+        }
+      }
+    }
+  }
+  assert.ok(seen > 50, "the walks left footprints to check");
+});
+
+test("rooms round 2: the hub's name is shown in full whenever its room holds it alone; a neighbour never gets more than what is left", () => {
+  for (const zone of ["terminal", "messaging"]) {
+    for (const [w, h] of [[62, 29], [62, 38], [100, 40], [160, 36]]) {
+      const doc = copy(demoWorn);
+      hubOf(doc).activity.zone = zone;
+      const info = roomsAt(doc, w, h, roomsSettled(doc));
+      const hub = info.chars.find((c) => c.hub);
+      const room = info.rooms[hub.room];
+      const full = "orchestrator";
+      const width = (c) => (c.name_cells ? c.name_cells.c1 - c.name_cells.c0 + 1 : 0);
+      if (room.x1 - room.x0 - 3 >= full.length) {
+        assert.equal(width(hub), full.length, `${zone} ${w}x${h}: the hub's name in full`);
+        assert.ok(hub.name_cells.c0 > room.x0 && hub.name_cells.c1 < room.x1, `${zone} ${w}x${h}: inside its room`);
+      }
+      for (const c of info.chars) if (c.room === hub.room && !c.hub && c.name_cells) {
+        const a = hub.name_cells;
+        const b = c.name_cells;
+        assert.ok(a.c1 < b.c0 || b.c1 < a.c0 || a.r !== b.r, `${zone} ${w}x${h}: ${c.name} does not touch the hub's name`);
+        if (width(hub) < full.length) assert.ok(width(c) <= width(hub) || width(c) <= 3, `${zone} ${w}x${h}: a shortened hub is not given less than its neighbour`);
+      }
+    }
+  }
+});
+
+test("rooms round 2: with the hub in TERMINAL or TEAM at 62 x 38 the furniture keeps a normal size and the bubble sits beside or under it", () => {
+  for (const [zone, room] of [["terminal", "terminal"], ["messaging", "team"]]) {
+    const doc = copy(demoWorn);
+    hubOf(doc).activity.zone = zone;
+    const lines = RM.roomsScene(doc, { width: 62, height: 38, now: roomsSettled(doc) });
+    assert.equal(lines.length, 38);
+    // the picture rows the panel gives at 62 x 38
+    const picture = lines.length - 1 - 3 - 5; // header, needs, NOW + BEFORE + rule + two agent rows
+    const info = roomsAt(doc, 62, picture + 1, roomsSettled(doc));
+    const f = info.furniture.find((x) => x.room === room);
+    assert.ok(f, `${room}: the furniture is there`);
+    assert.ok(f.x1 - f.x0 + 1 >= 9 && f.y1 - f.y0 + 1 >= (room === "team" ? 4 : 7), `${room}: a normal size, not a stub (${f.x1 - f.x0 + 1}x${f.y1 - f.y0 + 1})`);
+    assert.ok(info.bubble, `${room}: the bubble is shown`);
+    const b = info.bubble;
+    assert.ok(b.c1 < f.x0 || b.c0 > f.x1 || b.r * 2 > f.y1 || b.r * 2 + 1 < f.y0, `${room}: the bubble does not cover the furniture`);
+  }
+});
+
 test("demo: demoDocument adds a growing wear history and moving costs; the runner spawns nothing", async () => {
   const a = DM.demoDocument(demo, 0);
   const b = DM.demoDocument(demo, 30000);
