@@ -362,19 +362,34 @@ def zone_of(tool, code=None) -> str:
     return "tools"
 
 
+_VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"']+)"  # a quoted value (spaces and = allowed) or a bare word
 _TARGET_MASKS = (
     (re.compile(r"(?i)\b(authorization\s*[:=]\s*).*"), r"\1" + _MASK),
     (re.compile(r"(?i)\b(bearer\s+)[^\s\"']+"), r"\1" + _MASK),
+    (re.compile(r"(?i)\b((?:set-)?cookie\s*:\s*)[^\"'\n]*"), r"\1" + _MASK),  # all of it, to the closing quote or the line's end
     (re.compile(r"(?i)\b([A-Z0-9_.-]*(?:key|token|secret|passw(?:or)?d|credential|auth)[A-Z0-9_.-]*[ \t]*=[ \t]*)"
-                r"(\"[^\"]*\"|'[^']*'|[^\s\"']+)"), r"\1" + _MASK),
-    (re.compile(r"(?i)(--?(?:password|passwd|token|secret|api[-_]?key|auth)[ =])[^\s\"']+"), r"\1" + _MASK),
-    (re.compile(r"(\w+://)[^/\s@]+@"), r"\1" + _MASK + "@"),
+                + _VALUE), r"\1" + _MASK),
+    (re.compile(r"(?i)(--?(?:password|passwd|token|secret|api[-_]?key|auth)[ =])" + _VALUE), r"\1" + _MASK),
+    (re.compile(r"(?<![\w-])(-u[ ]*|--user[ =])(\"[^\"]*:[^\"]*\"|'[^']*:[^']*'|[^\s\"']*:[^\s\"']*)"), r"\1" + _MASK),  # user:password
+    (re.compile(r"(\w+://)[^/\s]+@"), r"\1" + _MASK + "@"),  # up to the last @ before the path
 )
+# `-p` is a password only for these clients (elsewhere it is --parents, --preserve, a port ...): the first word of the line.
+_P_ATTACHED = re.compile(r"(?<=\s)(-p)(?=[^\s\"'-])(" + _VALUE[1:])
+_P_SEPARATE = re.compile(r"(?<=\s)(-p[ ]*)" + _VALUE)
+_P_CLIENTS = re.compile(r"\s*(?:\S*/)?(mysql|mysqldump|mysqladmin|mariadb|mariadb-dump|psql|pg_dump|pg_dumpall|pg_restore|sshpass)(?=\s)")
+
+
+def _mask_p(line: str) -> str:
+    client = _P_CLIENTS.match(line)
+    if not client:
+        return line
+    pattern = _P_SEPARATE if client.group(1) == "sshpass" else _P_ATTACHED
+    return pattern.sub(lambda m: m.group(1) + _MASK, line)
 
 
 def _tidy(text, cap: int = TARGET_CAP) -> str | None:
     """One short plain line: secrets masked first, whitespace collapsed, then cut to `cap` with an ellipsis."""
-    line = mask_secrets(plain(text))
+    line = _mask_p(mask_secrets(plain(text)))
     for pattern, replacement in _TARGET_MASKS:
         line = pattern.sub(replacement, line)
     line = re.sub(r"\s+", " ", line).strip()
@@ -384,10 +399,11 @@ def _tidy(text, cap: int = TARGET_CAP) -> str | None:
 
 
 def _tilde(text: str) -> str:
+    """The home folder as `~`, where it is a whole path (followed by `/`, the end, a space or a quote or shell mark)."""
     home = str(Path.home())
-    if len(home) > 1 and (text == home or text.startswith(home + "/")):
-        return "~" + text[len(home):]
-    return text.replace(home + "/", "~/") if len(home) > 1 else text
+    if len(home) <= 1:
+        return text
+    return re.sub(r"(?<![\w/.-])" + re.escape(home) + r"(?=/|$|[\s\"';&|)])", "~", text)
 
 
 def _site(url) -> str | None:
@@ -420,6 +436,8 @@ def target_of(tool, first, second=None) -> str | None:
         text = _site(first)
     elif name in ("shell", "bash", "terminal"):
         text = next((line.strip() for line in plain(first).split("\n") if line.strip()), None)
+        if text:  # a query string or fragment can hold a secret: cut every URL at the first ? or #
+            text = re.sub(r"(\w+://[^\s\"'?#]*)[?#][^\s\"']*", r"\1", text[:4 * TARGET_CAP])
     elif name in ("read", "write", "edit", "multiedit", "grep", "glob", "websearch", "codesearch"):
         text = plain(first)
     elif name in ("subagent", "task"):
@@ -432,25 +450,25 @@ def target_of(tool, first, second=None) -> str | None:
         text = f"{call[0]}.{call[1]}" if call else None
     else:
         return None
-    return _tidy(_tilde(text), TARGET_CAP) if text else None
+    return _tidy(_tilde(text[:4 * TARGET_CAP]), TARGET_CAP) if text else None
 
 
 def _tool_sql(detail: bool) -> str:
     keys = ("command", "url", "pattern", "query", "code", "id", "agent", "subagent_type", "path")
-    field = "json_extract(m.data, c.fullkey || '.state.input.%s')"
+    field = "json_extract(c.value, '$.state.input.%s')"
     if detail:
         first = "substr(COALESCE(" + ", ".join(field % key for key in keys) + "), 1, 2000)"
         second = "substr(" + field % "description" + ", 1, 400)"
     else:  # the zone of an `execute` needs its code; every other tool is read by name and status alone
-        first = "CASE WHEN json_extract(m.data, c.fullkey || '.name') = 'execute' THEN substr(" + field % "code" + ", 1, 2000) END"
+        first = "CASE WHEN json_extract(c.value, '$.name') = 'execute' THEN substr(" + field % "code" + ", 1, 2000) END"
         second = "NULL"
     return (
-        "SELECT json_extract(m.data, c.fullkey || '.name'), json_extract(m.data, c.fullkey || '.state.status'), "
-        "json_extract(m.data, c.fullkey || '.time.created'), json_extract(m.data, c.fullkey || '.time.ran'), "
-        "json_extract(m.data, c.fullkey || '.time.completed'), m.time_created, " + first + ", " + second + " "
+        "SELECT json_extract(c.value, '$.name'), json_extract(c.value, '$.state.status'), "
+        "json_extract(c.value, '$.time.created'), json_extract(c.value, '$.time.ran'), "
+        "json_extract(c.value, '$.time.completed'), m.time_created, " + first + ", " + second + " "
         "FROM (SELECT seq, time_created, data FROM session_message WHERE session_id = ?1 AND type = 'assistant' "
         "ORDER BY seq DESC LIMIT ?2) m, json_each(m.data, '$.content') c "
-        "WHERE json_extract(m.data, c.fullkey || '.type') = 'tool' ORDER BY m.seq DESC, c.key DESC LIMIT ?3"
+        "WHERE json_extract(c.value, '$.type') = 'tool' ORDER BY m.seq DESC, c.key DESC LIMIT ?3"
     )
 
 

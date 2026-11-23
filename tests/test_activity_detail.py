@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -102,6 +103,63 @@ class Targets(unittest.TestCase):
                     self.assertNotIn(secret, got)
                 self.assertIn("[masked]", got)
         self.assertEqual(chatfeed.target_of("shell", "ls -la src"), "ls -la src")
+
+    def test_credentials_in_flags_headers_and_urls_are_masked(self):
+        cases = (
+            ("curl -u alice:hunter2 https://example.com", "curl", "hunter2"),
+            ("curl --user alice:hunter2 https://example.com", "curl", "hunter2"),
+            ("curl --user=alice:hunter2 https://example.com", "curl", "hunter2"),
+            ('mytool --password "hunter22" --verbose', "mytool", "hunter22"),
+            ("mytool --token 'abc'", "mytool", "abc"),
+            ('mytool --password "two words=x" go', "mytool", "words"),
+            ('curl -H "Cookie: session=abcdef123456" https://example.com', "curl", "abcdef123456"),
+            ('curl -H "Set-Cookie: sid=zyx987654; Path=/" https://example.com', "curl", "zyx987654"),
+            ("curl -H 'Cookie: a=b; c=d' https://example.com", "curl", "c=d"),
+            ("mysql -phunter2 -h localhost", "mysql", "hunter2"),
+            ("mysqldump -phunter2 app", "mysqldump", "hunter2"),
+            ("sshpass -p hunter2 ssh host", "sshpass", "hunter2"),
+            ("sshpass -phunter2 ssh host", "sshpass", "hunter2"),
+            ("curl https://u:p@ss@example.com/x", "example.com/x", "ss@"),
+            ("git clone https://u:p@ss@example.com/x.git", "example.com/x.git", "p@ss"),
+        )
+        for text, kept, secret in cases:
+            with self.subTest(text=text):
+                got = chatfeed.target_of("shell", text)
+                self.assertNotIn(secret, got)
+                self.assertIn(kept, got)
+                self.assertIn("[masked]", got)
+        for text in ("mkdir -p build", "ls -p", "cp -p a b", "curl -u alice https://example.com", "mysql -p app"):
+            with self.subTest(text=text):
+                self.assertEqual(chatfeed.target_of("shell", text), text)
+
+    def test_url_query_and_fragment_are_cut_in_a_command(self):
+        got = chatfeed.target_of("shell", 'curl "https://example.com/reset?code=ABCDEF123&sig=XYZ"')
+        self.assertEqual(got, 'curl "https://example.com/reset"')
+        for bad in ("code=", "sig=", "ABCDEF123", "XYZ", "?"):
+            self.assertNotIn(bad, got)
+        self.assertEqual(chatfeed.target_of("shell", "open http://example.com/a#frag=1 now"), "open http://example.com/a now")
+
+    def test_the_home_folder_is_only_rewritten_as_a_whole_path(self):
+        home = str(Path.home())
+        self.assertEqual(chatfeed.target_of("shell", f"cd {home} && ls"), "cd ~ && ls")
+        self.assertEqual(chatfeed.target_of("shell", f"ls {home}"), "ls ~")
+        self.assertEqual(chatfeed.target_of("shell", f'ls "{home}"; ls {home}/x'), 'ls "~"; ls ~/x')
+        self.assertEqual(chatfeed.target_of("read", home), "~")
+        self.assertEqual(chatfeed.target_of("shell", f"ls {home}x"), f"ls {home}x")
+        self.assertEqual(chatfeed.target_of("shell", f"ls {home}-old/y"), f"ls {home}-old/y")
+
+    def test_a_long_line_is_cheap_and_bidi_marks_are_dropped(self):
+        started = time.perf_counter()
+        got = chatfeed.target_of("shell", "echo " + "key-" * 500)
+        self.assertLess(time.perf_counter() - started, 0.5)
+        self.assertEqual(len(got), chatfeed.TARGET_CAP)
+        started = time.perf_counter()
+        chatfeed.target_of("webfetch", "example.com/" + "key-" * 500)
+        self.assertLess(time.perf_counter() - started, 0.5)
+        got = chatfeed.target_of("shell", "echo \u202egnp.exe \u2066x\u2069 end")
+        self.assertEqual(got, "echo gnp.exe x end")
+        for mark in ("\u202e", "\u2066", "\u2069"):
+            self.assertNotIn(mark, got)
 
     def test_length_cap_and_plain_text(self):
         got = chatfeed.target_of("shell", "echo " + "x" * 400)
