@@ -989,9 +989,10 @@
 .agentgraph .ag-loopbox .ag-timed-phase, .agentgraph .ag-loopbox .ag-timed-kind { color: var(--ag-muted); }
 .agentgraph .ag-loopbox .ag-timed-kind { margin-bottom: 6px; }
 .agentgraph .ag-loopbox .ag-timed-row { display: flex; flex-wrap: wrap; gap: 0 8px; font-variant-numeric: tabular-nums; }
-.agentgraph .ag-loopbox .ag-timed-label { flex: 0 0 8em; color: var(--ag-muted); }
+.agentgraph .ag-loopbox .ag-timed-label { flex: 0 0 10em; color: var(--ag-muted); }
 .agentgraph .ag-loopbox .ag-timed-value { flex: 1 1 8em; min-width: 0; color: var(--ag-ink); }
 .agentgraph .ag-loopbox .ag-timed-buttons { margin-top: 8px; }
+.agentgraph .ag-loopbox .ag-timed .ag-timed-reason, .agentgraph .ag-loopbox .ag-timed .ag-loop-line { margin-top: 6px; }
 .agentgraph .ag-loopbox .ag-timed .ag-loop-ask { margin: 8px 0 0; }
 .agentgraph .ag-loopbox .ag-timed button[aria-disabled="true"] { opacity: .55; cursor: default; }
 .agentgraph .ag-loopbox .ag-loop-schedule { margin: 0 0 6px; min-width: 0; }

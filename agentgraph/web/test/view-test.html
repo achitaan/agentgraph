@@ -10657,7 +10657,7 @@
 
     // ==== v4: screenshots (not a check): `?shot=form|running|finished|limit` mounts the page on the loop fixtures, leaves it
     // standing (window.shotReady) and runs nothing else; artifacts/agentgraph-loops/v4/r1/shots.mjs takes the pictures ====
-    if (shardOf.get('shot') && !shardOf.get('shot').startsWith('team-')) {
+    if (shardOf.get('shot') && !shardOf.get('shot').startsWith('team-') && !shardOf.get('shot').startsWith('timed-')) {
       const kind = shardOf.get('shot'), fakes = loopFakes({ live: kind === 'running', orphans: [] }), data = selfLoopFixture();
       clearPositions();
       if (kind === 'limit') { const detail = fakes.details.get('20261121-050000-0001'); detail.run.status = 'limit'; detail.run.reason = 'the attempt limit (4) was reached and the last check failed'; }
@@ -10792,6 +10792,232 @@
         });
       }
     });
+
+    // ==== v11: timed loops: the status panel, its buttons, the countdown, and the schedule in the form ====
+    const TIMED_ID = '20261121-080000-t111';
+    // One timed run as the list would hold it (the timing view is what looptime.view gives); `spec` overrides.
+    const timedExtra = (spec = {}, id = TIMED_ID) => now => {
+      const detail = loopDetail(id, 'fix-loop', spec.status || 'running', { created: now - 3200, reason: spec.reason ?? '', cost: spec.cost === undefined ? 0.42 : spec.cost, limit: spec.limit ?? 0, attempts: spec.attempts || [] });
+      detail.run.ended = spec.ended === undefined ? detail.run.ended : spec.ended;
+      detail.run.timing = { kind: 'interval', every: 600, phase: 'waiting', next_at: now + 250.5, deadline: now + 4000, end: 'for 7200 seconds', ticks_limit: null, counts: { idle: 2, woken: 3, skipped: 0, failed: 0 }, anchor: now - 3200, wakes: 3, ...(spec.timing || {}) };
+      return [detail];
+    };
+    const timedBox = (root, id = TIMED_ID) => loopSection(root)?.querySelector('[data-loop-timed="' + id + '"]');
+    const timedRowText = (root, name) => timedBox(root)?.querySelector('[data-loop-timed-row="' + name + '"] .ag-timed-value')?.textContent;
+    const timedButtons = root => [...timedBox(root).querySelectorAll('[data-loop-control]')].map(button => button.dataset.loopControl.replace(':' + TIMED_ID, ''));
+    const timedMount = (options, run, mount) => loopMount({ ...options, extra: options.extra || timedExtra(options.spec) }, run, { loopPollMs: 60000, ...mount });
+
+    await test('v11 timed panel: a running interval loop says the kind in words, the next wake as a countdown, wakes so far, when it ends, what was spent, and offers Pause and Stop', async () => {
+      await timedMount({}, async root => {
+        const box = timedBox(root);
+        assert(box && box.dataset.state === 'running' && /^Running/.test(box.querySelector('.ag-timed-head').textContent) && /waiting for the next wake/.test(box.querySelector('.ag-timed-head').textContent), 'head: ' + box?.textContent.slice(0, 120));
+        assert(box.querySelector('.ag-timed-kind').textContent === 'Wakes the agent every 10 min, for 2 h.', 'kind: ' + box.querySelector('.ag-timed-kind').textContent);
+        assert(/^in 4 min \d\d s$/.test(timedRowText(root, 'next')), 'next wake: ' + timedRowText(root, 'next'));
+        assert(timedRowText(root, 'wakes') === '3', 'wakes: ' + timedRowText(root, 'wakes'));
+        assert(/^\d\d:\d\d \(in 1 h \d\d min\)$/.test(timedRowText(root, 'ends')) || /^\w{3} \d+ \w{3} \d\d:\d\d \(in 1 h \d\d min\)$/.test(timedRowText(root, 'ends')), 'ends: ' + timedRowText(root, 'ends'));
+        assert(/\$0\.42/.test(timedRowText(root, 'spent')) && /Spent so far/.test(box.querySelector('[data-loop-timed-row="spent"]').textContent), 'spent: ' + timedRowText(root, 'spent'));
+        assert(sameJson(timedButtons(root), ['timed-pause', 'timed-stop']), 'buttons: ' + timedButtons(root));
+        assert(!box.querySelector('[aria-live]') && !loopSection(root).querySelector('[data-loop-timing]'), 'a countdown that is announced every second, or the old note');
+      });
+    });
+
+    await test('v11 timed panel: a paused time-boxed loop says "until the check passes, for up to…", counts attempts, has no next wake, and offers Resume and Stop; its reason is shown', async () => {
+      const spec = { status: 'paused', reason: 'paused on request after the step it was on', limit: 0, attempts: loopTwoAttempts().slice(0, 1), cost: 1.1, timing: { kind: 'timebox', phase: null, next_at: null, end: 'for 14400 seconds', deadline: Date.now() / 1000 + 9000, anchor: Date.now() / 1000 - 5400, wakes: null, counts: {} } };
+      await timedMount({ spec }, async root => {
+        const box = timedBox(root);
+        assert(box.dataset.state === 'paused' && /^Paused/.test(box.querySelector('.ag-timed-head').textContent), 'state: ' + box.dataset.state);
+        assert(box.querySelector('.ag-timed-kind').textContent === 'Keeps going until the check passes, for up to 4 h.', 'kind: ' + box.querySelector('.ag-timed-kind').textContent);
+        assert(!box.querySelector('[data-loop-timed-row="next"]') && !box.querySelector('[data-loop-timed-row="wakes"]') && timedRowText(root, 'attempts') === '1', 'rows: ' + box.textContent);
+        assert(/in 2 h \d\d min/.test(timedRowText(root, 'ends')), 'ends: ' + timedRowText(root, 'ends'));
+        assert(sameJson(timedButtons(root), ['timed-resume', 'timed-stop']) && /paused on request/.test(box.querySelector('.ag-timed-reason')?.textContent || ''), 'buttons/reason: ' + timedButtons(root) + ' ' + box.textContent);
+      });
+    });
+
+    await test('v11 timed panel: a finished or stopped loop says so in words, shows when it ended and the final spend, and has no buttons; "until" and tick limits are said too', async () => {
+      for (const [spec, word, state] of [[{ status: 'passed', reason: 'the check exited 0' }, 'Finished', 'finished'], [{ status: 'limit', reason: 'deadline reached after 7200 s' }, 'Finished', 'finished'], [{ status: 'cancelled', reason: 'cancelled' }, 'Stopped', 'stopped'], [{ status: 'failed', reason: 'the attempt limit (4) was reached' }, 'Stopped', 'stopped']]) {
+        await timedMount({ spec }, async root => {
+          const box = timedBox(root);
+          assert(box.dataset.state === state && box.querySelector('.ag-timed-state').textContent === word, spec.status + ': ' + box?.dataset.state);
+          assert(!box.querySelector('button') && /^Ended/.test(box.querySelector('[data-loop-timed-row="ends"]').textContent) && /^Spent\b(?! so far)/.test(box.querySelector('[data-loop-timed-row="spent"]').textContent) && !box.querySelector('[data-loop-countdown]'), spec.status + ': ' + box.textContent);
+        });
+      }
+      const until = { timing: { end: 'until 2026-11-21T20:00:00+00:00', ticks_limit: 12 } };
+      await timedMount({ spec: until }, async root => {
+        assert(/^Wakes the agent every 10 min, until \d\d:\d\d or after 12 ticks\.$|^Wakes the agent every 10 min, until \w{3} \d+ \w{3} \d\d:\d\d or after 12 ticks\.$/.test(timedBox(root).querySelector('.ag-timed-kind').textContent), timedBox(root).querySelector('.ag-timed-kind').textContent);
+      });
+      await timedMount({ spec: { timing: { deadline: null, end: 'after 5 ticks', ticks_limit: 5 } } }, async root => {
+        assert(timedBox(root).querySelector('.ag-timed-kind').textContent === 'Wakes the agent every 10 min, for 5 ticks.' && !timedBox(root).querySelector('[data-loop-timed-row="ends"]'), timedBox(root).textContent);
+      });
+    });
+
+    await test('v11 timed panel: the countdown reads seconds, minutes and seconds, then hours and minutes (no seconds), and "any moment" / "time is up" at zero', async () => {
+      const at = (next, end) => ({ spec: { timing: { next_at: Date.now() / 1000 + next, deadline: Date.now() / 1000 + end, anchor: Date.now() / 1000 - 100 } } });
+      await timedMount(at(42.9, 7530), async root => {
+        assert(/^in (41|42) s$/.test(timedRowText(root, 'next')) && /\(in 2 h 05 min\)$/.test(timedRowText(root, 'ends')), timedRowText(root, 'next') + ' / ' + timedRowText(root, 'ends'));
+      });
+      await timedMount(at(3725.9, 59.9), async root => {
+        assert(/^in 1 h 0[12] min$/.test(timedRowText(root, 'next')) && /\(in (58|59) s\)$/.test(timedRowText(root, 'ends')), timedRowText(root, 'next') + ' / ' + timedRowText(root, 'ends'));
+      });
+      await timedMount(at(-5, -5), async root => {
+        assert(timedRowText(root, 'next') === 'any moment' && /\(time is up\)$/.test(timedRowText(root, 'ends')), timedRowText(root, 'next') + ' / ' + timedRowText(root, 'ends'));
+      });
+    });
+
+    await test('v11 timed panel: one cheap timer updates the numbers (no server reads, no animation) and it stops when the flow is left or the page is hidden', async () => {
+      await timedMount({ spec: { timing: { next_at: Date.now() / 1000 + 3.4 } } }, async (root, fakes, app) => {
+        const reads = () => fakes.calls.filter(call => call.op === 'read').length, before = reads(), first = timedRowText(root, 'next');
+        assert(await loopUntil(() => timedRowText(root, 'next') !== first, 2600), 'the countdown did not move: ' + first);
+        assert(reads() === before, 'the countdown asked the server: ' + (reads() - before));
+        assert(getComputedStyle(timedBox(root).querySelector('.ag-timed-count')).animationName === 'none' && getComputedStyle(timedBox(root)).transitionDuration.split(',').every(one => parseFloat(one) === 0), 'the countdown animates');
+        assert(await loopUntil(() => timedRowText(root, 'next') === 'any moment', 3500), 'it did not reach "any moment": ' + timedRowText(root, 'next'));
+      });
+    });
+
+    await test('v11 timed panel: Pause and Resume post the existing ops for the run, say what happened in words, and the buttons are off while the request is in flight (a second press sends nothing)', async () => {
+      let release; const gate = new Promise(resolve => { release = resolve; });
+      await timedMount({ hold: async request => { if (request.op === 'pause') await gate; } }, async (root, fakes) => {
+        const button = timedBox(root).querySelector('[data-loop-control="timed-pause:' + TIMED_ID + '"]'); button.click(); await sleep(60);
+        assert(sameJson(fakes.calls.filter(call => call.op === 'pause'), [{ op: 'pause', run: TIMED_ID }]), 'pause call: ' + JSON.stringify(fakes.calls.filter(call => call.op === 'pause')));
+        const off = [...timedBox(root).querySelectorAll('button')];
+        assert(off.length >= 2 && off.every(one => one.getAttribute('aria-disabled') === 'true') && /Working on it/.test(timedBox(root).textContent), 'buttons while in flight: ' + off.map(one => one.getAttribute('aria-disabled')));
+        off.forEach(one => one.click()); await sleep(60);
+        assert(fakes.calls.filter(call => ['pause', 'cancel', 'resume'].includes(call.op)).length === 1, 'a press while in flight sent a request');
+        release(); assert(await loopUntil(() => /Pause asked/.test(timedBox(root)?.textContent || '')), 'no word on the pause: ' + timedBox(root)?.textContent);
+        assert([...timedBox(root).querySelectorAll('button')].every(one => one.getAttribute('aria-disabled') !== 'true'), 'buttons stayed off');
+      });
+      await timedMount({ spec: { status: 'paused', reason: 'paused on request' } }, async (root, fakes) => {
+        await loopClick(root, 'timed-resume:' + TIMED_ID);
+        assert(sameJson(fakes.calls.filter(call => call.op === 'resume'), [{ op: 'resume', run: TIMED_ID }]), 'resume call: ' + JSON.stringify(fakes.calls.filter(call => call.op === 'resume')));
+        assert(/Resumed/.test(loopSection(root).textContent), 'no word on the resume');
+      });
+    });
+
+    await test('v11 timed panel: Stop asks first (the turn now running is stopped); "Keep it going" sends nothing; confirming posts cancel for the run and says it in words', async () => {
+      await timedMount({ cancelAs: 'cancelled' }, async (root, fakes) => {
+        await loopClick(root, 'timed-stop:' + TIMED_ID);
+        const ask = timedBox(root).querySelector('[data-loop-timed-ask]');
+        assert(ask && /Stop this loop\?/.test(ask.textContent) && ask.getAttribute('role') === 'group' && !fakes.calls.some(call => call.op === 'cancel'), 'no confirmation: ' + timedBox(root).textContent);
+        await loopClick(root, 'timed-stop-keep:' + TIMED_ID);
+        assert(!timedBox(root).querySelector('[data-loop-timed-ask]') && !fakes.calls.some(call => call.op === 'cancel'), 'Keep it going did not close the question or sent a cancel');
+        await loopClick(root, 'timed-stop:' + TIMED_ID); await loopClick(root, 'timed-stop-confirm:' + TIMED_ID);
+        assert(sameJson(fakes.calls.filter(call => call.op === 'cancel'), [{ op: 'cancel', run: TIMED_ID }]), 'cancel call: ' + JSON.stringify(fakes.calls.filter(call => call.op === 'cancel')));
+        assert(await loopUntil(() => timedBox(root)?.dataset.state === 'stopped'), 'the panel did not read stopped: ' + timedBox(root)?.dataset.state);
+        assert(/The loop is stopped/.test(timedBox(root).textContent) && !timedBox(root).querySelector('button'), 'after stop: ' + timedBox(root).textContent);
+      });
+      await timedMount({ spec: { status: 'paused', reason: 'paused on request' } }, async root => {
+        await loopClick(root, 'timed-stop:' + TIMED_ID);
+        assert(/cannot be resumed/.test(timedBox(root).querySelector('[data-loop-timed-ask]').textContent), 'a paused loop is asked about without the turn');
+      });
+    });
+
+    await test('v11 timed panel: a refusal is said in plain words next to the panel (role alert), and the buttons come back', async () => {
+      await timedMount({ refuseOp: { pause: ['run ' + TIMED_ID + ' is not running', 409] } }, async (root, fakes) => {
+        await loopClick(root, 'timed-pause:' + TIMED_ID);
+        const line = timedBox(root).querySelector('[data-loop-line="error"]');
+        assert(line && line.getAttribute('role') === 'alert' && /is not running/.test(line.textContent) && /\.$/.test(line.textContent), 'error line: ' + timedBox(root).textContent);
+        assert([...timedBox(root).querySelectorAll('button')].every(one => one.getAttribute('aria-disabled') !== 'true'), 'buttons stayed off after an error');
+      });
+    });
+
+    await test('v11 schedule form: choices are Run once, Every… and Keep going for… / until…; a timed loop loads its fields in the largest exact unit, and an unchanged save sends the stored block as it was (interval, time box with a raw until, until as seconds)', async () => {
+      const BOXES = [
+        { kind: 'interval', every: 600, watch: 'sh watch.sh', ticks: 8 },
+        { kind: 'interval', every: 90, for: 7200, until: '2030-01-01T10:30:00+02:00', cache_seconds: 30, notes: 'n' },
+        { kind: 'timebox', for: 5400, until: 1893500000 },
+        { kind: 'timebox', until: '2031-03-04T05:06:07.5Z', for: 3600.5 }];
+      for (const timing of BOXES) {
+        await loopMount({ timing }, async (root, fakes) => {
+          const select = loopField(root, 'schedule');
+          assert([...select.options].map(option => option.text).join('|') === 'Run once (normal)|Every … (interval)|Keep going for … or until …' && select.value === timing.kind, 'choices: ' + [...select.options].map(option => option.text));
+          typeIn(loopField(root, 'goal'), 'Another goal'); await loopClick(root, 'save');
+          const post = fakes.calls.find(call => call.op === 'save');
+          assert(post && JSON.stringify(post.settings.timing) === JSON.stringify(timing), 'round trip: ' + JSON.stringify(post?.settings?.timing) + ' vs ' + JSON.stringify(timing));
+        });
+      }
+      await loopMount({ timing: BOXES[0] }, async root => {
+        assert(loopField(root, 'every_n').value === '10' && loopField(root, 'every_unit').value === 'min' && loopField(root, 'ticks').value === '8' && loopField(root, 'for_n').value === '', 'interval fields');
+      });
+      await loopMount({ timing: BOXES[2] }, async root => {
+        assert(loopField(root, 'for_n').value === '90' && loopField(root, 'for_unit').value === 'min' && /^\d{4}-\d\d-\d\dT\d\d:\d\d$/.test(loopField(root, 'until').value) && loopField(root, 'until').type === 'datetime-local', 'time box fields: ' + loopField(root, 'for_n').value + loopField(root, 'for_unit').value + loopField(root, 'until').value);
+        assert(/Attempts \(1 to 50, optional when time-boxed\)/.test(loopSection(root).textContent) && loopField(root, 'attempts').getAttribute('aria-required') !== 'true', 'attempts label for a time box');
+      });
+    });
+
+    await test('v11 schedule form: changing the fields sends the new block (units, until as an ISO time with an offset); Run once takes the schedule off with `timing: null`; a loop that never had one sends no `timing` key', async () => {
+      const when = new Date(Date.now() + 40 * 86400000), two = n => String(n).padStart(2, '0'), soon = when.getFullYear() + '-' + two(when.getMonth() + 1) + '-' + two(when.getDate()) + 'T04:05';
+      await loopMount({ timing: { kind: 'interval', every: 600, ticks: 8 } }, async (root, fakes) => {
+        typeIn(loopField(root, 'every_n'), '1.5'); loopField(root, 'every_unit').value = 'h'; loopField(root, 'every_unit').dispatchEvent(new Event('change', { bubbles: true }));
+        typeIn(loopField(root, 'ticks'), ''); typeIn(loopField(root, 'for_n'), '2'); typeIn(loopField(root, 'until'), soon);
+        await loopClick(root, 'save');
+        const sent = fakes.calls.find(call => call.op === 'save')?.settings.timing;
+        assert(sent && sent.kind === 'interval' && sent.every === 5400 && sent.for === 7200 && sent.ticks === undefined && /^\d{4}-\d\d-\d\dT04:05:00[+-]\d\d:\d\d$/.test(sent.until) && Date.parse(sent.until) === new Date(soon).getTime() && sent.until.startsWith(soon + ':00'), 'sent: ' + JSON.stringify(sent));
+      });
+      await loopMount({ timing: { kind: 'interval', every: 600, ticks: 8 } }, async (root, fakes) => {
+        const select = loopField(root, 'schedule'); select.value = 'once'; select.dispatchEvent(new Event('change', { bubbles: true })); await settled();
+        assert(!loopField(root, 'every_n'), 'the interval fields stayed');
+        await loopClick(root, 'save');
+        const post = fakes.calls.find(call => call.op === 'save');
+        assert(post && post.settings.timing === null && 'timing' in post.settings, 'Run once did not send timing: null: ' + JSON.stringify(post));
+      });
+      await loopMount({}, async (root, fakes) => {
+        assert(loopField(root, 'schedule').value === 'once', 'an untimed loop does not read Run once');
+        typeIn(loopField(root, 'goal'), 'x'); await loopClick(root, 'save');
+        const post = fakes.calls.find(call => call.op === 'save');
+        assert(post && !('timing' in post.settings), 'an untimed loop sent timing: ' + JSON.stringify(post));
+      });
+      await loopMount({}, async (root, fakes) => {
+        const select = loopField(root, 'schedule'); select.value = 'interval'; select.dispatchEvent(new Event('change', { bubbles: true })); await settled();
+        typeIn(loopField(root, 'every_n'), '30'); loopField(root, 'every_unit').value = 's'; loopField(root, 'every_unit').dispatchEvent(new Event('change', { bubbles: true })); typeIn(loopField(root, 'ticks'), '4');
+        await loopClick(root, 'save');
+        const post = fakes.calls.find(call => call.op === 'save');
+        assert(post && sameJson(post.settings.timing, { kind: 'interval', every: 30, ticks: 4 }), 'a new interval: ' + JSON.stringify(post?.settings?.timing));
+      });
+    });
+
+    await test('v11 schedule form: the rules of looptime.validate are said in plain words before anything is sent (interval 10 s to 24 h, an end is needed, spend and seconds per attempt are needed), and the server\'s own message is shown with its field named in words', async () => {
+      await loopMount({ timing: { kind: 'interval', every: 600, ticks: 8 } }, async (root, fakes) => {
+        const refused = async (words, label) => { await loopClick(root, 'save'); const line = loopSection(root).querySelector('[data-loop-line="error"]'); assert(line && words.test(line.textContent) && line.getAttribute('role') === 'alert', label + ': ' + line?.textContent); };
+        typeIn(loopField(root, 'every_n'), '5'); loopField(root, 'every_unit').value = 's'; loopField(root, 'every_unit').dispatchEvent(new Event('change', { bubbles: true })); await refused(/10 seconds up to every 24 hours/, 'every 5 s');
+        typeIn(loopField(root, 'every_n'), '25'); loopField(root, 'every_unit').value = 'h'; loopField(root, 'every_unit').dispatchEvent(new Event('change', { bubbles: true })); await refused(/10 seconds up to every 24 hours/, 'every 25 h');
+        typeIn(loopField(root, 'every_n'), ''); await refused(/how often/, 'no interval');
+        typeIn(loopField(root, 'every_n'), '1'); loopField(root, 'every_unit').value = 'min'; loopField(root, 'every_unit').dispatchEvent(new Event('change', { bubbles: true })); typeIn(loopField(root, 'ticks'), ''); await refused(/needs an end/, 'no end');
+        typeIn(loopField(root, 'ticks'), '2.5'); await refused(/ticks must be a whole number/, 'half a tick');
+        typeIn(loopField(root, 'ticks'), '3'); typeIn(loopField(root, 'for_n'), '0'); await refused(/above 0/, 'for 0');
+        typeIn(loopField(root, 'for_n'), ''); typeIn(loopField(root, 'cost'), ''); await refused(/needs a spend limit/, 'no spend limit');
+        typeIn(loopField(root, 'cost'), '1.5'); typeIn(loopField(root, 'attempt_seconds'), ''); await refused(/Seconds per attempt/, 'no seconds per attempt');
+        assert(!fakes.calls.some(call => call.op === 'save'), 'a refused form was sent');
+      });
+      await loopMount({}, async root => {
+        const select = loopField(root, 'schedule'); select.value = 'timebox'; select.dispatchEvent(new Event('change', { bubbles: true })); await settled();
+        await loopClick(root, 'save');
+        assert(/needs an end/.test(loopSection(root).querySelector('[data-loop-line="error"]')?.textContent || ''), 'a time box with no end');
+      });
+      await loopMount({ timing: { kind: 'interval', every: 600, ticks: 8 }, refuse: 'timing.every must be a number of seconds from 10 to 86400 (got 5)' }, async root => {
+        typeIn(loopField(root, 'goal'), 'y'); await loopClick(root, 'save');
+        const line = loopSection(root).querySelector('[data-loop-line="error"]');
+        assert(line && /^The interval must be/.test(line.textContent) && !/timing\./.test(line.textContent), 'the server message: ' + line?.textContent);
+        assert(loopField(root, 'goal').value === 'y' && loopField(root, 'every_n').value === '10', 'what was typed did not stay');
+      });
+    });
+
+    // Screenshots of the panel (not a check): `?shot=timed-running|timed-paused|timed-form&width=1400`
+    if ((shardOf.get('shot') || '').startsWith('timed-')) { try {
+      const kind = shardOf.get('shot').slice(6), width = Number(shardOf.get('width')) || 1400, now_ = Date.now() / 1000;
+      const spec = kind === 'paused' ? { status: 'paused', reason: 'paused on request after the step it was on', cost: 1.1, attempts: loopTwoAttempts().slice(0, 1), timing: { kind: 'timebox', phase: null, next_at: null, wakes: null, end: 'for 14400 seconds', deadline: now_ + 9000, anchor: now_ - 5400, counts: {} } } : {};
+      const fakes = loopFakes({ extra: timedExtra(spec), timing: kind === 'form' ? { kind: 'interval', every: 600, watch: 'sh watch.sh', for: 7200, ticks: 12 } : undefined });
+      clearPositions();
+      const root = host(); root.style.width = width + 'px'; root.style.height = (Number(shardOf.get('height')) || 1000) + 'px';
+      const app = AgentGraph.mount(root, { fetchSnapshot: async () => stampRevs(selfLoopFixture()), intervalMs: 60000, motion: 'none', scheme: shardOf.get('scheme') || 'auto', actions: { loops: fakes.loops }, loopPollMs: 60000 });
+      await app.refresh(); await settle();
+      openStep(root, 'fix-loop'); await settle();
+      assert(await loopUntil(() => loopSection(root)?.querySelector('[data-loop-form]')), 'no form');
+      await sleep(250);
+      const scroller = root.querySelector('.ag-detail-scroll'), mark = loopSection(root).querySelector(kind === 'form' ? '[data-loop-schedule]' : '[data-loop-timed]');
+      if (mark) scroller.scrollTop = Math.max(0, mark.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 90);
+      window.shotReady = true;
+      await new Promise(() => {});
+    } catch (error) { window.shotError = String(error && error.stack || error); await new Promise(() => {}); } }
+    // ==== v11: end ====
 
     // ==== v7: screenshots (not a check): `?shot=team-run|team-wait|team-paused|team-history|team-compare|team-versions&width=1400` ====
     if ((shardOf.get('shot') || '').startsWith('team-')) { try {
