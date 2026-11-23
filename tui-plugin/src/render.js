@@ -1064,8 +1064,8 @@ function pathsRow(flows, width, now) {
 // The zone of a tool call (snapshot `agents[].activity.zone`, as the web view): one single-width glyph for each. The
 // idea of zones and of a short trail of recent actions comes from AgentMove (MIT).
 const ZONE_GLYPHS = Object.freeze({ web: "⊕", terminal: "❯", files: "▤", search: "⊙", thinking: "·", messaging: "»", tasks: "☰", spawn: "┬", tools: "◇" });
-const ZONE_VERBS = Object.freeze({ web: "browsing", terminal: "running", files: "reading", search: "searching", thinking: "thinking", messaging: "messaging", tasks: "planning", spawn: "starting", tools: "using" });
-const TOOL_VERBS = Object.freeze({
+export const ZONE_VERBS = Object.freeze({ web: "browsing", terminal: "running", files: "reading", search: "searching", thinking: "thinking", messaging: "messaging", tasks: "planning", spawn: "starting", tools: "using" });
+export const TOOL_VERBS = Object.freeze({
   webfetch: "fetching", shell: "running", bash: "running", execute: "running", read: "reading", write: "writing", edit: "editing", multiedit: "editing",
   patch: "editing", apply_patch: "editing", grep: "searching", glob: "searching", websearch: "searching", codesearch: "searching", question: "asking",
   skill: "loading", subagent: "starting", task: "starting",

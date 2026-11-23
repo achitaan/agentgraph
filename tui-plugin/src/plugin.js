@@ -10,11 +10,12 @@
  * width) and the command "agentgraph.graph" (slash /graph, alias /agents) that opens and closes it. Every host
  * function is feature-detected; a host without them gets the sidebar only.
  *
- * The panel opens on the orbit (src/scene.js) in the side panel, at whatever size it has down to 36 columns by 14 rows
- * (the orbit compresses to fit), and on the list below that: `g` switches between them, from then on remembered while
- * the app runs, and never makes the panel full screen (only the user's `f` does, and the host on a narrow terminal);
+ * The panel opens on the pixel rooms (src/rooms.js: a floor plan of what each agent is doing) in the side panel, at
+ * whatever size it has down to 36 columns by 14 rows (the picture compresses to fit), and on the list below that: `g`
+ * switches between the picture and the list, `o` between the rooms and the orbit (src/scene.js), each from then on
+ * remembered while the app runs, and neither ever makes the panel full screen (only the user's `f` does, and the host on a narrow terminal);
  * its size is measured from the panel's own box (OpenTUI `onSizeChange`,
- * `width`, `height`), because the documented panel input has no height. `d` switches the orbit between its 2D view
+ * `width`, `height`), because the documented panel input has no height. On the orbit, `d` switches it between its 2D view
  * (the ring from above, braille dots) and its 3D view (a turning figure in depth characters). On the 3D view ←/→ turn
  * it round its upright axis, ↑/↓ change the elevation and `0` resets, named on its bottom row; a click on the orbit
  * switches the views as `d` does and a drag turns the 3D view (OpenTUI mouse events). In the list, ↑/↓ select
@@ -33,6 +34,7 @@ import {
   scene, sceneFits, frameInterval, changeAt, orbitTurned, orbitReset, TURN_STEP, ELEVATION_STEP, DRAG_TURN_PER_CELL, DRAG_ELEVATION_PER_ROW,
   finishedRuns, STREAK_MS, STREAK_GAP_MS,
 } from "./scene.js";
+import { roomsScene, roomsInterval } from "./rooms.js";
 import { createSnapshotRunner, createChatRunner, createSideAskRunner, createLoopRunner, errorDocument, errorMessage, oneLine, runFlowPrompt, GOAL_LIMIT, SIDE_QUESTION_LIMIT } from "./runner.js";
 import { chatLines, chatWindow, chatHeading, cleanChat, CHAT_MIN_INLINE } from "./chat.js";
 import { createDemoRunner, DEMO_INTERVAL_MS } from "./demo.js";
@@ -73,7 +75,8 @@ export function resolveOptions(raw, { os, path }) {
   const intervalMs = Number.isFinite(requested) && requested > 0 ? Math.max(MIN_INTERVAL_MS, Math.floor(requested)) : DEFAULT_INTERVAL_MS;
   const mode = options.mode === "prepend" ? "prepend" : "replace";
   // reducedMotion: the 3D sky without shooting stars or fades (scene.js `motion: "reduced"`)
-  return { home, python, intervalMs, mode, demo: options.demo === true, reducedMotion: options.reducedMotion === true };
+  // picture: what the panel opens on, "rooms" (the default) or "orbit"
+  return { home, python, intervalMs, mode, demo: options.demo === true, reducedMotion: options.reducedMotion === true, picture: options.picture === "orbit" ? "orbit" : "rooms" };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -244,7 +247,7 @@ export function measuredSize(node) {
 
 function lineKey(line) {
   let key = "";
-  for (const span of line) key += span.tone + "\u0001" + (span.color || "") + "\u0001" + span.text + "\u0002";
+  for (const span of line) key += span.tone + "\u0001" + (span.color || "") + "\u0001" + (span.bg || "") + (span.bold ? "b" : "") + "\u0001" + span.text + "\u0002";
   return key;
 }
 
@@ -292,8 +295,10 @@ export function createPlugin(host) {
       const tone = tones[span.tone] || tones.plain;
       const own = span.color ? colorProp(span.color) : undefined; // the orbit's group colours
       const fg = own || colorProp(tone.fg);
+      const bg = span.bg ? colorProp(span.bg) : undefined; // the rooms' half-block pixels: top in fg, bottom in bg
+      const bold = span.bold || (!own && tone.bold);
       // a span takes its colour from `style`; OpenTUI ignores a span's `fg` property, kept for the tests' colour checks
-      return element("span", { fg, style: !own && tone.bold ? { fg, bold: true } : { fg } }, [span.text]);
+      return element("span", Object.assign({ fg }, bg ? { bg } : {}, { style: Object.assign({ fg }, bg ? { bg } : {}, bold ? { bold: true } : {}) }), [span.text]);
     });
   }
   function sceneRow(spans) {
@@ -1152,6 +1157,13 @@ export function createPlugin(host) {
     // The orbit's view chosen with `d`, remembered while the app runs; it opens in 2D. A switch morphs the old view
     // into the new one over CHANGE_MS (each agent travels from its place in one to its place in the other).
     const [dimension, setDimension] = host.createSignal({ view: "2d", change: null });
+    // The picture chosen with `o`, remembered while the app runs: the pixel rooms (src/rooms.js, the default) or the orbit, which `options.picture` can open on.
+    const [picture, setPicture] = host.createSignal(options.picture);
+    const togglePicture = () => {
+      setPicture(picture() === "rooms" ? "orbit" : "rooms");
+      for (const w of watchers) if (w.retime) w.retime();
+      requestRender();
+    };
     const toggleDimension = () => {
       const cur = dimension();
       const view = cur.view === "3d" ? "2d" : "3d";
@@ -1180,7 +1192,7 @@ export function createPlugin(host) {
     // was pressed; a redraw keeps the lines' nodes (sceneSpans), so neither is lost. Should a line go (a resize), the
     // line under the pointer still gets "over" with the button held (onMouseOver), which carries the drag on.
     let press = null; // { x, y, lastX, lastY, dragged } from the left button's press on the orbit
-    const orbitShown = () => rows.scene && !dialogOpen();
+    const orbitShown = () => rows.scene && picture() === "orbit" && !dialogOpen();
     const cell = (e, key) => Math.floor(Number(e && e[key]));
     const sceneMouse = {
       down(e) {
@@ -1228,6 +1240,7 @@ export function createPlugin(host) {
     };
     // The keys named on the 3D view's bottom row while the panel has the turn layer (panelKeys binds them).
     const ORBIT_KEYS = Object.freeze([["←→↑↓", "turn"], ["0", "reset"]]);
+    const ROOMS_KEYS = Object.freeze([["o", "orbit"], ["g", "list"]]);
     let orbitKeysOn = false;
     // The orbit's frames: rows are reused while their text and tones stay the same, and a tick whose frame equals
     // the last one drawn pushes nothing to the host.
@@ -1245,7 +1258,7 @@ export function createPlugin(host) {
         const now = clock();
         const live = streaks.filter((st) => now < st.at + STREAK_MS);
         if (live.length !== streaks.length) streaks = live;
-        const in3d = dimension().view === "3d";
+        const in3d = picture() === "orbit" && dimension().view === "3d";
         if (seen && seen.doc === snap.doc) {
           if (in3d) seen.in3d = true;
           return;
@@ -1271,17 +1284,20 @@ export function createPlugin(host) {
       const viewOptions = () => {
         const d = dimension();
         const o = orbit();
+        if (picture() === "rooms") return Object.assign({ colors }, orbitKeysOn ? { keys: ROOMS_KEYS } : {}, options.reducedMotion ? { motion: "reduced" } : {});
         return Object.assign({ view: d.view, change: d.change, colors }, o ? { orbit: o } : {}, orbitKeysOn ? { keys: ORBIT_KEYS } : {},
           streaks.length ? { streaks } : {}, options.reducedMotion ? { motion: "reduced" } : {});
       };
       const compute = (snap, size) => {
         noteRuns(snap);
+        if (picture() === "rooms") return roomsScene(snap.doc, Object.assign(viewOptions(), { width: size.width, height: size.height, now: clock() }));
         return scene(snap.doc, Object.assign(viewOptions(), { width: size.width, height: size.height, now: clock(), previous: snap.previous ? { doc: snap.previous, at: snap.at } : undefined }));
       };
       // the frame interval at now; the previous document is part of it (the sun's spikes draw back for a second after the hub stops)
       watcher.sceneInterval = (doc) => {
         const snap = watcher.state();
         const previous = snap && snap.doc === doc && snap.previous ? { doc: snap.previous, at: snap.at } : undefined;
+        if (picture() === "rooms") return roomsInterval(doc, viewOptions(), clock());
         return frameInterval(doc, Object.assign(viewOptions(), previous ? { previous } : {}), clock());
       };
       let lastSize = null;
@@ -1292,7 +1308,7 @@ export function createPlugin(host) {
         const lines = compute(snap, lastSize);
         const key = lines.map(lineKey).join("\n");
         if (key === drawn) return false;
-        prepared = { doc: snap.doc, width: lastSize.width, height: lastSize.height, lines, dimension: dimension(), orbit: orbit(), streaks };
+        prepared = { doc: snap.doc, width: lastSize.width, height: lastSize.height, lines, picture: picture(), dimension: dimension(), orbit: orbit(), streaks };
         return true;
       };
       return {
@@ -1301,7 +1317,7 @@ export function createPlugin(host) {
           colors = sceneColors(ctx.theme, tones);
           let lines;
           const same = prepared && prepared.doc === snap.doc && prepared.width === size.width && prepared.height === size.height;
-          if (same && prepared.dimension === dimension() && prepared.orbit === orbit() && prepared.streaks === streaks) lines = prepared.lines;
+          if (same && prepared.picture === picture() && prepared.dimension === dimension() && prepared.orbit === orbit() && prepared.streaks === streaks) lines = prepared.lines;
           else lines = compute(snap, size);
           prepared = null;
           const keys = lines.map(lineKey);
@@ -1519,7 +1535,7 @@ export function createPlugin(host) {
         requestRender();
       };
       // the 3D orbit shows: the arrow keys turn it (left and right in the turn layer, up and down in the layer above)
-      const turning = () => ours() && rows.scene && dimension().view === "3d" && !dialogOpen();
+      const turning = () => ours() && rows.scene && picture() === "orbit" && dimension().view === "3d" && !dialogOpen();
       const act = (name) => () => {
         try {
           panel[name]();
@@ -1585,7 +1601,8 @@ export function createPlugin(host) {
             ctx.keymap.layer(() => ({
               commands: [
                 { id: PANEL_NAME + ".view", bind: "g", enabled: ours, run: () => switchView(currentSize) },
-                { id: PANEL_NAME + ".dimension", bind: "d", enabled: ours, run: toggleDimension },
+                { id: PANEL_NAME + ".dimension", bind: "d", enabled: () => ours() && picture() === "orbit", run: () => picture() === "orbit" && toggleDimension() },
+                { id: PANEL_NAME + ".picture", bind: "o", enabled: ours, run: togglePicture },
               ],
             })),
           );

@@ -168,10 +168,30 @@ view, the list opens as a session panel:
   and stops when it closes or the plugin is disposed.
 - A host without `ui.panel`, `keymap.layer` or `ui.toast` gets the sidebar only, as before.
 
-## The orbit (the panel's scene)
+## The rooms (the panel's default scene)
+
+The panel opens on a floor plan drawn in half-block pixels: six rooms in a 3 by 2 grid, TERMINAL, FILES and WEB above
+SEARCH, THINKING and TEAM. The orchestrator stands in the room of what it is doing now (spawning, messages and tasks
+are TEAM's; tools it has no room for are TERMINAL's; a hub that is not working stands in TEAM with nothing lit), and
+that room is lit while the others are dim. Each other agent stands in the room of its tool; a working agent with no
+tool is thinking, an idle one rests in TEAM, dimmed and unnamed, and a stuck or sent-back one stands in TEAM with its
+name and mark. A speech bubble over the orchestrator shows its target; footprints run from the room of its last
+action to its own. Working characters bob a pixel every 500 ms and the orchestrator walks for 1.2 s when a new action
+starts; `reducedMotion: true` stops all of it. Everything is a function of the snapshot and the time.
+
+Under the picture: the header (the hub, `4/11  $7.65`), what needs you (at most 3 lines), then `NOW`, `BEFORE` (its
+last actions) and one line per working agent (name, tool, task, cost). Only the orchestrator's line carries a target.
+As the panel shrinks things give way in this order: the working lines, BEFORE, the props, the bubble, the names (the
+orchestrator's last), NOW, what needs you; the smallest size is 36 by 14, below that the list shows. `o` swaps the
+rooms and the orbit (remembered while the app runs, named in the key hints); `d`, the arrow keys and the mouse belong
+to the orbit. Option `picture: "orbit"` opens on the orbit instead.
+
+The idea comes from AgentMove (MIT licence); this is a new implementation (`src/rooms.js`), no code copied.
+
+## The orbit (the panel's other scene)
 
 The picture lives in the side panel beside the chat. When the panel is at least 36 columns by 14 rows (the smallest
-that still reads; the sidebar's 37 columns would fit) it opens on the orbit, drawn instead of the list, whatever its
+that still reads; the sidebar's 37 columns would fit) it opens on the rooms (above; `o` switches to the orbit), drawn instead of the list, whatever its
 size (`g` switches to the list and back; full screen is only ever the user's `f`, or the host's own choice on a narrow
 terminal). Smaller than 36x14, and until the panel's height is known, it draws the list. The sidebar always draws the
 list.
@@ -439,7 +459,8 @@ Restart the TUI. Options go in the `[path, options]` form:
 | `intervalMs` | `4000`                                                                | Refresh period; minimum 1000. |
 | `python`     | `/Users/achita.anantachina/.local/state/tec/toolchain/base_profile/bin/python3` | Absolute path to Python 3.11+ (`/usr/bin/python3` is 3.9 and has no `-P`). `~/` is expanded. |
 | `home`       | `~/.config/opencode/orchestration`                                   | The folder that contains `agentgraph/` (used as `PYTHONPATH`). |
-| `reducedMotion` | `false`                                                            | The 3D sky without shooting stars or fades. |
+| `reducedMotion` | `false`                                                            | The 3D sky without shooting stars or fades; the rooms stand still. |
+| `picture`    | `"rooms"`                                                            | What the panel opens on: `"rooms"` or `"orbit"`; `o` swaps them. |
 
 To keep the built-in sections, use `"mode": "prepend"`.
 
@@ -484,6 +505,7 @@ folder.``
   → exactly `height` lines of exactly `width` cells, spans `{ text, tone, color? }` (`color` a `#rrggbb` group
   colour). `view` is `"2d"` or `"3d"`, `change` `{ from, at }` the camera's move, `colors` `{ dark, muted }`; also
   `orbit` `{ turn, elevation, resume }`, `streaks` `[{ flow, run, at }]`, `motion: "reduced"` and `sky: false`.
+- `src/rooms.js`: the rooms, pure: `roomsScene(snapshot, { width, height, now, motion, colors, keys })` → exactly `height` lines of `width` cells, spans `{ text, tone: "plain", color?, bg?, bold? }`; `roomsLines(doc, w, h, now, options)` is the picture alone.
 - `src/chat.js`: pure chat rendering: cleaning, wrapping, kinds, window and heading.
 - `src/demo.js`: the demo runner for `AGENTGRAPH_TUI_DEMO`.
 - `src/runner.js`: the snapshot process runner, the chat reader (`createChatRunner`), and `runFlowPrompt` (the run message of a path).
