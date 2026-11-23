@@ -191,6 +191,7 @@ class IntervalTests(TimedBase):
         self.assertEqual(len(ex.calls), 1)
         self.assertEqual(record["status"], "limit")
         self.assertEqual(record["timing"]["counts"], {"idle": 3, "woken": 1, "skipped": 0, "failed": 0})
+        self.assertEqual(record["timing"]["wakes"], 1)  # one wake started, counted for readers
         self.assertIn("watch run 3 says news", ex.calls[0]["message"])
         self.assertIn("exited 10", ex.calls[0]["message"])
         wake = [t for t in record["timing"]["ticks"] if t["result"] == "wake_passed"]
@@ -641,6 +642,7 @@ class StatusTests(TimedBase):
         record, ex, clock, run = self.run_timed()
         row = loopapi._summary(self.project, run)
         self.assertEqual((row["status"], row["timing"]["kind"], row["timing"]["counts"]["idle"]), ("limit", "interval", 2))
+        self.assertEqual((row["timing"]["wakes"], row["timing"]["anchor"]), (None, T0))  # no wake yet: unknown-or-none, never a made-up 0; the run's start is there for "for N"
         detail = loopapi.run_detail(self.project, run)
         self.assertEqual(detail["run"]["timing"]["counts"]["idle"], 2)
         self.save()
