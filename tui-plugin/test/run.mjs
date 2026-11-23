@@ -2672,8 +2672,8 @@ test("rooms: exactly w x h at every size, spans with plain tone and #rrggbb colo
   // the whole panel at the report's size, from the demo
   const panel = RM.roomsScene(demoWorn, { width: 62, height: 38, now: 1500 });
   assertRoomsExact(panel, 62, 38, "roomsScene 62x38");
-  assert.ok(roomsText(panel).some((l) => l.startsWith("NOW ")) && roomsText(panel).some((l) => l.startsWith("BEFORE ")));
-  assert.match(roomsText(panel)[0], /^◉ orchestrator +4\/11 +\$[\d.]+$/);
+  assert.ok(roomsText(panel).some((l) => l.startsWith(" NOW ")) && roomsText(panel).some((l) => l.startsWith(" BEFORE ")));
+  assert.match(roomsText(panel)[0], /^ ◉ orchestrator +4\/11 +\$[\d.]+ $/);
 });
 
 test("rooms: never throws on an empty document, no hub, no activity, a hub with nothing lit, or 30 agents", () => {
@@ -2803,9 +2803,9 @@ test("rooms: the target is the hub's alone: in the NOW row, never on an agent's 
   hubOf(doc).activity.target = "made-up-hub-target";
   for (const a of doc.agents) if (a.group !== "hub" && a.activity) a.activity.target = "made-up-agent-target";
   const text = roomsText(RM.roomsScene(doc, { width: 100, height: 40, now: 1500 }));
-  assert.ok(text.some((l) => l.startsWith("NOW ") && l.includes("made-up-hub-target")));
+  assert.ok(text.some((l) => l.startsWith(" NOW ") && l.includes("made-up-hub-target")));
   assert.ok(!text.some((l) => l.includes("made-up-agent-target")), "no agent line carries a target\n" + text.join("\n"));
-  const working = text.filter((l) => l.startsWith("▪ "));
+  const working = text.filter((l) => l.startsWith(" ▪ "));
   assert.ok(working.length >= 2 && working.every((l) => !l.includes("made-up")));
   // the bubble over the hub shows the target, when it stands still
   hubOf(doc).activity.zone = "files"; // alone in its room, with room for the bubble
@@ -2825,7 +2825,7 @@ test("rooms: the panel gives way in order down to 36x14, always exactly the size
     assertRoomsExact(lines, 62, h, `62x${h}`);
     const text = roomsText(lines);
     assert.ok(text[0].includes("orchestrator"), `62x${h}: the header names the hub`);
-    seen.push({ h, now: text.some((l) => l.startsWith("NOW ")), before: text.some((l) => l.startsWith("BEFORE ")), working: text.filter((l) => l.startsWith("▪ ")).length });
+    seen.push({ h, now: text.some((l) => l.startsWith(" NOW ")), before: text.some((l) => l.startsWith(" BEFORE ")), working: text.filter((l) => l.startsWith(" ▪ ")).length });
   }
   const at = (h) => seen.find((s) => s.h === h);
   assert.ok(at(60).working >= at(38).working && at(38).working >= at(30).working, "working lines go first");
@@ -3570,7 +3570,7 @@ test("rooms panel: the panel opens on the rooms; o swaps rooms and orbit and is 
     const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
     await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
     sizePanel(view, 120, 40);
-    const isRooms = (lines) => lines.length === 40 && lines.some((l) => l.includes(">_ TERMINAL")) && lines.some((l) => l.startsWith("NOW "));
+    const isRooms = (lines) => lines.length === 40 && lines.some((l) => l.includes(">_ TERMINAL")) && lines.some((l) => l.trim().startsWith("NOW "));
     assert.ok(isRooms(screen(view)), "opens on the rooms\n" + screen(view).join("\n"));
     const layer = () => state.layers.find((l) => (l.commands || []).some((c) => c.bind === "g"));
     const cmd = (bind) => layer().commands.find((c) => c.bind === bind);
