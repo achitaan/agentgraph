@@ -458,7 +458,7 @@ Add the folder to `plugins` in `~/.config/opencode/cli.json`:
   "$schema": "https://opencode.ai/v2/cli.json",
   "plugins": [
     "oh-my-opencode-slim",
-    "/path/to/orchestration/tui-plugin"
+    "/Users/achita.anantachina/.config/opencode/orchestration/tui-plugin"
   ]
 }
 ```
@@ -466,14 +466,14 @@ Add the folder to `plugins` in `~/.config/opencode/cli.json`:
 Restart the TUI. Options go in the `[path, options]` form:
 
 ```json
-["/path/to/orchestration/tui-plugin", { "mode": "prepend", "intervalMs": 4000 }]
+["/Users/achita.anantachina/.config/opencode/orchestration/tui-plugin", { "mode": "prepend", "intervalMs": 4000 }]
 ```
 
 | Option       | Default                                                               | Meaning |
 |--------------|-----------------------------------------------------------------------|---------|
 | `mode`       | `"replace"`                                                           | `"replace"` takes over the sidebar (hides Context, Limit, MCP, Todo). `"prepend"` puts the graph above them. |
 | `intervalMs` | `4000`                                                                | Refresh period; minimum 1000. |
-| `python`     | `/path/to/python3` | Absolute path to Python 3.11+ (`/usr/bin/python3` is 3.9 and has no `-P`). `~/` is expanded. |
+| `python`     | `/Users/achita.anantachina/.local/state/tec/toolchain/base_profile/bin/python3` | Absolute path to Python 3.11+ (`/usr/bin/python3` is 3.9 and has no `-P`). `~/` is expanded. |
 | `home`       | `~/.config/opencode/orchestration`                                   | The folder that contains `agentgraph/` (used as `PYTHONPATH`). |
 | `reducedMotion` | `false`                                                            | The pictures and the 3D sky without motion; the list never moves. |
 | `picture`    | `"off"`                                                              | What the panel opens on: `"off"` (the list; `g` shows a picture), `"planets"` or `"orbit"`. |
