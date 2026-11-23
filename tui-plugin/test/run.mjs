@@ -1181,31 +1181,32 @@ test("panel: other panel names render nothing; its own name draws the list with 
     setName("agentgraph.graph");
     assert.deepEqual(screen(view), ["Loading"]);
     await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
-    // the demo: the main chat first (with the cursor), then NEEDS YOU, AT WORK, one idle line, one totals line, the keys
+    // the demo: the main chat first, then NEEDS YOU (with the cursor on its first row), AT WORK, one idle line, one totals line, the keys
     const widthOf = (i) => R.displayWidth(screen(view)[i]);
     const lines = () => screen(view);
     const first = cursorRow(view);
-    assert.equal(first, 0, "the cursor starts on the main chat");
-    assert.match(lines()[0], /^›◉ orchestrator +\S.* \$[\d.]+ ?$/);
+    assert.match(lines()[first], /^›● impl-claude +stalled/, "the cursor starts on the first row that needs you");
+    assert.match(lines()[0], /^ ◉ orchestrator +\S.* \$[\d.]+ ?$/);
     const needs = lines().findIndex((l) => /^ NEEDS YOU ─+$/.test(l));
     assert.ok(needs > 0, "a NEEDS YOU rule");
-    assert.match(lines()[needs + 1], /^ ● impl-claude +stalled .*\$[\d.]+$/);
+    assert.equal(first, needs + 1);
+    assert.match(lines()[needs + 1], /^›● impl-claude +stalled .*\$[\d.]+ ?$/);
     assert.ok(lines().some((l) => /^ AT WORK ─+$/.test(l)));
     assert.ok(lines().some((l) => /^ Idle: explorer, .*/.test(l)));
     assert.ok(lines().some((l) => /^ \d+ of \d+ steps done/.test(l)));
     assert.equal(lines().at(-1), " ↑↓ select  q close", "the keys, in words, only the ones that act (no picture while the size is unknown)");
-    assert.equal(widthOf(0), 80, "a selected row is tinted to the width");
+    assert.equal(widthOf(cursorRow(view)), 80, "a selected row is tinted to the width");
     // wider panel, wider lines
     setWidth(100);
-    assert.equal(widthOf(0), 100);
+    assert.equal(widthOf(cursorRow(view)), 100);
     // the cap holds
     setWidth(300);
-    assert.equal(widthOf(0), 100);
+    assert.equal(widthOf(cursorRow(view)), 100);
     // never narrower than the sidebar
     setWidth(10);
-    assert.equal(widthOf(0), 37);
+    assert.equal(widthOf(cursorRow(view)), 37);
     setWidth(undefined);
-    assert.equal(widthOf(0), 37);
+    assert.equal(widthOf(cursorRow(view)), 37);
     setWidth(37);
     assert.ok(screen(view).every((l) => /^[› ]/.test(l) && R.displayWidth(l) <= 37), "the panel has the gutter and no line is wider than 37");
     // the name changes away: nothing is drawn
@@ -1321,24 +1322,26 @@ test("panel keys: up and down move the cursor through the rows that act, clamped
     const view = host.panelClaim().render(makePanel({ sessionID: "ses_keys", width: 80 }));
     await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
     const { key, calls } = host;
-    // the main chat, its title, a rule, stalled, a rule, designer, the idle line, the totals, the keys: the cursor starts on the main chat
+    // the main chat, its title, a rule, stalled, a rule, designer, the idle line, the totals, the keys: the cursor starts on the stalled row, the first that needs you
     const rowOf = (re) => screen(view).findIndex((l) => re.test(l));
     const hubRow = rowOf(/orchestrator/);
     const stalledRow = rowOf(/impl-claude/);
     const designerRow = rowOf(/designer/);
     assert.equal(hubRow, 0);
     assert.ok(hubRow < stalledRow && stalledRow < designerRow);
-    assert.equal(cursorRow(view), hubRow);
+    assert.equal(cursorRow(view), rowOf(/impl-claude/));
     assert.equal(screen(view).filter((l) => l[0] === "›").length, 1, "one cursor");
     assert.equal(key("up").enabled(), true);
     key("up").run();
-    assert.equal(cursorRow(view), hubRow, "clamped at the top");
+    assert.equal(cursorRow(view), rowOf(/orchestrator/));
+    key("up").run();
+    assert.equal(cursorRow(view), rowOf(/orchestrator/), "clamped at the top");
     key("down").run();
-    assert.equal(cursorRow(view), stalledRow);
+    assert.equal(cursorRow(view), rowOf(/impl-claude/));
     key("down").run();
     key("down").run();
     key("down").run();
-    assert.equal(cursorRow(view), designerRow, "clamped at the last row that acts: the idle line and the totals are not selectable");
+    assert.equal(cursorRow(view), rowOf(/designer/), "clamped at the last row that acts: the idle line and the totals are not selectable");
     assert.equal(screen(view).at(-1), " ↑↓ select  ⏎ open  q close");
     key("return").run();
     assert.deepEqual(calls.at(-1), ["navigate", { type: "session", sessionID: "ses_h" }]);
@@ -1393,11 +1396,7 @@ test("panel keys: s confirms, then interrupts the working agent's session; m ask
     await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
     const { key, calls, state } = host;
     assert.deepEqual(state.layers.filter((l) => (l.commands || []).some((c) => c.bind === "f")).pop().commands.map((c) => c.bind), ["f", "q", "up", "down", "return", "s", "m", "c", "escape", "pageup", "pagedown"]);
-    // the cursor starts on the main chat: the user's own session, nothing to stop or message
-    assert.equal(screen(view).at(-1), " ↑↓ select  ⏎ open  q close");
-    assert.equal(key("s").enabled(), false);
-    // the stalled impl-claude: it works, so s and m act on its running session
-    key("down").run();
+    // the cursor starts on the stalled impl-claude: it works, so s and m act on its running session
     assert.equal(screen(view).at(-1), " ↑↓ select  ⏎ open  s stop  m message  q close");
     assert.equal(key("s").enabled(), true);
     key("s").run();
@@ -1470,7 +1469,6 @@ test("panel keys: while a host dialog is open the list keys do nothing, and the 
     const view = host.panelClaim().render(makePanel({ sessionID: "ses_dialog", width: 80 }));
     await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
     const { key, calls } = host;
-    key("down").run(); // the cursor starts on the main chat; the stalled agent is the next row
     const stalled = cursorRow(view);
     assert.ok(stalled > 0);
     // any host dialog (the keymap is in "modal" mode): every list key is off and does nothing
@@ -1564,7 +1562,7 @@ test("panel: pending permission requests and questions from the host's data come
     try {
       const v2 = bare.panelClaim().render(makePanel({ sessionID: "ses_req2", width: 80 }));
       await waitFor(() => screen(v2).length > 3, 5000, "bare snapshot");
-      assert.ok(screen(v2).some((l) => /^ ● impl-claude +stalled/.test(l)));
+      assert.ok(screen(v2).some((l) => /^›● impl-claude +stalled/.test(l)), "the first row that needs you has the cursor");
     } finally {
       stop2();
     }
@@ -2910,7 +2908,7 @@ test("planets: every frame is exactly width x height at several sizes and times;
   assert.equal(PL.planetsInfo(demoWorn, 4, 3), null);
 });
 
-test("planets: shapes are pixels only; letters, digits and marks appear only in the names, the pill and the icon row", () => {
+test("planets: shapes are pixels only; letters, digits and marks appear only in the names and the pill", () => {
   for (const [w, h] of [[36, 14], [62, 30], [62, 38], [100, 30], [160, 45]]) {
     for (const now of [3000, 11000, 27000]) {
       for (const doc of [demoWorn, plHubDoc(PL_ZONE_ACTIVITY.terminal)]) {
@@ -2921,12 +2919,12 @@ test("planets: shapes are pixels only; letters, digits and marks appear only in 
         for (const l of info.labels) allow(l.c0, l.c1, l.r);
         if (info.hub.label) allow(info.hub.label.c0, info.hub.label.c1, info.hub.label.r);
         if (info.pill) allow(info.pill.c0, info.pill.c1, info.pill.r);
-        if (info.icons) allow(info.icons.c0, info.icons.c1, info.icons.r);
+        assert.equal(info.icons, undefined, "no icon row");
         lines.forEach((line, r) => {
           let c = 0;
           for (const s of line) {
             for (const ch of s.text) {
-              if (ch !== " " && ch !== "\u2580") assert.ok(allowed.has(c + "," + r), `${w}x${h}@${now}: "${ch}" at ${c},${r} is not part of a name, the pill or the icons`);
+              if (ch !== " " && ch !== "\u2580") assert.ok(allowed.has(c + "," + r), `${w}x${h}@${now}: "${ch}" at ${c},${r} is not part of a name or the pill`);
               c += R.displayWidth(ch);
             }
           }
@@ -2950,18 +2948,18 @@ test("planets: the hub ball is the largest and sits at the centre", () => {
   }
 });
 
-test("planets: the pill and the icon row are never covered by a ball and show the zone of the hub's current action", () => {
+test("planets: the pill is never covered by a ball and says what the hub does; no row of zone symbols is drawn", () => {
   for (const [w, h] of [[62, 30], [62, 38], [100, 30], [160, 45]]) {
     for (const now of [0, 3000, 11000, 27000]) {
       for (const [zone, act] of [["web", PL_ZONE_ACTIVITY.web], ["terminal", PL_ZONE_ACTIVITY.terminal], ["files", PL_ZONE_ACTIVITY.files], ["thinking", PL_ZONE_ACTIVITY.thinking]]) {
         const info = PL.planetsInfo(plHubDoc(act), w, h, now, PLO);
-        assert.ok(info.pill && info.icons, `${w}x${h}@${now} ${zone}: a pill and an icon row`);
-        assert.equal(info.icons.current, zone, `${w}x${h} ${zone}: the lit icon`);
-        assert.deepEqual(info.icons.cells.filter((c) => c.lit).map((c) => c.zone), [zone]);
+        assert.ok(info.pill, `${w}x${h}@${now} ${zone}: a pill`);
+        assert.equal(info.zone, zone, `${w}x${h} ${zone}: the pill's zone`);
+        assert.equal(info.icons, undefined, "no icon row");
         const lines = PL.planetsLines(plHubDoc(act), w, h, now, PLO);
         const rowText = (r) => lines[r].map((s) => s.text).join("");
         assert.ok(rowText(info.pill.r).includes(info.pill.text.split(" ")[1]), `${zone}: the pill says what it does`);
-        for (const [c0, c1, r] of [[info.pill.c0, info.pill.c1, info.pill.r], [info.icons.c0, info.icons.c1, info.icons.r]]) {
+        for (const [c0, c1, r] of [[info.pill.c0, info.pill.c1, info.pill.r]]) {
           for (const b of info.balls) {
             const nx = Math.max(c0, Math.min(c1 + 1, b.x));
             const ny = Math.max(r * 2, Math.min(r * 2 + 2, b.y));
@@ -2971,10 +2969,11 @@ test("planets: the pill and the icon row are never covered by a ball and show th
       }
     }
   }
-  // no activity of a known zone: nothing is lit; a resting hub says so
-  const spawning = PL.planetsInfo(demoWorn, 62, 38, 11000, PLO);
-  assert.equal(spawning.icons.current, null);
-  assert.equal(spawning.icons.cells.length, 5);
+  // no row of five zone symbols anywhere in the picture, whatever the hub does
+  for (const doc of [demoWorn, plHubDoc(PL_ZONE_ACTIVITY.terminal)]) {
+    const text = PL.planetsLines(doc, 62, 38, 11000, PLO).map((l) => l.map((s) => s.text).join("")).join("\n");
+    assert.ok(!/\S [^\w\s] [^\w\s] [^\w\s] [^\w\s] [^\w\s]/.test(text.replace(/\u2580/g, " ")), "no icon row");
+  }
 });
 
 test("planets: a nearer ball covers a farther one", () => {
@@ -3087,6 +3086,18 @@ test("calm list: sections in order (main chat, NEEDS YOU, AT WORK, idle), each o
   assert.ok(q.some((t) => /^ Idle: alpha, beta/.test(t)));
   const busy = SL_layout(SL_team([{ name: "alpha", activity: SL_act("read", 5) }]), 62).lines.map(SL_text);
   assert.ok(busy.some((t) => /^ AT WORK/.test(t)) && !busy.some((t) => /^ Idle/.test(t)), "no idle line with no idle agents");
+});
+
+test("calm list: the cursor opens on the first NEEDS YOU row when there is one, else on the main chat; a chosen row is kept", () => {
+  const withNeeds = SL_layout(SL_doc(), 62);
+  assert.equal(withNeeds.selected, "stalled:impl-claude");
+  const selectedText = SL_text(withNeeds.lines[withNeeds.items.find((i) => i.key === withNeeds.selected).line]);
+  assert.match(selectedText, /^›● impl-claude +stalled/, "the first row that needs you");
+  const quiet = SL_layout(SL_team([{ name: "alpha", busy: false }, { name: "beta", activity: SL_act("read", 5) }]), 62);
+  assert.equal(quiet.items.find((i) => i.key === quiet.selected).kind, "hub", "no needs: the main chat");
+  assert.match(SL_text(quiet.lines[0]), /^›◉/);
+  const chosen = SL_layout(SL_doc(), 62, { selected: "agent:orchestrator" });
+  assert.equal(chosen.selected, "agent:orchestrator", "a row the user chose is kept");
 });
 
 test("calm list: a working agent is one line in words with how long ago: 'reading a file · 12s'", () => {
@@ -3443,7 +3454,7 @@ test("panel scene: f only changes the size: the picture or the list stays as it 
     const key = (bind) => state.layers.filter((l) => (l.commands || []).some((c) => c.bind === bind)).pop().commands.find((c) => c.bind === bind);
     assert.equal(key("down").enabled(), false, "no row keys on a picture");
     key("g").run();
-    assert.ok(!isOrbit(screen(view)) && screen(view).length <= 16, "g: the list in the side panel");
+    assert.ok(!isOrbit(screen(view)) && screen(view).some((l) => /^ NEEDS YOU/.test(l)), "g: the list in the side panel");
     assert.equal(key("down").enabled(), true);
     key("f").run();
     assert.equal(panel.presentation, "fullscreen");
@@ -5839,29 +5850,31 @@ test("chat panel: `chatfeed --session <newest> --json --limit 40` for the select
   try {
     await c.settle(1);
     assert.equal(P.CHAT_POLL_MS, 2000);
-    // the list starts on the main chat: its session is idle (the feed says so): read once, the timer reads no more
-    assert.deepEqual(c.chatCmds()[0].slice(1), ["-P", "-m", "agentgraph.chatfeed", "--session", "ses_root", "--json", "--limit", "40"]);
+    // the list starts on the first row that needs you
+    assert.deepEqual(c.chatCmds()[0].slice(1), ["-P", "-m", "agentgraph.chatfeed", "--session", "ses_g", "--json", "--limit", "40"]);
+    assert.equal(c.fake.length, 1, "one chat timer");
+    // six ticks while a read runs and after: never two at once
+    for (let i = 0; i < 6; i++) c.tick();
+    await c.settle(2);
+    c.tick();
+    c.tick();
+    await c.settle(3);
+    assert.equal(maxRunning(), 1, "one read in flight at a time");
+    assert.ok(sessionsRead().every((s) => s === "ses_g"), "only the selected agent: " + sessionsRead());
+    // the main chat: its session is idle (the feed says so): read once, the timer reads no more
+    c.key("up").run();
+    const n = chatSessions().length;
+    await c.settle(n + 1);
+    assert.equal(chatSessions().at(-1), "ses_root");
     c.tick();
     c.tick();
     await sleep(500);
-    assert.equal(chatSessions().length, 1, "an idle session is read once");
-    // the stalled agent: busy, read, then every tick; one read at a time
-    c.key("down").run();
-    await c.settle(2);
-    assert.equal(chatSessions().at(-1), "ses_g");
-    assert.equal(c.fake.length, 1, "one chat timer");
-    for (let i = 0; i < 6; i++) c.tick();
-    await c.settle(3);
-    c.tick();
-    c.tick();
-    await c.settle(4);
-    assert.equal(maxRunning(), 1, "one read in flight at a time");
-    assert.ok(sessionsRead().slice(1).every((s) => s === "ses_g"), "only the selected agent: " + sessionsRead());
-    // the designer: busy, read, never before it was selected
+    assert.equal(chatSessions().length, n + 1, "an idle session is read once");
+    // the designer: busy again, read, never before it was selected
     assert.ok(!chatSessions().includes("ses_h"));
-    const n = chatSessions().length;
     c.key("down").run();
-    await c.settle(n + 1);
+    c.key("down").run();
+    await c.settle(n + 2);
     assert.equal(chatSessions().at(-1), "ses_h");
     // hidden: the panel's name is not ours: no read, no timer
     c.setName("other.panel");
@@ -5883,8 +5896,6 @@ test("chat panel: the chat shows under the rows, thinking and what was said apar
   const c = await chatPanel({ size: [42, 38], width: 42, feeds: { ses_g: { items: KINDS, busy: true } } });
   try {
     await c.settle(1);
-    c.key("down").run();
-    await c.settle(2);
     const lines = c.lines();
     assert.ok(lines.some((l) => /^›● impl-claude +stalled/.test(l)), "the selected row: " + lines.join("|"));
     assert.ok(!lines.some((l) => l.includes("▸ edit") && l.startsWith("   ")), "no tool lines under the rows: the list stays calm");
@@ -5920,8 +5931,6 @@ test("chat panel: follows the newest; Page Up scrolls back and holds its place w
   const c = await chatPanel({ size: [60, 24], width: 60, feeds: { ses_g: { items: said(60), busy: true } } });
   try {
     await c.settle(1);
-    c.key("down").run();
-    await c.settle(2);
     const body = () => c.lines().filter((l) => /^ message \d+$/.test(l.trimEnd())).map((l) => Number(l.trim().split(" ")[1]));
     assert.equal(body().at(-1), 60, "the newest at the bottom");
     assert.ok(!c.lines().some((l) => /↓\d/.test(l)), "not scrolled: no mark");
@@ -5933,7 +5942,7 @@ test("chat panel: follows the newest; Page Up scrolls back and holds its place w
     // the chat grows while scrolled back: the same lines stay
     writeFeed("ses_g", said(63), { busy: true });
     c.tick();
-    await c.settle(3);
+    await c.settle(2);
     assert.deepEqual(body(), back, "held its place");
     c.key("pagedown").run();
     assert.ok(body().at(-1) > back.at(-1) && body().at(-1) < 63, "a page forward: " + body());
@@ -5943,7 +5952,7 @@ test("chat panel: follows the newest; Page Up scrolls back and holds its place w
     // following: a new item shows without a key
     writeFeed("ses_g", said(64), { busy: true });
     c.tick();
-    await c.settle(4);
+    await c.settle(3);
     assert.equal(body().at(-1), 64);
     // up and down still move the selection beside the chat
     c.key("down").run();
@@ -5959,16 +5968,15 @@ test("chat panel: no session shows 'No session yet' and reads nothing; the orche
   });
   const c = await chatPanel({ size: [60, 30], width: 60, doc: noSession, feeds: { ses_root: { items: said(2), busy: true } } });
   try {
-    await c.settle(1); // the main chat, selected first
-    c.key("down").run(); // the stalled agent, which has no session
-    await sleep(300);
+    await sleep(300); // the stalled agent, selected first, has no session
     assert.ok(c.lines().some((l) => l.trimEnd() === " No session yet"), c.lines().join("\n"));
-    assert.equal(c.chatCmds().length, 1, "nothing more to read");
+    assert.deepEqual(c.chatCmds(), [], "nothing to read");
+    assert.equal(c.fake.length, 0);
     assert.ok(!lastLine(c.lines()).includes("⏎ open"), "no session to open either");
     // the orchestrator
     c.key("up").run();
-    await c.settle(2);
-    assert.equal(chatSessions().at(-1), "ses_root");
+    await c.settle(1);
+    assert.equal(chatSessions()[0], "ses_root");
     assert.ok(c.lines().some((l) => l.startsWith(" transcript · orchestrator")), "read-only: a transcript\n" + c.lines().join("\n"));
     assert.ok(c.lines().some((l) => l.trimEnd() === " message 2"));
     assert.equal(c.key("s").enabled(), false);
@@ -5980,7 +5988,7 @@ test("chat panel: no session shows 'No session yet' and reads nothing; the orche
     assert.deepEqual(c.calls.filter((x) => x[0] === "prompt" || x[0] === "confirm" || x[0] === "send" || x[0] === "interrupt"), []);
     // a feed that says it is busy is polled even though the row cannot be steered
     c.tick();
-    await c.settle(3);
+    await c.settle(2);
     // a working agent: its chat is live
     c.key("down").run();
     c.key("down").run();
@@ -5994,8 +6002,6 @@ test("chat panel: after m the chat is read at once and the message is pending un
   const c = await chatPanel({ size: [80, 38], answers: { prompt: "  use the token bucket  " }, feeds: { ses_g: { items: said(2), busy: true } } });
   try {
     await c.settle(1);
-    c.key("down").run();
-    await c.settle(2);
     const before = c.chatCmds().length;
     c.key("m").run();
     await waitFor(() => c.calls.some((x) => x[0] === "send"), 2000, "send");
@@ -6022,8 +6028,6 @@ test("chat panel: where there is no room, c opens the chat in place of the lower
   const c = await chatPanel({ size: [60, 14], width: 60, feeds: { ses_g: { items: said(40), busy: true } } });
   try {
     assert.ok(!c.lines().some((l) => l.includes(" chat · ")), "no room beside the list");
-    assert.match(lastLine(c.lines()), /⏎ open  c chat/);
-    c.key("down").run(); // the stalled agent: a busy one, steerable
     assert.match(lastLine(c.lines()), /s stop  m message  c chat/);
     assert.equal(c.key("c").enabled(), true);
     assert.equal(c.key("escape").enabled(), false, "Escape closes only an open chat");
@@ -6066,8 +6070,6 @@ test("chat panel: escape sequences, wide characters and very long lines stay ins
     const c = await chatPanel({ size: [w, 38], width: w, feeds: { ses_g: { items: nasty, busy: true } } });
     try {
       await c.settle(1);
-      c.key("down").run();
-      await c.settle(2);
       const lines = c.lines();
       assert.ok(lines.some((l) => l.includes(" chat · ")), lines.join("\n"));
       const limit = Math.min(w, Math.max(P.WIDTH, Math.min(P.PANEL_MAX_WIDTH, w)));
@@ -6088,9 +6090,7 @@ test("chat panel: with --demo the chat comes from `agentgraph chat --demo`", asy
   const c = await chatPanel({ size: [80, 38], demoOn: true, feeds: { ses_g: { items: said(2), busy: true } } });
   try {
     await c.settle(1);
-    c.key("down").run();
-    await c.settle(2);
-    const cmd = c.chatCmds()[1];
+    const cmd = c.chatCmds()[0];
     assert.deepEqual(cmd.slice(1), ["-P", "-m", "agentgraph.chatfeed", "--session", "ses_g", "--json", "--limit", "40", "--demo"]);
     assert.ok(c.lines().some((l) => l.trimEnd() === " message 2"), c.lines().join("\n"));
   } finally {
