@@ -85,7 +85,7 @@ It does not block the real database (OpenCode needs it, so a run can read other 
 running programs, or reading the rest of the home folder. Environment variables that point into a checkout or the config
 folder are dropped, and the check runs with a minimal environment.
 
-Run the suite from a work copy (a git worktree), not from the live install, so the live files are not what the sandbox protects.
+Run the suite from a work copy (a git worktree), not from the live install: the sandbox protects the checkout it runs from, and the live install is the one place a mistake would cost.
 
 New flags: `--keep-work` and `--no-sandbox` (`run`, `probe`, `suite`); `--append` (`suite`: add rows to labels that already have
 rows of that suite; rep numbers continue). A suite stops with exit code 3 when the budget is spent between rounds and 4 when two
