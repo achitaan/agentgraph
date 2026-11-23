@@ -1,0 +1,14 @@
+{
+  "name": "compare",
+  "note": "The four hard tasks plus the older tasks whose prompt names no toolkit feature, so plain OpenCode can be compared fairly on at least five tasks.",
+  "scenarios": [
+    "h1-page-count",
+    "h2-contact-shape",
+    "h3-todo-flags",
+    "h4-duration-spec",
+    "p4-graph-two",
+    "p4-solo",
+    "s1-simple",
+    "s2-parallel"
+  ]
+}
