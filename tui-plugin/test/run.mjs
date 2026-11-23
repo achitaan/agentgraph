@@ -2911,7 +2911,9 @@ test("rooms: the crowded team room at 62x38 keeps the hub full size with its bub
   assert.ok(info.bubble, "the bubble is shown");
   assert.ok(info.bubble.r * 2 + 1 < hub.y0 + 1, "the bubble is over the hub");
   const idle = info.chars.filter((c) => c.room === "team" && c.kind === "idle");
-  assert.ok(idle.length >= 3 && idle.every((c) => c.x1 - c.x0 + 1 <= 3 && c.y1 - c.y0 + 1 <= 3), "idle agents are small");
+  // the furniture keeps its size first: the idle ones give way to it, and what is hidden is counted in the +N
+  assert.ok(idle.every((c) => c.x1 - c.x0 + 1 <= 3 && c.y1 - c.y0 + 1 <= 3), "idle agents are small");
+  assert.ok(idle.length >= 3 || (info.furniture.some((f) => f.room === "team") && info.more.some((m) => m.room === "team")), "idle agents are drawn, or the sofa stays and the rest is counted");
   const needs = info.chars.filter((c) => c.room === "team" && c.kind === "needs");
   assert.ok(needs.length >= 1, "agents that need the user are drawn");
   // many more idle agents than room: some are hidden, counted in the title row, the hub and the needs keep their places
@@ -2925,7 +2927,7 @@ test("rooms: the crowded team room at 62x38 keeps the hub full size with its bub
   assert.equal(many.more.length, 1);
   assert.match(many.more[0].text, /^\+\d+$/);
   assert.equal(many.more[0].room, "team");
-  assert.equal(many.more[0].count, idle.length + 40 - many.chars.filter((c) => c.room === "team" && c.kind === "idle").length, "the +N counts the hidden");
+  assert.equal(many.more[0].count, idle.length + info.more.filter((m) => m.room === "team").reduce((t, m) => t + m.count, 0) + 40 - many.chars.filter((c) => c.room === "team" && c.kind === "idle").length, "the +N counts the hidden");
   assertRoomsTidy(many, "crowded team");
 });
 

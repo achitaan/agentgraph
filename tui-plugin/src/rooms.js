@@ -215,11 +215,13 @@ const BOT_TIERS = [
   ["h", "b"],
 ];
 const LEG = [51, 65, 85];
+// The idle ones in TEAM, from a 3 x 3 person to a one-pixel stick of head, body and legs, to a pair of pixels
+const IDLE_TIERS = [[".h.", "bbb", "l.l"], ["h", "b", "l"], BOT_TIERS[3]];
 
 function palette(hub, body, dim) {
   const k = dim ? (c) => mix(c, BG, 0.5) : (c) => c;
-  const skin = k(SKIN);
-  return { a: ANTENNA, h: skin, E: dim ? mix(skin, BG, 0.35) : EYE, b: k(body), l: k(LEG) };
+  const skin = dim ? mix(SKIN, BG, 0.3) : SKIN;
+  return { a: ANTENNA, h: skin, E: dim ? mix(skin, BG, 0.35) : EYE, b: k(body), l: dim ? mix(LEG, BG, 0.15) : LEG };
 }
 
 // The furniture, two sizes a room, the larger first: parts of [sprite rows, palette, dx, dy]. It stands against the back
@@ -377,7 +379,7 @@ function fitRoom(items, stage, want = {}) {
   const W = stage.x1 - stage.x0 + 1;
   const H = stage.y1 - stage.y0 + 1;
   const total = items.length;
-  if (W < 1 || H < 2) return { placed: [], hidden: total, bubbleRow: -1 };
+  if (W < 1 || H < 2) return { placed: [], hidden: total, bubbleRow: -1, idleCount: null, idleLost: 0 };
   const cap = Math.max(1, ((W + 1) >> 1) * Math.floor((H + 1) / 3)); // no more than the smallest pairs could ever hold
   const hubItem = items.find((i) => i.hub) || null;
   const lead = items.filter((i) => !i.hub && i.kind !== "idle");
@@ -388,43 +390,96 @@ function fitRoom(items, stage, want = {}) {
   const hub = ht >= 0 ? hubItem : null;
   const labels = new Map();
   for (const it of items) if (it.name) labels.set(it, { text: (it.mark ? it.mark + " " : "") + it.name, w: displayWidth((it.mark ? it.mark + " " : "") + it.name) });
-  // `named` is true to name it; for the hub 2 names it in full, 1 cut to its sprite's width, 0 not at all
+  // `named` is true to name it; for the hub 2 names it in full (cut to the stage only when nothing else would fit), 1 cut
+  // to its sprite's width, 0 not at all
+  const cells = new Map();
   const cell = (item, rows, named) => {
+    const key = rows === undefined ? "" : rows.length + ":" + named;
+    let mine = cells.get(item);
+    if (!mine) cells.set(item, (mine = new Map()));
+    let made = mine.get(key);
+    if (!made) mine.set(key, (made = cellOf(item, rows, named)));
+    return made;
+  };
+  const cellOf = (item, rows, named) => {
     const l = named ? labels.get(item) : null;
-    let text = l ? l.text : "";
-    let nw = l ? l.w : 0;
-    if (named === 1 && nw > rows[0].length) {
-      text = truncate(text, rows[0].length);
-      nw = displayWidth(text);
-    }
-    if (nw > W) nw = 0;
-    return { item, rows, sw: rows[0].length, sh: rows.length, label: nw ? text : null, nw, iw: Math.max(rows[0].length, nw) };
+    let text = l ? l.text : null;
+    if (text && named === 1) text = truncate(text, rows[0].length);
+    else if (text && l.w > W) text = truncate(text, W);
+    return { item, rows, sw: rows[0].length, sh: rows.length, text, tw: text ? (text === (l && l.text) ? l.w : displayWidth(text)) : 0 };
+  };
+  // One line of cells: sprites a pixel apart, each name centred under its sprite. A name that would touch the one before it
+  // is cut down to what is left (the hub comes first, so it keeps its own), or left out under three cells.
+  // -> { pos: [{ c, sx, lx, text, nw }], min, max } in cells relative to the first sprite.
+  const flow = (cells, gap = 1) => {
+    const pos = [];
+    let le = -Infinity;
+    let min = 0;
+    let max = 0;
+    cells.forEach((c, i) => {
+      const sx = i ? pos[i - 1].sx + pos[i - 1].c.sw + gap : 0;
+      let text = c.text;
+      let nw = c.tw;
+      let lx = sx + ((c.sw - nw) >> 1);
+      if (text && lx < le + 2) {
+        let a = nw - 1;
+        for (; a >= 3; a -= 1) if (sx + ((c.sw - a) >> 1) >= le + 2) break;
+        if (a >= 3) {
+          text = truncate(text, a);
+          nw = displayWidth(text);
+          lx = sx + ((c.sw - nw) >> 1);
+        } else {
+          text = null;
+          nw = 0;
+        }
+      }
+      if (text) le = lx + nw - 1;
+      pos.push({ c, sx, lx, text, nw });
+      min = Math.min(min, sx, text ? lx : sx);
+      max = Math.max(max, sx + c.sw - 1, text ? lx + nw - 1 : sx);
+    });
+    return { pos, min, max };
   };
   const wrap = (cells) => {
     const lines = [];
-    let cur = null;
+    let cur = [];
     for (const c of cells) {
-      if (!cur || cur.w + 1 + c.iw > W) {
-        cur = { cells: [], w: -1 };
+      if (cur.length && (() => { const f = flow([...cur, c]); return f.max - f.min + 1 > W; })()) {
         lines.push(cur);
+        cur = [];
       }
-      cur.cells.push(c);
-      cur.w += 1 + c.iw;
+      cur.push(c);
     }
+    if (cur.length) lines.push(cur);
     return lines;
   };
   // one line of cells with its bottom pixel at B: -> its top pixel, or null when it leaves the stage
-  const lay = (line, B, out) => {
-    const has = line.cells.some((c) => c.label);
+  const lay = (cells, B, out) => {
+    let f = flow(cells);
+    // names that were cut or left out: stand the people further apart while the stage holds them
+    if (cells.length > 1 && f.pos.some((p) => p.c.text !== p.text)) {
+      const kept = (x) => x.pos.reduce((t, p) => t + (p.text ? displayWidth(p.text) : 0), 0);
+      for (let g = 2; g <= 14; g += 1) {
+        const t = flow(cells, g);
+        if (t.max - t.min + 1 > W) break;
+        if (kept(t) > kept(f)) f = t;
+        if (!f.pos.some((p) => p.c.text !== p.text)) break;
+      }
+    }
+    const has = f.pos.some((p) => p.text);
     if (has && B % 2 === 0) B -= 1;
     const band = has ? 3 : 0;
-    const top = B - band - Math.max(...line.cells.map((c) => c.sh)) + 1;
+    const top = B - band - Math.max(...cells.map((c) => c.sh)) + 1;
     if (top < stage.y0) return null;
-    let x = stage.x0 + ((W - line.w) >> 1);
-    for (const c of line.cells) {
+    const ox = stage.x0 + ((W - (f.max - f.min + 1)) >> 1) - f.min;
+    for (const p of f.pos) {
+      const c = p.c;
       const sy = B - band - c.sh + 1;
-      out.push({ item: c.item, rows: c.rows, x: x + ((c.iw - c.sw) >> 1), y: sy, sw: c.sw, sh: c.sh, label: c.label, nx: x + ((c.iw - c.nw) >> 1), nr: c.label ? (B - 1) >> 1 : -1, ix: x, iw: c.iw, top: sy, bottom: c.label ? B : sy + c.sh - 1 });
-      x += c.iw + 1;
+      const x = ox + p.sx;
+      const nx = ox + p.lx;
+      const ix = p.text ? Math.min(x, nx) : x;
+      const iw = (p.text ? Math.max(x + c.sw, nx + p.nw) : x + c.sw) - ix;
+      out.push({ item: c.item, rows: c.rows, x, y: sy, sw: c.sw, sh: c.sh, label: p.text, nx, nr: p.text ? (B - 1) >> 1 : -1, ix, iw, top: sy, bottom: p.text ? B : sy + c.sh - 1 });
     }
     return top;
   };
@@ -432,7 +487,7 @@ function fitRoom(items, stage, want = {}) {
   const lower = (c, kn, n) => {
     const cells = hub ? [cell(hub, HUB_TIERS[ht], c.hubName)] : [];
     for (let i = 0; i < kn; i += 1) cells.push(cell(leadAt[i], BOT_TIERS[c.T], i < n));
-    if (cells.some((x) => x.iw > W)) return null;
+    if (cells.some((x) => x.sw > W)) return null;
     const out = [];
     const lines = wrap(cells);
     let B = stage.y1;
@@ -463,27 +518,41 @@ function fitRoom(items, stage, want = {}) {
         best = r;
       } else hi = mid - 1;
     }
-    const rows = BOT_TIERS[c.IT];
+    const rows = IDLE_TIERS[c.IT];
     const sw = rows[0].length;
     const sh = rows.length;
-    const cols = Math.floor((W + 1) / (sw + 1));
-    const gx = stage.x0 + ((W - (cols * (sw + 1) - 1)) >> 1);
+    const gap = sw === 1 ? 2 : 1; // the one-pixel people stand two apart
+    // when not all of them fit, a `+N` closes the last row; it takes the cells of the last sprites of that row
+    let cols = Math.floor((W + gap) / (sw + gap));
+    let reserve = 0;
+    if (cols > 0 && idleAt.length > cols * (best.B - sh + 1 >= stage.y0 ? Math.floor((best.B - sh + 1 - stage.y0) / (sh + 1)) + 1 : 0)) {
+      reserve = Math.ceil((("+" + idle.length).length + 1) / (sw + gap));
+      if (cols - reserve < 1) reserve = 0;
+      cols -= reserve;
+    }
+    const gx = stage.x0 + ((W - (cols * (sw + gap) - gap + (reserve ? reserve * (sw + gap) : 0))) >> 1);
     let shown = 0;
+    let count = null;
     for (let b = best.B; cols > 0 && b - sh + 1 >= stage.y0 && shown < idleAt.length; b -= sh + 1) {
       for (let k = 0; k < cols && shown < idleAt.length; k += 1) {
-        const x = gx + k * (sw + 1);
+        const x = gx + k * (sw + gap);
         best.out.push({ item: idleAt[shown], rows, x, y: b - sh + 1, sw, sh, label: null, nx: 0, nr: -1, ix: x, iw: sw, top: b - sh + 1, bottom: b });
         shown += 1;
       }
+      if (!count && reserve) count = { c0: gx + cols * (sw + gap), r: (b - 1) >> 1, bottom: b };
     }
-    return { out: best.out, bubbleRow: best.bubbleRow, lost: lead.length - lo, idleLost: idle.length - shown };
+    const idleLost = idle.length - shown;
+    if (count && idleLost > 0) count.text = "+" + idleLost;
+    else count = null;
+    return { out: best.out, bubbleRow: best.bubbleRow, lost: lead.length - lo, idleLost, count };
   };
   let found = null;
   let foundKey = null;
   for (const gap of want.bubble && hub ? [1, 0, -1] : [-1]) { // the bubble's gap to the hub; -1: no bubble
     for (const hubName of hub && labels.has(hub) ? [2, 1, 0] : [0]) {
       for (const T of leadAt.length ? [0, 1, 2, 3] : [0]) {
-        for (const IT of idleAt.length && T < 3 ? [2, 3] : [3]) {
+        let tLost = Infinity; // a bigger T only matters while working agents are still lost
+        for (const IT of idleAt.length ? (T < 3 ? [0, 1, 2] : [1, 2]) : [2]) {
           const c = { gap, hubName, T, IT };
           const base = run(c, 0);
           if (!base) continue;
@@ -501,18 +570,24 @@ function fitRoom(items, stage, want = {}) {
           }
           const named = r.out.filter((p) => p.label && !p.item.hub).length;
           const hubLabel = r.out.find((p) => p.label && p.item.hub);
-          const key = [r.lost, gap < 0 ? 2 : 1 - gap, T, hubLabel ? (hubLabel.label === labels.get(hub).text ? 0 : 1) : 2, r.idleLost, IT, -named];
+          const key = [r.lost, gap < 0 ? 2 : 1 - gap, hubLabel ? (hubLabel.label === labels.get(hub).text ? 0 : 1) : 2, T, r.idleLost, IT, -named];
           let better = !foundKey;
           for (let i = 0; !better && i < key.length && key[i] <= foundKey[i]; i += 1) if (key[i] < foundKey[i]) better = true;
           if (better) {
             found = r;
             foundKey = key;
           }
+          tLost = Math.min(tLost, r.lost);
+          if (r.idleLost === 0) break; // a smaller idle sprite can only be worse
         }
+        if (tLost === 0) break;
       }
+      // nothing later can beat: no one lost, the bubble as close as asked, the hub named in full
+      if (foundKey && foundKey[0] === 0 && foundKey[1] === (gap < 0 ? 2 : 1 - gap) && foundKey[2] === 0) break;
     }
+    if (foundKey && foundKey[0] === 0 && foundKey[1] === 0) break;
   }
-  return { placed: found ? found.out : [], hidden: total - (found ? found.out.length : 0), bubbleRow: found ? found.bubbleRow : -1 };
+  return { placed: found ? found.out : [], hidden: total - (found ? found.out.length : 0), bubbleRow: found ? found.bubbleRow : -1, idleCount: found ? found.count : null, idleLost: found ? found.idleLost : 0 };
 }
 
 const pick = (o, k) => (typeof k === "string" && Object.hasOwn(o, k) ? o[k] : undefined); // never a name from the prototype
@@ -525,6 +600,7 @@ const colorFor = (c, dark) => (dark ? c : undefined);
 function planRoom(items, stage, want, name) {
   const base = fitRoom(items, stage, want);
   base.furniture = null;
+  base.bubbleSpot = null;
   if (!name) return base;
   const W = stage.x1 - stage.x0 + 1;
   const H = stage.y1 - stage.y0 + 1;
@@ -534,15 +610,33 @@ function planRoom(items, stage, want, name) {
   const idleOf = (fit) => fit.placed.filter((p) => p.item.kind === "idle").length;
   const hubOf = (fit) => fit.placed.find((p) => p.item.hub) || null;
   const baseHub = hubOf(base);
-  for (const tier of tiers) {
+  const baseLead = lead(base);
+  // first looking for a piece that leaves the idle ones as people (three pixels tall); when none does, the idle give way
+  const idleH = (fit) => fit.placed.reduce((m, p) => (p.item.kind === "idle" ? Math.max(m, p.sh) : m), 0);
+  const wantIdle = Math.min(idleOf(base), 3);
+  for (let pass = 0; pass < 2; pass += 1) for (let t = 0; t < tiers.length; t += 1) {
+    const tier = tiers[t];
     if (tier.w > W || tier.h + 2 > H) continue;
-    const furniture = { tier, x: stage.x0 + ((W - tier.w) >> 1), y: stage.y0 };
-    if (!items.length) return { ...base, furniture };
-    const fit = fitRoom(items, { ...stage, y0: stage.y0 + tier.h + 1 }, want);
-    const hub = hubOf(fit);
-    const ok = lead(fit).length === lead(base).length && sum(lead(fit)) >= sum(lead(base)) && (!baseHub || (hub && hub.sh === baseHub.sh && !!hub.label === !!baseHub.label)) &&
-      (base.bubbleRow < 0 || fit.bubbleRow >= 0) && idleOf(fit) >= Math.min(idleOf(base), 3);
-    if (ok) return { ...fit, furniture };
+    const middle = { tier, x: stage.x0 + ((W - tier.w) >> 1), y: stage.y0 };
+    if (!items.length) return { ...base, furniture: middle };
+    // the furniture in the middle with the bubble under it; else in a corner with the bubble beside it, in the same rows
+    const options = [{ furniture: middle, spot: null, want }];
+    if (want.bubble && baseHub) {
+      for (const left of [true, false]) {
+        const x = left ? stage.x0 : stage.x1 - tier.w + 1;
+        const x0 = left ? x + tier.w + 1 : stage.x0 - 1;
+        const x1 = left ? stage.x1 + 1 : x - 2;
+        if (x1 - x0 + 1 >= 8) options.push({ furniture: { tier, x, y: stage.y0 }, spot: { x0, x1, top: stage.y0 + 1 }, want: { ...want, bubble: false } });
+      }
+    }
+    for (const o of options) {
+      const fit = fitRoom(items, { ...stage, y0: stage.y0 + tier.h + 1 }, o.want);
+      const hub = hubOf(fit);
+      const ok = lead(fit).length === baseLead.length && sum(lead(fit)) >= sum(baseLead) && (!baseHub || (hub && hub.sh === baseHub.sh && !!hub.label === !!baseHub.label)) &&
+        (base.bubbleRow < 0 || o.spot || fit.bubbleRow >= 0) &&
+        (pass === 1 ? t < tiers.length - 1 || idleOf(fit) >= wantIdle : idleOf(fit) >= wantIdle && (!wantIdle || idleH(fit) >= Math.min(idleH(base), 3)));
+      if (ok) return { ...fit, furniture: o.furniture, bubbleSpot: o.spot };
+    }
   }
   return base;
 }
@@ -564,6 +658,83 @@ function cachedPlan(doc, key, make) {
     kept.set(key, plan);
   }
   return plan;
+}
+
+// The way for the footprints: over free floor and through the doors only, from the free spot nearest the middle of the room
+// the hub came from to the free cell nearest its feet, drawn straight wherever the way is clear. -> points, or null.
+function routeAround(pix, pass, room, feet) {
+  const { w, h } = pix;
+  const open = new Uint8Array(w * h); // 1: free floor or door
+  for (let i = 0; i < open.length; i += 1) open[i] = pass[i] === 1 && !pix.taken[i] ? 1 : 0;
+  const ok = (x, y) => x >= 0 && y >= 0 && x < w && y < h && open[y * w + x] === 1;
+  const [cx, cy] = centreOf(room);
+  let start = null;
+  for (let d = 0; d <= 14 && !start; d += 1) {
+    let bestD = Infinity;
+    for (let y = Math.max(room.y0 + 1, cy - d); y <= Math.min(room.y1 - 1, cy + d); y += 1) for (let x = Math.max(room.x0 + 1, cx - d); x <= Math.min(room.x1 - 1, cx + d); x += 1) {
+      const dd = Math.hypot(x - cx, y - cy);
+      if (open[y * w + x] === 1 && dd < bestD) {
+        bestD = dd;
+        start = [x, y];
+      }
+    }
+  }
+  if (!start) return null;
+  const prev = new Int32Array(w * h).fill(-1);
+  const queue = new Int32Array(w * h);
+  let head = 0;
+  let tail = 0;
+  queue[tail++] = start[1] * w + start[0];
+  prev[queue[0]] = queue[0];
+  let goal = -1;
+  const DX = [1, -1, 0, 0, 1, 1, -1, -1];
+  const DY = [0, 0, 1, -1, 1, -1, 1, -1];
+  while (head < tail) {
+    const cur = queue[head++];
+    const x = cur % w;
+    const y = (cur - x) / w;
+    if (Math.abs(x - feet[0]) <= 2 && Math.abs(y - feet[1]) <= 2) {
+      goal = cur;
+      break;
+    }
+    for (let k = 0; k < 8; k += 1) {
+      const nx = x + DX[k];
+      const ny = y + DY[k];
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+      const at = ny * w + nx;
+      if (open[at] !== 1 || prev[at] >= 0) continue;
+      if (k >= 4 && (open[y * w + nx] !== 1 || open[ny * w + x] !== 1)) continue;
+      prev[at] = cur;
+      queue[tail++] = at;
+    }
+  }
+  if (goal < 0) return null;
+  const cells = [];
+  for (let at = goal; ; at = prev[at]) {
+    cells.push([at % w, Math.floor(at / w)]);
+    if (prev[at] === at) break;
+  }
+  cells.reverse();
+  const clear = (a, b) => {
+    const n = Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
+    for (let i = 1; i < n; i += 1) if (!ok(Math.round(a[0] + ((b[0] - a[0]) * i) / n), Math.round(a[1] + ((b[1] - a[1]) * i) / n))) return false;
+    return true;
+  };
+  const pts = [cells[0]];
+  let at = 0;
+  while (at < cells.length - 1) {
+    let next = at + 1;
+    for (let k = Math.min(cells.length - 1, at + 40); k > at + 1; k -= 1) {
+      if (clear(cells[at], cells[k])) {
+        next = k;
+        break;
+      }
+    }
+    pts.push(cells[next]);
+    at = next;
+  }
+  pts.push(feet);
+  return pts;
 }
 
 const BUBBLE = [226, 232, 240];
@@ -596,17 +767,28 @@ function buildRooms(doc, w, rows, now, options) {
     pix.rect(r.x1, r.y0, r.x1, r.y1, wall);
   }
   const door = mix(BG, ZONE_RGB.team, 0.2);
+  const pass = new Uint8Array(pix.w * pix.h); // where feet may go: the floors, and the doors in the walls
+  for (const [name] of ROOMS) {
+    const r = rooms[name];
+    for (let y = r.y0 + 1; y < r.y1; y += 1) for (let x = r.x0 + 1; x < r.x1; x += 1) pass[y * pix.w + x] = 1;
+  }
   for (const [a, b] of [["terminal", "files"], ["files", "web"], ["search", "thinking"], ["thinking", "team"]]) {
     const l = rooms[a];
     const ym = centreOf(l)[1];
     const half = Math.min(1, (l.y1 - l.y0 - 3) >> 1);
-    if (half >= 0) pix.rect(l.x1, ym - half, rooms[b].x0, ym + half, door);
+    if (half >= 0) {
+      pix.rect(l.x1, ym - half, rooms[b].x0, ym + half, door);
+      for (let y = ym - half; y <= ym + half; y += 1) for (let x = l.x1; x <= rooms[b].x0; x += 1) pass[y * pix.w + x] = 1;
+    }
   }
   for (const [a, b] of [["terminal", "search"], ["files", "thinking"], ["web", "team"]]) {
     const t = rooms[a];
     const xm = centreOf(t)[0];
     const half = Math.min(1, (t.x1 - t.x0 - 3) >> 1);
-    if (half >= 0) pix.rect(xm - half, t.y1, xm + half, rooms[b].y0, door);
+    if (half >= 0) {
+      pix.rect(xm - half, t.y1, xm + half, rooms[b].y0, door);
+      for (let y = t.y1; y <= rooms[b].y0; y += 1) for (let x = xm - half; x <= xm + half; x += 1) pass[y * pix.w + x] = 1;
+    }
   }
 
   // plaques, and each room's stage under them
@@ -635,7 +817,9 @@ function buildRooms(doc, w, rows, now, options) {
   // the characters in their rooms
   const placed = [];
   const bubbleRows = {};
+  const bubbleSpots = {};
   const moreDraws = [];
+  const countDraws = [];
   const furnitureAt = [];
   const target = model.hub && model.hub.working && model.act ? clean(model.act.target) : "";
   let bubbleText = "";
@@ -649,9 +833,11 @@ function buildRooms(doc, w, rows, now, options) {
     const mine = model.items.filter((i) => i.room === name);
     const st = stages[name];
     const bubble = !!bubbleText && model.hub.room === name;
-    const key = [name, st.x0, st.x1, st.y0, st.y1, bubble ? 1 : 0, compact ? 1 : 0, ...mine.map((i) => [i.kind, i.name, i.mark, i.hub ? 1 : 0, i.working ? 1 : 0, i.dim ? 1 : 0, i.color.join(",")].join(":"))].join("|");
-    const fit = cachedPlan(doc, key, () => planRoom(mine, st, { bubble }, compact ? null : name));
+    const bw0 = bubble ? Math.min(displayWidth(bubbleText) + 4, 11) : 0;
+    const key = [name, st.x0, st.x1, st.y0, st.y1, bw0, compact ? 1 : 0, ...mine.map((i) => [i.kind, i.name, i.mark, i.hub ? 1 : 0, i.working ? 1 : 0, i.dim ? 1 : 0, i.color.join(",")].join(":"))].join("|");
+    const fit = cachedPlan(doc, key, () => planRoom(mine, st, { bubble, bubbleW: bw0 }, compact ? null : name));
     bubbleRows[name] = fit.bubbleRow;
+    bubbleSpots[name] = fit.bubbleSpot || null;
     if (fit.furniture) {
       const f = fit.furniture;
       pix.take(f.x, f.y, f.x + f.tier.w - 1, f.y + f.tier.h - 1);
@@ -663,33 +849,23 @@ function buildRooms(doc, w, rows, now, options) {
     }
     // the ones that did not fit: `+N` at the right end of the plaque row, when the plaque leaves room
     const t = plaqueDraws.find((d) => d.name === name);
-    const text = "+" + fit.hidden;
+    if (fit.idleCount) {
+      const ic = fit.idleCount;
+      pix.take(ic.c0, ic.r * 2, ic.c0 + ic.text.length - 1, ic.r * 2 + 1);
+      countDraws.push({ name, text: ic.text, c0: ic.c0, r: ic.r });
+      info.more.push({ room: name, text: ic.text, count: fit.idleLost, c0: ic.c0, c1: ic.c0 + ic.text.length - 1, r: ic.r });
+    }
+    const lostHere = fit.hidden - (fit.idleCount ? fit.idleLost : 0);
+    const text = "+" + lostHere;
     const c1 = st.x1;
-    if (fit.hidden > 0 && t && c1 - text.length + 1 > t.c0 + displayWidth(t.text) + 1) {
+    if (lostHere > 0 && t && c1 - text.length + 1 > t.c0 + displayWidth(t.text) + 1) {
       const c0 = c1 - text.length + 1;
       pix.take(c0, t.tr * 2, c1, t.tr * 2 + 1);
       moreDraws.push({ name, text, c0, r: t.tr });
-      info.more.push({ room: name, text, count: fit.hidden, c0, c1, r: t.tr });
+      info.more.push({ room: name, text, count: lostHere, c0, c1, r: t.tr });
     }
   }
   const hubAt = placed.find((p) => p.item.hub) || null;
-
-  // the walk: from the middle of the room of the last action to the hub's place, during the first WALK_MS of its action
-  let walk = null;
-  const before = model.act && Array.isArray(model.act.recent) ? model.act.recent.find(isObject) : null;
-  const fromRoom = before ? roomOfActivity(before, null) : null;
-  if (hubAt && model.hub.working && fromRoom && fromRoom !== hubAt.room) {
-    const feet = [hubAt.x + (hubAt.sw >> 1), hubAt.y + hubAt.sh - 1];
-    const pts = pathBetween(rooms, fromRoom, hubAt.room);
-    pts[pts.length - 1] = feet;
-    walk = { pts, lens: lengthsOf(pts) };
-  }
-  let walkAt = null;
-  if (walk && !reduced && model.start !== null) {
-    const t = (now - model.start) / WALK_MS;
-    if (t >= 0 && t < 1) walkAt = pointAt(walk.pts, walk.lens, walk.lens[walk.lens.length - 1] * (t * t * (3 - 2 * t)));
-  }
-  info.walking = !!walkAt;
 
   // the bubble over the hub: what it does, cut to the room, with a tail of one pixel pointing at the hub
   let bubble = null;
@@ -697,21 +873,31 @@ function buildRooms(doc, w, rows, now, options) {
   if (hubAt && bubbleText) {
     const r = rooms[hubAt.room];
     const br = bubbleRows[hubAt.room];
-    const bw = displayWidth(bubbleText) + 4;
-    if (br >= 1) {
-      for (const bx of [hubAt.x + (hubAt.sw >> 1) - (bw >> 1), r.x1 - 2 - bw + 1, r.x0 + 2]) {
+    const spot = bubbleSpots[hubAt.room];
+    const hubMid = hubAt.x + (hubAt.sw >> 1);
+    if (spot) {
+      // beside the furniture: as wide as the gap allows, the text cut to fit
+      const bw = Math.min(displayWidth(bubbleText) + 4, spot.x1 - spot.x0 + 1);
+      const text = truncate(bubbleText, bw - 4);
+      const x0 = spot.x0 + ((spot.x1 - spot.x0 + 1 - bw) >> 1);
+      if (displayWidth(text) >= 3 && pix.free(x0, spot.top, x0 + bw - 1, spot.top + 1)) {
+        bubble = { text, c0: x0, r: spot.top >> 1, w: bw };
+        pix.take(x0, spot.top, x0 + bw - 1, spot.top + 1);
+      }
+    } else if (br >= 1) {
+      const bw = displayWidth(bubbleText) + 4;
+      for (const bx of [hubMid - (bw >> 1), r.x1 - 2 - bw + 1, r.x0 + 2]) {
         const x0 = Math.max(r.x0 + 2, Math.min(bx, r.x1 - 2 - bw + 1));
         if (pix.free(x0, br * 2, x0 + bw - 1, br * 2 + 1)) {
           bubble = { text: bubbleText, c0: x0, r: br, w: bw };
           pix.take(x0, br * 2, x0 + bw - 1, br * 2 + 1);
-          const tx = Math.max(x0 + 2, Math.min(hubAt.x + (hubAt.sw >> 1), x0 + bw - 3));
+          const tx = Math.max(x0 + 2, Math.min(hubMid, x0 + bw - 3));
           if (br * 2 + 2 < hubAt.y && pix.free(tx, br * 2 + 2, tx, br * 2 + 2)) tail = [tx, br * 2 + 2];
           break;
         }
       }
     }
   }
-  info.bubble = bubble && !walkAt ? { text: bubble.text, c0: bubble.c0, c1: bubble.c0 + bubble.w - 1, r: bubble.r } : null;
 
   // furniture that did not fit beside the characters: where it fits in the free space of the stage
   if (!compact) {
@@ -736,6 +922,26 @@ function buildRooms(doc, w, rows, now, options) {
   }
   for (const f of furnitureAt) info.furniture.push({ room: f.room, x0: f.x, y0: f.y, x1: f.x + f.tier.w - 1, y1: f.y + f.tier.h - 1 });
 
+  // the walk: from the middle of the room of the last action round whatever stands in the way to the hub's place, during
+  // the first WALK_MS of its action; the footprints are laid along it on bare floor only
+  let walk = null;
+  const before = model.act && Array.isArray(model.act.recent) ? model.act.recent.find(isObject) : null;
+  const fromRoom = before ? roomOfActivity(before, null) : null;
+  if (hubAt && model.hub.working && fromRoom && fromRoom !== hubAt.room) {
+    const feet = [hubAt.x + (hubAt.sw >> 1), hubAt.y + hubAt.sh - 1];
+    const routed = cachedPlan(doc, ["route", w, rows, fromRoom, feet.join(","), compact ? 1 : 0, placed.length, furnitureAt.length].join("|"), () => routeAround(pix, pass, rooms[fromRoom], feet) || pathBetween(rooms, fromRoom, hubAt.room));
+    const pts = routed.map((q) => q.slice());
+    pts[pts.length - 1] = feet;
+    walk = { pts, lens: lengthsOf(pts) };
+  }
+  let walkAt = null;
+  if (walk && !reduced && model.start !== null) {
+    const t = (now - model.start) / WALK_MS;
+    if (t >= 0 && t < 1) walkAt = pointAt(walk.pts, walk.lens, walk.lens[walk.lens.length - 1] * (t * t * (3 - 2 * t)));
+  }
+  info.walking = !!walkAt;
+  info.bubble = bubble && !walkAt ? { text: bubble.text, c0: bubble.c0, c1: bubble.c0 + bubble.w - 1, r: bubble.r } : null;
+
   // drawing: the trail, the furniture, the bubble's edge, the characters, then the text over them
   if (walk && hubAt) {
     const total = walk.lens[walk.lens.length - 1];
@@ -744,7 +950,7 @@ function buildRooms(doc, w, rows, now, options) {
       const [x, y] = pointAt(walk.pts, walk.lens, i * 3 + 2);
       const tx = Math.round(x);
       const ty = Math.round(y) + (i % 2 ? 1 : 0);
-      if (pix.free(tx, ty, tx, ty)) pix.set(tx, ty, mix(pix.get(tx, ty), ANTENNA, Math.min(0.4, 0.1 + 0.025 * i)));
+      if (pix.free(tx, ty, tx, ty) && pass[ty * pix.w + tx]) pix.set(tx, ty, mix(pix.get(tx, ty), ANTENNA, Math.min(0.4, 0.1 + 0.025 * i)));
     }
   }
   for (const f of furnitureAt) for (const [rowsOf, pal, dx, dy] of f.tier.parts) pix.sprite(f.x + dx, f.y + dy, rowsOf, pal);
@@ -772,6 +978,7 @@ function buildRooms(doc, w, rows, now, options) {
     pix.text(t.c0, t.tr, t.text, on ? PLAQUE_DARK : mix(z, WHITE, 0.2), on ? z : mix(BG, z, 0.24), on);
   }
   for (const m of moreDraws) pix.text(m.c0, m.r, m.text, mix(BG, ZONE_RGB[m.name], 0.75));
+  for (const m of countDraws) pix.text(m.c0, m.r, m.text, mix(BG, WHITE, 0.4));
   for (const p of placed) {
     if (!p.label || (p.item.hub && walkAt)) continue;
     const it = p.item;
