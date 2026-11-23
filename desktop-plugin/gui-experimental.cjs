@@ -6116,7 +6116,7 @@ var AGENTGRAPH_ASSETS = (function () {
           // "Now: reading a file · 3 s ago", then what it is working on (its cleaned target) on a line of its own, dim and cut short.
           const ago = liveAgo(agent.activity.time, snapshot?.generated), line = el('p', 'ag-detail-activity ag-detail-now', 'Now: ' + words + (ago ? ' · ' + ago : ''));
           line.dataset.kind = text(agent.activity.kind); line.dataset.zone = recent.zone; detailScroll.append(line);
-          if (recent.target) { const target = el('p', 'ag-detail-target', recent.target); target.title = recent.target; detailScroll.append(target); }
+          if (recent.target) { detailScroll.append(el('p', 'ag-detail-target', recent.target)); }
         } else if (agent.busy) {
           const doing = activityLine(agent);
           if (doing) { const line = el('p', 'ag-detail-activity', doing); line.dataset.kind = text(agent.activity.kind); detailScroll.append(line); }

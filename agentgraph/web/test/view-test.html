@@ -2997,6 +2997,7 @@
         const now = root.querySelector('.ag-detail-now'), target = root.querySelector('.ag-detail-target');
         assert(now && now.textContent === 'Now: running a command · 5 s ago', 'the Now line: ' + now?.textContent);
         assert(root.querySelector('.ag-detail-title').nextElementSibling === now && now.nextElementSibling === target, 'the lines are not under the name in order');
+        assert(!target.hasAttribute('title'), 'the target is in a tooltip');
         assert(target.textContent === 'make build-demo --flag' && getComputedStyle(target).whiteSpace === 'nowrap' && getComputedStyle(target).textOverflow === 'ellipsis', 'the target line is not one truncated line: ' + target.textContent);
         assert(parseFloat(getComputedStyle(target).fontSize) < parseFloat(getComputedStyle(now).fontSize) + 1 && getComputedStyle(target).color !== getComputedStyle(root.querySelector('.ag-detail-title')).color, 'the target is not dim');
         const spent = [...root.querySelectorAll('.ag-stat')].find(item => item.querySelector('.ag-stat-label').textContent === 'Spent');
