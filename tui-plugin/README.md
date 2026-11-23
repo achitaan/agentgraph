@@ -172,21 +172,42 @@ view, the list opens as a session panel:
 
 ## The rooms (the panel's default scene)
 
-The panel opens on a floor plan drawn in half-block pixels: six rooms in a 3 by 2 grid, TERMINAL, FILES and WEB above
-SEARCH, THINKING and TEAM. The orchestrator stands in the room of what it is doing now (spawning, messages and tasks
-are TEAM's; tools it has no room for are TERMINAL's; a hub that is not working stands in TEAM with nothing lit), and
-that room is lit while the others are dim. Each other agent stands in the room of its tool; a working agent with no
-tool is thinking, an idle one rests in TEAM, dimmed and unnamed, and a stuck or sent-back one stands in TEAM with its
-name and mark. A speech bubble over the orchestrator shows its target; footprints run from the room of its last
-action to its own. Working characters bob a pixel every 500 ms and the orchestrator walks for 1.2 s when a new action
-starts; `reducedMotion: true` stops all of it. Everything is a function of the snapshot and the time.
+The panel opens on a floor plan drawn in half-block pixels: six rooms in a 3 by 2 grid with shared one-pixel walls and
+a flat, calm floor, TERMINAL, FILES and WEB above SEARCH, THINKING and TEAM. Each room has its title on a small plaque
+and its own furniture (desk and monitor, cabinet, globe, magnifier, light bulb, sofa), always in front of the
+characters, never under them; the furniture shrinks a size or two before it is dropped. The orchestrator stands in the
+room of what it is doing now (spawning, messages and tasks are TEAM's; tools it has no room for are TERMINAL's; a hub
+that is not working stands in TEAM with nothing lit); that room is lit (brighter floor and wall, a solid plaque) while
+the others are dim. Everyone is the same character: the orchestrator is gold, larger and has an antenna; the others take
+a colour from their name, working ones bob a pixel every 500 ms, idle ones rest in TEAM, dimmed and unnamed, and a stuck
+or sent-back one stands in TEAM with its name and mark. Names are centred under the characters and never share a cell;
+the orchestrator's name comes first, and where room is short, idle people become small unnamed figures and a `+N` says
+how many more there are. A speech bubble with a small tail beside the orchestrator shows its target; furniture moves to
+the corner of the room to make space for it. Faint footprints run along the bare floor from the room of its last action
+to its own. The orchestrator walks for 1.2 s when a new action starts; `reducedMotion: true` stops all of it.
+Everything is a function of the snapshot and the time.
 
-Under the picture: the header (the hub, `4/11  $7.65`), what needs you (at most 3 lines), then `NOW`, `BEFORE` (its
-last actions) and one line per working agent (name, tool, task, cost). Only the orchestrator's line carries a target.
-As the panel shrinks things give way in this order: the working lines, BEFORE, the props, the bubble, the names (the
-orchestrator's last), NOW, what needs you; the smallest size is 36 by 14, below that the list shows. `o` swaps the
+Around the picture: a status bar on top (the hub on the left, `4/11  $7.65` on the right) and what needs you as rows
+with a mark chip, the name, the reason and the loop count in columns, red for stuck and amber for sent back (at most 3,
+then `+N more`). Under the picture: a `NOW` bar tinted by the room (zone icon, verb, target), `BEFORE` as small chips of
+the orchestrator's last actions, a thin rule, then one row per working agent in columns (name, icon and verb, task, cost
+at the right edge). Only the orchestrator carries a target. A light theme gets the tones only, no colours or
+backgrounds. As the panel shrinks things give way in this order: the working rows, BEFORE, the furniture, the bubble, the
+names (the orchestrator's last), NOW, what needs you. Below 15 columns per room or 14 pixel rows per room (36 by 14 is
+the smallest) the picture goes compact: short plaque titles, no furniture; below that size the list shows. `o` swaps the
 rooms and the orbit (remembered while the app runs, named in the key hints); `d`, the arrow keys and the mouse belong
-to the orbit. Option `picture: "orbit"` opens on the orbit instead.
+to the orbit. Option `picture: "orbit"` opens on the orbit instead. 
+
+### The text list (`g`)
+
+`g` swaps to the text list, drawn in the same style as the rooms (a dark theme gets backgrounds, a light one tones only;
+the narrow sidebar keeps its plain list): a status bar on top (the hub on the left, steps and spend on the right), then
+sections under a labelled rule (`NEEDS YOU`, `PROPOSALS`, `LOOP RUNS`, `AT WORK` or `AGENTS`, `PATHS`). Rows are in
+aligned columns: mark, name, state (a coloured zone icon and verb for a tool, else `working`, `thinking`, `replying`; `↻n`
+after a loop), task cut with `…`, and the time or the idle count at the right edge. A line under a row, indented and
+dim, holds its target or what it says. One footer block under a thin rule holds progress, spend and context, and the key
+hints (the key plain, its label dim). The selected row (`›`) is tinted on a dark theme. Up, down, return, the mouse, `d`
+and the chat opening under a row work as before.
 
 The idea comes from AgentMove (MIT licence); this is a new implementation (`src/rooms.js`), no code copied.
 

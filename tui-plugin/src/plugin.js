@@ -278,7 +278,8 @@ export function createPlugin(host) {
       line.map((span) => {
         const tone = tones[span.tone] || tones.plain;
         const own = span.color ? colorProp(span.color) : undefined; // the orbit's group colours
-        return element("text", { fg: own || colorProp(tone.fg), attributes: !own && tone.bold ? BOLD : undefined, wrapMode: "none", flexShrink: 0 }, [span.text]);
+        const bg = span.bg ? colorProp(span.bg) : undefined; // the styled list's bar and selected row (dark themes)
+        return element("text", { fg: own || colorProp(tone.fg), bg, attributes: span.bold || (!own && tone.bold) ? BOLD : undefined, wrapMode: "none", flexShrink: 0 }, [span.text]);
       }),
     );
   }
@@ -687,6 +688,7 @@ export function createPlugin(host) {
           const height = resolved.height || null;
           const columns = resolved.columns || null;
           const base = { width, frame: watcher.frame(), now: clock(), requests, cursor: !!listOptions.cursor, selected };
+          if (listOptions.styled) Object.assign(base, { styled: true, dark: sceneColors(ctx.theme, tones).dark });
           if (typeof listOptions.asking === "function" && listOptions.asking()) base.asking = true;
           // the panel's rows carry what each working agent is doing; they go when the panel is too short for the rows
           let more = listOptions.activity ? { activity: true } : {};
@@ -866,6 +868,7 @@ export function createPlugin(host) {
     };
     const panelList = {
       cursor: true,
+      styled: true,
       activity: true,
       asking: () => asking(),
       selected: () => selection(),
