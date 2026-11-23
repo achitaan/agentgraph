@@ -1,0 +1,19 @@
+{
+  "enabled": true,
+  "read_chars": 40000,
+  "other_chars": 20000,
+  "head_share": 0.7,
+  "exempt_tools": [
+    "edit",
+    "write",
+    "question",
+    "skill",
+    "subagent",
+    "task_status",
+    "task_message",
+    "task_reply",
+    "task_cancel",
+    "interview_submit_state"
+  ],
+  "log_dir": null
+}
