@@ -1306,7 +1306,9 @@ function calmLayout(snapshot, agents, options, width, now) {
   for (const item of shownNeeds) candidates.push(item.key);
   for (const item of shownWorking) candidates.push(item.key);
   if (side) candidates.push("sidechat");
-  const selected = candidates.includes(options.selected) ? options.selected : candidates.length ? candidates[0] : null;
+  // no row chosen yet (the panel just opened): the first row that needs you, else the main chat
+  const firstNeeds = shownNeeds.find((n) => candidates.includes(n.key));
+  const selected = candidates.includes(options.selected) ? options.selected : firstNeeds ? firstNeeds.key : candidates.length ? candidates[0] : null;
 
   const nameCap = Math.max(8, Math.floor(inner * 0.34));
   const names = [hubName, ...shownNeeds.map((n) => n.name), ...shownWorking.map((w) => w.name), ...(side ? [SIDE_NAME] : [])];

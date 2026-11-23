@@ -2,7 +2,7 @@
  * The pixel planets: the Desktop graph in a terminal. The same figure as the 3D orbit (src/scene.js: its layout, camera,
  * depth and name placing are used as they are), but every body is a smooth shaded ball and every line is one pixel thin.
  * A pixel is half a cell: `▀` with the top pixel as its foreground and the bottom one as its background (two equal pixels
- * are a space with that background), so a 62 x 30 picture is 62 x 60 pixels. Names, the pill and the icons are ordinary
+ * are a space with that background), so a 62 x 30 picture is 62 x 60 pixels. Names and the pill are ordinary
  * text over the picture. Nothing is drawn in letters or digits except those.
  *
  *   planetsLines(doc, w, h, now, options) -> Line[]   exactly `h` lines of exactly `w` cells; Line = Span[],
@@ -12,15 +12,15 @@
  *   planetsScene(snapshot, options)       -> the panel: a header, the picture, the keys; exactly `height` lines
  * options: { orbit, motion: "reduced" | undefined, colors: { dark, muted } }
  *
- * Under the hub: its name, a pill saying what the main chat does now (a zone mark, a verb, the target) and a row of five
- * zone marks with the current one lit. The block goes below the hub, or above it where that covers fewer balls.
+ * Under the hub: its name and a pill saying what the main chat does now (a zone mark, a verb, the target). They go
+ * below the hub, or above it where that covers fewer balls. No row of symbols is drawn.
  */
 import {
   ZONE_VERBS, TOOL_VERBS, SIDE_NAME,
   charWidth, displayWidth, truncate, clean, seatName, isObject, busyCount, hubWorking, sideBusy,
   validAgents, findHub, needsEntries, lineWidth, clipLine,
 } from "./render.js";
-import { zoneOfTool, roomOfActivity } from "./zones.js";
+import { zoneOfTool } from "./zones.js";
 import {
   orbitLayout, figure3D, camera3D, orbitCamera, moonPhase, moonPoint, makePalette, Canvas, Styles, placeBodies,
   NAME_MAX, PERSPECTIVE, frameInterval, scene as orbitScene,
@@ -42,7 +42,6 @@ const CORAL = rgbOfHex("#ed9583");
 const WARM = rgbOfHex("#e0874a");
 const ORBIT_LINE = rgbOfHex("#65564e");
 const ZONE_GLYPH = { web: "⊕", terminal: "❯", files: "▤", search: "⊙", thinking: "◇", spawn: "✦", messaging: "◆", tasks: "≡", tools: "◆" };
-const ICON_ZONES = ["web", "terminal", "files", "search", "thinking"];
 const GROUP_TINT = { build: "#b89987", decide: "#a996a7", council: "#b49f8c", understand: "#a5988e", verify: "#a79aac" };
 const FALLBACK_TINT = rgbOfHex("#97877e");
 
@@ -406,7 +405,7 @@ function buildPlanets(doc, w, h, now, options) {
     }
   }
 
-  // ---- text over the picture: names, the pill, the icons
+  // ---- text over the picture: names and the pill
   const text = new Array(w * h).fill(null); // { ch, fg, bold, bg? }
   const putText = (c, r, str, fg, bold, bg) => {
     let col = c;
@@ -421,7 +420,7 @@ function buildPlanets(doc, w, h, now, options) {
     }
   };
 
-  // the cells a ball covers (its ring included): names, the pill and the icons keep off them
+  // the cells a ball covers (its ring included): names and the pill keep off them
   const occ = new Float32Array(w * h).fill(-Infinity);
   const canvas = new Canvas(w, h, new Styles());
   for (const b of order) {
@@ -440,17 +439,14 @@ function buildPlanets(doc, w, h, now, options) {
   const hubTop = Math.max(0, Math.floor((hubP.y - hubReach) / 2));
   const hubBottom = Math.min(h - 1, Math.floor((hubP.y + hubReach) / 2));
 
-  // the hub's name, the pill and the icons
+  // the hub's name and the pill
   const hubName = truncate(clean(L.hub && L.hub.name) || "main", NAME_MAX + 4);
   const act = L.hub && isObject(L.hub.activity) ? L.hub.activity : null;
   let pillParts = [];
   let zone = null;
-  let current = null;
   if (hubWork && act && (act.kind === "tool" || act.kind === "reasoning" || act.kind === "text" || typeof act.zone === "string")) {
     const d = describe(act);
     zone = d.zone;
-    const room = roomOfActivity(act, null);
-    current = ICON_ZONES.includes(room) ? room : null;
     pillParts = [d.glyph, d.verb, d.target, PEACH, PEACH];
   } else if (hubWork) {
     pillParts = ["✦", "working", "", PEACH, PEACH];
@@ -481,7 +477,6 @@ function buildPlanets(doc, w, h, now, options) {
     }
     if (maxPill >= 5) pill = { g, glyphColor, verb, verbColor, tg, width: displayWidth(inner) + 2 };
   }
-  const iconWidth = ICON_ZONES.length * 2 - 1;
   const cost = (c0, c1, r) => {
     if (r < 0 || r >= h) return Infinity;
     let n = 0;
@@ -504,13 +499,8 @@ function buildPlanets(doc, w, h, now, options) {
     }
     return found;
   };
-  // the name goes as near the hub as it can without covering a ball: under it, over it, or beside it; then the pill and
-  // the icons go below or above the hub where they cover fewest balls (and never the name)
-  const taken = new Uint8Array(w * h);
-  const takenCost = (c0, c1, r) => {
-    for (let c = Math.max(0, c0 - 1); c <= Math.min(w - 1, c1 + 1); c += 1) if (taken[r * w + c]) return Infinity;
-    return 0;
-  };
+  // the name goes as near the hub as it can without covering a ball: under it, over it, or beside it; then the pill
+  // goes below or above the hub where it covers fewest balls (and never the name)
   const fit = (c0, c1, r) => r >= 0 && r < h && c0 >= 0 && c1 < w;
   const nameCands = [];
   for (const dr of [1, 2, 3]) {
@@ -529,35 +519,27 @@ function buildPlanets(doc, w, h, now, options) {
     if (!fit(nc.c0, nc.c0 + nameW - 1, nc.r)) continue;
     const nameCost = cost(nc.c0, nc.c0 + nameW - 1, nc.r);
     if (nameCost > 0 && chosen && chosen.nameCost === 0) continue;
-    taken.fill(0);
-    for (let c = nc.c0; c < nc.c0 + nameW; c += 1) taken[nc.r * w + c] = 1;
     const rowsFor = [[hubBottom + 1, 0], [hubBottom + 2, 0.6], [hubBottom + 3, 1.2], [hubTop - 3, 0.4], [hubTop - 4, 1.0], [h - 3, 5]];
     let blk = null;
     for (const [pr, pd] of rowsFor) {
-      const ir = pr + 1;
-      if (pr === nc.r || ir === nc.r || pr < 0 || ir >= h) continue;
+      if (pr === nc.r || pr < 0 || pr >= h) continue;
       const p = pill ? best(pillW, pr) : { c0: 0, cost: 0 };
       if (!p) continue;
-      const iconC0 = pill ? clamp(p.c0 + Math.round((pillW - iconWidth) / 2), 0, w - iconWidth) : clamp(centred(iconWidth, 0), 0, w - iconWidth);
-      if (takenCost(p.c0, p.c0 + Math.max(pillW, iconWidth) - 1, pr) === Infinity && nc.r === pr) continue;
-      if (takenCost(iconC0, iconC0 + iconWidth - 1, ir) === Infinity) continue;
-      const total = p.cost * 4 + cost(iconC0, iconC0 + iconWidth - 1, ir) * 4 + pd;
-      if (Number.isFinite(total) && (!blk || total < blk.total)) blk = { pr, ir, p, iconC0, total };
+      const total = p.cost * 4 + pd;
+      if (Number.isFinite(total) && (!blk || total < blk.total)) blk = { pr, p, total };
     }
     if (!blk) continue;
     const total = nameCost * 4 + nc.d + blk.total;
     if (!chosen || total < chosen.total) chosen = { n: { c0: nc.c0 }, nr: nc.r, nameCost, blk, total };
   }
-  const info = { hub: { x: hubP.x, y: hubP.y, r: hubR, name: hubName }, balls: [], labels: [], pill: null, icons: null, zone, owner: null };
+  const info = { hub: { x: hubP.x, y: hubP.y, r: hubR, name: hubName }, balls: [], labels: [], pill: null, zone, owner: null };
   const reserve = (c0, c1, r) => {
     for (let c = c0 - 1; c <= c1 + 1; c += 1) canvas.put(c, r, " ", 0);
   };
   if (chosen) {
     const nr = chosen.nr;
-    const { pr, ir } = chosen.blk;
+    const { pr } = chosen.blk;
     chosen.p = chosen.blk.p;
-    chosen.iconC0 = chosen.blk.iconC0;
-    const dim = (c) => mix(BG, c, 0.38);
     // the name (bold)
     putText(chosen.n.c0, nr, hubName, INK, true);
     info.hub.label = { c0: chosen.n.c0, c1: chosen.n.c0 + nameW - 1, r: nr };
@@ -588,16 +570,6 @@ function buildPlanets(doc, w, h, now, options) {
       reserve(c0, c0 + pillW - 1, pr);
       info.pill = { c0, c1: c0 + pillW - 1, r: pr, text: (pill.g ? pill.g + " " : "") + pill.verb + (pill.tg ? " " + pill.tg : "") };
     }
-    // the five zone marks, the current one lit
-    const marks = [];
-    ICON_ZONES.forEach((z, k) => {
-      const c = chosen.iconC0 + k * 2;
-      const lit = z === current;
-      putText(c, ir, ZONE_GLYPH[z], lit ? PEACH : dim(IDLE), lit);
-      marks.push({ zone: z, col: c, lit });
-    });
-    reserve(chosen.iconC0, chosen.iconC0 + iconWidth - 1, ir);
-    info.icons = { r: ir, c0: chosen.iconC0, c1: chosen.iconC0 + iconWidth - 1, cells: marks, current };
   }
 
   // ---- the other names, placed as the orbit places them
@@ -698,7 +670,7 @@ export function planetsLines(doc, w, h, now = 0, options = {}) {
   }
 }
 
-// Where the balls, names, pill and icons stand (cells and pixels), for the tests. Null for a size too small to draw.
+// Where the balls, names and pill stand (cells and pixels), for the tests. Null for a size too small to draw.
 export function planetsInfo(doc, w, h, now = 0, options = {}) {
   w = Math.max(0, Math.floor(Number(w) || 0));
   h = Math.max(0, Math.floor(Number(h) || 0));
