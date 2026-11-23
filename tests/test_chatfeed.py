@@ -78,10 +78,10 @@ def said(text):
     return {"type": "text", "text": text}
 
 
-def tool(name, status="completed"):
+def tool(name, status="completed", command=None):
     return {"type": "tool", "id": "call_1", "name": name, "executed": True,
             "time": {"created": T0 + 2500, "ran": T0 + 2600, "completed": T0 + 2700},
-            "state": {"status": status, "input": {"command": f"echo {MARKER}"},
+            "state": {"status": status, "input": {"command": command or f"echo {MARKER}"},
                       "content": [{"type": "text", "text": f"output {MARKER}"}], "metadata": {"m": MARKER},
                       "error": {"message": MARKER, "status": 1, "type": "x"}}}
 
@@ -510,8 +510,9 @@ class Demo(unittest.TestCase):
 
     def test_the_demo_activity_is_for_busy_sessions_only(self):
         found = demo_activity(1000.0)
-        self.assertEqual(sorted(found), ["ses_g", "ses_h", "ses_root"])
-        self.assertEqual(found["ses_g"], {"kind": "tool", "tool": "shell", "text": None, "time": 994.0})
+        self.assertEqual(sorted(found), ["ses_g", "ses_h", "ses_j", "ses_root"])
+        self.assertEqual(found["ses_g"], {"kind": "tool", "tool": "shell", "text": None, "time": 994.0, "zone": "terminal",
+                                          "status": "running", "target": "npm test -- middleware"})
         self.assertEqual((found["ses_h"]["kind"], found["ses_h"]["tool"]), ("reasoning", None))
         self.assertEqual(found["ses_h"]["text"], "Check the three widths before writing the copy.")
 
@@ -557,9 +558,9 @@ class SnapshotActivity(unittest.TestCase):
         by_name = {agent["name"]: agent for agent in doc["agents"]}
         busy = {name for name, agent in by_name.items() if agent["busy"]}
         self.assertEqual({name for name, agent in by_name.items() if "activity" in agent}, busy)
-        self.assertEqual(busy, {"orchestrator", "impl-claude", "designer"})
+        self.assertEqual(busy, {"orchestrator", "impl-claude", "designer", "explorer"})
         self.assertEqual(by_name["impl-claude"]["activity"]["tool"], "shell")
-        self.assertNotIn("activity", by_name["explorer"])
+        self.assertNotIn("activity", by_name["oracle"])
         for agent in by_name.values():
             self.assertEqual(set(agent) - {"activity"}, set("name group model effort pool configured skills about busy "
                                                             "sessions team parent".split()))
@@ -581,7 +582,7 @@ class SnapshotActivity(unittest.TestCase):
         snap = demo_snapshot(1000.0)
         with patch("agentgraph.chatfeed.activities", return_value={}) as read:
             snapshot_json.live_activity(snap, "x.db")
-        self.assertEqual(sorted(read.call_args.args[0]), ["ses_g", "ses_h", "ses_root"])
+        self.assertEqual(sorted(read.call_args.args[0]), ["ses_g", "ses_h", "ses_j", "ses_root"])
 
 
 class Route(Case):
@@ -595,7 +596,7 @@ class Route(Case):
         d.session("ses_other", agent="orchestrator", busy=True, updated=10)    # another tree
         for sid in ("ses_root", "ses_work", "ses_done", "ses_ghost", "ses_other"):
             d.user(sid, f"prompt of {sid}")
-        d.assistant("ses_work", [reasoning("deep thought"), tool("shell", "running")])
+        d.assistant("ses_work", [reasoning("deep thought"), tool("shell", "running", command="make build")])
         d.assistant("ses_root", [said("root says hi")])
         for folder in ("graphs", "structure", "agents", "skills", "ledger", "commands"):
             (self.dir / folder).mkdir()
@@ -689,7 +690,7 @@ class Route(Case):
         self.assertNotIn(MARKER, body.decode())
         demo = {a["name"]: a for a in json.loads(self.get("/api/snapshot?demo=1")[2])["agents"]}
         self.assertEqual(demo["impl-claude"]["activity"]["tool"], "shell")
-        self.assertNotIn("activity", demo["explorer"])
+        self.assertNotIn("activity", demo["oracle"])
 
     def test_the_snapshot_carries_the_hubs_detail_and_no_other_agent_does(self):
         part = {"type": "tool", "id": "c", "name": "webfetch", "state": {"status": "running", "input": {
@@ -699,7 +700,9 @@ class Route(Case):
         hub = agents["orchestrator"]["activity"]
         self.assertEqual((hub["zone"], hub["target"], hub["status"]), ("web", "example.com/docs/intro", "running"))
         self.assertEqual([(r["zone"], r["target"]) for r in hub["recent"]], [("terminal", "npm test")])
-        self.assertEqual(set(agents["impl-openai"]["activity"]), {"kind", "tool", "text", "time"})
+        worker = agents["impl-openai"]["activity"]  # a worker has a zone, a status and a target, never a trail
+        self.assertEqual(set(worker), {"kind", "tool", "text", "time", "zone", "status", "target"})
+        self.assertEqual((worker["zone"], worker["status"], worker["target"]), ("terminal", "running", "make build"))
 
     def test_an_unreadable_database_gives_an_empty_feed_not_an_error(self):
         self.db.close()

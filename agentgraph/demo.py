@@ -46,6 +46,7 @@ def demo_snapshot(now: float | None = None) -> Snapshot:
         session("ses_g", "impl-claude", "Middleware integration (escalated)", True, 605, 776, 1.35, 2100, 15800),
         session("ses_h", "designer", "429 error page", True, 420, 777, 0.09, 600, 5200),
         session("ses_i", "reviewer", "Review the combined change", False, 545, 575, 0.21, 700, 3100),
+        session("ses_j", "explorer", "Find where the 429 page is served", True, 690, 777, 0.31, 520, 3300),
     ]
 
     def node(nid, ntype, agent, goal, status, deps=(), scope=(), done_when="", attempts=0, tiers=None,
@@ -216,7 +217,16 @@ _WORKING = {
         (240, "text", "The page shows a generic message. It needs the retry time from the header.", None),
         (3, "reasoning", "Check the three widths before writing the copy.\nThe retry time can be read from the Retry-After header.", None),
     ],
+    "ses_j": [
+        (90, "user", "Find where the 429 error page is served and which handler sets Retry-After.", None),
+        (80, "reasoning", "Search the handlers for the header name first.", None),
+        (40, "tool", "read", "completed"),
+        (4, "tool", "grep", "running"),
+    ],
 }
+
+# What a busy worker is doing now in the demo, for the detail: (target of its running tool, a made-up one).
+_WORKER_NOW = {"ses_g": "npm test -- middleware", "ses_j": "Retry-After"}
 
 
 def _generic(title):
@@ -283,8 +293,9 @@ def demo_chat(session_id, now: float | None = None) -> dict | None:
 
 
 def demo_activity(now: float | None = None, *, detail: bool = True) -> dict[str, dict]:
-    """`activity` of each busy demo session, from the last item of its chat. The hub's one also carries a zone,
-    a status and, with `detail`, a made-up target and trail (web, terminal, files, search, spawn; one failed)."""
+    """`activity` of each busy demo session, from the last item of its chat, each with a zone and a status and,
+    with `detail`, a made-up target. The hub's also carries a made-up trail (web, terminal, files, search,
+    spawn; one failed)."""
     from .chatfeed import activity_of
     now = time.time() if now is None else now
     snap = demo_snapshot(now)
@@ -294,6 +305,16 @@ def demo_activity(now: float | None = None, *, detail: bool = True) -> dict[str,
         activity = activity_of(feed["items"][-1]) if feed and feed["items"] else None
         if activity is not None:
             found[session.id] = activity
+    from .chatfeed import zone_of
+    for sid, base in found.items():  # every busy worker: a zone and a status, with `detail` a target; never a trail
+        if sid == "ses_root":
+            continue
+        base["zone"] = "thinking" if base.get("kind") == "reasoning" else zone_of(base.get("tool")) if base.get("kind") == "tool" else None
+        if base["zone"] is None:
+            del base["zone"]
+        base["status"] = "running" if base.get("kind") == "tool" else None
+        if detail:
+            base["target"] = _WORKER_NOW.get(sid) if base.get("kind") == "tool" else None
     root = snap.root
     if root is not None and root.id in found and found[root.id].get("kind") == "tool":
         found[root.id].update(zone="spawn", status="running")

@@ -13,10 +13,10 @@ text of a `synthetic` message (the host's own notes: shell output, a sub-agent's
 is shown as a bare `note`. `tests/test_chatfeed.py` proves it with a marker in each of those places and by
 looking at every statement the connection runs.
 
-One exception, for the main chat only and only through `hub_activity`: the "what is it doing now" detail of
-the hub reads a few named `state.input` fields (`command`, `url`, `pattern`, `query`, `code`, `id`, `agent`,
-`subagent_type`, `path`, `description`), each cut in SQL, and shows one short masked line of them (a command's
-first line, a URL's host and path, a file's path). Never the `content` of a write or edit, a prompt, or a
+One exception, for a busy agent's session only and only through `busy_activities` (`hub_activity` for the
+main chat alone): the "what is it doing now" detail of a busy agent reads a few named `state.input` fields
+(`command`, `url`, `pattern`, `query`, `code`, `id`, `agent`, `subagent_type`, `path`, `description`), each cut
+in SQL, and shows one short masked line of them (a command's first line, a URL's host and path, a file's path). Never the `content` of a write or edit, a prompt, or a
 tool's output.
 
 A message sent with delivery "steer" lands as a `user` message once the session takes it up; until then it
@@ -501,43 +501,74 @@ def _call_row(row, detail: bool) -> dict:
             "status": _STATUS.get(status), "time": _seconds(created, message_time), "seconds": done}
 
 
+def _enriched(base: dict, rows, detail: bool, trail: bool) -> dict:
+    """`base` with `zone`, `status` and, when `detail`, `target` (and, with `trail`, `recent`) from the newest
+    tool-call rows (newest first). The one place that decides what a busy agent's activity says, for the hub
+    and for every worker alike."""
+    calls = [_call_row(row, detail) for row in rows]
+    found = dict(base)
+    if base.get("kind") == "tool":
+        now = calls[0] if calls and calls[0]["tool"] == base.get("tool") else None
+        found["zone"] = now["zone"] if now else zone_of(base.get("tool"))
+        found["status"] = now["status"] if now else None
+        if detail:
+            found["target"] = now["target"] if now else None
+            if trail:
+                found["recent"] = calls[1:TRAIL + 1] if now else []
+    else:
+        if base.get("kind") == "reasoning":
+            found["zone"] = "thinking"
+        found["status"] = None
+        if detail:
+            found["target"] = None
+            if trail:
+                found["recent"] = calls[:TRAIL]
+    return found
+
+
+def busy_activities(entries: dict, hub_id=None, *, detail: bool = True, db_path=DB_PATH,
+                    timeout: float = TIMEOUT) -> dict:
+    """`entries` (session id to one `activities()` entry of a busy session) with each entry's `zone`, `status`
+    and, when `detail`, its `target`: one connection for all of them. The hub's session (`hub_id`) also gets
+    `recent` (one query over its last messages); a worker is read only when its item is a tool call, with one
+    query over its newest message, and has no `recent`. The same cleaning and masking (`target_of`) for every
+    entry, and with `detail` False no `state.input` is read except an `execute` tool's code (for its zone).
+    An entry that cannot be read keeps its `base` unchanged; so does everything when the database is missing."""
+    found = {sid: base for sid, base in entries.items()}
+    if not found or not Path(db_path).exists():
+        return found
+    try:
+        conn = _connection(db_path, timeout)
+    except Exception:  # noqa: BLE001
+        return found
+    try:
+        for sid, base in entries.items():
+            if not isinstance(base, dict) or not valid_session(sid):
+                continue
+            hub = sid == hub_id
+            try:
+                if hub:
+                    rows = conn.execute(_tool_sql(detail), (sid, TRAIL_MESSAGES, TRAIL + 1 if detail else 1)).fetchall()
+                elif base.get("kind") == "tool":
+                    rows = conn.execute(_tool_sql(detail), (sid, 1, 1)).fetchall()
+                else:
+                    rows = []
+                found[sid] = _enriched(base, rows, detail, hub)
+            except Exception:  # noqa: BLE001
+                found[sid] = base
+    finally:
+        conn.close()
+    return found
+
+
 def hub_activity(session_id, base: dict, *, detail: bool = True, db_path=DB_PATH, timeout: float = TIMEOUT) -> dict:
     """`base` (one `activities()` entry of the hub's session) with `zone`, `status` and, when `detail`,
     `target` and `recent`. `zone` is `thinking` for reasoning and absent for text. With `detail` False no
     `state.input` is read except an `execute` tool's code (for its zone), and `target` and `recent` are left out.
     Any failure returns `base` unchanged."""
-    if not isinstance(base, dict) or not valid_session(session_id) or not Path(db_path).exists():
+    if not isinstance(base, dict) or not valid_session(session_id):
         return base
-    try:
-        conn = _connection(db_path, timeout)
-    except Exception:  # noqa: BLE001
-        return base
-    try:
-        rows = conn.execute(_tool_sql(detail), (session_id, TRAIL_MESSAGES, TRAIL + 1 if detail else 1)).fetchall()
-    except Exception:  # noqa: BLE001
-        return base
-    finally:
-        conn.close()
-    try:
-        calls = [_call_row(row, detail) for row in rows]
-        found = dict(base)
-        if base.get("kind") == "tool":
-            now = calls[0] if calls and calls[0]["tool"] == base.get("tool") else None
-            found["zone"] = now["zone"] if now else zone_of(base.get("tool"))
-            found["status"] = now["status"] if now else None
-            if detail:
-                found["target"] = now["target"] if now else None
-                found["recent"] = calls[1:TRAIL + 1] if now else []
-        else:
-            if base.get("kind") == "reasoning":
-                found["zone"] = "thinking"
-            found["status"] = None
-            if detail:
-                found["target"] = None
-                found["recent"] = calls[:TRAIL]
-        return found
-    except Exception:  # noqa: BLE001
-        return base
+    return busy_activities({session_id: base}, session_id, detail=detail, db_path=db_path, timeout=timeout)[session_id]
 
 
 def activity_of(item: dict) -> dict | None:

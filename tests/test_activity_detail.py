@@ -17,7 +17,7 @@ from agentgraph import chatfeed, snapshot_json
 from agentgraph.demo import demo_activity, demo_snapshot
 from agentgraph.sources import build_snapshot
 
-from tests.test_chatfeed import MARKER, T0, Case
+from tests.test_chatfeed import MARKER, T0, Case, reasoning as reasoning_part, said as said_part
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -356,6 +356,161 @@ class Hub(Case):
         self.assertEqual(chatfeed.hub_activity("ses_root", base, db_path=path), base)
 
 
+class Workers(Case):
+    """A busy worker's activity: the same zone, status and cleaned target as the hub's, no trail."""
+
+    def setUp(self):
+        super().setUp()
+        self.db.session("ses_root", busy=True)
+        self.db.session("ses_w", busy=True)
+        self.db.session("ses_x", busy=True)
+        self.db.user("ses_root", "hello")
+
+    def entries(self, *ids):
+        found = chatfeed.activities(list(ids), db_path=self.db.path)
+        return found
+
+    def run_for(self, sid, hub_id=None, **kw):
+        base = self.entries(sid)
+        return chatfeed.busy_activities(base, hub_id, db_path=self.db.path, **kw)[sid]
+
+    def test_a_worker_has_zone_status_and_target_but_no_trail(self):
+        self.db.assistant("ses_w", [call("read", {"path": "/p/a.py"}, at=1000, took=200),
+                                    call("shell", {"command": "make build\nsecond line"}, "running", at=2000, took=0)])
+        got = self.run_for("ses_w")
+        self.assertEqual((got["kind"], got["tool"], got["zone"], got["status"], got["target"]),
+                         ("tool", "shell", "terminal", "running", "make build"))
+        self.assertNotIn("recent", got)
+        self.assertEqual(set(got), {"kind", "tool", "text", "time", "zone", "status", "target"})
+
+    def test_reasoning_and_text_need_no_query(self):
+        self.db.assistant("ses_w", [call("read", {"path": "/p/a.py"}, at=1000), reasoning_part("mulling")])
+        self.db.assistant("ses_x", [said_part("all done")])
+        entries = self.entries("ses_w", "ses_x")
+        statements = []
+        real = chatfeed._connection
+
+        def spy(*args, **kwargs):
+            conn = real(*args, **kwargs)
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        with patch.object(chatfeed, "_connection", spy):
+            got = chatfeed.busy_activities(entries, None, db_path=self.db.path)
+        self.assertEqual(statements, [])
+        self.assertEqual((got["ses_w"]["zone"], got["ses_w"]["status"], got["ses_w"]["target"]), ("thinking", None, None))
+        self.assertNotIn("zone", got["ses_x"])
+        self.assertEqual((got["ses_x"]["status"], got["ses_x"]["target"]), (None, None))
+        self.assertNotIn("recent", got["ses_w"])
+
+    def test_the_target_is_cleaned_exactly_as_the_hubs_is(self):
+        home = str(Path.home())
+        cases = [("webfetch", {"url": "https://user:pw@example.test/docs/intro?token=abc#frag"}),
+                 ("read", {"path": f"{home}/proj/a.py"}),
+                 ("subagent", {"agent": "explorer", "description": "look around", "prompt": MARKER}),
+                 ("shell", {"command": "curl -u alice:madeup-pass https://api.example.test/v1?key=zzz"}),
+                 ("shell", {"command": "curl 10.1.2.3:8080/x?sig=abcdef -H 'Authorization: Bearer madeup123456'"}),
+                 ("shell", {"command": "export MADE_UP_API_TOKEN=tok-123456 && npm test"}),
+                 ("shell", {"command": "psql -h 10.0.0.5 -pmadeuppw mydb"}),
+                 ("shell", {"command": "x " * 200})]
+        for n, (name, inp) in enumerate(cases):
+            with self.subTest(case=n):
+                self.db.assistant("ses_root", [call(name, inp, "running")])
+                self.db.assistant("ses_w", [call(name, inp, "running")])
+                hub = chatfeed.busy_activities(self.entries("ses_root"), "ses_root", db_path=self.db.path)["ses_root"]
+                worker = self.run_for("ses_w", "ses_root")
+                self.assertEqual(worker["target"], hub["target"])
+                self.assertEqual((worker["zone"], worker["status"]), (hub["zone"], hub["status"]))
+
+    def test_secrets_are_masked_in_a_worker_target(self):
+        cases = {
+            "curl -u alice:madeup-pass https://api.example.test/v1?key=zzz": ("madeup-pass", "zzz"),
+            "curl 10.1.2.3:8080/x?sig=abcdef -H 'Authorization: Bearer madeup123456'": ("abcdef", "madeup123456"),
+            "export MADE_UP_API_TOKEN=tok-123456 && npm test": ("tok-123456",),
+            "psql -h 10.0.0.5 -pmadeuppw mydb": ("madeuppw",),
+            "mysql --password=hunter2made -u bob": ("hunter2made",),
+            "wget https://bob:swordfish@files.example.test/a.zip": ("swordfish",),
+            "curl localhost:3000/a?code=qwerty99": ("qwerty99",),
+        }
+        for n, (command, secrets) in enumerate(cases.items()):
+            self.db.assistant("ses_w", [call("shell", {"command": command}, "running", at=n * 10)])
+            target = self.run_for("ses_w")["target"]
+            self.assertTrue(target, command)
+            for secret in secrets:
+                self.assertNotIn(secret, target, command)
+        self.db.assistant("ses_w", [call("webfetch", {"url": "https://u:p4ss@example.test/a/b?token=t0k#x"}, "running")])
+        self.assertEqual(self.run_for("ses_w")["target"], "example.test/a/b")
+        self.db.assistant("ses_w", [call("write", {"path": "/p/b.py", "content": MARKER}, "running")])
+        got = self.run_for("ses_w")
+        self.assertEqual(got["target"], "/p/b.py")
+        self.assertNotIn(MARKER, json.dumps(got))
+
+    def test_the_opt_out_leaves_no_target_and_reads_no_input(self):
+        self.db.assistant("ses_w", [call("shell", {"command": f"echo {MARKER}"}, "running")])
+        self.db.assistant("ses_x", [call("execute", {"code": "await tools.browser.open({url: 'https://example.test'})"}, "running")])
+        entries = self.entries("ses_w", "ses_x")
+        statements = []
+        real = chatfeed._connection
+
+        def spy(*args, **kwargs):
+            conn = real(*args, **kwargs)
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        with patch.object(chatfeed, "_connection", spy):
+            got = chatfeed.busy_activities(entries, None, detail=False, db_path=self.db.path)
+        self.assertEqual((got["ses_w"]["zone"], got["ses_w"]["status"]), ("terminal", "running"))
+        self.assertEqual(got["ses_x"]["zone"], "web")
+        for item in got.values():
+            self.assertNotIn("target", item)
+            self.assertNotIn("recent", item)
+        self.assertNotIn(MARKER, json.dumps(got))
+        sql = " ".join(statements)
+        for banned in (".state.input.command", ".state.input.url", ".state.input.path", ".state.content", ".metadata", ".native"):
+            self.assertNotIn(banned, sql)
+        self.assertIn(".state.input.code", sql)
+
+    def test_one_connection_and_named_input_fields_only(self):
+        self.db.assistant("ses_w", [call("write", {"path": "/p", "content": MARKER, "oldString": MARKER}, "running")])
+        self.db.assistant("ses_x", [call("read", {"path": "/q"}, "running")])
+        entries = self.entries("ses_w", "ses_x")
+        statements, opened = [], []
+        real = chatfeed._connection
+
+        def spy(*args, **kwargs):
+            conn = real(*args, **kwargs)
+            opened.append(conn)
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        with patch.object(chatfeed, "_connection", spy):
+            chatfeed.busy_activities(entries, None, db_path=self.db.path)
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(len(statements), 2)  # one short query per worker
+        sql = " ".join(statements)
+        for banned in ("state.content", "metadata", "native", "oldString", "newString", "prompt", "input.content", "'$.input'"):
+            self.assertNotIn(banned, sql)
+        self.assertNotIn(MARKER, sql)
+
+    def test_a_failing_entry_keeps_its_base_and_the_others_still_get_detail(self):
+        self.db.assistant("ses_w", [call("read", {"path": "/p"}, "running")])
+        self.db.assistant("ses_x", [call("read", {"path": "/q"}, "running")])
+        entries = self.entries("ses_w", "ses_x")
+        real = chatfeed._call_row
+
+        def flaky(row, detail):
+            if row[6] == "/p":
+                raise RuntimeError("x")
+            return real(row, detail)
+
+        with patch.object(chatfeed, "_call_row", flaky):
+            got = chatfeed.busy_activities(entries, None, db_path=self.db.path)
+        self.assertEqual(got["ses_w"], entries["ses_w"])
+        self.assertEqual(got["ses_x"]["target"], "/q")
+        self.assertEqual(chatfeed.busy_activities(entries, None, db_path=self.dir / "none.db"), entries)
+        self.assertEqual(chatfeed.busy_activities({}, None, db_path=self.db.path), {})
+
+
 class Snapshot(Case):
     """Which agents get the detail, and the command's privacy split."""
 
@@ -377,18 +532,25 @@ class Snapshot(Case):
         doc = snapshot_json.snapshot_document(self.snapshot(), "live", activity=activity)
         return {a["name"]: a for a in doc["agents"]}
 
-    def test_only_the_hub_gets_the_new_keys(self):
+    def test_the_hub_alone_gets_a_trail_and_a_worker_gets_zone_status_and_target(self):
         agents = self.agents(True)
         self.assertEqual((agents["orchestrator"]["activity"]["zone"], agents["orchestrator"]["activity"]["target"],
                           agents["orchestrator"]["activity"]["status"]), ("terminal", "npm test", "running"))
         self.assertEqual([r["target"] for r in agents["orchestrator"]["activity"]["recent"]], ["example.com/docs/intro"])
-        self.assertEqual(set(agents["impl-openai"]["activity"]), {"kind", "tool", "text", "time"})
+        worker = agents["impl-openai"]["activity"]
+        self.assertEqual(set(worker), {"kind", "tool", "text", "time", "zone", "status", "target"})
+        self.assertEqual((worker["zone"], worker["status"], worker["target"]), ("terminal", "running", "make build"))
+        self.assertNotIn("recent", worker)
 
     def test_without_detail_the_hub_has_a_zone_and_a_status_only(self):
         hub = self.agents(False)["orchestrator"]["activity"]
         self.assertEqual((hub["zone"], hub["status"]), ("terminal", "running"))
         self.assertNotIn("target", hub)
         self.assertNotIn("recent", hub)
+        worker = self.agents(False)["impl-openai"]["activity"]
+        self.assertEqual((worker["zone"], worker["status"]), ("terminal", "running"))
+        self.assertNotIn("target", worker)
+        self.assertNotIn("recent", worker)
 
     def test_a_missing_database_is_the_old_behaviour(self):
         self.assertEqual(snapshot_json.live_activity(self.snapshot(), self.dir / "none.db"), {})
@@ -417,12 +579,20 @@ class Demo(unittest.TestCase):
         times = [r["time"] for r in hub["recent"]]
         self.assertEqual(times, sorted(times, reverse=True))
         self.assertTrue(all(r["zone"] in chatfeed.ZONES and r["target"] and r["time"] < hub["time"] for r in hub["recent"]))
-        others = demo_activity(1000.0)
-        for sid in ("ses_g", "ses_h"):
-            self.assertEqual(set(others[sid]), {"kind", "tool", "text", "time"})
+        workers = demo_activity(1000.0)
+        for sid in ("ses_g", "ses_h", "ses_j"):
+            self.assertEqual(set(workers[sid]) - {"zone"}, {"kind", "tool", "text", "time", "status", "target"})
+            self.assertNotIn("recent", workers[sid])
+        self.assertEqual([workers[sid].get("zone") for sid in ("ses_g", "ses_h", "ses_j")], ["terminal", "thinking", "search"])
+        self.assertEqual([workers[sid]["target"] for sid in ("ses_g", "ses_h", "ses_j")], ["npm test -- middleware", None, "Retry-After"])
 
     def test_demo_without_detail(self):
-        hub = demo_activity(1000.0, detail=False)["ses_root"]
+        workers = demo_activity(1000.0, detail=False)
+        for sid in ("ses_g", "ses_h", "ses_j"):
+            self.assertNotIn("target", workers[sid])
+            self.assertNotIn("recent", workers[sid])
+        self.assertEqual(workers["ses_g"]["zone"], "terminal")
+        hub = workers["ses_root"]
         self.assertEqual(hub["zone"], "spawn")
         self.assertNotIn("target", hub)
         self.assertNotIn("recent", hub)
@@ -434,17 +604,25 @@ class Demo(unittest.TestCase):
         return {a["name"]: a for a in json.loads(done.stdout)["agents"]}
 
     def test_the_agent_command_has_no_target_or_recent_unless_asked(self):
-        hub = self.run_cli(str(ROOT / "bin" / "agentgraph"), "snapshot", "--demo")["orchestrator"]["activity"]
+        agents = self.run_cli(str(ROOT / "bin" / "agentgraph"), "snapshot", "--demo")
+        hub = agents["orchestrator"]["activity"]
         self.assertEqual(hub["zone"], "spawn")
         self.assertNotIn("target", hub)
         self.assertNotIn("recent", hub)
-        hub = self.run_cli(str(ROOT / "bin" / "agentgraph"), "snapshot", "--demo", "--activity-detail")["orchestrator"]["activity"]
-        self.assertEqual(len(hub["recent"]), 5)
+        for name in ("impl-claude", "designer", "explorer"):  # the opt-out covers every agent's target
+            self.assertNotIn("target", agents[name]["activity"])
+            self.assertNotIn("recent", agents[name]["activity"])
+        agents = self.run_cli(str(ROOT / "bin" / "agentgraph"), "snapshot", "--demo", "--activity-detail")
+        self.assertEqual(len(agents["orchestrator"]["activity"]["recent"]), 5)
+        self.assertEqual(agents["impl-claude"]["activity"]["target"], "npm test -- middleware")
+        self.assertNotIn("recent", agents["impl-claude"]["activity"])
 
     def test_the_module_the_plugins_run_carries_them(self):
-        hub = self.run_cli(sys.executable, "-P", "-m", "agentgraph.snapshot_json", "--demo")["orchestrator"]["activity"]
+        agents = self.run_cli(sys.executable, "-P", "-m", "agentgraph.snapshot_json", "--demo")
+        hub = agents["orchestrator"]["activity"]
         self.assertEqual(len(hub["recent"]), 5)
         self.assertTrue(hub["target"])
+        self.assertEqual(agents["explorer"]["activity"]["target"], "Retry-After")
 
 
 if __name__ == "__main__":
