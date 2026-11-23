@@ -56,6 +56,24 @@ The `improve-orchestration` skills may propose a change to these two settings fr
 
 The what-if numbers are estimates: each recorded turn's cost is rescaled by how its priced tokens would change, using Anthropic's published ratios (cache read 0.1×, five-minute write 1.25×, one-hour write 2×, output 5×).
 
+## Checking that it paid off
+
+`agentgraph cost --check` sets the last 7 days (`--days N` changes that) against the baseline before the first change in `cost-settings.jsonl`. The recent window never starts before that first change. It prints seven lines, each with the word better, same, worse or not enough data and the two numbers behind it, then one overall line. `--json` prints the same as JSON.
+
+1. Dollars a turn, in root chats, as `--trend` counts them.
+2. Cold share: the share of that spend that went to cold turns.
+3. Compactions: how many, what they cost, and their share of all spend.
+4. Rollovers (from the rollover plugin's log): how many, and the most for one chat in one day. More than 6 in a day is worse.
+5. Worker spend in long chats: the share of worker-session spend that went to chats over 300 turns or $25.
+6. Whole chat re-cached: turns that read under 25,000 tokens from the cache and wrote over 30,000, two or more in a row in one chat. One such turn is an ordinary cold turn and is not counted. Any run is worse, with the line "caching stopped working in N chats".
+7. Rollover gaps: the median minutes between rollovers of the same chat. Worse when a chat rolled more than 6 times in a day.
+
+Lines 1, 2, 3 and 5 count as changed only when a number moves by more than 10% of the baseline (and, for shares, by more than 2 points). Lines 1 to 3 need 30 turns in both periods; with fewer, or with no recorded change to compare against, they say not enough data. The overall line is worse if any line is worse, else better if any is better.
+
+Each run adds one dated JSON row (numbers and verdicts only, no chat text or names) to `~/.local/share/agentgraph/cost-check/cost-check.jsonl`. `AGENTGRAPH_COST_CHECK_HOME` names another folder, and `--check-log PATH` another file. The rollover log is read from `~/.local/share/agentgraph/rollover/rollover.log` (`AGENTGRAPH_ROLLOVER_HOME` or `--rollover-log PATH` change that); without it, lines 4 and 7 say not enough data.
+
+Limits of the count: a worker session counts in the period of its last update; a rollover is a `rolled` event or an own compaction that got the plugin's summary; a compaction with no recorded cost counts as $0.
+
 ## Loops
 
 A loop (`agentgraph loop`, [docs/LOOPS.md](docs/LOOPS.md)) spends money in a way the numbers above do not cover, so its rules are separate:

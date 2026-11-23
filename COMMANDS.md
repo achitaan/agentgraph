@@ -10,6 +10,7 @@ Global command files live in `~/.config/opencode/commands/`; the toolkit's copie
 | `/flow A B [C…] [: instruction]` | Add one flow with an optional instruction. | `agentgraph structure flow add A B [C…] [--text-file F] --json` |
 | `/agent-skills AGENT [add SKILL \| remove SKILL \| all]` | Show or change an agent's skills; changes apply on restart. | `agentgraph skills show AGENT`, `agentgraph skills add AGENT SKILL`, `agentgraph skills remove AGENT SKILL`, or `agentgraph skills all AGENT` |
 | `/spend` | Summarize the cost trend in at most three lines. | `agentgraph cost --trend` |
+| *(no command file)* | Check whether the cost work has paid off: seven lines, each better, same, worse or not enough data, then one overall verdict; one dated row is added to a log. | `agentgraph cost --check [--days N] [--json]` |
 | `/graph-check [task]` | Validate this project's graphs and report unfinished work. | `agentgraph check [--task NAME]` |
 
 `H` is the active preset's ledger home; `F` is a temporary file. For `/learn`, `--feedback-ids` exposes the IDs used in the `{ "id": "reason" }` marking file. Marks are append-only in `H/feedback-handled.jsonl`; they do not rewrite notes, advance the watermark, or erase history. Recording an approved batch edit keeps the existing watermark, so notes not settled by that run remain pending.

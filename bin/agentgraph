@@ -27,6 +27,7 @@
 #   agentgraph spend limit AMOUNT   the project's spend limit in dollars (--warn AMOUNT; spend limit --off; spend show [--json]; --dir PROJECT)
 #   agentgraph cost [--session ID]  where one chat's money went, and what would have made it cheaper
 #   agentgraph cost --trend         cost per turn over time, split at each change to the cost settings
+#   agentgraph cost --check         has the cost work paid off: the last 7 days against the baseline, one verdict a line (--days N, --json)
 #   agentgraph bloat [--json]       the fixed text each agent's turn costs, dead weight, what piles up (--set-baseline)
 #   agentgraph chat --session ID    one session's recent chat as plain text: reasoning, messages, tool names (--limit N, --json, --chars N, --demo)
 #   agentgraph sidechat ask --main ID --text-file F|-   ask the read-only side chat (sidechat status|brief|install|uninstall|undo; --json, --demo)
