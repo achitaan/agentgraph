@@ -122,26 +122,43 @@
   }
   function liveTitle(item) { return item.tool + (item.target ? ': ' + item.target : '') + (item.seconds === null ? '' : ' (' + liveTaken(item.seconds) + ')') + (item.status === 'error' ? ' · failed' : ''); }
   // ---- Where each name goes (pure: boxes in, places out; no page needed) ----
-  // A name is tried below its planet, above, right of it, then left, a small gap off the disc. Names are placed in order of
-  // standing (tier: 0 the orchestrator, 1 agents that need the user, 2 working, 3 the chosen, hovered or focused, 4 the
-  // rest, 5 a group's seats), the nearer to the viewer (larger z) first within a tier. A name that has no free place is
-  // not shown (a chosen one is shown at its least bad place). A shown name never covers another shown name, a planet in
-  // front of it (in 2D: any other planet) or a chip. Hysteresis: a shown name keeps its place while that place is free;
-  // when blocked it waits `hold` ms before it moves or goes, and one that is hidden comes back only after a place has been
-  // free that long, so the names do not jump or flicker while the view turns. A name never seen before is decided at once.
-  // item: { id, w, h, asc, cx, cy, r, z, tier, forced, dx, prev }; w, h, asc: the box with its backing and the baseline's
-  // distance under its top; (cx, cy, r): the planet's disc; dx: a sideways shift of the name's centre (a narrow canvas);
-  // prev: what this returned for the item last time ({ place, shown, blockedSince, freeSince }) or nothing.
-  // opts: { now, hold, gap, places, chips: [{ left, top, right, bottom }], frontOnly (3D), bounds ({ left, top, right, bottom }: the
-  // canvas; a place that leaves it is not free) }.
-  // Returns { places: { id: { place, shown, held, x, y, w, h, baseline, blockedSince, freeSince } }, pending }.
-  const LABEL_PLACES = ['below', 'above', 'right', 'left'];
-  function labelBoxAt(item, place, gap) {
-    const dx = Number(item.dx) || 0;
-    if (place === 'above') return { left: item.cx + dx - item.w / 2, top: item.cy - item.r - gap - item.h };
-    if (place === 'right') return { left: item.cx + item.r + gap, top: item.cy - item.h / 2 };
-    if (place === 'left') return { left: item.cx - item.r - gap - item.w, top: item.cy - item.h / 2 };
-    return { left: item.cx + dx - item.w / 2, top: item.cy + item.r + gap };
+  // A name is tried below its planet, above, right of it, left, then the four diagonals (below-right, below-left, above-right,
+  // above-left), a small gap off the disc, and then all eight again at a second, wider gap (a place's id then ends in "+"),
+  // before it gives up. Names are placed in order of standing (tier: 0 the orchestrator, 1 agents that need the user,
+  // 2 working, 3 the chosen, hovered or focused, 4 the rest, 5 a group's seats), the nearer to the viewer (larger z) first
+  // within a tier. A shown name never covers another shown name, ANY other planet's disc (in front of it or behind it: a name
+  // over a planet behind it reads as that planet's), or a chip. A name that has no clean place is not shown, except one that
+  // must be (item.forced: chosen, hovered, focused or an agent that needs the user), which is shown at the place that
+  // covers least (a planet behind it before one in front). The orchestrator's name (item.claim) has first claim on its
+  // spot: it is shown at its first place whatever is there, and everything else yields to it. With opts.depth (3D) the name
+  // of a planet that planets in front of it cover for 60% of its disc or more is hidden (unless item.asked: chosen,
+  // hovered or focused). Hysteresis: a shown name keeps its place while that place is free; when blocked it waits
+  // `hold` ms before it moves or goes, and one that is hidden comes back only after a place has been free that long, so the
+  // names do not jump or flicker while the view turns. A name never seen before is decided at once.
+  // item: { id, w, h, asc, cx, cy, r, cr, z, tier, forced, asked, claim, dx, places, prev }; w, h, asc: the box with its
+  // backing and the baseline's distance under its top; (cx, cy, r): the planet's disc as names keep clear of it, cr the disc
+  // itself (default r); dx: a sideways shift of the name's centre (a narrow canvas); places: the exact ids to try, in order
+  // (default labelOrder()); prev: what this returned for the item last time ({ place, shown, blockedSince, freeSince }) or nothing.
+  // opts: { now, hold, gap, wide (the second gap), places, chips: [{ left, top, right, bottom }], depth (3D), bounds ({ left,
+  // top, right, bottom }: the canvas; a place that leaves it is not free) }.
+  // Returns { places: { id: { place, shown, held, buried, x, y, w, h, baseline, blockedSince, freeSince } }, pending }.
+  const LABEL_PLACES = ['below', 'above', 'right', 'left'], LABEL_DIAGONALS = ['below-right', 'below-left', 'above-right', 'above-left'];
+  function labelOrder(first) {
+    const near = (Array.isArray(first) && first.length ? first : LABEL_PLACES).slice();
+    LABEL_PLACES.concat(LABEL_DIAGONALS).forEach(place => { if (!near.includes(place)) near.push(place); });
+    return near.concat(near.map(place => place + '+'));
+  }
+  const LABEL_ALL = labelOrder();
+  function labelBoxAt(item, place, gap, wide) {
+    const dx = Number(item.dx) || 0, far = place.endsWith('+'), name = far ? place.slice(0, -1) : place, g = far ? wide : gap, d = item.r * Math.SQRT1_2;
+    if (name === 'above') return { left: item.cx + dx - item.w / 2, top: item.cy - item.r - g - item.h };
+    if (name === 'right') return { left: item.cx + item.r + g, top: item.cy - item.h / 2 };
+    if (name === 'left') return { left: item.cx - item.r - g - item.w, top: item.cy - item.h / 2 };
+    if (name === 'below-right') return { left: item.cx + d + g, top: item.cy + d + g };
+    if (name === 'below-left') return { left: item.cx - d - g - item.w, top: item.cy + d + g };
+    if (name === 'above-right') return { left: item.cx + d + g, top: item.cy - d - g - item.h };
+    if (name === 'above-left') return { left: item.cx - d - g - item.w, top: item.cy - d - g - item.h };
+    return { left: item.cx + dx - item.w / 2, top: item.cy + item.r + g };
   }
   function boxMeetsBox(a, b) { return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top; }
   function boxMeetsDisc(box, d) {
@@ -152,15 +169,29 @@
     const x = Math.max(box.left, Math.min(d.cx, box.right)), y = Math.max(box.top, Math.min(d.cy, box.bottom));
     return Math.max(0, d.r - Math.hypot(x - d.cx, y - d.cy));
   }
+  // Points over a disc (its centre, a ring at half its radius, a ring near its rim) to find how much of it other discs cover.
+  const BURY_POINTS = [[0, 0]].concat(Array.from({ length: 6 }, (_, i) => [.5 * Math.cos(i * Math.PI / 3), .5 * Math.sin(i * Math.PI / 3)]), Array.from({ length: 12 }, (_, i) => [.9 * Math.cos(i * Math.PI / 6 + .26), .9 * Math.sin(i * Math.PI / 6 + .26)]));
+  function discBuried(item, list, share) {
+    const cr = item.cr > 0 ? item.cr : item.r, z = Number(item.z) || 0;
+    if (!(cr > 0)) return false;
+    const fronts = list.filter(other => other !== item && other.r > 0 && (Number(other.z) || 0) > z);
+    if (!fronts.length) return false;
+    let covered = 0;
+    BURY_POINTS.forEach(([ux, uy]) => {
+      const x = item.cx + ux * cr, y = item.cy + uy * cr;
+      if (fronts.some(other => { const o = other.cr > 0 ? other.cr : other.r; return (x - other.cx) ** 2 + (y - other.cy) ** 2 < o * o; })) covered++;
+    });
+    return covered / BURY_POINTS.length >= share;
+  }
   function placeLabels(items, opts = {}) {
     const now = Number.isFinite(opts.now) ? opts.now : 0, hold = Number.isFinite(opts.hold) ? opts.hold : 300, gap = Number.isFinite(opts.gap) ? opts.gap : 2;
-    const defaults = Array.isArray(opts.places) && opts.places.length ? opts.places : LABEL_PLACES, chips = opts.chips || [], front = !!opts.frontOnly;
+    const wide = Number.isFinite(opts.wide) ? opts.wide : gap + 6, share = Number.isFinite(opts.bury) ? opts.bury : .6;
+    const defaults = Array.isArray(opts.places) && opts.places.length ? opts.places : LABEL_ALL, chips = opts.chips || [], depth = !!(opts.depth ?? opts.frontOnly);
     const bounds = opts.bounds && Number.isFinite(opts.bounds.left) && Number.isFinite(opts.bounds.right) ? opts.bounds : null;
     const list = (items || []).filter(item => item && Number.isFinite(item.w) && Number.isFinite(item.cx) && Number.isFinite(item.cy));
     const sorted = list.slice().sort((a, b) => (a.tier - b.tier) || ((Number(b.z) || 0) - (Number(a.z) || 0)) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     const placed = [], out = {};
     let pending = false;
-    const boxOf = (item, place) => { const at = labelBoxAt(item, place, gap); return { left: at.left, top: at.top, right: at.left + item.w, bottom: at.top + item.h }; };
     const outside = box => !!bounds && (box.left < bounds.left || box.right > bounds.right || box.top < bounds.top || box.bottom > bounds.bottom); // out of the canvas
     // 0 when nothing is covered; otherwise a measure of how much (for the least bad place).
     const cover = (item, box) => {
@@ -170,73 +201,82 @@
       if (outside(box)) sum += 400;
       for (const disc of list) {
         if (disc === item || !(disc.r > 0)) continue;
-        if (front && !((Number(disc.z) || 0) > (Number(item.z) || 0))) continue;
-        if (boxMeetsDisc(box, disc)) sum += 40 + discArea(box, disc);
+        if (boxMeetsDisc(box, disc)) sum += 40 + discArea(box, disc) + (depth && (Number(disc.z) || 0) > (Number(item.z) || 0) ? 60 : 0);
       }
       return sum;
     };
     sorted.forEach(item => {
       const prev = item.prev && typeof item.prev === 'object' ? item.prev : null;
-      const order = Array.isArray(item.places) && item.places.length ? item.places : defaults, boxes = new Map(order.map(place => [place, boxOf(item, place)]));
-      const free = place => cover(item, boxes.get(place)) === 0;
-      const firstFree = () => order.find(free) || null;
-      let place = order.includes(prev?.place) ? prev.place : order[0], shown = false, held = false, blockedSince = null, freeSince = null;
-      if (!prev) {
-        const at = firstFree();
-        if (at) { place = at; shown = true; }
-      } else if (prev.shown) {
-        if (free(place)) shown = true;
-        else {
-          blockedSince = Number.isFinite(prev.blockedSince) ? prev.blockedSince : now;
-          if (now - blockedSince < hold && !outside(boxes.get(place))) { shown = true; held = true; pending = true; } // (not held when it left the canvas)
-          else { const at = firstFree(); if (at) { place = at; shown = true; blockedSince = null; } }
-        }
+      const order = Array.isArray(item.places) && item.places.length ? item.places : defaults;
+      const boxes = new Map(order.map(place => { const at = labelBoxAt(item, place, gap, wide); return [place, { left: at.left, top: at.top, right: at.left + item.w, bottom: at.top + item.h }]; }));
+      let place = order.includes(prev?.place) ? prev.place : order[0], shown = false, held = false, blockedSince = null, freeSince = null, buried = false;
+      if (item.claim) {
+        // The orchestrator's name: its own spot, shown whatever is there (others yield to it).
+        place = order[0]; shown = true;
       } else {
-        const at = free(place) ? place : firstFree();
-        if (at) {
-          freeSince = Number.isFinite(prev.freeSince) ? prev.freeSince : now;
-          if (now - freeSince >= hold) { place = at; shown = true; freeSince = null; } else pending = true;
+        buried = depth && !item.asked && discBuried(item, list, share);
+        const free = at => !buried && cover(item, boxes.get(at)) === 0;
+        const firstFree = () => order.find(free) || null;
+        if (!prev) {
+          const at = firstFree();
+          if (at) { place = at; shown = true; }
+        } else if (prev.shown) {
+          if (free(place)) shown = true;
+          else {
+            blockedSince = Number.isFinite(prev.blockedSince) ? prev.blockedSince : now;
+            if (now - blockedSince < hold && !outside(boxes.get(place))) { shown = true; held = true; pending = true; } // (not held when it left the canvas)
+            else { const at = firstFree(); if (at) { place = at; shown = true; blockedSince = null; } }
+          }
+        } else {
+          const at = free(place) ? place : firstFree();
+          if (at) {
+            freeSince = Number.isFinite(prev.freeSince) ? prev.freeSince : now;
+            if (now - freeSince >= hold) { place = at; shown = true; freeSince = null; } else pending = true;
+          }
         }
-      }
-      if (!shown && item.forced) {
-        // A name the user asked for is shown, at the place that covers least.
-        let best = Infinity;
-        order.forEach(at => { const c = cover(item, boxes.get(at)); if (c < best) { best = c; place = at; } });
-        shown = true; held = false; blockedSince = null; freeSince = null;
-      }
-      if (!shown) {
-        // A hidden name rests at the place that covers least (inside the canvas when any is), so it never leaves the canvas unseen.
-        let best = Infinity;
-        order.forEach(at => { const c = cover(item, boxes.get(at)); if (c < best) { best = c; place = at; } });
+        if (!shown && (item.forced || item.asked) && !(buried && !item.asked)) {
+          // A name that must be shown goes at the place that covers least.
+          let best = Infinity;
+          order.forEach(at => { const c = cover(item, boxes.get(at)); if (c < best) { best = c; place = at; } });
+          shown = true; held = false; blockedSince = null; freeSince = null;
+        }
+        if (!shown) {
+          // A hidden name rests at the place that covers least (inside the canvas when any is), so it never leaves the canvas unseen.
+          let best = Infinity;
+          order.forEach(at => { const c = cover(item, boxes.get(at)); if (c < best) { best = c; place = at; } });
+        }
       }
       const box = boxes.get(place);
       if (shown) placed.push(box);
-      out[item.id] = { place, shown, held, x: box.left, y: box.top, w: item.w, h: item.h, baseline: box.top + (Number(item.asc) || 0), blockedSince, freeSince };
+      out[item.id] = { place, shown, held, buried, x: box.left, y: box.top, w: item.w, h: item.h, baseline: box.top + (Number(item.asc) || 0), blockedSince, freeSince };
     });
     return { places: out, pending };
   }
-  // The orchestrator's chip (with its row of icons), below the sun or above it: the side that covers fewer planets (weighted), below
-  // when equal; it changes only after the other side has been better for `hold` ms.
-  // chip: { cx, cy, r, s, top, bottom, width } (r the sun's radius, top/bottom the chip's and its row's reach under it at
-  // size s = 1); planets: [{ cx, cy, r, z }] (the sun not among them); opts: { now, hold, frontOnly, z (the sun's), prev }.
-  // Returns { side, box, covers, since }.
+  // The orchestrator's chip (with its row of icons): below the sun's name, above the sun, or beside it (right, then left): the
+  // side that covers fewest planets, in that order when equal; it changes only after another side has been better for `hold` ms.
+  // The chip is drawn over every planet, so what it covers is only what it hides of a planet (and no name may be under it).
+  // chip: { cx, cy, r, s, top, bottom, width } (r the sun's radius, top/bottom the chip's and its row's reach under the centre at
+  // size s = 1); planets: [{ cx, cy, r }] (the sun not among them); opts: { now, hold, prev }.
+  // Returns { side, box, covers, since, dx, dy } (dx, dy: where the group moves, at size 1, from its place under the sun).
+  const CHIP_SIDES = ['below', 'above', 'right', 'left'], CHIP_BESIDE = 34;
   function placeChip(chip, planets, opts = {}) {
     const now = Number.isFinite(opts.now) ? opts.now : 0, hold = Number.isFinite(opts.hold) ? opts.hold : 300, s = Number(chip.s) || 1;
+    const height = chip.bottom - chip.top, width = chip.width, reach = (Number(chip.r) || 0) + CHIP_BESIDE;
+    const shift = side => side === 'above' ? { dx: 0, dy: -(chip.top + chip.bottom) } : side === 'right' ? { dx: reach + width / 2, dy: -(chip.top + chip.bottom) / 2 } : side === 'left' ? { dx: -reach - width / 2, dy: -(chip.top + chip.bottom) / 2 } : { dx: 0, dy: 0 };
     const boxFor = side => {
-      const left = chip.cx - chip.width * s / 2, right = chip.cx + chip.width * s / 2;
-      return side === 'above' ? { left, right, top: chip.cy - chip.bottom * s, bottom: chip.cy - chip.top * s } : { left, right, top: chip.cy + chip.top * s, bottom: chip.cy + chip.bottom * s };
+      const { dx, dy } = shift(side), left = chip.cx + (dx - width / 2) * s, top = chip.cy + (chip.top + dy) * s;
+      return { left, right: left + width * s, top, bottom: top + height * s };
     };
-    // A planet in front of the sun (any, in 2D) counts 2, one behind it 1: the chip is drawn over that one, but still better kept off it.
-    const count = side => { const box = boxFor(side); return planets.reduce((sum, p) => sum + (boxMeetsDisc(box, p) ? (opts.frontOnly && !((Number(p.z) || 0) > (Number(opts.z) || 0)) ? 1 : 2) : 0), 0); };
-    const below = count('below'), above = count('above'), better = above < below ? 'above' : 'below';
-    const prev = opts.prev && (opts.prev.side === 'above' || opts.prev.side === 'below') ? opts.prev : null;
+    const covers = {};
+    CHIP_SIDES.forEach(side => { const box = boxFor(side); covers[side] = planets.reduce((sum, p) => sum + (boxMeetsDisc(box, p) ? 1 : 0), 0); });
+    const better = CHIP_SIDES.reduce((best, side) => covers[side] < covers[best] ? side : best, 'below');
+    const prev = opts.prev && CHIP_SIDES.includes(opts.prev.side) ? opts.prev : null;
     let side = prev ? prev.side : better, since = null;
-    const covers = { below, above };
     if (prev && better !== prev.side && covers[better] < covers[prev.side]) {
       since = Number.isFinite(prev.since) ? prev.since : now;
       if (now - since >= hold) { side = better; since = null; }
     }
-    return { side, box: boxFor(side), covers, since };
+    return { side, box: boxFor(side), covers, since, ...shift(side) };
   }
   // The chip and the trail under the hub's name, as one group around the hub's centre; r is the hub's radius.
   function liveGroup(live, r, fresh) {
@@ -456,7 +496,11 @@
     });
     // The side chat's moon (n8) is drawn in a layer of its own: it is not an agent, so it is never among the nodes.
     const sideLayer = svg('g', { class: 'ag-sidemoons' }), sideBack = svg('g', { class: 'ag-sidemoons ag-sidemoons-far' });
-    stage.append(flareLayer, edgeLayer, teamLayer, loopLayer, routeLayer, trailLayer, wire, sideBack, nodeLayer, sideLayer, draftLayer); drawing.append(defs, stage);
+    // The hub's chip, drawn again over every planet and the side chat's moon in 3D (the original stays in its node for the pointer and is
+    // hidden then): nothing is ever drawn over the chip's text.
+    const chipLayer = svg('g', { class: 'ag-chips', 'aria-hidden': 'true' });
+    chipLayer.style.pointerEvents = 'none';
+    stage.append(flareLayer, edgeLayer, teamLayer, loopLayer, routeLayer, trailLayer, wire, sideBack, nodeLayer, sideLayer, chipLayer, draftLayer); drawing.append(defs, stage);
     const teamLines = new Map(); // "id\nmember" -> { group, hit, line, team, member }
     const empty = el('div', 'ag-empty', 'Loading');
     viewport.append(drawing, empty);
@@ -1700,16 +1744,32 @@
       let chipWaits = false;
       if (hub && chipGroup && Number(chipGroup.dataset.boxW) > 0) {
         const s = hubThing.s, top = Number(chipGroup.dataset.boxTop), bottom = Number(chipGroup.dataset.boxBottom);
-        const discs = things.filter(t => t !== hubThing).map(t => ({ cx: t.p.x, cy: t.p.y, r: (t.p.r + 3) * t.s, z: t.z }));
-        const chip = placeChip({ cx: hub.x, cy: hub.y, r: hub.r, s, top, bottom, width: Number(chipGroup.dataset.boxW) }, discs, { now, hold: LABEL_HOLD, frontOnly: in3d, z: hubThing.z, prev: labelChip });
+        const discs = things.filter(t => t !== hubThing).map(t => ({ cx: t.p.x, cy: t.p.y, r: (t.p.r + 3) * t.s }));
+        if (moon) discs.push({ cx: pose.x, cy: pose.y, r: (SIDE_R + 3) * pose.scale });
+        const chip = placeChip({ cx: hub.x, cy: hub.y, r: hub.r, s, top, bottom, width: Number(chipGroup.dataset.boxW) }, discs, { now, hold: LABEL_HOLD, prev: labelChip });
         labelChip = chip;
         chipWaits = chip.since !== null;
-        const dy = chip.side === 'above' ? -(bottom + top) : 0;
-        const want = dy ? 'translate(0 ' + dy.toFixed(2) + ')' : '';
+        const want = chip.dx || chip.dy ? 'translate(' + chip.dx.toFixed(2) + ' ' + chip.dy.toFixed(2) + ')' : '';
         if ((chipGroup.getAttribute('transform') || '') !== want) { if (want) chipGroup.setAttribute('transform', want); else chipGroup.removeAttribute('transform'); }
         chipGroup.dataset.side = chip.side;
         chips.push({ left: chip.box.left, right: chip.box.right, top: chip.box.top, bottom: chip.box.bottom });
-      } else labelChip = null;
+        // In 3D the chip is drawn again in the top layer (made once for each change of its text), where the planets cannot cover it.
+        if (in3d) {
+          let top3 = chipLayer.querySelector(':scope > .ag-live');
+          if (!top3 || top3.dataset.stamp !== chipGroup.dataset.stamp || top3.dataset.copyOf !== hubName) {
+            top3?.remove();
+            top3 = chipGroup.cloneNode(true); top3.removeAttribute('transform'); top3.dataset.fresh = 'false'; top3.dataset.copyOf = hubName; top3.dataset.copy = '1';
+            top3.querySelectorAll('title').forEach(title => title.remove());
+            chipLayer.append(top3);
+          }
+          const place = 'translate(' + hub.x.toFixed(2) + ' ' + hub.y.toFixed(2) + ')' + (s > 1.0005 ? ' scale(' + s.toFixed(4) + ')' : '') + (want ? ' ' + want : '');
+          if (top3.getAttribute('transform') !== place) top3.setAttribute('transform', place);
+          if (chipGroup.style.opacity !== '0') chipGroup.style.opacity = '0';
+        } else {
+          if (chipGroup.style.opacity) chipGroup.style.opacity = '';
+          chipLayer.querySelector(':scope > .ag-live')?.remove();
+        }
+      } else { labelChip = null; chipLayer.querySelector(':scope > .ag-live')?.remove(); }
       const items = things.map(t => {
         const size = labelSize(t.label, t.kind);
         if (!size) return null;
@@ -1717,19 +1777,20 @@
         const chosen = (selected?.type === 'agent' && selected.key === t.id) || labelHover === t.id || labelFocus === t.id;
         const seat = !!p.parent && t.id !== hubName;
         const tier = t.id === hubName ? 0 : needs ? 1 : busy ? 2 : chosen ? 3 : seat ? 5 : 4;
-        return { id: t.id, w: (size.w + 2 * LABEL_PAD) * s, h: (size.h + LABEL_PAD) * s, asc: (size.asc + LABEL_PAD / 2) * s, cx: p.x, cy: p.y, r: ((Number(p.r) || 0) + (t.id === hubName ? 0 : 4)) * s, z: t.z, tier, forced: chosen, dx: (Number(p.labelShift) || 0) * s,
-          // A seat above its lead has its name above it first (in 2D, where that is where the layout put it).
-          places: !in3d && p.labelUp ? ['above', 'below', 'right', 'left'] : undefined, prev: labelState.get(t.id), size };
+        const core = (Number(p.r) || 0) * s;
+        return { id: t.id, w: (size.w + 2 * LABEL_PAD) * s, h: (size.h + LABEL_PAD) * s, asc: (size.asc + LABEL_PAD / 2) * s, cx: p.x, cy: p.y, r: core + (t.id === hubName ? 0 : 4 * s), cr: core, z: t.z, tier, forced: chosen || needs, asked: chosen, claim: t.id === hubName, dx: (Number(p.labelShift) || 0) * s,
+          // The orchestrator's name has the spot under it. A seat above its lead has its name above it first (in 2D, where that is where the layout put it).
+          places: t.id === hubName ? ['below'] : !in3d && p.labelUp ? labelOrder(['above', 'below', 'right', 'left']) : undefined, prev: labelState.get(t.id), size };
       }).filter(Boolean);
       if (moon) {
         const label = moon.querySelector('.ag-side-name'), size = labelSize(label, 'side'), busy = moon.dataset.busy === '1', chosen = selected?.type === 'sidechat' || labelHover === SIDE_KEY || labelFocus === SIDE_KEY;
         const hubY = hub ? hub.y : pose.y;
-        if (size) items.push({ id: SIDE_KEY, w: (size.w + 2 * LABEL_PAD) * pose.scale, h: (size.h + LABEL_PAD) * pose.scale, asc: (size.asc + LABEL_PAD / 2) * pose.scale, cx: pose.x, cy: pose.y, r: (SIDE_R + 3) * pose.scale, z: pose.z, tier: busy ? 2 : chosen ? 3 : 4, forced: chosen,
-          places: !in3d && pose.y < hubY ? ['above', 'below', 'right', 'left'] : undefined, prev: labelState.get(SIDE_KEY), size });
+        if (size) items.push({ id: SIDE_KEY, w: (size.w + 2 * LABEL_PAD) * pose.scale, h: (size.h + LABEL_PAD) * pose.scale, asc: (size.asc + LABEL_PAD / 2) * pose.scale, cx: pose.x, cy: pose.y, r: (SIDE_R + 3) * pose.scale, z: pose.z, cr: SIDE_R * pose.scale, tier: busy ? 2 : chosen ? 3 : 4, forced: chosen, asked: chosen,
+          places: !in3d && pose.y < hubY ? labelOrder(['above', 'below', 'right', 'left']) : undefined, prev: labelState.get(SIDE_KEY), size });
       }
       // In 3D a name stays inside the canvas (the fit leaves room for it below its planet, not beside it).
       const k = camera.scale || 1, bounds = in3d && viewport.clientWidth > 0 ? { left: -camera.x / k - LABEL_PAD, top: -camera.y / k - LABEL_PAD, right: (viewport.clientWidth - camera.x) / k + LABEL_PAD, bottom: (viewport.clientHeight - camera.y) / k + LABEL_PAD } : null;
-      const result = placeLabels(items, { now, hold: LABEL_HOLD, gap: LABEL_GAP, frontOnly: in3d, chips, bounds });
+      const result = placeLabels(items, { now, hold: LABEL_HOLD, gap: LABEL_GAP, depth: in3d, chips, bounds });
       const seen = new Set();
       items.forEach(item => {
         const found = result.places[item.id];
@@ -1745,7 +1806,22 @@
         if (label.hasAttribute('transform')) label.removeAttribute('transform');
         const shown = found.shown;
         if (calm) label.style.transition = 'none'; else if (label.style.transition) label.style.transition = '';
-        if (shown) { if (label.style.opacity) label.style.opacity = ''; } else if (label.style.opacity !== '0') label.style.opacity = '0';
+        // The orchestrator's name is drawn again in the top layer in 3D (nothing, a planet or the side chat's ball, is ever over it).
+        let nameTop = item.id === hubName ? chipLayer.querySelector(':scope > .ag-agent-name') : null;
+        const raise = item.id === hubName && in3d && shown;
+        if (raise) {
+          if (!nameTop) { nameTop = label.cloneNode(true); nameTop.removeAttribute('style'); nameTop.dataset.copy = '1'; chipLayer.append(nameTop); }
+          if (nameTop.textContent !== label.textContent) nameTop.textContent = label.textContent;
+          const at = 'translate(' + p.x.toFixed(2) + ' ' + p.y.toFixed(2) + ')' + (s > 1.0005 ? ' scale(' + s.toFixed(4) + ')' : '');
+          if (nameTop.getAttribute('transform') !== at) nameTop.setAttribute('transform', at);
+          nameTop.setAttribute('x', fx); nameTop.setAttribute('y', fy);
+        } else nameTop?.remove();
+        // The side chat's ball under the orchestrator's name (it is behind the sun there) is paled, so the name stays the clear one.
+        if (item.id === hubName && moon) {
+          const under = !!(shown && in3d && pose.z < 0 && boxMeetsDisc({ left: found.x, right: found.x + found.w, top: found.y, bottom: found.y + found.h }, { cx: pose.x, cy: pose.y, r: SIDE_R * pose.scale }));
+          if (under) { if (moon.dataset.underName !== '1') moon.dataset.underName = '1'; } else if (moon.dataset.underName) delete moon.dataset.underName;
+        }
+        if (shown && !raise) { if (label.style.opacity) label.style.opacity = ''; } else if (label.style.opacity !== '0') label.style.opacity = '0';
         label.dataset.place = found.place; label.dataset.shown = shown ? '1' : '0'; label.dataset.held = found.held ? '1' : '0';
         if (item.id !== SIDE_KEY) p.placedBox = shown ? { left: found.x + LABEL_PAD * s - p.x, right: found.x + found.w - LABEL_PAD * s - p.x, top: found.y + LABEL_PAD / 2 * s - p.y, bottom: found.y + found.h - LABEL_PAD / 2 * s - p.y } : null; // (the name's own box: the backing's margin is not an obstacle)
         else side.placedBox = shown ? { left: found.x, right: found.x + found.w, top: found.y, bottom: found.y + found.h } : null;
@@ -5532,7 +5608,7 @@
     // and spend, its transcript (the chat section) and, where the host gives actions.side, a box to ask it. A reply
     // is { ok: true, answer } or { ok: false, error }; text from it reaches the page as textContent only.
     const sideAction = action('side');
-    const SIDE_WAIT_MS = 170000, SIDE_R = 11, SIDE_GAP = 44, SIDE_TILT = .6, SIDE_START = -2.2;
+    const SIDE_WAIT_MS = 170000, SIDE_MIX_MAX = .3, SIDE_R = 11, SIDE_GAP = 44, SIDE_TILT = .6, SIDE_START = -2.2;
     const SIDE_AXES = [[1, 0, 0], [0, Math.cos(SIDE_TILT), Math.sin(SIDE_TILT)]];
     const side = { sending: false, pending: '', local: null, note: null, angle: SIDE_START, raf: 0, last: 0, node: null, pose: null };
     function sideInfo() {
@@ -5563,7 +5639,7 @@
       const sphere = svg('polygon', { class: 'ag-side-sphere', points: face, fill: 'url(#' + uid + '-sphere)', 'aria-hidden': 'true' });
       const mix = svg('polygon', { class: 'ag-side-mix', points: face, 'aria-hidden': 'true' });
       sphere.style.display = 'none'; mix.style.display = 'none';
-      node.append(svg('circle', { class: 'ag-side-halo', r: SIDE_R + 8 }), svg('circle', { class: 'ag-side-core', r: SIDE_R }), ball, sphere, mix, name);
+      node.append(svg('circle', { class: 'ag-side-halo', r: SIDE_R + 8 }), svg('circle', { class: 'ag-side-core', r: SIDE_R }), ball, mix, sphere, name); // (the light over the muted colour: the highlight stays at every depth)
       return side.node = node;
     }
     // Where the moon is now: round the orchestrator's place at the moons' phase, flat in 2D, on its own tilted plane in 3D
@@ -5604,7 +5680,7 @@
       if (lit) {
         const toward = Math.atan2(hub.y - y, hub.x - x) * 180 / Math.PI + 135;
         sphere.setAttribute('transform', 'rotate(' + toward.toFixed(1) + ')'); sphere.style.opacity = e.toFixed(3);
-        mix.style.opacity = (info.busy ? 0 : e * orbitMix(depth)).toFixed(3);
+        mix.style.opacity = (info.busy ? 0 : e * Math.min(orbitMix(depth), SIDE_MIX_MAX)).toFixed(3); // (a small ball paled by depth as a planet is, but it keeps its shading)
       }
       // The ball is drawn over every planet (near) or under every one (far), so that is its depth for the names.
       side.pose = { x, y, scale, z: in3d ? (depth >= 0 ? 1e3 : -1e3) : z };
@@ -8074,5 +8150,5 @@
       pointers.clear(); teamViews.clear(); root.replaceChildren(); root.classList.remove('agentgraph', 'ag-compact', 'ag-canvas-compact', 'ag-details-open'); root.style.removeProperty('--ag-sheet-height'); root.style.removeProperty('--ag-header-height'); delete root.dataset.state; delete root.dataset.team; delete root.dataset.agScheme; delete root.dataset.agSchemeSource; delete root.dataset.agMotion; delete root.dataset.agFlows; delete root.dataset.agTrail;
     } };
   }
-  window.AgentGraph = { mount, placeLabels, placeChip };
+  window.AgentGraph = { mount, placeLabels, placeChip, labelOrder };
 })();
