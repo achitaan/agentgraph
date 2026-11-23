@@ -2,9 +2,12 @@
 measured in tokens, cache reads and writes, cost, time, agent calls, correctness and recovery.
 
     agentgraph bench scratch-config --to DIR [--pin-model M] [--json]
+    agentgraph bench plain-config --to DIR [--pin-model M] [--json]
     agentgraph bench run SCENARIO... --label L --config DIR [--reps N] [--interrupt-after SECONDS] [--budget USD] [--json]
     agentgraph bench probe AGENT... --label L --config DIR [--json]
     agentgraph bench report LABEL [LABEL2] [--results DIR]
+    agentgraph bench suite NAME --setup LABEL=DIR --setup LABEL=DIR [--reps N] [--budget USD] [--interrupt-after SECONDS] [--json]
+    agentgraph bench card LABEL_A LABEL_B [--html FILE] [--suite NAME] [--results DIR]
     agentgraph bench scenarios
     agentgraph bench fingerprint
 
@@ -25,6 +28,16 @@ Not copied: `.git`, `.opencode/`, `memory*/`, `proposals*/`, `out/`, `bench/`, `
 config folder, and anything inside it. The command is always the app CLI
 (`/Applications/OpenCode.app/Contents/Resources/opencode-cli`, `OPENCODE_CLI` overrides, an absolute path only) with
 `--standalone` (a private server; the background service is never attached to, started or stopped).
+
+**Plain copy.** `plain-config` makes a scratch HOME the same way (same checks, same links, same model pin) that holds plain
+OpenCode and nothing of the toolkit: from `opencode.json` only the keys in `PLAIN_KEYS` (the provider entries and the
+models), and no agent files, prompts, plugins, skills, `AGENTS.md`, commands or MCP servers. Both kinds of copy hold a
+`bench-setup.json` (`kind` toolkit or plain, and for plain the `agent` to run, `build`, the one built-in agent): a run uses
+that agent instead of the scenario's. No copy ever holds a `bench/scenarios` folder (the hidden checks).
+
+**Suites** (`bench/suites/<name>.json`: name, note, scenarios) run every scenario on every setup, one rep of one scenario on
+each setup in turn, the first setup alternating, so drift over time reaches all setups; `--budget` is one total over all of
+them. Each row gets a `suite` field. `card` puts two labels side by side (`agentgraph/benchcard.py`).
 
 **Sessions** go to the real OpenCode database as archived sessions titled `agentgraph-bench: <scenario> <label> rN`
 (the host has no per-run data folder switch short of moving the credentials too), so the orchestrator's spend limit
@@ -79,6 +92,12 @@ RESULTS = BENCH_DIR / "results"
 TEMP_ROOT = Path("/private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode")
 DEFAULT_PIN = "anthropic/claude-sonnet-5-5"
 MARKER = ".agentgraph-bench-scratch"
+SETUP_FILE = "bench-setup.json"
+PLAIN_AGENT = "build"
+# What a plain copy keeps of opencode.json: the provider entries and the models. Everything else (plugins, agents, MCP
+# servers, commands, instruction files, permissions) is left out.
+PLAIN_KEYS = ("$schema", "provider", "enabled_providers", "disabled_providers", "model", "small_model")
+SUITES = BENCH_DIR / "suites"
 PROBE_PROMPT = "Reply with the single word OK."
 RESUME_PROMPT = ("Continue from the graph checkpoint: read the task graph in .opencode/graph/, work only the nodes that have "
                  "not passed (do not redo a node that passed), and finish the task.")
@@ -103,6 +122,8 @@ class BenchError(Exception):
 # ---- the scratch copy of the config ----
 
 def _skip(name: str, relative: Path) -> bool:
+    if relative.parts[-2:] == ("bench", "scenarios"):  # the hidden checks, wherever a copied folder holds them
+        return True
     if name in GLOBAL_SKIP or name.endswith((".bak", ".pyc")) or name.startswith((".oh-my-opencode-slim", ".lock")):
         return True
     if relative.parts[:1] == ("orchestration",) and len(relative.parts) == 2:  # the toolkit's own personal folders
@@ -254,10 +275,9 @@ def _inside(path: Path, folder: Path) -> bool:
         return False
 
 
-def scratch_config(to, *, pin_model: str | None = DEFAULT_PIN, live: Path | None = None,
-                   temp_root: Path | None = None, real_home: Path | None = None) -> dict:
-    """Copy the live config into the scratch folder `to` (mode 0700) and return {dir, config, prompt_hash, files, pinned}."""
-    live = Path(live) if live is not None else sources.CONFIG_DIR
+def _new_scratch(to, *, pin_model, live: Path, temp_root: Path | None, real_home: Path | None) -> tuple[Path, Path, Path]:
+    """The checks both kinds of copy share, then the empty scratch folder with its links to the real database, state and
+    cache folders: (dir, home, config)."""
     real_home = Path(real_home) if real_home is not None else Path.home()
     root = Path(temp_root) if temp_root is not None else TEMP_ROOT
     target = Path(to).expanduser()
@@ -286,6 +306,18 @@ def scratch_config(to, *, pin_model: str | None = DEFAULT_PIN, live: Path | None
         if real.is_dir():
             link.parent.mkdir(parents=True, exist_ok=True)
             link.symlink_to(real)
+    return target, home, config
+
+
+def _write_setup(target: Path, kind: str, agent: str | None) -> None:
+    (target / SETUP_FILE).write_text(json.dumps({"kind": kind, "agent": agent}) + "\n", encoding="utf-8")
+
+
+def scratch_config(to, *, pin_model: str | None = DEFAULT_PIN, live: Path | None = None,
+                   temp_root: Path | None = None, real_home: Path | None = None) -> dict:
+    """Copy the live config into the scratch folder `to` (mode 0700) and return {dir, config, prompt_hash, files, pinned}."""
+    live = Path(live) if live is not None else sources.CONFIG_DIR
+    target, home, config = _new_scratch(to, pin_model=pin_model, live=live, temp_root=temp_root, real_home=real_home)
     copied = 0
     for name in TOP_FILES:
         if (live / name).is_file():
@@ -298,8 +330,38 @@ def scratch_config(to, *, pin_model: str | None = DEFAULT_PIN, live: Path | None
     digest, files = config_hash(config, target)
     (target / MARKER).write_text(json.dumps({"created": int(time.time()), "prompt_hash": digest, "pin_model": pin_model,
                                              "files": copied}) + "\n", encoding="utf-8")
+    _write_setup(target, "toolkit", None)
     return {"dir": str(target), "home": str(home), "config": str(config), "prompt_hash": digest, "prompt_files": files, "files_copied": copied,
-            "pinned": pinned, "pin_model": pin_model}
+            "pinned": pinned, "pin_model": pin_model, "kind": "toolkit"}
+
+
+def plain_config(to, *, pin_model: str | None = DEFAULT_PIN, live: Path | None = None,
+                 temp_root: Path | None = None, real_home: Path | None = None) -> dict:
+    """A scratch folder of plain OpenCode: only the `PLAIN_KEYS` of the live `opencode.json` (the model pinned), nothing else
+    of the config. Returns the same fields as `scratch_config`."""
+    live = Path(live) if live is not None else sources.CONFIG_DIR
+    target, home, config = _new_scratch(to, pin_model=pin_model, live=live, temp_root=temp_root, real_home=real_home)
+    kept, copied = {}, 0
+    source = live / "opencode.json"
+    if source.is_file():
+        try:
+            data = json.loads(rewrite_text(source.read_text(encoding="utf-8"), live, config))
+        except (OSError, ValueError):
+            raise BenchError("the live opencode.json could not be read as JSON") from None
+        kept = {key: data[key] for key in PLAIN_KEYS if isinstance(data, dict) and key in data}
+    if pin_model:
+        kept = _pin_opencode_json(kept, pin_model)
+        kept["model"] = pin_model
+    if kept:
+        (config / "opencode.json").write_text(json.dumps(kept, indent=2) + "\n", encoding="utf-8")
+        copied = 1
+    digest, files = config_hash(config, target)
+    (target / MARKER).write_text(json.dumps({"created": int(time.time()), "prompt_hash": digest, "pin_model": pin_model,
+                                             "files": copied}) + "\n", encoding="utf-8")
+    _write_setup(target, "plain", PLAIN_AGENT)
+    return {"dir": str(target), "home": str(home), "config": str(config), "prompt_hash": digest, "prompt_files": files,
+            "files_copied": copied, "pinned": 1 if pin_model else 0, "pin_model": pin_model, "kind": "plain",
+            "keys": sorted(kept)}
 
 
 def open_scratch(config, *, live: Path | None = None) -> dict:
@@ -324,7 +386,14 @@ def open_scratch(config, *, live: Path | None = None) -> dict:
         raise BenchError(f"{marker} is unreadable") from None
     cfg = path / "home" / ".config" / "opencode"
     digest, _ = config_hash(cfg, path)
-    return {"dir": path, "config": cfg, "hash": digest, "pin_model": info.get("pin_model"), "made": info.get("prompt_hash")}
+    try:
+        setup = json.loads((path / SETUP_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        setup = {}  # a copy made before the setup file existed is a toolkit copy
+    setup = setup if isinstance(setup, dict) else {}
+    agent = setup.get("agent") if isinstance(setup.get("agent"), str) else None
+    return {"dir": path, "config": cfg, "hash": digest, "pin_model": info.get("pin_model"), "made": info.get("prompt_hash"),
+            "kind": setup.get("kind") if setup.get("kind") in ("toolkit", "plain") else "toolkit", "agent": agent}
 
 
 def run_env(scratch: dict, work: Path, environ=None) -> dict:
@@ -576,7 +645,8 @@ def one_rep(*, scenario: dict | None, agent: str, prompt: str, label: str, rep: 
     prepare_work(scenario["dir"] if scenario else None, work)
     env = run_env(scratch, work)
     row = {"scenario": scenario_id, "label": label, "rep": rep, "agent": agent, "time": int(time.time()),
-           "config_hash": scratch["hash"], "model": model or scratch.get("pin_model"), "work": str(work)}
+           "config_hash": scratch["hash"], "model": model or scratch.get("pin_model"), "work": str(work),
+           "setup": scratch.get("kind", "toolkit")}
     cmd = build_command(exe, agent=agent, model=model, title=title, auto=auto)
     first = _spawn(cmd, prompt, work, env, timeout, stop_after=interrupt_after)
     events = sidechat._events(first["stdout"])
@@ -647,15 +717,91 @@ def run_scenarios(names, *, label, config, reps=1, interrupt_after=None, budget=
         for rep in range(1, reps + 1):
             if budget is not None and spent >= budget:
                 raise BenchError(f"stopped before {scenario['id']} r{rep}: spent ${spent:.2f} of the ${budget:.2f} budget")
-            row = one_rep(scenario=scenario, agent=scenario["agent"], prompt=scenario["prompt"], label=label, rep=rep,
-                          scratch=scratch, exe=exe, db_path=db_path, model=scenario.get("model") or scratch["pin_model"],
-                          name=scenario["id"], interrupt_after=interrupt_after, timeout=float(scenario["timeout"]))
-            append_row(row, results)
+            row = _run_one(scenario, rep, label=label, scratch=scratch, exe=exe, db_path=db_path, interrupt_after=interrupt_after,
+                           results=results)
             rows.append(row)
             spent += row.get("cost") or 0.0
             if out:
                 print(summary_line(row), file=out, flush=True)
     return rows
+
+
+def _run_one(scenario: dict, rep: int, *, label: str, scratch: dict, exe: str, db_path: Path, interrupt_after, results,
+             extra: dict | None = None) -> dict:
+    """One rep of one scenario on one scratch copy, its row saved. A copy that names an agent (the plain one) runs that
+    agent in place of the scenario's."""
+    row = one_rep(scenario=scenario, agent=scratch.get("agent") or scenario["agent"], prompt=scenario["prompt"], label=label, rep=rep,
+                  scratch=scratch, exe=exe, db_path=db_path, model=scenario.get("model") or scratch["pin_model"],
+                  name=scenario["id"], interrupt_after=interrupt_after, timeout=float(scenario["timeout"]))
+    row.update(extra or {})
+    append_row(row, results)
+    return row
+
+
+# ---- suites ----
+
+def load_suite(name: str, root: Path | None = None) -> dict:
+    root = Path(root) if root is not None else SUITES
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name or ""):
+        raise BenchError(f"bad suite name: {name!r}")
+    try:
+        data = json.loads((root / f"{name}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise BenchError(f"no suite {name!r} in {root}") from None
+    ids = data.get("scenarios") if isinstance(data, dict) else None
+    if not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids):
+        raise BenchError(f"suite {name!r} needs a list of scenario ids")
+    return {"name": name, "note": str(data.get("note") or ""), "scenarios": ids}
+
+
+def parse_setups(items) -> list[tuple[str, str]]:
+    """`LABEL=DIR` strings as (label, dir)."""
+    setups = []
+    for item in items or []:
+        label, sep, folder = str(item).partition("=")
+        if not sep or not folder:
+            raise BenchError(f"--setup must look like LABEL=DIR, not {item!r}")
+        setups.append((label, folder))
+    return setups
+
+
+def run_suite(name, *, setups, reps=1, interrupt_after=None, budget=None, executable=None, db_path=None, results=None,
+              scenarios_root=None, suites_root=None, live=None, out=None) -> dict:
+    """Every scenario of the suite on every setup, interleaved: one rep of one scenario on each setup in turn, the setup that
+    goes first rotating from one rep to the next. Nothing is run if a scenario, a label or a folder is wrong. Returns
+    {rows, spent, stopped}; `stopped` says why the budget ended it early (the rows so far are kept)."""
+    suite = load_suite(name, suites_root)
+    setups = [(_label(label), folder) for label, folder in setups]
+    if len(setups) < 2 or len({label for label, _ in setups}) != len(setups):
+        raise BenchError("give two or more --setup LABEL=DIR with different labels")
+    scratches = [(label, open_scratch(folder, live=live)) for label, folder in setups]
+    exe = executable_path(executable)
+    db_path = Path(db_path) if db_path is not None else sources.DB_PATH
+    scenarios = [load_scenario(n, scenarios_root) for n in suite["scenarios"]]
+    if reps < 1 or reps > 20:
+        raise BenchError("--reps must be 1 to 20")
+    if interrupt_after is not None and interrupt_after <= 0:
+        raise BenchError("--interrupt-after must be positive")
+    if budget is not None and budget <= 0:
+        raise BenchError("--budget must be positive")
+    rows, spent, stopped, cell = [], 0.0, None, 0
+    for scenario in scenarios:
+        for rep in range(1, reps + 1):
+            shift = cell % len(scratches)
+            cell += 1
+            for label, scratch in scratches[shift:] + scratches[:shift]:
+                if budget is not None and spent >= budget:
+                    stopped = f"stopped before {scenario['id']} r{rep} on {label}: spent ${spent:.2f} of the ${budget:.2f} budget"
+                    if out:
+                        print(stopped, file=out, flush=True)
+                    return {"rows": rows, "spent": round(spent, 6), "stopped": stopped}
+                row = _run_one(scenario, rep, label=label, scratch=scratch, exe=exe, db_path=db_path, interrupt_after=interrupt_after,
+                               results=results, extra={"suite": suite["name"]})
+                rows.append(row)
+                spent += row.get("cost") or 0.0
+                if out:
+                    print(f"[{label}] {summary_line(row)}", file=out, flush=True)
+    return {"rows": rows, "spent": round(spent, 6), "stopped": stopped}
 
 
 def run_probes(agents, *, label, config, executable=None, db_path=None, results=None, live=None, out=None) -> list[dict]:
@@ -825,6 +971,10 @@ def main(argv=None) -> int:
     p.add_argument("--to", required=True)
     p.add_argument("--pin-model", default=DEFAULT_PIN, help=f"model for every agent and preset (default {DEFAULT_PIN}); 'none' keeps them")
     p.add_argument("--json", action="store_true")
+    p = sub.add_parser("plain-config", help="a scratch folder of plain OpenCode: no agents, prompts, plugins or skills")
+    p.add_argument("--to", required=True)
+    p.add_argument("--pin-model", default=DEFAULT_PIN, help=f"model to pin (default {DEFAULT_PIN}); 'none' keeps the live one")
+    p.add_argument("--json", action="store_true")
     p = sub.add_parser("run", help="run scenarios")
     p.add_argument("scenarios", nargs="+")
     p.add_argument("--label", required=True)
@@ -843,6 +993,19 @@ def main(argv=None) -> int:
     p = sub.add_parser("report", help="a table per scenario; two labels give the changes")
     p.add_argument("labels", nargs="+")
     p.add_argument("--results", type=Path)
+    p = sub.add_parser("suite", help="run a suite on two or more setups, interleaved")
+    p.add_argument("name")
+    p.add_argument("--setup", action="append", default=[], metavar="LABEL=DIR", help="a label and its scratch folder (repeat)")
+    p.add_argument("--reps", type=int, default=1)
+    p.add_argument("--interrupt-after", type=float)
+    p.add_argument("--budget", type=float, help="one total in dollars over all setups; no run starts once it is reached")
+    p.add_argument("--results", type=Path)
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("card", help="a scorecard of two labels (text; --html for a page)")
+    p.add_argument("labels", nargs=2, metavar="LABEL")
+    p.add_argument("--html", type=Path, metavar="FILE")
+    p.add_argument("--suite")
+    p.add_argument("--results", type=Path)
     sub.add_parser("scenarios", help="list the scenarios")
     sub.add_parser("fingerprint", help="hashes of the live config files and ledgers (to show a bench left them alone)")
     args = parser.parse_args(argv)
@@ -852,6 +1015,24 @@ def main(argv=None) -> int:
             print(json.dumps(info) if args.json else
                   f"scratch config at {info['config']}\nprompt hash {info['prompt_hash']} ({info['prompt_files']} prompt files, "
                   f"{info['files_copied']} files copied, model pinned to {info['pin_model']})")
+        elif args.command == "plain-config":
+            info = plain_config(args.to, pin_model=None if args.pin_model == "none" else args.pin_model)
+            print(json.dumps(info) if args.json else
+                  f"plain config at {info['config']}\nsettings kept: {', '.join(info['keys']) or 'none'} (agent {PLAIN_AGENT}, "
+                  f"model pinned to {info['pin_model']})")
+        elif args.command == "suite":
+            result = run_suite(args.name, setups=parse_setups(args.setup), reps=args.reps, interrupt_after=args.interrupt_after,
+                               budget=args.budget, results=args.results, out=None if args.json else sys.stdout)
+            if args.json:
+                print(json.dumps(result))
+            elif not result["stopped"]:
+                labels = [s.partition("=")[0] for s in args.setup]
+                print(f"done: {len(result['rows'])} runs, ${result['spent']:.2f}. Next: agentgraph bench card {labels[0]} {labels[1]} --suite {args.name}")
+            if result["stopped"]:
+                return 3
+        elif args.command == "card":
+            from . import benchcard
+            sys.stdout.write(benchcard.run_card(args.labels[0], args.labels[1], results=args.results, suite=args.suite, html_file=args.html))
         elif args.command == "run":
             rows = run_scenarios(args.scenarios, label=args.label, config=args.config, reps=args.reps,
                                  interrupt_after=args.interrupt_after, budget=args.budget, results=args.results,

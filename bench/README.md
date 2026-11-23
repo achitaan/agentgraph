@@ -25,3 +25,27 @@ agentgraph bench fingerprint                              # hashes of the live c
   `--interrupt-after` and resumes the same session).
 - Results: `bench/results/<label>.jsonl`, one row per rep. Never compare rows made with different `config_hash` values
   as "the same config"; the hash is what changed.
+
+## Plain OpenCode against this toolkit
+
+Three commands answer "on the same fixed tasks, is setup A better than setup B?":
+
+```
+agentgraph bench plain-config --to DIR                    # plain OpenCode: provider entries and pinned model only, agent build
+agentgraph bench suite basic --setup toolkit=DIR1 --setup plain=DIR2 --reps 3 --budget 10
+agentgraph bench card toolkit plain --suite basic --html card.html
+```
+
+- `plain-config` makes a scratch HOME like `scratch-config`, but keeps only an allow-list of settings keys (`PLAIN_KEYS`
+  in `bench.py`). No agent files, prompts, plugins, skills, `AGENTS.md`, MCP servers or commands. It takes `--pin-model` too.
+- Each copy holds a `bench-setup.json` marker (`plain` or `toolkit`). For a plain copy the runner uses its agent (`build`)
+  instead of the scenario's agent. Copies never include `bench/scenarios` (the hidden checks).
+- `suite NAME` runs every scenario in `bench/suites/<name>.json` on every `--setup LABEL=DIR`, interleaved (task 1 rep 1
+  on A, then B, task 1 rep 2 ...) with the first setup alternating. `--budget` is one total over all setups; when it is
+  reached the suite stops before the next run, says so and exits with code 3. Rows go to `bench/results/<LABEL>.jsonl`
+  with a `suite` field.
+- `card A B` reads existing rows and prints a scorecard; `--html FILE` also writes a self-contained page. `l-suite:METHOD`
+  names the rows of `l-suite.jsonl` for one method. `--suite NAME` keeps only rows made by that suite. Passing is a sign
+  test over tasks (p <= 0.10); cost, time, turns and agent calls use the median over tasks of B/A, needing at least 5 tasks
+  with 80% or more the same way. Otherwise the line says "too few runs to say".
+

@@ -11,6 +11,9 @@ Global command files live in `~/.config/opencode/commands/`; the toolkit's copie
 | `/agent-skills AGENT [add SKILL \| remove SKILL \| all]` | Show or change an agent's skills; changes apply on restart. | `agentgraph skills show AGENT`, `agentgraph skills add AGENT SKILL`, `agentgraph skills remove AGENT SKILL`, or `agentgraph skills all AGENT` |
 | `/spend` | Summarize the cost trend in at most three lines. | `agentgraph cost --trend` |
 | *(no command file)* | Check whether the cost work has paid off: seven lines, each better, same, worse or not enough data, then one overall verdict; one dated row is added to a log. | `agentgraph cost --check [--days N] [--json]` |
+| *(no command file)* | Make a scratch HOME of plain OpenCode: provider entries and the pinned model only, no agents, prompts, plugins, skills, instructions, MCP servers or commands. | `agentgraph bench plain-config --to DIR [--pin-model M]` |
+| *(no command file)* | Run a suite of fixed tasks on two or more setups, interleaved, with one total budget; rows go to the bench results. | `agentgraph bench suite NAME --setup LABEL=DIR --setup LABEL=DIR [--reps N] [--budget DOLLARS] [--interrupt-after S]` |
+| *(no command file)* | Compare two sets of bench rows: per-measure verdicts (better, worse, same or too few runs to say), and an optional HTML card. | `agentgraph bench card LABEL_A LABEL_B [--suite NAME] [--html FILE]` |
 | `/graph-check [task]` | Validate this project's graphs and report unfinished work. | `agentgraph check [--task NAME]` |
 
 `H` is the active preset's ledger home; `F` is a temporary file. For `/learn`, `--feedback-ids` exposes the IDs used in the `{ "id": "reason" }` marking file. Marks are append-only in `H/feedback-handled.jsonl`; they do not rewrite notes, advance the watermark, or erase history. Recording an approved batch edit keeps the existing watermark, so notes not settled by that run remain pending.

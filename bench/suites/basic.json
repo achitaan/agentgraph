@@ -1,0 +1,5 @@
+{
+  "name": "basic",
+  "note": "Three small tasks: one bug, two independent features, one dependent three-step build. A quick first look at two setups.",
+  "scenarios": ["s1-simple", "s2-parallel", "s3-workflow"]
+}

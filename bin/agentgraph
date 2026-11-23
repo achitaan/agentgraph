@@ -37,7 +37,7 @@
 #   agentgraph loop set|show|unset|start|status|list|cancel   run a drawn self-loop for real: code runs the check and counts attempts (docs/LOOPS.md)
 #   agentgraph graph set TASK NODE --status S ...   change one node under the lock, refused if check would object (graph event TASK [NODE] KIND --note T)
 #   agentgraph status --task T [--json]    read-only resume view: ready, running (live/quiet/orphan), returned, stale, stall candidates
-#   agentgraph bench scratch-config --to DIR   a fixed-task bench on a scratch copy of the config (bench run|probe|report|scenarios)
+#   agentgraph bench scratch-config --to DIR   a fixed-task bench on a scratch copy of the config (bench run|probe|report|scenarios|plain-config|suite|card)
 # -P: do not put the current directory on the import path, so a project that
 # has its own "agentgraph" package cannot shadow this tool.
 HERE="$(cd "$(dirname "$0")/.." && pwd)"

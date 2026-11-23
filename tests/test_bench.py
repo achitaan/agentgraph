@@ -156,6 +156,82 @@ class ScratchConfigTests(Base):
         self.assertEqual(before["ledger"]["files"], 1)
 
 
+class PlainConfigTests(Base):
+    def setUp(self):
+        super().setUp()
+        (self.live / "opencode.json").write_text(json.dumps({
+            "$schema": "https://example.invalid/schema.json", "model": "openai/gpt-6-sol", "small_model": "openai/gpt-6-luna",
+            "provider": {"acme": {"options": {"baseURL": f"{self.live}/proxy"}, "models": {"m1": {}}}},
+            "plugin": ["some-plugin"], "mcp": {"srv": {"command": ["x"]}}, "agent": {"explore": {"model": "openai/y"}},
+            "command": {"c": {"template": "t"}}, "instructions": ["AGENTS.md"], "permission": {"bash": "allow"}}))
+        (self.live / "skills" / "x" / "bench" / "scenarios" / "t1" / "hidden").mkdir(parents=True)
+        (self.live / "skills" / "x" / "bench" / "scenarios" / "t1" / "hidden" / "h.py").write_text("HIDDEN-CHECK\n")
+        (self.live / "skills" / "x" / "SKILL.md").write_text("skill text\n")
+        (self.live / "orchestration" / "deep" / "bench" / "scenarios").mkdir(parents=True)
+        (self.live / "orchestration" / "deep" / "bench" / "scenarios" / "s.json").write_text("HIDDEN-CHECK\n")
+        (self.live / "orchestration" / "deep" / "keep.md").write_text("kept\n")
+
+    def plain(self, name="p1", **kw):
+        return bench.plain_config(self.root / name, live=self.live, temp_root=self.root, real_home=self.real_home, **kw)
+
+    def test_plain_copy_has_only_the_allow_listed_settings(self):
+        info = self.plain()
+        config = Path(info["config"])
+        self.assertEqual([p.name for p in config.iterdir()], ["opencode.json"])   # no agents, skills, plugins, AGENTS.md, commands
+        data = json.loads((config / "opencode.json").read_text())
+        self.assertEqual(sorted(data), sorted(("$schema", "model", "small_model", "provider")))
+        self.assertTrue(set(data) <= set(bench.PLAIN_KEYS))
+        for gone in ("plugin", "mcp", "agent", "command", "instructions", "permission"):
+            self.assertNotIn(gone, data)
+        self.assertEqual((data["model"], data["small_model"]), (MODEL, MODEL))
+        self.assertEqual(data["provider"]["acme"]["models"], {"m1": {}})
+        self.assertIn(str(config), data["provider"]["acme"]["options"]["baseURL"])  # the live path points at the copy
+        self.assertNotIn(str(self.live), json.dumps(data))
+        self.assertEqual(stat.S_IMODE(os.stat(info["dir"]).st_mode), 0o700)
+        for name in ("AGENTS.md", "agents", "commands", "skills", "oh-my-opencode-slim", "orchestration", "node_modules", "cli.json"):
+            self.assertFalse((config / name).exists(), name)
+
+    def test_plain_copy_is_marked_and_the_marker_names_the_agent(self):
+        info = self.plain()
+        self.assertEqual(json.loads((Path(info["dir"]) / bench.SETUP_FILE).read_text()), {"kind": "plain", "agent": "build"})
+        scratch = bench.open_scratch(info["dir"], live=self.live)
+        self.assertEqual((scratch["kind"], scratch["agent"], scratch["pin_model"]), ("plain", "build", MODEL))
+        toolkit = self.scratch("tk")
+        self.assertEqual(json.loads((Path(toolkit["dir"]) / bench.SETUP_FILE).read_text()), {"kind": "toolkit", "agent": None})
+        scratch = bench.open_scratch(toolkit["dir"], live=self.live)
+        self.assertEqual((scratch["kind"], scratch["agent"]), ("toolkit", None))
+        (Path(toolkit["dir"]) / bench.SETUP_FILE).unlink()                          # a copy made before the marker existed
+        self.assertEqual(bench.open_scratch(toolkit["dir"], live=self.live)["kind"], "toolkit")
+
+    def test_plain_copy_keeps_the_pin_option_and_the_same_refusals(self):
+        keep = json.loads((Path(self.plain("k", pin_model=None)["config"]) / "opencode.json").read_text())
+        self.assertEqual(keep["model"], "openai/gpt-6-sol")
+        other = json.loads((Path(self.plain("o", pin_model="openai/gpt-6-luna")["config"]) / "opencode.json").read_text())
+        self.assertEqual((other["model"], other["small_model"]), ("openai/gpt-6-luna",) * 2)
+        for target in (self.live / "inside", "relative/dir", self.base / "outside-temp-root", self.root):
+            with self.subTest(target=str(target)), self.assertRaises(bench.BenchError):
+                bench.plain_config(target, live=self.live, temp_root=self.root, real_home=self.real_home)
+        with self.assertRaises(bench.BenchError):
+            self.plain("bad", pin_model="not a model")
+        self.plain("taken")
+        with self.assertRaises(bench.BenchError):
+            self.plain("taken")
+
+    def test_plain_copy_leaves_the_live_files_alone(self):
+        before = bench.live_fingerprint(self.live)
+        self.plain()
+        self.assertEqual(bench.live_fingerprint(self.live), before)
+
+    def test_no_copy_holds_the_hidden_checks(self):
+        for info in (self.scratch("tk"), self.plain("pl")):
+            files = [p for p in Path(info["dir"]).rglob("*")]
+            self.assertFalse([p for p in files if "scenarios" in p.parts], info["dir"])
+            self.assertNotIn("HIDDEN-CHECK", "".join(p.read_text() for p in files if p.is_file() and not p.is_symlink()))
+        config = Path(self.scratch("tk2")["config"])
+        self.assertTrue((config / "skills" / "x" / "SKILL.md").is_file())             # the rest of the folder is still copied
+        self.assertTrue((config / "orchestration" / "deep" / "keep.md").is_file())
+
+
 class RefusalTests(Base):
     def test_no_config_the_live_folder_and_a_plain_folder_are_refused(self):
         with self.assertRaisesRegex(bench.BenchError, "--config DIR is required"):
@@ -392,6 +468,117 @@ class RunTests(Base):
         state = bench.graph_state(work)
         self.assertEqual((state["passed"], state["nodes"], state["dispatched"], state["events"]), (["a:n1"], 2, {"a:n1": 2}, 2))
         self.assertEqual(bench.graph_state(self.base / "none")["nodes"], 0)
+
+
+class SuiteTests(Base):
+    """`bench suite`: the fake executable answers every call with the same root session, so every run costs the same."""
+
+    def setUp(self):
+        super().setUp()
+        self.tk = self.scratch("tk")["dir"]
+        self.plain = bench.plain_config(self.root / "pl", live=self.live, temp_root=self.root, real_home=self.real_home)["dir"]
+        self.cli_dir = self.base / "cli"
+        self.cli_dir.mkdir()
+        self.cli = self.cli_dir / "opencode-cli"
+        self.cli.write_text(FAKE)
+        self.cli.chmod(0o755)
+        (self.cli_dir / "plan.json").write_text(json.dumps([{"write": {"answer.txt": "right\n"}}]))
+        self.results, self.scenarios, self.suites = self.base / "results", self.base / "scenarios", self.base / "suites"
+        for name in ("t1", "t2"):
+            s = self.scenarios / name
+            (s / "fixture").mkdir(parents=True)
+            (s / "hidden").mkdir()
+            (s / "fixture" / "answer.txt").write_text("wrong\n")
+            (s / "hidden" / "expect.txt").write_text("right\n")
+            (s / "scenario.json").write_text(json.dumps({"agent": "orchestrator", "prompt": f"fix {name}", "timeout": 20,
+                                                         "check": "diff -q answer.txt expect.txt >/dev/null && echo ok"}))
+        self.suites.mkdir()
+        (self.suites / "pair.json").write_text(json.dumps({"name": "pair", "note": "two", "scenarios": ["t1", "t2"]}))
+        self.db = self.base / "opencode.db"
+        make_db(self.db, [("ses_root", None, "orchestrator", "x", 0.4, 1)],
+                [("ses_root", "user", "{}"), ("ses_root", "assistant", message(10, 100, 0, 0, 20_000, 0.4))])
+
+    def suite(self, setups=None, **kw):
+        return bench.run_suite("pair", setups=setups or [("A", self.tk), ("B", self.plain)], executable=str(self.cli), db_path=self.db,
+                               results=self.results, scenarios_root=self.scenarios, suites_root=self.suites, live=self.live, **kw)
+
+    def calls(self):
+        path = self.cli_dir / "calls.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def titles(self):
+        return [c["args"][c["args"].index("--title") + 1].removeprefix("agentgraph-bench: ") for c in self.calls()]
+
+    def test_runs_are_interleaved_and_the_first_setup_alternates(self):
+        result = self.suite(reps=2)
+        self.assertEqual(self.titles(), ["t1 A r1", "t1 B r1", "t1 B r2", "t1 A r2", "t2 A r1", "t2 B r1", "t2 B r2", "t2 A r2"])
+        self.assertEqual([(r["label"], r["scenario"], r["rep"]) for r in result["rows"]],
+                         [(t.split()[1], t.split()[0], int(t.split()[2][1:])) for t in self.titles()])
+        self.assertIsNone(result["stopped"])
+        self.assertAlmostEqual(result["spent"], 3.2)
+
+    def test_three_setups_rotate(self):
+        third = bench.scratch_config(self.root / "tk3", live=self.live, temp_root=self.root, real_home=self.real_home)["dir"]
+        self.suite([("A", self.tk), ("B", self.plain), ("C", third)])
+        self.assertEqual(self.titles()[:6], ["t1 A r1", "t1 B r1", "t1 C r1", "t2 B r1", "t2 C r1", "t2 A r1"])
+
+    def test_rows_carry_the_suite_and_go_through_the_row_writer_and_report(self):
+        self.suite(reps=2)
+        rows = [json.loads(line) for line in (self.results / "A.jsonl").read_text().splitlines()]
+        self.assertEqual(len(rows), 4)
+        self.assertEqual({r["suite"] for r in rows}, {"pair"})
+        self.assertEqual({r["setup"] for r in rows}, {"toolkit"})
+        text = bench.report("A", "B", self.results)
+        self.assertIn("== t1   reps 2 / 2", text)
+        self.assertIn("== t2   reps 2 / 2", text)
+
+    def test_the_markers_agent_replaces_the_scenarios_agent(self):
+        self.suite()
+        agents = {c["args"][c["args"].index("--title") + 1].split()[-2]: c["args"][c["args"].index("--agent") + 1] for c in self.calls()}
+        self.assertEqual(agents, {"A": "orchestrator", "B": "build"})
+        rows = [json.loads(line) for line in (self.results / "B.jsonl").read_text().splitlines()]
+        self.assertEqual({(r["agent"], r["setup"]) for r in rows}, {("build", "plain")})
+        self.assertEqual(self.calls()[1]["home"], str(Path(self.plain) / "home"))      # each run in its own scratch HOME
+
+    def test_one_total_budget_stops_before_the_next_run_and_says_so(self):
+        out = io.StringIO()
+        result = self.suite(budget=0.7, reps=2, out=out)
+        self.assertEqual(self.titles(), ["t1 A r1", "t1 B r1"])                          # 0.4 spent, then 0.8: the third run does not start
+        self.assertIn("budget", result["stopped"])
+        self.assertIn("spent $0.80 of the $0.70 budget", out.getvalue())
+        self.assertEqual(len(result["rows"]), 2)
+        self.assertEqual(len((self.results / "A.jsonl").read_text().splitlines()) + len((self.results / "B.jsonl").read_text().splitlines()), 2)
+
+    def test_a_bad_request_fails_before_anything_runs(self):
+        (self.suites / "bad.json").write_text(json.dumps({"name": "bad", "scenarios": ["t1", "nope"]}))
+        (self.suites / "empty.json").write_text(json.dumps({"name": "empty", "scenarios": []}))
+        cases = [({"name": "bad"}, "no scenario"), ({"name": "missing"}, "no suite"), ({"name": "empty"}, "list of scenario ids"),
+                 ({"name": "../x"}, "bad suite name"),
+                 ({"setups": [("A", self.tk), ("B", self.base / "no-such-folder")]}, "not a scratch config"),
+                 ({"setups": [("A", self.tk)]}, "two or more"), ({"setups": [("A", self.tk), ("A", self.plain)]}, "different labels"),
+                 ({"setups": [("A", self.tk), ("../B", self.plain)]}, "--label"), ({"reps": 0}, "--reps"),
+                 ({"budget": 0}, "--budget"), ({"interrupt_after": 0}, "--interrupt-after")]
+        for kw, why in cases:
+            with self.subTest(why=why):
+                kw = {"name": "pair", **kw}
+                setups = kw.pop("setups", [("A", self.tk), ("B", self.plain)])
+                with self.assertRaisesRegex(bench.BenchError, why):
+                    bench.run_suite(kw.pop("name"), setups=setups, executable=str(self.cli), db_path=self.db, results=self.results,
+                                    scenarios_root=self.scenarios, suites_root=self.suites, live=self.live, **kw)
+        self.assertEqual(self.calls(), [])
+        self.assertFalse(self.results.exists())
+
+    def test_the_shipped_suites_name_scenarios_that_exist(self):
+        self.assertEqual(bench.load_suite("basic")["scenarios"], ["s1-simple", "s2-parallel", "s3-workflow"])
+        for path in sorted(bench.SUITES.glob("*.json")):
+            for name in bench.load_suite(path.stem)["scenarios"]:
+                bench.load_scenario(name)
+
+    def test_setup_arguments_are_parsed(self):
+        self.assertEqual(bench.parse_setups(["A=/x/y", "B=/z=w"]), [("A", "/x/y"), ("B", "/z=w")])
+        for bad in ("A", "A="):
+            with self.assertRaises(bench.BenchError):
+                bench.parse_setups([bad])
 
 
 class ReportTests(Base):
