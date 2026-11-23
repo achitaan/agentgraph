@@ -305,6 +305,8 @@ class Canvas {
     this.fig = new Array(n).fill(null);
     this.figStyle = new Uint16Array(n);
     this.figDepth = new Float32Array(n).fill(-Infinity);
+    this.bodyDepth = new Float32Array(n).fill(-Infinity); // where the figure cell is a body's (a ball's), its depth
+    this.pad = new Uint8Array(n); // the clear cells beside a name: another name may share one
     this.text = new Array(n).fill(null); // a character, "" for the right half of a wide one, null for none
     this.textStyle = new Uint16Array(n);
     this.kept = new Uint8Array(n);
@@ -327,7 +329,42 @@ class Canvas {
     this.figDepth[i] = depth;
     this.fig[i] = ch;
     this.figStyle[i] = style;
+    this.bodyDepth[i] = -Infinity;
     return true;
+  }
+
+  // A cell of a body (a ball): as plot, and the cell then counts as that body's until something nearer covers it.
+  plotBody(c, r, ch, style, depth) {
+    if (!this.plot(c, r, ch, style, depth)) return false;
+    this.bodyDepth[r * this.w + c] = depth;
+    return true;
+  }
+
+  // The depth of the body drawn at cell (c, r), -Infinity where none is.
+  bodyAt(c, r) {
+    return c >= 0 && r >= 0 && c < this.w && r < this.h ? this.bodyDepth[r * this.w + c] : -Infinity;
+  }
+
+  // The depth of the figure character at cell (c, r), -Infinity where none is.
+  figAt(c, r) {
+    return c >= 0 && r >= 0 && c < this.w && r < this.h ? this.figDepth[r * this.w + c] : -Infinity;
+  }
+
+  // A clear cell beside a name (blank text over whatever is there); two names may share one.
+  gap(c, r) {
+    if (c < 0 || r < 0 || c >= this.w || r >= this.h) return;
+    const i = r * this.w + c;
+    if (this.text[i] !== null) return;
+    this.text[i] = " ";
+    this.textStyle[i] = 0;
+    this.pad[i] = 1;
+  }
+
+  // Free for a name's clear cell: no text, or only another name's clear cell.
+  gapFree(c, r) {
+    if (!(c >= 0 && r >= 0 && c < this.w && r < this.h)) return false;
+    const i = r * this.w + c;
+    return this.text[i] === null || this.pad[i] === 1;
   }
 
   // The cell and its eight neighbours hold no figure character and no text (a star there reads as sky).
@@ -843,7 +880,7 @@ export function figure3D(L, rise = 1) {
     const inc = SIDE_TILT * k;
     const n = horizontal(SIDE_NODE);
     const m = [Math.cos(SIDE_NODE) * Math.cos(inc), -Math.sin(SIDE_NODE) * Math.cos(inc), Math.sin(inc)];
-    const ring = { key: "side", lead: "", centre: [0, 0, 0], e1: n, e2: m, normal: norm(cross(n, m)) || [0, 0, 1], radius: clamp(hubRho0 * 1.9, 0.2, 0.38), points: [] };
+    const ring = { key: "side", lead: "", centre: [0, 0, 0], e1: n, e2: m, normal: norm(cross(n, m)) || [0, 0, 1], radius: clamp(hubRho0 * 1.9, 0.2, Math.max(0.38, Math.min(0.62, hubRho0 * 1.9))), points: [] };
     for (let j = 0; j < 48; j += 1) ring.points.push(moonOn(ring, (j / 48) * 2 * Math.PI));
     side = { ring, a0: SIDE_REST, point: moonOn(ring, SIDE_REST) };
   }
@@ -916,7 +953,7 @@ export function camera3D(L, turn, elevation) {
   const dots = cameraDots(L, turn, elevation);
   const project = (p) => {
     const q = dots(p);
-    return { col: Math.floor(q.x / 2), row: Math.floor(q.y / 4), depth: q.depth };
+    return { col: Math.floor(q.x / 2), row: Math.floor(q.y / 4), depth: q.depth, x: q.x, y: q.y }; // x, y: the same place in dots
   };
   project.hub = dots.hub;
   project.hubRho = dots.hubRho;
@@ -934,7 +971,9 @@ export function morphCamera(L, turn, elevation, k) {
     const q = dots(p);
     const fx = L.cx + p[0] * L.rx;
     const fy = L.cy - p[1] * L.ry;
-    return { col: Math.floor((fx + (q.x - fx) * f) / 2), row: Math.floor((fy + (q.y - fy) * f) / 4), depth: q.depth };
+    const x = fx + (q.x - fx) * f;
+    const y = fy + (q.y - fy) * f;
+    return { col: Math.floor(x / 2), row: Math.floor(y / 4), depth: q.depth, x, y };
   };
   // the hub ball: the 2D ball at the 2D centre, grown and moved to the 3D ball as the morph goes
   const h = dots.hub;
@@ -1505,23 +1544,31 @@ function drawSun3D(canvas, S, project, P, now, level, reduced, count) {
 // flares' characters (BALL_SHADES, light to dense: lighter toward the upper left, denser toward the lower right).
 export const BALL_SHADES = Object.freeze(["░", "▒", "▓", "█"]);
 function drawBall3D(canvas, project, style, P) {
-  const hub = project.hub;
-  const c0 = Math.floor((hub.x - hub.rx) / 2) - 1;
-  const c1 = Math.ceil((hub.x + hub.rx) / 2) + 1;
-  const r0 = Math.floor((hub.y - hub.ry) / 4) - 1;
-  const r1 = Math.ceil((hub.y + hub.ry) / 4) + 1;
+  drawShadedBall(canvas, project.hub, project.hubRho || HUB_RADIUS3, 0, style);
+}
+
+// A shaded ball in block shades: `ball` { x, y, rx, ry } its centre and radii in dots, `rho` its radius in figure radii
+// (the depth it adds toward the viewer), `depth` its centre's depth. The cells are the ball's body cells: a name never
+// covers one. -> how many cells show (a cell a nearer thing covers does not count)
+function drawShadedBall(canvas, ball, rho, depth, style) {
+  const c0 = Math.floor((ball.x - ball.rx) / 2) - 1;
+  const c1 = Math.ceil((ball.x + ball.rx) / 2) + 1;
+  const r0 = Math.floor((ball.y - ball.ry) / 4) - 1;
+  const r1 = Math.ceil((ball.y + ball.ry) / 4) + 1;
+  let shown = 0;
   for (let r = r0; r <= r1; r += 1) {
     for (let c = c0; c <= c1; c += 1) {
-      const dx = (c * 2 + 1 - hub.x) / hub.rx;
-      const dy = (r * 4 + 2 - hub.y) / hub.ry;
+      const dx = (c * 2 + 1 - ball.x) / ball.rx;
+      const dy = (r * 4 + 2 - ball.y) / ball.ry;
       const d2 = dx * dx + dy * dy;
       if (d2 > 1) continue;
       const nz = Math.sqrt(1 - d2);
       const lum = ballLum(dx, -dy, nz);
       const k = clamp(Math.round((1 - lum) * (BALL_SHADES.length - 1)), 0, BALL_SHADES.length - 1);
-      canvas.plot(c, r, BALL_SHADES[k], style, (project.hubRho || HUB_RADIUS3) * nz);
+      if (canvas.plotBody(c, r, BALL_SHADES[k], style, depth + rho * nz)) shown += 1;
     }
   }
+  return shown;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1577,15 +1624,15 @@ function draw2D(doc, L, canvas, S, P, now, frame, options) {
     }
   }
   drawLabels2D(doc, L, canvas, S, P, now, frame);
-  drawSide2D(doc, L, canvas, S, now, reduced);
+  drawSide2D(doc, L, canvas, S, P, now, reduced);
 }
 
-// The side chat's moon (only when installed): two dots on a faint orbit round the hub's ball, going round only while it
-// answers, and its name beside it where the cells are free (after the agents' names, which it never covers).
-function drawSide2D(doc, L, canvas, S, now, reduced) {
+// The side chat's moon (only when installed): a small shaded ball (dithered dots, the hub's light) on a faint orbit round
+// the hub's ball, going round only while it answers, and its name beside it where the cells are free (after the agents' names, which it never covers).
+function drawSide2D(doc, L, canvas, S, P, now, reduced) {
   if (!L.side) return;
   const busy = sideBusy(doc);
-  const rm = L.hubR + 6;
+  const rm = L.hubR + 4 + SIDE_BALL_DOTS_2D * 2; // clear of the hub's ball (and its glow)
   const at = (a) => [L.cx + rm * Math.cos(a), L.cy + rm * 0.9 * Math.sin(a)];
   if (L.w >= MOON_RINGS_MIN_W && L.h >= MOON_RINGS_MIN_H) {
     for (let j = 0; j < 36; j += 1) {
@@ -1595,8 +1642,26 @@ function drawSide2D(doc, L, canvas, S, now, reduced) {
   }
   const [x, y] = at(SIDE_REST - Math.PI / 2 + (busy ? moonPhase(now, reduced) : 0));
   const st = busy ? S.get("plain", undefined, 4) : S.get("muted");
-  canvas.dot(x, y, st);
-  canvas.dot(x + 1, y, st);
+  const rb = SIDE_BALL_DOTS_2D;
+  for (let dy = -rb; dy <= rb; dy += 1) {
+    for (let dx = -rb; dx <= rb; dx += 1) {
+      const d2 = (dx * dx + dy * dy) / (rb * rb + 1);
+      if (d2 > 1) continue;
+      const lum = ballLum(dx / rb, -dy / rb, Math.sqrt(Math.max(0, 1 - d2)));
+      const dens = 0.12 + 0.88 * (P.dark ? lum : 1 - lum);
+      const px = Math.round(x) + dx;
+      const py = Math.round(y) + dy;
+      if (d2 > 0.62 || dens > (BAYER[(py & 3) * 4 + (px & 3)] + 0.5) / 16) canvas.dot(px, py, st); // the rim is whole, the inside shaded
+    }
+  }
+  // no cell of the ball may be the same braille pattern as a working agent's spinner (it would read as one)
+  for (let r = Math.floor((Math.round(y) - rb) / 4); r <= Math.floor((Math.round(y) + rb) / 4); r += 1) {
+    for (let c = Math.floor((Math.round(x) - rb) / 2); c <= Math.floor((Math.round(x) + rb) / 2); c += 1) {
+      if (c < 0 || r < 0 || c >= canvas.w || r >= canvas.h) continue;
+      const i = r * canvas.w + c;
+      if (canvas.bits[i] && SPINNER.includes(String.fromCharCode(0x2800 + canvas.bits[i]))) canvas.bits[i] |= 0x40; // (every spinner pattern lacks the bottom-left dot)
+    }
+  }
   const text = truncate(SIDE_NAME, NAME_MAX);
   const tw = displayWidth(text);
   const col = Math.floor(x / 2);
@@ -1609,7 +1674,7 @@ function drawSide2D(doc, L, canvas, S, now, reduced) {
   };
   for (const dr of [0, -1, 1]) {
     for (const side of [out, -out]) {
-      const c = side > 0 ? col + 2 : col - 1 - tw;
+      const c = side > 0 ? col + 3 : col - 2 - tw;
       if (fits(c, row + dr)) {
         canvas.put(c, row + dr, text, st);
         return;
@@ -1815,66 +1880,241 @@ function draw3D(doc, L, canvas, S, P, now, frame, cam, options) {
       else if (s === "sent_back") digitStream(canvas, [...cells].reverse(), now, 11, S.get("plain", P.full(arc.worker.key), 4));
     }
   }
-  // text: the hub's glyph, then the agents' glyphs and names, nearest first; a label never covers a nearer one
+  // the side chat's moon: a small shaded ball (the hub's ball drawing and light) on its orbit. Where the hub's ball is
+  // nearer, the z-buffer hides it; in front of the hub's centre it also covers the sun's flames, which are drawn above the
+  // figure.
+  let sideShown = 0;
+  let sideBall = null;
+  if (sideQ) {
+    const s = PERSPECTIVE / (PERSPECTIVE - sideQ.depth);
+    const rd = Math.max(SIDE_BALL_MIN_DOTS, project.hub.rx * SIDE_BALL_PART) * s;
+    sideBall = { x: sideQ.x, y: sideQ.y, rx: rd, ry: rd };
+    const lit = sideBusyNow && sideQ.depth >= 0;
+    sideShown = drawShadedBall(canvas, sideBall, (project.hubRho || HUB_RADIUS3) * SIDE_BALL_PART, sideQ.depth >= 0 ? sideQ.depth + SUN_TOP : sideQ.depth, lit ? S.get("plain", undefined, 4) : S.get("muted"));
+  }
+  // text: the hub's glyph, then every body's glyph, then every name (see placeBodies)
   const hubAt = project([0, 0, 0]);
   canvas.put(hubAt.col, hubAt.row, MARK_HUB, hubStyle);
   const blinkOn = Math.floor(now / 500) % 2 === 0;
-  const items = L.placed.map((p, k) => ({ p, k, q: project(F.agents.get(p.agent.name)) })).sort((a, b) => b.q.depth - a.q.depth);
-  for (const { p, k, q } of items) {
-    if (!canvas.free(q.col, q.row)) continue;
-    let st = agentStyle(S, P, p, blinkOn);
-    if (p.state !== "working" && p.state !== "stuck" && q.depth < 0) st = S.get("plain", P.depth(p.key, 0), 2);
-    canvas.put(q.col, q.row, glyphFor(p, k, frame, blinkOn), st);
+  const needs = (state) => state === "stuck" || state === "back";
+  const bodies = [];
+  L.placed.forEach((p, k) => {
+    const q = project(F.agents.get(p.agent.name));
+    bodies.push({ id: "p:" + p.agent.name, kind: "planet", q, rank: needs(p.state) ? 0 : p.state === "working" ? 1 : 2, name: p.label, key: p.key, p, k });
+  });
+  for (const { seat, q } of moons) {
+    const st = L.states.get(seat.agent.name);
+    const busy = busyCount(seat.agent) > 0;
+    bodies.push({ id: "m:" + seat.lead + "/" + seat.agent.name, kind: "moon", q, rank: needs(st) ? 0 : busy ? 1 : 2, name: truncate(clean(seatName(seat.agent.name)) || "?", NAME_MAX), key: seat.key, seat, busy });
   }
-  // names: the planets' first, nearest first, so a moon never moves a planet's name; then the moons' glyphs where their
-  // cells are still free (a moon behind its parent, or under a name, shows none) and their names, nearest first
-  const placeLabels = (labels) => {
-    labels.sort((a, b) => b.q.depth - a.q.depth);
-    for (const { text, q, key, stuck, lit, style } of labels) {
-      const tw = displayWidth(text);
-      const st = style !== undefined ? style : stuck ? S.get("danger") : q.depth >= 0 || lit ? S.get("plain", P.full(key), 4) : muted;
-      const out = q.col >= Math.floor(L.cx / 2) ? 1 : -1;
-      const fits = (c, r) => {
-        if (c < 0 || c + tw > L.w || r < 0 || r >= L.h) return false;
-        for (let i = -1; i <= tw; i += 1) if (c + i >= 0 && c + i < L.w && !canvas.free(c + i, r)) return false;
-        return true;
-      };
-      // beside the glyph, outward first; then a row or two up or down; then anywhere on the nearest free row
-      let spot = null;
-      for (const dr of [0, -1, 1, -2, 2]) {
+  if (sideQ) bodies.push({ id: "side", kind: "side", q: sideQ, rank: sideBusyNow ? 1 : 2, name: truncate(SIDE_NAME, NAME_MAX), key: "side", shown: sideShown, ball: sideBall });
+  placeBodies(L, canvas, S, P, bodies, { cam, frame, blinkOn, muted, hubBall: project.hub, trace: Array.isArray(options.trace) ? options.trace : null });
+}
+
+// Where bodies and their names go, in priority order: the agents that need the user, then the working ones, then the
+// rest, each nearest to the viewer first. First every body's glyph (the planets' marks and spinners, the moons' dots),
+// so no name can cover one; a body whose cell lies on a nearer ball (the hub's, the side chat's) is behind it and shows
+// no glyph. Then the names, each beside its glyph, outward first, then up or down a row or two, then anywhere close:
+//   - a name never covers another name, a glyph, a mark, or a ball cell of a body nearer than its own, and keeps a clear
+//     cell from each (two names may share the clear cell between them);
+//   - it keeps the place it had in the last frame (relative to its body: `L`'s size remembers it) while that place stays
+//     free, so it does not hop as the figure turns; otherwise the first place that is free of everything nearer;
+//   - with no place for the whole name it is cut to what fits, with an ellipsis (at least NAME_MIN cells); with no
+//     room even for that it is left out.
+// A moon, or the side chat's, whose body is hidden has no name drawn.
+const NAME_MIN = 3;
+const SIDE_BALL_DOTS_2D = 3; // the 2D ball: radius in dots
+const SIDE_BALL_MIN_DOTS = 4; // the side chat's ball: radius in dots, at least this
+const SIDE_BALL_PART = 0.5; // ... and half the hub's
+const MEMORY_TURN = 0.35; // radians: how far the camera may be from the last frame's for its places to count
+const labelMemory = new Map(); // "w x h" -> { cam, places: Map(body id -> { side, dr, dc }) }: the places of the last frame
+function placeBodies(L, canvas, S, P, bodies, env) {
+  const { frame, blinkOn, muted, hubBall, trace, cam } = env;
+  const size = L.w + "x" + L.h;
+  // the last frame's places count only while the camera is close to that frame's (a turning view moves a little each
+  // frame; a jump of the camera starts afresh), so a frame is the same whatever was drawn long before it
+  const near = (a, b) => {
+    let dt = Math.abs((Number(a.turn) || 0) - (Number(b.turn) || 0)) % (2 * Math.PI);
+    if (dt > Math.PI) dt = 2 * Math.PI - dt;
+    return dt < MEMORY_TURN && Math.abs((Number(a.elevation) || 0) - (Number(b.elevation) || 0)) < MEMORY_TURN && Math.abs((Number(a.morph) || 0) - (Number(b.morph) || 0)) < MEMORY_TURN;
+  };
+  const camNow = { turn: cam.turn, elevation: cam.elevation, morph: cam.morph };
+  let entry = labelMemory.get(size);
+  if (!entry) {
+    if (labelMemory.size >= 16) labelMemory.clear();
+    entry = { cam: camNow, places: new Map() };
+    labelMemory.set(size, entry);
+  } else if (!near(entry.cam, camNow) || entry.places.size > 4000) {
+    entry.places = new Map();
+  }
+  entry.cam = camNow;
+  const memory = entry.places;
+  bodies.sort((a, b) => a.rank - b.rank || b.q.depth - a.q.depth || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  // glyphs
+  for (const b of bodies) {
+    const { q } = b;
+    b.hidden = canvas.bodyAt(q.col, q.row) > q.depth; // under a nearer ball
+    if (b.kind === "planet") {
+      const p = b.p;
+      if (!b.hidden && canvas.free(q.col, q.row)) {
+        let st = agentStyle(S, P, p, blinkOn);
+        if (p.state !== "working" && p.state !== "stuck" && q.depth < 0) st = S.get("plain", P.depth(p.key, 0), 2);
+        canvas.put(q.col, q.row, glyphFor(p, b.k, frame, blinkOn), st);
+        b.drawn = true;
+      }
+    } else if (b.kind === "moon") {
+      if (!b.hidden && canvas.free(q.col, q.row)) {
+        canvas.put(q.col, q.row, "•", b.busy ? S.get("plain", P.full(b.key), 4) : S.get("plain", P.depth(b.key, Math.min(4, depthLevel(q.depth))), 2));
+        b.drawn = true;
+      }
+    } else {
+      b.drawn = b.shown > 0;
+    }
+    if (trace) trace.push({ kind: "body", id: b.id, col: q.col, row: q.row, depth: q.depth, drawn: !!b.drawn, hidden: b.hidden, ball: b.ball || null });
+  }
+  if (trace) trace.push({ kind: "ball", id: "hub", x: hubBall.x, y: hubBall.y, rx: hubBall.rx, ry: hubBall.ry });
+  // names
+  const blocked = (c, r, depth, strict, gap) => {
+    if (gap ? !canvas.gapFree(c, r) : !canvas.free(c, r)) return true;
+    if (canvas.bodyAt(c, r) > depth) return true; // a body nearer than this one
+    if (strict) {
+      if (canvas.bodyAt(c, r) > -Infinity) return true;
+      const f = canvas.figAt(c, r);
+      if (f < SUN_TOP - 0.5 && (strict > 1 ? f > SKY_DEPTH + 1 : f > depth + 0.02)) return true; // a ring, spoke or arc (strictest: any; else one nearer than this one)
+    }
+    return false;
+  };
+  // the name `text` going `dir` from the cell `first` on row r: the text that fits there (whole, else cut), or null
+  const runAt = (first, dir, r, text, depth, strict, glyphGap) => {
+    if (r < 0 || r >= L.h) return null;
+    if (blocked(first - dir, r, depth, strict, true) && glyphGap) return null;
+    const tw = displayWidth(text);
+    let m = 0; // cells that are free from `first` on, with one more for the clear cell after the name
+    let edge = false;
+    while (m <= tw) {
+      const c = first + dir * m;
+      if (c < 0 || c >= L.w) {
+        edge = true;
+        break;
+      }
+      if (blocked(c, r, depth, strict, m === tw)) break;
+      m += 1;
+    }
+    const n = m > tw ? tw : edge ? m : m - 1;
+    if (n >= tw) return { text, width: tw, c0: dir > 0 ? first : first - tw + 1, r, whole: true };
+    if (n < Math.min(NAME_MIN, tw)) return null;
+    const cut = truncate(text, n);
+    const w = displayWidth(cut);
+    if (w < Math.min(NAME_MIN, tw)) return null;
+    return { text: cut, width: w, c0: dir > 0 ? first : first - w + 1, r, whole: false };
+  };
+  const sideAt = (b, side, dr, strict) => {
+    const first = side > 0 ? b.q.col + 2 : b.q.col - 2;
+    const hit = runAt(first, side, b.q.row + dr, b.name, b.q.depth, strict, true);
+    return hit && Object.assign(hit, { side, dr, dc: 0 });
+  };
+  // the whole name on row r, starting in columns lo to hi, the nearest to the body's column (a clear cell each side)
+  const scanRow = (b, r, strict, lo, hi) => {
+    if (r < 0 || r >= L.h) return null;
+    const tw = displayWidth(b.name);
+    const from = Math.max(0, lo);
+    const to = Math.min(L.w - tw, hi);
+    if (to < from) return null;
+    let best = null;
+    const free = [];
+    for (let c = Math.max(0, from - 1); c < to + tw + 1 && c < L.w; c += 1) free[c] = !blocked(c, r, b.q.depth, strict, false);
+    const gapOk = (c) => c < 0 || c >= L.w || !blocked(c, r, b.q.depth, strict, true);
+    for (let c = from; c <= to; c += 1) {
+      if (best !== null && Math.abs(c - b.q.col) > Math.abs(best - b.q.col) && c > b.q.col) break;
+      let ok = gapOk(c - 1) && gapOk(c + tw);
+      for (let i = 0; i < tw && ok; i += 1) if (!free[c + i]) ok = false;
+      if (ok && (best === null || Math.abs(c - b.q.col) < Math.abs(best - b.q.col))) best = c;
+    }
+    return best !== null ? { text: b.name, width: tw, c0: best, r, whole: true, side: 0, dr: r - b.q.row, dc: best - b.q.col } : null;
+  };
+  const windowAt = (b, dr, strict, reach) => {
+    const tw = displayWidth(b.name);
+    return scanRow(b, b.q.row + dr, strict, b.q.col - tw - reach, b.q.col + reach + 2);
+  };
+  const anywhere = (b, strict) => {
+    for (let k = 0; k < L.h; k += 1) {
+      for (const dr of k === 0 ? [0] : [-k, k]) {
+        const hit = scanRow(b, b.q.row + dr, strict, 0, L.w);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  };
+  const rowsNear = [0, -1, 1, -2, 2];
+  const rowsFar = [-3, 3, -4, 4];
+  const choose = (b) => {
+    const out = b.q.col >= Math.floor(L.cx / 2) ? 1 : -1;
+    const mem = memory.get(b.id);
+    let remembered = null;
+    if (mem) {
+      const hit = mem.side ? sideAt(b, mem.side, mem.dr, false) : (() => {
+        const r = b.q.row + mem.dr;
+        const tw = displayWidth(b.name);
+        const c = b.q.col + mem.dc;
+        const run = runAt(c, 1, r, b.name, b.q.depth, false, false);
+        return run && run.whole && run.c0 === c ? Object.assign(run, { side: 0, dr: mem.dr, dc: mem.dc }) : null;
+      })();
+      if (hit && hit.whole) return hit;
+      remembered = hit;
+    }
+    let cut = null;
+    const keep = (hit) => {
+      if (hit && (!cut || hit.width > cut.width)) cut = hit;
+    };
+    keep(remembered); // a cut name keeps its place unless a wider one is found
+    for (const strict of [2, 1, 0]) {
+      for (const dr of rowsNear) {
         for (const side of [out, -out]) {
-          const c = side > 0 ? q.col + 2 : q.col - 1 - tw;
-          if (!spot && fits(c, q.row + dr)) spot = [c, q.row + dr];
+          const hit = sideAt(b, side, dr, strict);
+          if (hit && hit.whole) return hit;
+          keep(hit);
         }
       }
-      for (let d = 0; !spot && d < L.h * 2; d += 1) {
-        const r = q.row + (d % 2 ? -(d + 1) / 2 : d / 2);
-        if (r < 0 || r >= L.h) continue;
-        let best = null;
-        for (let c = 0; c + tw <= L.w; c += 1) if (fits(c, r) && (best === null || Math.abs(c - q.col) < Math.abs(best - q.col))) best = c;
-        if (best !== null) spot = [best, r];
+      // a planet's name may go farther along its row before it covers a figure cell; a moon's stays close
+      for (const dr of b.kind === "planet" ? rowsNear.concat(rowsFar) : rowsNear) {
+        const hit = windowAt(b, dr, strict, b.kind === "planet" ? 12 : 2);
+        if (hit) return hit;
       }
-      if (!spot) continue;
-      // a clear cell each side, so the name reads apart from the figure
-      if (spot[0] > 0) canvas.put(spot[0] - 1, spot[1], " ", 0);
-      if (spot[0] + tw < L.w) canvas.put(spot[0] + tw, spot[1], " ", 0);
-      canvas.put(spot[0], spot[1], text, st);
     }
+    for (const strict of [2, 1, 0]) {
+      for (const dr of rowsNear.concat(rowsFar)) {
+        const hit = windowAt(b, dr, strict, 12);
+        if (hit) return hit;
+      }
+    }
+    for (const strict of [2, 1, 0]) {
+      const hit = anywhere(b, strict);
+      if (hit) return hit;
+    }
+    return cut;
   };
-  placeLabels(items.map(({ p, q }) => ({ text: p.label, q, key: p.key, stuck: p.state === "stuck", lit: false })));
-  const moonLabels = [];
-  for (const { seat, q } of [...moons].sort((a, b) => b.q.depth - a.q.depth)) {
-    if (!canvas.free(q.col, q.row)) continue;
-    const busy = busyCount(seat.agent) > 0;
-    canvas.put(q.col, q.row, "•", busy ? S.get("plain", P.full(seat.key), 4) : S.get("plain", P.depth(seat.key, Math.min(4, depthLevel(q.depth))), 2));
-    moonLabels.push({ text: truncate(clean(seatName(seat.agent.name)) || "?", NAME_MAX), q, key: seat.key, stuck: false, lit: busy });
+  for (const b of bodies) {
+    const { q } = b;
+    if (b.kind !== "planet" && !b.drawn) {
+      memory.delete(b.id);
+      continue; // a hidden moon has no name
+    }
+    const hit = choose(b);
+    if (!hit) {
+      memory.delete(b.id);
+      continue;
+    }
+    memory.set(b.id, { side: hit.side, dr: hit.dr, dc: hit.dc });
+    let st;
+    if (b.kind === "planet") st = b.p.state === "stuck" ? S.get("danger") : q.depth >= 0 && !b.hidden ? S.get("plain", P.full(b.key), 4) : muted;
+    else if (b.kind === "moon") st = q.depth >= 0 || b.busy ? S.get("plain", P.full(b.key), 4) : muted;
+    else st = b.q.depth >= 0 && b.rank === 1 ? S.get("plain", undefined, 4) : S.get("muted");
+    // a clear cell each side, so the name reads apart from the figure
+    canvas.gap(hit.c0 - 1, hit.r);
+    canvas.gap(hit.c0 + hit.width, hit.r);
+    canvas.put(hit.c0, hit.r, hit.text, st);
+    if (trace) trace.push({ kind: "label", id: b.id, name: b.name, text: hit.text, col: hit.c0, row: hit.r, width: hit.width, depth: q.depth, whole: hit.whole });
   }
-  if (sideQ && canvas.free(sideQ.col, sideQ.row)) {
-    const st = sideBusyNow ? S.get("plain", undefined, 4) : S.get("muted");
-    canvas.put(sideQ.col, sideQ.row, "•", st);
-    moonLabels.push({ text: truncate(SIDE_NAME, NAME_MAX), q: sideQ, key: "side", stuck: false, lit: false, style: st });
-  }
-  placeLabels(moonLabels);
 }
 
 // ---------------------------------------------------------------------------------------------------------------

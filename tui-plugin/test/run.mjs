@@ -2631,6 +2631,216 @@ test("scene: a 160x45 frame costs less than four times what it costs today, coun
 });
 
 // ---------------------------------------------------------------------------------------------------------------
+// The 3D orbit: no name over another, the side chat's ball, labels that stay put (polish-orbit; made-up data only)
+
+const orbitSideDoc = (doc, busy) => Object.assign(JSON.parse(JSON.stringify(doc)), { sidechat: { installed: true, session: "ses_demoside", model: "x", busy } });
+// every frame of the 3D orbit with its trace: { lines, text, labels (the names drawn: id, text, col, row, width), bodies }
+const orbitTrace = (doc, w, h, now, extra = {}) => {
+  const trace = [];
+  const lines = S.orbitLines(doc, w, h, now, Object.assign({ view: "3d", colors: DARK, trace }, extra));
+  return { lines, text: sceneText(lines), labels: trace.filter((t) => t.kind === "label"), bodies: trace.filter((t) => t.kind === "body"), hub: trace.find((t) => t.kind === "ball") };
+};
+
+test("orbit 3D: no two name spans share a cell, each is on screen where it says, and none covers a body's glyph (5 sizes, 6 times, side chat busy)", () => {
+  const doc = orbitSideDoc(demoWorn, true);
+  let spans = 0;
+  for (const [w, h] of [[36, 14], [64, 12], [62, 38], [100, 30], [160, 45]]) {
+    for (const now of [0, 3000, 11000, 19000, 27000, 35000]) {
+      const f = orbitTrace(doc, w, h, now);
+      assertExact(f.lines, w, h, `${w}x${h}@${now}`);
+      const taken = new Map();
+      for (const l of f.labels) {
+        assert.ok(l.col >= 0 && l.col + l.width <= w && l.row >= 0 && l.row < h, `${w}x${h}@${now}: ${l.id} on the canvas`);
+        assert.equal(f.text[l.row].slice(l.col, l.col + l.width), l.text, `${w}x${h}@${now}: ${l.id} is drawn where its record says`);
+        for (let c = l.col; c < l.col + l.width; c += 1) {
+          assert.ok(!taken.has(c + "," + l.row), `${w}x${h}@${now}: ${l.id} shares a cell with ${taken.get(c + "," + l.row)}`);
+          taken.set(c + "," + l.row, l.id);
+        }
+        spans += 1;
+        if (!l.whole) assert.ok(l.text.endsWith("…") && l.width >= 3, `${w}x${h}@${now}: a cut name ends in an ellipsis and keeps 3 cells`);
+        else assert.equal(l.text, l.name);
+      }
+      // a glyph of a drawn body is not under a name
+      for (const b of f.bodies) if (b.drawn && !b.ball) assert.ok(!taken.has(b.col + "," + b.row), `${w}x${h}@${now}: ${b.id}'s glyph is covered by ${taken.get(b.col + "," + b.row)}`);
+    }
+  }
+  assert.ok(spans > 150, "names were drawn: " + spans);
+});
+
+test("orbit 3D: the name of a body behind the hub never lies over the hub's ball, and the agents that need the user keep their whole names at 100x30", () => {
+  const doc = orbitSideDoc(demoWorn, true);
+  for (const now of [0, 5000, 11000, 19000, 27000]) {
+    const f = orbitTrace(doc, 100, 30, now);
+    const hub = f.hub;
+    for (const l of f.labels) {
+      for (let c = l.col; c < l.col + l.width; c += 1) {
+        const dx = (c * 2 + 1 - hub.x) / hub.rx;
+        const dy = (l.row * 4 + 2 - hub.y) / hub.ry;
+        if (l.depth < 0) assert.ok(Math.hypot(dx, dy) >= 1, `${now}: the name of ${l.id}, behind the hub, lies over the hub's ball`);
+      }
+    }
+    for (const name of ["impl-claude", "reviewer", "impl-openai"]) {
+      const l = f.labels.find((x) => x.id === "p:" + name);
+      assert.ok(l && l.whole, `${now}: ${name} (needs the user) has its whole name`);
+    }
+  }
+});
+
+test("orbit 3D: names stay where they are while the view turns a little; they move only when their place is taken", () => {
+  const doc = orbitSideDoc(demoWorn, true);
+  let compared = 0;
+  let moved = 0;
+  for (const [w, h] of [[100, 30], [160, 45], [62, 38]]) {
+    let prev = null;
+    for (let now = 4000; now < 7000; now += 100) { // 3 s: the camera turns ~ 3% of a turn
+      const f = orbitTrace(doc, w, h, now);
+      const cur = new Map(f.labels.map((l) => {
+        const b = f.bodies.find((x) => x.id === l.id);
+        return [l.id, { dc: l.col - b.col, dr: l.row - b.row }];
+      }));
+      if (prev) {
+        for (const [id, q] of cur) {
+          const p = prev.get(id);
+          if (!p) continue;
+          compared += 1;
+          if (p.dc !== q.dc || p.dr !== q.dr) moved += 1; // its place beside its body (the body itself moves a cell now and then)
+        }
+      }
+      prev = cur;
+    }
+  }
+  console.log(`     names kept their place beside the body in ${compared - moved} of ${compared} frame pairs`);
+  assert.ok(compared > 800, "compared " + compared);
+  assert.ok(moved <= compared * 0.05, `${moved} of ${compared} name positions changed between frames 100 ms apart`);
+});
+
+test("orbit 3D: the side chat's moon is a shaded ball when installed, nothing when not; it follows its own plane, moves only while busy, stands still under reduced motion", () => {
+  const SHADES = /[░▒▓█]/;
+  const plain = JSON.parse(JSON.stringify(demoWorn));
+  const base = sceneText(S.orbitLines(plain, 160, 45, 0, { view: "3d", colors: DARK }));
+  const idle = orbitSideDoc(demoWorn, false);
+  const busy = orbitSideDoc(demoWorn, true);
+  // not installed (or not `true`): the frame is the plain frame; no side body in the trace
+  for (const bad of [undefined, { installed: false }, { installed: "true" }, { installed: 1, session: "s" }]) {
+    const d = JSON.parse(JSON.stringify(demoWorn));
+    if (bad) d.sidechat = bad;
+    const f = orbitTrace(d, 160, 45, 0);
+    assert.deepEqual(f.text, base, "not installed: the plain frame " + JSON.stringify(bad));
+    assert.ok(!f.bodies.some((b) => b.id === "side"));
+  }
+  // installed: a ball of more than one shade, at its place on the screen, away from the hub's ball
+  const f = orbitTrace(idle, 160, 45, 0);
+  const side = f.bodies.find((b) => b.id === "side");
+  assert.ok(side && side.drawn && side.ball, "the side chat's ball is drawn");
+  const { x, y, rx, ry } = side.ball;
+  assert.ok(rx >= 3 && ry >= 3, "a ball of at least 3 dots' radius");
+  const shades = new Set();
+  const colours = new Set();
+  const cells = f.lines.map((l) => cellsOf(l));
+  for (let r = Math.floor((y - ry) / 4); r <= Math.floor((y + ry) / 4); r += 1) {
+    for (let c = Math.floor((x - rx) / 2); c <= Math.floor((x + rx) / 2); c += 1) {
+      const cell = cells[r] && cells[r][c];
+      if (!cell) continue;
+      if (Math.hypot((c * 2 + 1 - f.hub.x) / f.hub.rx, (r * 4 + 2 - f.hub.y) / f.hub.ry) < 1.05) continue; // the hub's own cells
+      if (Math.hypot((c * 2 + 1 - x) / rx, (r * 4 + 2 - y) / ry) > 0.85) continue;
+      if (SHADES.test(cell.ch)) shades.add(cell.ch);
+      colours.add(cell.ch + (cell.color || cell.tone));
+    }
+  }
+  assert.ok(shades.size >= 2, "the ball is shaded with more than one shade character: " + [...shades].join(""));
+  assert.ok(f.text.some((l) => l.includes("side chat")), "named");
+  // not busy: it stands still while the clock moves
+  const held = { orbit: { turn: 0.9, elevation: 0.9, resume: 1e15 } }; // the camera held: only the moon's own motion shows
+  const at = (doc, now, extra) => orbitTrace(doc, 160, 45, now, Object.assign({}, held, extra)).bodies.find((b) => b.id === "side");
+  assert.deepEqual([at(idle, 0).col, at(idle, 0).row], [at(idle, 9000).col, at(idle, 9000).row], "idle: still");
+  // busy: it goes round (a different place), and the place is a function of the clock only
+  const a = at(busy, 2000);
+  const b = at(busy, 8000);
+  assert.ok(a.col !== b.col || a.row !== b.row, "busy: it moves");
+  assert.deepEqual([at(busy, 2000).col, at(busy, 2000).row], [a.col, a.row]);
+  // reduced motion: still
+  const r1 = at(busy, 2000, { motion: "reduced" });
+  const r2 = at(busy, 8000, { motion: "reduced" });
+  assert.deepEqual([r1.col, r1.row, r1.ball.x, r1.ball.y], [r2.col, r2.row, r2.ball.x, r2.ball.y], "reduced motion: it stands still");
+});
+
+test("orbit 3D: the side chat's ball passes behind the hub's ball (hidden, and no name) and in front of it (drawn), by depth", () => {
+  const busy = orbitSideDoc(demoWorn, true);
+  // the camera high above the orbit's plane: at now 10000 the moon is on the far side of the hub
+  const behind = orbitTrace(busy, 100, 30, 10000, { orbit: { turn: 0.5, elevation: 1.3, resume: 1e15 } });
+  const s = behind.bodies.find((b) => b.id === "side");
+  assert.ok(s.depth < -0.15, "on the far side: depth " + s.depth);
+  assert.ok(Math.hypot((s.ball.x - behind.hub.x) / behind.hub.rx, (s.ball.y - behind.hub.y) / behind.hub.ry) < 0.2, "straight behind the hub's centre");
+  assert.equal(s.drawn, false, "hidden behind the hub");
+  assert.ok(!behind.text.some((l) => l.includes("side chat")), "no name for a hidden moon");
+  // the same camera, a quarter orbit later: the ball is in front of the hub or beside it, and drawn
+  let front = 0;
+  for (let now = 0; now < 24000; now += 500) {
+    const f = orbitTrace(busy, 100, 30, now);
+    const b = f.bodies.find((x) => x.id === "side");
+    if (b.depth > 0.3 && Math.hypot((b.ball.x - f.hub.x) / f.hub.rx, (b.ball.y - f.hub.y) / f.hub.ry) < 0.9) {
+      front += 1;
+      assert.ok(b.drawn, `${now}: in front of the hub: drawn`);
+      // its cells are on the hub's ball (nearer)
+      const cell = cellsOf(f.lines[Math.floor(b.ball.y / 4)])[Math.floor(b.ball.x / 2)];
+      assert.ok(cell && /[░▒▓█]/.test(cell.ch), `${now}: a shade character at the ball's centre`);
+    }
+  }
+  assert.ok(front >= 3, "it passes in front of the hub's ball: " + front + " samples");
+});
+
+test("orbit 3D: every frame is exactly width x height at awkward sizes, in 3D, with the side chat busy, idle or absent, and a bad document never throws", () => {
+  for (const view of ["3d", "2d"]) {
+    for (const [w, h] of [[36, 14], [37, 14], [40, 20], [64, 12], [100, 30], [160, 45], [200, 60], [20, 8], [1, 1]]) {
+      for (const doc of [orbitSideDoc(demoWorn, true), orbitSideDoc(demoWorn, false), demoWorn, {}, null, { agents: "x", sidechat: { installed: true } }]) {
+        for (const now of [0, 7777, 19000]) {
+          const lines = S.scene(doc, { width: w, height: h, now, view, colors: DARK });
+          assert.equal(lines.length, h, `${view} ${w}x${h}: height`);
+          lines.forEach((l, i) => assert.equal(R.displayWidth(l.map((s) => s.text).join("")), w, `${view} ${w}x${h}@${now} line ${i}`));
+        }
+      }
+    }
+  }
+});
+
+test("orbit 3D: the 2D side chat ball is more than two dots and never reads as a spinner", () => {
+  const busy = orbitSideDoc(demoWorn, true);
+  const plain = demoWorn;
+  const dots = (lines) => lines.map((l) => cellsOf(l).filter((c) => BRAILLE.test(c.ch)).length).reduce((a, b) => a + b, 0);
+  for (const [w, h] of [[100, 30], [160, 45], [62, 38]]) {
+    const withBall = S.orbitLines(busy, w, h, 11000, { view: "2d", colors: DARK });
+    const without = S.orbitLines(plain, w, h, 11000, { view: "2d", colors: DARK });
+    assert.ok(dots(withBall) >= dots(without) + 3, `${w}x${h}: a ball of dots, not two`);
+    assert.equal((sceneText(withBall).join("").match(SPIN) || []).length, (sceneText(without).join("").match(SPIN) || []).length, "no spinner pattern of its own");
+  }
+});
+
+test("orbit 3D: 300 agents draw in under 200 ms a frame, exact size, no name over another", () => {
+  const groups = ["build", "verify", "understand", "decide", "council"];
+  const agents = [A("orchestrator", "hub")];
+  for (let i = 0; i < 300; i += 1) agents.push(A("agent-" + i, groups[i % groups.length], i % 4 === 0 ? 1 : 0, "", i % 7));
+  const doc = Object.assign(D(agents), { sidechat: { installed: true, session: "ses_demoside", model: "x", busy: true } });
+  for (let i = 0; i < 3; i += 1) S.orbitLines(doc, 160, 45, i * 100, { view: "3d", colors: DARK }); // warm up
+  const t0 = process.hrtime.bigint();
+  let worst = 0;
+  for (let i = 0; i < 6; i += 1) {
+    const t = process.hrtime.bigint();
+    const f = orbitTrace(doc, 160, 45, 3000 + i * 1300);
+    worst = Math.max(worst, Number(process.hrtime.bigint() - t) / 1e6);
+    assertExact(f.lines, 160, 45, "300 agents");
+    const taken = new Set();
+    for (const l of f.labels) {
+      for (let c = l.col; c < l.col + l.width; c += 1) {
+        assert.ok(!taken.has(c + "," + l.row), "300 agents: names share a cell");
+        taken.add(c + "," + l.row);
+      }
+    }
+  }
+  console.log(`     300 agents at 160x45: worst frame ${worst.toFixed(1)} ms, mean ${(Number(process.hrtime.bigint() - t0) / 1e6 / 6).toFixed(1)} ms`);
+  assert.ok(worst < 200, `a frame took ${worst.toFixed(1)} ms`);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
 // The pixel rooms (src/rooms.js): the floor plan, with made-up data
 
 const RM = await import(src("rooms.js"));

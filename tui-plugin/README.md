@@ -136,9 +136,11 @@ view, the list opens as a session panel:
     no session yet it shows one quiet line (`No session yet`). `s` and `m` do nothing on it (there is nothing of yours to
     stop or steer) and `Enter` opens its session. The row spins while `sidechat.busy` or while a question of yours is
     out. It is not an agent: it is not counted as working or idle, has no needs and no arrows.
-  - On the orbit, in 2D and 3D, the side chat is its own moon of the hub (the same moon drawing, on an orbit plane of
-    its own in 3D), named `side chat` where names fit. It goes round only while `sidechat.busy` (and, with reduced
-    motion, stays still); the ring of the team stays round and nothing else moves because of it.
+  - On the orbit, in 2D and 3D, the side chat is its own moon of the hub, a small shaded ball (in 3D the hub's ball
+    drawing and light, half its size, on an orbit plane of its own with its faint orbit line, passing behind and in front
+    of the hub's ball by depth; in 2D a small ball of dithered dots on a faint ring), named `side chat` where names
+    fit. It goes round only while `sidechat.busy` (and, with reduced motion, stays still); the ring of the team stays
+    round and nothing else moves because of it.
   - `a` (above) runs `<python> -P -m agentgraph.sidechat ask --main <the snapshot's root session> --text-file - --json`
     (`--demo` added with `AGENTGRAPH_TUI_DEMO`) through the same runner rules (no shell, `PYTHONPATH=<home>`, the
     project folder as the working directory, capped output). **The question goes on the command's standard input, never
@@ -265,7 +267,14 @@ planes furthest apart) turned about the vertical axis through the parent by 360Â
 least 48Ã—18 (never over a name; the sky keeps clear of where a moon or its name can be). The moons go round once in
 24 s, from the clock (`now`), not the frame count, whatever the camera does; with `motion: "reduced"` each stands at its
 time-0 place. A moon's name takes a place like any other, nearest first, and never goes over another name or its
-parent's; a moon hidden behind its parent shows no glyph and no name for that moment. In 2D the seats stay dots in a
+parent's; a moon hidden behind its parent shows no glyph and no name for that moment.
+**Names in 3D** never overlap: a name never covers another name, a glyph or mark, or a cell of a body nearer than its own
+(the hub's ball, the side chat's ball), and keeps a clear cell each side. They are placed by priority: the hub, agents
+that need you (stuck or sent back), working agents, then the rest, nearest to the viewer first; each beside its glyph
+(outward first, then a row or two up or down, then anywhere close), preferring cells with no ring or spoke on them. A name
+that fits nowhere whole is cut with an ellipsis (at least 3 cells), and left out when even that does not fit. A name keeps
+the place it had in the last frame while that place stays free and the camera has moved only a little, so names do not
+hop as the view turns. A body behind a nearer ball shows no glyph (a planet keeps its muted name). In 2D the seats stay dots in a
 small circle round the parent and nothing about them moves. While an agent
 works, `0`/`1` digits stream along its spoke from the hub out to it in its group colour; on a loop's arc they stream
 toward whoever has the work. A stuck agent blinks in the danger colour.
