@@ -3264,7 +3264,7 @@ test("styled list: items[].line points at the row of the item (mouse mapping); b
         const lines = picked.lines.map(SL_text);
         assert.equal(lines.filter((t) => t[0] === "›").length, 1, "one cursor");
         assert.equal(lines[picked.items.find((x) => x.key === it.key).line][0], "›");
-        assert.ok(lines[it.line].includes(it.kind === "hub" ? "orchestrator" : it.name.slice(0, 3)), it.name + " on its row: " + lines[it.line]);
+        assert.ok(lines[it.line].includes(it.kind === "hub" ? "◉ orc" : it.name.slice(0, 3)), it.name + " on its row: " + lines[it.line]);
       }
       // bar, rules, progress, spend and keys are not items
       const itemRows = new Set(base.items.map((it) => it.line));
