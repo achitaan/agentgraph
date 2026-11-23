@@ -3,10 +3,10 @@ measured in tokens, cache reads and writes, cost, time, agent calls, correctness
 
     agentgraph bench scratch-config --to DIR [--pin-model M] [--json]
     agentgraph bench plain-config --to DIR [--pin-model M] [--json]
-    agentgraph bench run SCENARIO... --label L --config DIR [--reps N] [--interrupt-after SECONDS] [--budget USD] [--json]
-    agentgraph bench probe AGENT... --label L --config DIR [--json]
+    agentgraph bench run SCENARIO... --label L --config DIR [--reps N] [--interrupt-after SECONDS] [--budget USD] [--keep-work] [--no-sandbox] [--json]
+    agentgraph bench probe AGENT... --label L --config DIR [--keep-work] [--no-sandbox] [--json]
     agentgraph bench report LABEL [LABEL2] [--results DIR]
-    agentgraph bench suite NAME --setup LABEL=DIR --setup LABEL=DIR [--reps N] [--budget USD] [--interrupt-after SECONDS] [--json]
+    agentgraph bench suite NAME --setup LABEL=DIR --setup LABEL=DIR [--reps N] [--budget USD] [--interrupt-after SECONDS] [--append] [--keep-work] [--no-sandbox] [--json]
     agentgraph bench card LABEL_A LABEL_B [--html FILE] [--suite NAME] [--results DIR]
     agentgraph bench scenarios
     agentgraph bench fingerprint
@@ -19,7 +19,7 @@ under the temp folder) as `DIR/home/.config/opencode`, and every run and probe s
 with the prompt text left byte-for-byte as it is, so first-turn prompt tokens match the live config. Under the scratch
 HOME, `.local/share/opencode` (the database, so sessions are stored and costed in the real one), `.local/state/opencode`
 and `.cache/opencode` (the plugin's package cache) are symlinks to the real ones. `OPENCODE_CONFIG_CONTENT` (the provider
-config) and the proxy helpers stay in the environment as they are; `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG` and
+config) and the proxy helpers stay in the environment as they are (except what the Sandbox paragraph drops); `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG` and
 `OPENCODE_TUI_CONFIG` are removed from it. `AGENTGRAPH_HOME` points at the scratch ledger (an empty `memory/`), so a bench
 agent that runs `agentgraph record` or `check` touches only the scratch toolkit. Only the absolute path of the live
 folder inside copied text files (`opencode.json`, `cli.json`: the plugin paths) is rewritten to the scratch folder.
@@ -29,6 +29,20 @@ config folder, and anything inside it. The command is always the app CLI
 (`/Applications/OpenCode.app/Contents/Resources/opencode-cli`, `OPENCODE_CLI` overrides, an absolute path only) with
 `--standalone` (a private server; the background service is never attached to, started or stopped).
 
+**Work folders and hidden checks.** Each run works in a brand-new `tempfile.mkdtemp` folder inside the temp folder (not under
+the scratch folder). The hidden check never runs there: `run_check` moves the model's folder aside, puts a throwaway copy
+(symlinks and sockets dropped) at the same path, copies `hidden/` into the copy, runs the check, deletes the copy and moves the model's
+folder back (the p4 checks find the session by that path). When the row has been written the work folder is deleted, unless
+`--keep-work` is given; kept folders hold no `hidden/` but must be removed before another run (a later model could read them).
+`run`, `suite` and `probe` refuse a scratch folder that still holds a `work/` folder of the older layout (it holds hidden checks).
+
+**Sandbox.** On macOS, when `/usr/bin/sandbox-exec` exists, the host runs under a profile (`--no-sandbox` turns it off; each
+row has `"sandbox": true|false`) that allows everything except: reading any `bench/scenarios` folder or git directory of this
+checkout, of every `git worktree list` path of it and of the live toolkit checkout; writing anywhere under the real config
+folder or under those checkouts. The runner itself is not sandboxed. The real database stays readable (a known gap).
+`run_env` drops variables whose value points into this repository or the real config folder (a PATH entry is dropped alone);
+for a plain copy `OPENCODE_CONFIG_CONTENT` keeps only the `PLAIN_KEYS` (dropped if it is not JSON).
+
 **Plain copy.** `plain-config` makes a scratch HOME the same way (same checks, same links, same model pin) that holds plain
 OpenCode and nothing of the toolkit: from `opencode.json` only the keys in `PLAIN_KEYS` (the provider entries and the
 models), and no agent files, prompts, plugins, skills, `AGENTS.md`, commands or MCP servers. Both kinds of copy hold a
@@ -37,7 +51,11 @@ that agent instead of the scenario's. No copy ever holds a `bench/scenarios` fol
 
 **Suites** (`bench/suites/<name>.json`: name, note, scenarios) run every scenario on every setup, one rep of one scenario on
 each setup in turn, the first setup alternating, so drift over time reaches all setups; `--budget` is one total over all of
-them. Each row gets a `suite` field. `card` puts two labels side by side (`agentgraph/benchcard.py`).
+them. Each row gets a `suite` field. `card` puts two labels side by side (`agentgraph/benchcard.py`). The setups must pin the
+same model. The budget is checked only between rounds (one scenario and rep on every setup), so every setup ends with the
+same number of runs. Two runs in a row with no session in the database stop the suite (exit 4: the cost cannot be tracked).
+A suite whose result files already hold rows for the same label and suite refuses to start unless `--append` is given, then rep
+numbers continue after the highest one present.
 
 **Sessions** go to the real OpenCode database as archived sessions titled `agentgraph-bench: <scenario> <label> rN`
 (the host has no per-run data folder switch short of moving the credentials too), so the orchestrator's spend limit
@@ -63,7 +81,10 @@ takes the name of any agent the host knows, including plugin sub-agents, so the 
 
 Row fields (`bench/results/<label>.jsonl`): scenario, label, rep, agent, time, config_hash, model, wall_seconds, root_session,
 sessions, agent_calls, turns, tokens {input, output, reasoning, cache_read, cache_write}, first_turn_tokens {agent: n},
-max_context, cost, cost_sessions, check {passed, detail}, recovery, exit_code, error.
+max_context, cost, cost_sessions, models_used (provider/model ids on the sessions' turns, when the database has them),
+check {passed, detail}, recovery, exit_code, error, sandbox, work (only with --keep-work). `error` and `check.detail` pass
+through `mask` before a row is written. The check runs with a minimal environment (PATH, HOME of the scratch copy,
+PYTHONDONTWRITEBYTECODE, and P4_DB for the database path), not the real one.
 """
 from __future__ import annotations
 
@@ -74,6 +95,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import statistics
 import subprocess
 import sys
@@ -104,6 +126,10 @@ RESUME_PROMPT = ("Continue from the graph checkpoint: read the task graph in .op
 LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}")
 MODEL = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+")
 SESSION = re.compile(r"ses_[A-Za-z0-9]+")
+KEYLIKE = re.compile(r"[A-Za-z0-9]{24,}")  # a key, token or session id: long runs of letters and digits
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+WORK_PREFIX = "agentgraph-bench-work-"
+EXIT_BUDGET, EXIT_UNRECORDED = 3, 4
 TEXT_SUFFIXES = {".md", ".json", ".jsonl", ".py", ".sh", ".txt", ".yaml", ".yml", ".toml", ".html", ".js", ".mjs", ".ts", ""}
 TOP_FILES = ("AGENTS.md", "opencode.json", "cli.json", "tui.json", "package.json", "package-lock.json",
              "oh-my-opencode-slim.json")
@@ -335,20 +361,42 @@ def scratch_config(to, *, pin_model: str | None = DEFAULT_PIN, live: Path | None
             "pinned": pinned, "pin_model": pin_model, "kind": "toolkit"}
 
 
+def file_reference_keys(node, live: Path, real_home: Path, trail: str = "") -> list[str]:
+    """The keys (a dotted path, never a value) of every string that refers to a file: a `{file:` reference or a path in the
+    config folder, written absolute or with `~`."""
+    config = [str(live), str(Path(live).resolve()), str(real_home / ".config" / "opencode"), "~/.config/opencode",
+              "$HOME/.config/opencode"]
+    if isinstance(node, str):
+        return [trail] if "{file:" in node or any(path in node for path in config) else []
+    found = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            found += file_reference_keys(value, live, real_home, f"{trail}.{key}" if trail else str(key))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            found += file_reference_keys(value, live, real_home, f"{trail}[{index}]")
+    return found
+
+
 def plain_config(to, *, pin_model: str | None = DEFAULT_PIN, live: Path | None = None,
                  temp_root: Path | None = None, real_home: Path | None = None) -> dict:
     """A scratch folder of plain OpenCode: only the `PLAIN_KEYS` of the live `opencode.json` (the model pinned), nothing else
     of the config. Returns the same fields as `scratch_config`."""
     live = Path(live) if live is not None else sources.CONFIG_DIR
-    target, home, config = _new_scratch(to, pin_model=pin_model, live=live, temp_root=temp_root, real_home=real_home)
-    kept, copied = {}, 0
-    source = live / "opencode.json"
+    real_home = Path(real_home) if real_home is not None else Path.home()
+    kept, copied, source = {}, 0, live / "opencode.json"
     if source.is_file():
         try:
-            data = json.loads(rewrite_text(source.read_text(encoding="utf-8"), live, config))
+            data = json.loads(source.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             raise BenchError("the live opencode.json could not be read as JSON") from None
         kept = {key: data[key] for key in PLAIN_KEYS if isinstance(data, dict) and key in data}
+        refs = file_reference_keys(kept, live, real_home)
+        if refs:
+            raise BenchError("a plain copy cannot hold settings that refer to a file; remove these keys from the live "
+                             "opencode.json settings or set them in the environment: " + ", ".join(refs[:8]))
+    target, home, config = _new_scratch(to, pin_model=pin_model, live=live, temp_root=temp_root, real_home=real_home)
+    kept = json.loads(rewrite_text(json.dumps(kept), live, config))
     if pin_model:
         kept = _pin_opencode_json(kept, pin_model)
         kept["model"] = pin_model
@@ -396,16 +444,111 @@ def open_scratch(config, *, live: Path | None = None) -> dict:
             "kind": setup.get("kind") if setup.get("kind") in ("toolkit", "plain") else "toolkit", "agent": agent}
 
 
-def run_env(scratch: dict, work: Path, environ=None) -> dict:
+def _drop_paths(live: Path | None) -> list[str]:
+    """The folders no environment variable of a run may point into: this repository and the real config folder."""
+    live = Path(live) if live is not None else sources.CONFIG_DIR
+    return sorted({str(p) for base in (HERE, live) for p in (base, base.resolve())})
+
+
+def run_env(scratch: dict, work: Path, environ=None, live: Path | None = None) -> dict:
     env = dict(os.environ if environ is None else environ)
     for name in ("OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "OPENCODE_TUI_CONFIG"):
         env.pop(name, None)  # an extra folder or file would be merged into the scratch config
+    folders = _drop_paths(live)
+    for name, value in list(env.items()):
+        if name == "OPENCODE_CONFIG_CONTENT":
+            continue
+        if name == "PATH":  # only the entries that point into those folders go
+            env[name] = os.pathsep.join(e for e in value.split(os.pathsep) if not any(f in e for f in folders))
+        elif any(f in value for f in folders):
+            del env[name]  # OLDPWD, PWD and the like
+    if scratch.get("kind") == "plain" and "OPENCODE_CONFIG_CONTENT" in env:
+        try:
+            content = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        except ValueError:
+            content = None
+        if isinstance(content, dict):
+            env["OPENCODE_CONFIG_CONTENT"] = json.dumps({k: v for k, v in content.items() if k in PLAIN_KEYS})
+        else:
+            del env["OPENCODE_CONFIG_CONTENT"]
     env["HOME"] = str(scratch["dir"] / "home")
     env["XDG_CONFIG_HOME"] = str(scratch["dir"] / "home" / ".config")
     env["AGENTGRAPH_HOME"] = str(scratch["config"] / "orchestration" / "memory")
     env["PWD"] = str(work)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
+
+
+# ---- the sandbox ----
+
+def protected_paths(live: Path | None = None) -> tuple[list[Path], list[Path]]:
+    """(folders the host may not read, folders it may not write): the `bench/scenarios` folder and the git directory of this
+    checkout, of every worktree `git worktree list` names for it and of the live toolkit checkout; writes are refused under
+    those checkouts and under the real config folder."""
+    live = Path(live) if live is not None else sources.CONFIG_DIR
+    checkouts = [HERE]
+    try:
+        out = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=HERE, capture_output=True, text=True, timeout=30).stdout
+        checkouts += [Path(line[9:]) for line in out.splitlines() if line.startswith("worktree ")]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    checkouts.append(live / "orchestration")
+    reads, writes = [], [live]
+    for checkout in checkouts:
+        reads.append(checkout / "bench" / "scenarios")
+        writes.append(checkout)
+    try:
+        common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=HERE, capture_output=True,
+                                text=True, timeout=30).stdout.strip()
+        if common:
+            reads.append(Path(common))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return reads, writes
+
+
+def _quoted(path) -> str:
+    return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def sandbox_profile(deny_read, deny_write) -> str:
+    """A sandbox-exec profile that allows everything except reading the first folders and writing under the second ones
+    (each in its written and its resolved form: the profile matches real paths)."""
+    lines = ["(version 1)", "(allow default)"]
+    for action, folders in (("file-read*", deny_read), ("file-write*", deny_write)):
+        for folder in sorted({str(p) for f in folders for p in (Path(f), Path(os.path.realpath(f)))}):
+            lines.append(f"(deny {action} (subpath {_quoted(folder)}))")
+    return "\n".join(lines) + "\n"
+
+
+def sandbox_available() -> bool:
+    return sys.platform == "darwin" and os.path.isfile(SANDBOX_EXEC)
+
+
+def sandboxed(cmd: list[str], enabled: bool, live: Path | None = None) -> list[str]:
+    """`cmd` under the profile when the sandbox is wanted and exists, else unchanged."""
+    if not enabled or not sandbox_available():
+        return cmd
+    reads, writes = protected_paths(live)
+    return [SANDBOX_EXEC, "-p", sandbox_profile(reads, writes), *cmd]
+
+
+def mask(text, home: Path | None = None) -> str:
+    """Text for a public row: the home path becomes `~`, anything that looks like a key or token (24 or more letters and
+    digits in a row) becomes `[hidden]`, at most 160 characters."""
+    text = str(text or "")
+    home = Path(home) if home is not None else Path.home()
+    for folder in sorted({str(home), str(home.resolve())}, key=len, reverse=True):
+        if len(folder) > 1:
+            text = text.replace(folder, "~")
+    return KEYLIKE.sub("[hidden]", text)[:160]
+
+
+def _mask_row(row: dict) -> dict:
+    row["error"] = mask(row.get("error"))
+    if isinstance(row.get("check"), dict) and "detail" in row["check"]:
+        row["check"] = {**row["check"], "detail": mask(row["check"]["detail"])}
+    return row
 
 
 # ---- scenarios ----
@@ -434,12 +577,18 @@ def list_scenarios(root: Path | None = None) -> list[str]:
 
 
 def _git(work: Path, *args: str) -> None:
-    subprocess.run(["git", "-c", "user.name=bench", "-c", "user.email=bench@localhost", "-c", "commit.gpgsign=false", *args],
+    subprocess.run(["git", "-c", "core.fsmonitor=false", "-c", "user.name=bench", "-c", "user.email=bench@localhost", "-c", "commit.gpgsign=false", *args],
                    cwd=work, check=True, capture_output=True, timeout=60)
 
 
+def new_work_dir() -> Path:
+    """A brand-new folder of its own in the temp folder, for one run (mode 0700); never under a scratch folder."""
+    TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=WORK_PREFIX, dir=TEMP_ROOT)).resolve()
+
+
 def prepare_work(scenario_dir: Path | None, work: Path) -> None:
-    work.mkdir(parents=True)
+    work.mkdir(parents=True, exist_ok=True)
     fixture = Path(scenario_dir) / "fixture" if scenario_dir else None
     if fixture is not None and fixture.is_dir():
         shutil.copytree(fixture, work, dirs_exist_ok=True)
@@ -450,18 +599,42 @@ def prepare_work(scenario_dir: Path | None, work: Path) -> None:
     _git(work, "commit", "-q", "-m", "fixture")
 
 
+def _plain_entries_only(folder: str, names: list[str]) -> list[str]:
+    """What the copy leaves out: symlinks, sockets and the like (only files and folders are copied)."""
+    skip = []
+    for name in names:
+        mode = os.lstat(os.path.join(folder, name)).st_mode
+        if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+            skip.append(name)
+    return skip
+
+
 def run_check(scenario: dict, work: Path, env: dict, db_path: Path | None = None) -> dict:
-    """Run the scenario's check in the run's scratch environment (`run_env`), never the real one; the one real path it
-    needs, the OpenCode database (read-only, by the p4 checks), goes in as `P4_DB`."""
-    env = {**env, "PYTHONDONTWRITEBYTECODE": "1", **({"P4_DB": str(db_path)} if db_path is not None else {})}
+    """Run the scenario's check on a throwaway copy of `work` with `hidden/` copied into it; `work` itself never holds
+    `hidden/` and comes back as it was. The copy sits at the same path (the p4 checks find the run's sessions by the folder
+    they run in): the model's folder is moved aside for the length of the check, symlinks are not copied (a link must not let
+    a hidden file land elsewhere). The check gets a minimal environment, not the real one: PATH, HOME (the scratch home),
+    PYTHONDONTWRITEBYTECODE and, for the p4 checks that read the OpenCode database (read-only), `P4_DB`."""
+    work = Path(work)
+    check_env = {"PYTHONDONTWRITEBYTECODE": "1", **{k: env[k] for k in ("PATH", "HOME") if k in env},
+                 **({"P4_DB": str(db_path)} if db_path is not None else {})}
     hidden = scenario["dir"] / "hidden"
-    if hidden.is_dir():
-        shutil.copytree(hidden, work, dirs_exist_ok=True)
+    aside = Path(tempfile.mkdtemp(prefix=WORK_PREFIX + "aside-", dir=work.parent))
+    saved = aside / "model"
+    os.rename(work, saved)
     try:
-        done = subprocess.run(scenario["check"], shell=True, cwd=work, capture_output=True, text=True, errors="replace",
-                              timeout=scenario["check_timeout"], env=env)
-    except subprocess.TimeoutExpired:
-        return {"passed": False, "detail": "check timed out"}
+        shutil.copytree(saved, work, ignore=_plain_entries_only)
+        if hidden.is_dir():
+            shutil.copytree(hidden, work, dirs_exist_ok=True)
+        try:
+            done = subprocess.run(scenario["check"], shell=True, cwd=work, capture_output=True, text=True, errors="replace",
+                                  timeout=scenario["check_timeout"], env=check_env)
+        except subprocess.TimeoutExpired:
+            return {"passed": False, "detail": "check timed out"}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+        os.rename(saved, work)
+        shutil.rmtree(aside, ignore_errors=True)
     lines = [ln.strip() for ln in (done.stdout + "\n" + done.stderr).splitlines() if ln.strip()]
     return {"passed": done.returncode == 0, "detail": (lines[-1] if lines else f"exit {done.returncode}")[:160]}
 
@@ -526,7 +699,8 @@ def _num(value) -> float:
 
 def read_tree(db_path: Path, root: str) -> dict:
     """Totals for the root session and every descendant, read-only: sessions, agent_calls, turns, tokens, first-turn prompt
-    tokens per agent, max context, cost."""
+    tokens per agent, max context, cost, and models_used (the sorted provider/model ids the assistant turns carry)."""
+    models: set[str] = set()
     out = {"sessions": 0, "agent_calls": {}, "turns": 0, "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0,
            "cache_write": 0}, "first_turn_tokens": {}, "max_context": 0, "cost": 0.0, "cost_sessions": 0.0, "root_agent": None}
     with closing(costmod._connect(db_path)) as db:
@@ -550,11 +724,14 @@ def read_tree(db_path: Path, root: str) -> dict:
                 users = db.execute("SELECT count(*) FROM session_message WHERE session_id=? AND type='user'", (sid,)).fetchone()[0]
                 out["agent_calls"][agent] = out["agent_calls"].get(agent, 0) + max(1, int(users))
             ok = "(CASE WHEN json_valid(data) THEN json_type(data) = 'object' ELSE 0 END)"
-            fields = ("cost", "tokens.input", "tokens.output", "tokens.reasoning", "tokens.cache.read", "tokens.cache.write")
+            fields = ("cost", "tokens.input", "tokens.output", "tokens.reasoning", "tokens.cache.read", "tokens.cache.write",
+                      "model.providerID", "model.id")
             cols = ", ".join(f"CASE WHEN {ok} THEN json_extract(data, '$.{f}') END" for f in fields)
             first = True
             for values in db.execute(f"SELECT {cols} FROM session_message WHERE session_id=? AND type='assistant' ORDER BY seq", (sid,)):
-                c, i, o, r, cr, cw = (_num(v) for v in values)
+                c, i, o, r, cr, cw = (_num(v) for v in values[:6])
+                if isinstance(values[7], str) and values[7]:
+                    models.add(f"{values[6]}/{values[7]}" if isinstance(values[6], str) and values[6] else values[7])
                 if values[1] is None and values[4] is None:
                     continue  # a turn still without usage numbers
                 out["turns"] += 1
@@ -566,6 +743,8 @@ def read_tree(db_path: Path, root: str) -> dict:
                 if first:
                     out["first_turn_tokens"].setdefault(agent, context)
                     first = False
+    if models:  # left out when the turns carry no model id
+        out["models_used"] = sorted(models)
     return out
 
 
@@ -638,49 +817,71 @@ def _first_line(text: str) -> str:
 
 
 def one_rep(*, scenario: dict | None, agent: str, prompt: str, label: str, rep: int, scratch: dict, exe: str, db_path: Path,
-            model: str | None, name: str, interrupt_after: float | None = None, timeout: float = 900, auto: bool = True) -> dict:
+            model: str | None, name: str, interrupt_after: float | None = None, timeout: float = 900, auto: bool = True,
+            sandbox: bool = True, live: Path | None = None) -> dict:
+    """One run in a work folder of its own. The row holds `_work` (the model's folder, no `hidden/`): `save_row` writes the
+    row, then deletes the folder or keeps it."""
     scenario_id = scenario["id"] if scenario else name
     title = f"agentgraph-bench: {scenario_id} {label} r{rep}"
-    work = scratch["dir"] / "work" / f"{label}-{scenario_id}-r{rep}-{int(time.time())}"
-    prepare_work(scenario["dir"] if scenario else None, work)
-    env = run_env(scratch, work)
-    row = {"scenario": scenario_id, "label": label, "rep": rep, "agent": agent, "time": int(time.time()),
-           "config_hash": scratch["hash"], "model": model or scratch.get("pin_model"), "work": str(work),
-           "setup": scratch.get("kind", "toolkit")}
-    cmd = build_command(exe, agent=agent, model=model, title=title, auto=auto)
-    first = _spawn(cmd, prompt, work, env, timeout, stop_after=interrupt_after)
-    events = sidechat._events(first["stdout"])
-    root, wall, recovery, last = events["session"], first["seconds"], None, first
-    error = events["error"] or ("timed out" if first["timed_out"] else "") or (_first_line(first["stderr"]) if first["code"] else "")
-    if first["interrupted"]:
-        before = graph_state(work)
-        at = first["seconds"]
-        root, _tree = tree_for(db_path, root, title)
-        if not root:
-            error = error or "no session was created before the interruption"
+    work = new_work_dir()
+    try:
+        prepare_work(scenario["dir"] if scenario else None, work)
+        env = run_env(scratch, work, live=live)
+        use_sandbox = bool(sandbox and sandbox_available())
+        row = {"scenario": scenario_id, "label": label, "rep": rep, "agent": agent, "time": int(time.time()),
+               "config_hash": scratch["hash"], "model": model or scratch.get("pin_model"), "_work": str(work),
+               "setup": scratch.get("kind", "toolkit"), "sandbox": use_sandbox}
+        cmd = sandboxed(build_command(exe, agent=agent, model=model, title=title, auto=auto), use_sandbox, live)
+        first = _spawn(cmd, prompt, work, env, timeout, stop_after=interrupt_after)
+        events = sidechat._events(first["stdout"])
+        root, wall, recovery, last = events["session"], first["seconds"], None, first
+        error = events["error"] or ("timed out" if first["timed_out"] else "") or (_first_line(first["stderr"]) if first["code"] else "")
+        if first["interrupted"]:
+            before = graph_state(work)
+            at = first["seconds"]
+            root, _tree = tree_for(db_path, root, title)
+            if not root:
+                error = error or "no session was created before the interruption"
+            else:
+                resume = sandboxed(build_command(exe, agent=agent, model=model, title=None, session=root, auto=auto), use_sandbox, live)
+                last = _spawn(resume, RESUME_PROMPT, work, env, timeout)
+                wall += last["seconds"]
+                ev2 = sidechat._events(last["stdout"])
+                error = ev2["error"] or ("timed out" if last["timed_out"] else "") or (_first_line(last["stderr"]) if last["code"] else "")
+                recovery = {"_before": before, "_at": at}
+        check = run_check(scenario, work, env, db_path) if scenario else {"passed": None, "detail": "no check"}
+        if recovery is not None:
+            after = graph_state(work)
+            recovery = recovery_row(recovery["_before"], after, recovery["_at"],
+                                    check["passed"] is True and after["status"] == "passed")
+        root, tree = tree_for(db_path, root, title)
+        row.update({"wall_seconds": round(wall, 1), "root_session": root, "exit_code": last["code"], "error": error,
+                    "check": check, "recovery": recovery})
+        if tree is None:
+            row.update({"sessions": 0, "agent_calls": {}, "turns": 0, "tokens": {}, "first_turn_tokens": {}, "max_context": 0,
+                        "cost": 0.0, "cost_sessions": 0.0})
+            row["error"] = row["error"] or "the session was not found in the database"
         else:
-            last = _spawn(build_command(exe, agent=agent, model=model, title=None, session=root, auto=auto), RESUME_PROMPT, work, env, timeout)
-            wall += last["seconds"]
-            ev2 = sidechat._events(last["stdout"])
-            error = ev2["error"] or ("timed out" if last["timed_out"] else "") or (_first_line(last["stderr"]) if last["code"] else "")
-            recovery = {"_before": before, "_at": at}
-    check = run_check(scenario, work, env, db_path) if scenario else {"passed": None, "detail": "no check"}
-    if recovery is not None:
-        after = graph_state(work)
-        recovery = recovery_row(recovery["_before"], after, recovery["_at"],
-                                check["passed"] is True and after["status"] == "passed")
-    root, tree = tree_for(db_path, root, title)
-    row.update({"wall_seconds": round(wall, 1), "root_session": root, "exit_code": last["code"], "error": error[:160],
-                "check": check, "recovery": recovery})
-    if tree is None:
-        row.update({"sessions": 0, "agent_calls": {}, "turns": 0, "tokens": {}, "first_turn_tokens": {}, "max_context": 0,
-                    "cost": 0.0, "cost_sessions": 0.0})
-        row["error"] = row["error"] or "the session was not found in the database"
-    else:
-        tree.pop("root_agent", None)
-        row.update(tree)
-        row["cost"], row["cost_sessions"] = round(tree["cost"], 6), round(tree["cost_sessions"], 6)
-    return row
+            tree.pop("root_agent", None)
+            row.update(tree)
+            row["cost"], row["cost_sessions"] = round(tree["cost"], 6), round(tree["cost_sessions"], 6)
+        return _mask_row(row)
+    except BaseException:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+
+
+def save_row(row: dict, results: Path | None = None, keep_work: bool = False) -> Path:
+    """Write the row, then delete the run's work folder (the model's; the hidden check never entered it) unless it is kept,
+    when the row says where it is."""
+    work = row.pop("_work", None)
+    if work and keep_work:
+        row["work"] = work
+    try:
+        return append_row(row, results)
+    finally:
+        if work and not keep_work:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def append_row(row: dict, results: Path | None = None) -> Path:
@@ -689,7 +890,7 @@ def append_row(row: dict, results: Path | None = None) -> Path:
     results.mkdir(parents=True, exist_ok=True)
     path = results / f"{label}.jsonl"
     with path.open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps(row, sort_keys=True) + "\n")
+        stream.write(json.dumps(_mask_row(dict(row)), sort_keys=True) + "\n")
     return path
 
 
@@ -699,12 +900,21 @@ def _label(label) -> str:
     return label
 
 
+def refuse_old_layout(scratch: dict) -> None:
+    """The first layout kept every run's work folder under the scratch folder's `work/`, hidden checks included."""
+    old = Path(scratch["dir"]) / "work"
+    if old.exists() and (not old.is_dir() or any(old.iterdir())):
+        raise BenchError(f"{old} holds work folders from the older layout, with hidden checks inside; delete that folder "
+                         f"(rm -r '{old}') and start again")
+
+
 def run_scenarios(names, *, label, config, reps=1, interrupt_after=None, budget=None, executable=None, db_path=None,
-                  results=None, scenarios_root=None, live=None, out=None) -> list[dict]:
+                  results=None, scenarios_root=None, live=None, out=None, sandbox=True, keep_work=False) -> list[dict]:
     label = _label(label)
     if not names:
         raise BenchError("name at least one scenario")
     scratch = open_scratch(config, live=live)
+    refuse_old_layout(scratch)
     exe = executable_path(executable)
     db_path = Path(db_path) if db_path is not None else sources.DB_PATH
     scenarios = [load_scenario(n, scenarios_root) for n in names]
@@ -718,7 +928,7 @@ def run_scenarios(names, *, label, config, reps=1, interrupt_after=None, budget=
             if budget is not None and spent >= budget:
                 raise BenchError(f"stopped before {scenario['id']} r{rep}: spent ${spent:.2f} of the ${budget:.2f} budget")
             row = _run_one(scenario, rep, label=label, scratch=scratch, exe=exe, db_path=db_path, interrupt_after=interrupt_after,
-                           results=results)
+                           results=results, sandbox=sandbox, keep_work=keep_work, live=live)
             rows.append(row)
             spent += row.get("cost") or 0.0
             if out:
@@ -727,14 +937,14 @@ def run_scenarios(names, *, label, config, reps=1, interrupt_after=None, budget=
 
 
 def _run_one(scenario: dict, rep: int, *, label: str, scratch: dict, exe: str, db_path: Path, interrupt_after, results,
-             extra: dict | None = None) -> dict:
+             extra: dict | None = None, sandbox: bool = True, keep_work: bool = False, live: Path | None = None) -> dict:
     """One rep of one scenario on one scratch copy, its row saved. A copy that names an agent (the plain one) runs that
     agent in place of the scenario's."""
     row = one_rep(scenario=scenario, agent=scratch.get("agent") or scenario["agent"], prompt=scenario["prompt"], label=label, rep=rep,
                   scratch=scratch, exe=exe, db_path=db_path, model=scenario.get("model") or scratch["pin_model"],
-                  name=scenario["id"], interrupt_after=interrupt_after, timeout=float(scenario["timeout"]))
+                  name=scenario["id"], interrupt_after=interrupt_after, timeout=float(scenario["timeout"]), sandbox=sandbox, live=live)
     row.update(extra or {})
-    append_row(row, results)
+    save_row(row, results, keep_work)
     return row
 
 
@@ -765,16 +975,31 @@ def parse_setups(items) -> list[tuple[str, str]]:
     return setups
 
 
+def _highest_rep(results: Path | None, label: str, suite: str) -> int:
+    """The highest rep number in the result file of `label` among rows made by `suite` (0 when there are none)."""
+    try:
+        rows = read_rows(label, results)
+    except BenchError:
+        return 0
+    return max([r["rep"] for r in rows if r.get("suite") == suite and isinstance(r.get("rep"), int)], default=0)
+
+
 def run_suite(name, *, setups, reps=1, interrupt_after=None, budget=None, executable=None, db_path=None, results=None,
-              scenarios_root=None, suites_root=None, live=None, out=None) -> dict:
+              scenarios_root=None, suites_root=None, live=None, out=None, sandbox=True, keep_work=False, append=False) -> dict:
     """Every scenario of the suite on every setup, interleaved: one rep of one scenario on each setup in turn, the setup that
-    goes first rotating from one rep to the next. Nothing is run if a scenario, a label or a folder is wrong. Returns
-    {rows, spent, stopped}; `stopped` says why the budget ended it early (the rows so far are kept)."""
+    goes first rotating from one rep to the next. Nothing is run if a scenario, a label or a folder is wrong. The budget is
+    checked between complete rounds (one scenario and rep on every setup). Returns {rows, spent, stopped, reason}; `stopped`
+    says why the suite ended early (the rows so far are kept) and `reason` is "budget" or "unrecorded" (two runs in a row left
+    no session in the database, so their cost cannot be tracked)."""
     suite = load_suite(name, suites_root)
     setups = [(_label(label), folder) for label, folder in setups]
     if len(setups) < 2 or len({label for label, _ in setups}) != len(setups):
         raise BenchError("give two or more --setup LABEL=DIR with different labels")
     scratches = [(label, open_scratch(folder, live=live)) for label, folder in setups]
+    for _, scratch in scratches:
+        refuse_old_layout(scratch)
+    if len({scratch["pin_model"] for _l, scratch in scratches}) != 1:
+        raise BenchError("the setups pin different models; a suite compares setups on one model (make the copies with the same --pin-model)")
     exe = executable_path(executable)
     db_path = Path(db_path) if db_path is not None else sources.DB_PATH
     scenarios = [load_scenario(n, scenarios_root) for n in suite["scenarios"]]
@@ -784,40 +1009,54 @@ def run_suite(name, *, setups, reps=1, interrupt_after=None, budget=None, execut
         raise BenchError("--interrupt-after must be positive")
     if budget is not None and budget <= 0:
         raise BenchError("--budget must be positive")
-    rows, spent, stopped, cell = [], 0.0, None, 0
+    offset = max(_highest_rep(results, label, suite["name"]) for label, _ in setups)
+    if offset and not append:
+        raise BenchError(f"the result files already hold rows of suite {suite['name']!r} for these labels; use --append to add "
+                         f"more (rep numbers continue after {offset}) or another label")
+    rows, spent, cell, misses = [], 0.0, 0, 0
+
+    def stop(text, reason):
+        if out:
+            print(text, file=out, flush=True)
+        return {"rows": rows, "spent": round(spent, 6), "stopped": text, "reason": reason}
+
     for scenario in scenarios:
-        for rep in range(1, reps + 1):
+        for n in range(1, reps + 1):
+            rep = offset + n
+            if budget is not None and spent >= budget:
+                return stop(f"stopped before {scenario['id']} r{rep}: spent ${spent:.2f} of the ${budget:.2f} budget", "budget")
             shift = cell % len(scratches)
             cell += 1
             for label, scratch in scratches[shift:] + scratches[:shift]:
-                if budget is not None and spent >= budget:
-                    stopped = f"stopped before {scenario['id']} r{rep} on {label}: spent ${spent:.2f} of the ${budget:.2f} budget"
-                    if out:
-                        print(stopped, file=out, flush=True)
-                    return {"rows": rows, "spent": round(spent, 6), "stopped": stopped}
                 row = _run_one(scenario, rep, label=label, scratch=scratch, exe=exe, db_path=db_path, interrupt_after=interrupt_after,
-                               results=results, extra={"suite": suite["name"]})
+                               results=results, extra={"suite": suite["name"]}, sandbox=sandbox, keep_work=keep_work, live=live)
                 rows.append(row)
                 spent += row.get("cost") or 0.0
                 if out:
                     print(f"[{label}] {summary_line(row)}", file=out, flush=True)
-    return {"rows": rows, "spent": round(spent, 6), "stopped": stopped}
+                misses = misses + 1 if not row.get("sessions") else 0
+                if misses >= 2:
+                    return stop("stopped: two runs in a row left no session in the database, so runs are not being recorded "
+                                "and their cost cannot be tracked", "unrecorded")
+    return {"rows": rows, "spent": round(spent, 6), "stopped": None, "reason": None}
 
 
-def run_probes(agents, *, label, config, executable=None, db_path=None, results=None, live=None, out=None) -> list[dict]:
+def run_probes(agents, *, label, config, executable=None, db_path=None, results=None, live=None, out=None, sandbox=True,
+               keep_work=False) -> list[dict]:
     label = _label(label)
     if not agents:
         raise BenchError("name at least one agent")
     scratch = open_scratch(config, live=live)
+    refuse_old_layout(scratch)
     exe = executable_path(executable)
     db_path = Path(db_path) if db_path is not None else sources.DB_PATH
     rows = []
     for agent in agents:
         row = one_rep(scenario=None, agent=agent, prompt=PROBE_PROMPT, label=label, rep=1, scratch=scratch, exe=exe,
-                      db_path=db_path, model=scratch["pin_model"], name=f"probe-{agent}", timeout=300, auto=False)
+                      db_path=db_path, model=scratch["pin_model"], name=f"probe-{agent}", timeout=300, auto=False, sandbox=sandbox, live=live)
         row["scenario"], row["probe_agent"] = "probe", agent
         row["check"] = {"passed": None, "detail": "probe"}
-        append_row(row, results)
+        save_row(row, results, keep_work)
         rows.append(row)
         if out:
             print(summary_line(row), file=out, flush=True)
@@ -964,6 +1203,12 @@ def report(label: str, other: str | None = None, results: Path | None = None) ->
 
 # ---- command line ----
 
+def _run_flags(parser) -> None:
+    parser.add_argument("--keep-work", action="store_true",
+                        help="keep each run's work folder (the model's, no hidden checks); delete them before another run")
+    parser.add_argument("--no-sandbox", action="store_true", help="run the host without the macOS sandbox profile")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="agentgraph bench", description="Reproducible toolkit bench on a scratch config.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -983,12 +1228,14 @@ def main(argv=None) -> int:
     p.add_argument("--interrupt-after", type=float)
     p.add_argument("--budget", type=float, help="stop starting new reps once this many dollars were spent")
     p.add_argument("--results", type=Path)
+    _run_flags(p)
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("probe", help="first-turn prompt tokens of each agent")
     p.add_argument("agents", nargs="+")
     p.add_argument("--label", required=True)
     p.add_argument("--config")
     p.add_argument("--results", type=Path)
+    _run_flags(p)
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("report", help="a table per scenario; two labels give the changes")
     p.add_argument("labels", nargs="+")
@@ -1000,6 +1247,8 @@ def main(argv=None) -> int:
     p.add_argument("--interrupt-after", type=float)
     p.add_argument("--budget", type=float, help="one total in dollars over all setups; no run starts once it is reached")
     p.add_argument("--results", type=Path)
+    p.add_argument("--append", action="store_true", help="add to result files that already hold rows of this suite and label")
+    _run_flags(p)
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("card", help="a scorecard of two labels (text; --html for a page)")
     p.add_argument("labels", nargs=2, metavar="LABEL")
@@ -1022,26 +1271,27 @@ def main(argv=None) -> int:
                   f"model pinned to {info['pin_model']})")
         elif args.command == "suite":
             result = run_suite(args.name, setups=parse_setups(args.setup), reps=args.reps, interrupt_after=args.interrupt_after,
-                               budget=args.budget, results=args.results, out=None if args.json else sys.stdout)
+                               budget=args.budget, results=args.results, out=None if args.json else sys.stdout,
+                               sandbox=not args.no_sandbox, keep_work=args.keep_work, append=args.append)
             if args.json:
                 print(json.dumps(result))
             elif not result["stopped"]:
                 labels = [s.partition("=")[0] for s in args.setup]
                 print(f"done: {len(result['rows'])} runs, ${result['spent']:.2f}. Next: agentgraph bench card {labels[0]} {labels[1]} --suite {args.name}")
             if result["stopped"]:
-                return 3
+                return EXIT_UNRECORDED if result["reason"] == "unrecorded" else EXIT_BUDGET
         elif args.command == "card":
             from . import benchcard
             sys.stdout.write(benchcard.run_card(args.labels[0], args.labels[1], results=args.results, suite=args.suite, html_file=args.html))
         elif args.command == "run":
             rows = run_scenarios(args.scenarios, label=args.label, config=args.config, reps=args.reps,
                                  interrupt_after=args.interrupt_after, budget=args.budget, results=args.results,
-                                 out=None if args.json else sys.stdout)
+                                 out=None if args.json else sys.stdout, sandbox=not args.no_sandbox, keep_work=args.keep_work)
             if args.json:
                 print(json.dumps(rows))
         elif args.command == "probe":
             rows = run_probes(args.agents, label=args.label, config=args.config, results=args.results,
-                              out=None if args.json else sys.stdout)
+                              out=None if args.json else sys.stdout, sandbox=not args.no_sandbox, keep_work=args.keep_work)
             if args.json:
                 print(json.dumps(rows))
         elif args.command == "report":
