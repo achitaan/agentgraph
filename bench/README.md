@@ -25,3 +25,18 @@ agentgraph bench fingerprint                              # hashes of the live c
   `--interrupt-after` and resumes the same session).
 - Results: `bench/results/<label>.jsonl`, one row per rep. Never compare rows made with different `config_hash` values
   as "the same config"; the hash is what changed.
+
+## Hard tasks (`bench/suites/hard.json`)
+
+Four small projects where the quick fix passes the visible check and fails the hidden one:
+
+- `h1-page-count`: a page-count bug whose obvious fix in the shared helper breaks the outbox, a second caller.
+- `h2-contact-shape`: a three-step change (new record shape, migrate old data, update the report) that has to be done in order.
+- `h3-todo-flags`: two features that both change one shared render file, without changing how existing tasks look or load.
+- `h4-duration-spec`: one function with a ten-rule spec in the fixture; the visible tests cover three rules.
+
+Each task folder also has `solutions/reference/` (a correct solution) and `solutions/naive/` (the hurried fix); both hold only
+the files that differ from `fixture/`. They are never copied into a run's work folder (`prepare_work` copies `fixture/`
+only); `tests/test_bench_hard.py` uses them to prove that the fixture fails the visible check, the naive fix passes it
+and fails the hidden check, and the reference passes both. Hidden checks only test what the prompt or the fixture's own
+spec states.

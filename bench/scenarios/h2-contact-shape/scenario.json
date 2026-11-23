@@ -1,0 +1,7 @@
+{
+  "agent": "orchestrator",
+  "prompt": "We are changing how the address book stores people: names get split into first and last, and a person can have several phone numbers. The whole change, with the old and new file shapes, the name rule and the exact behaviour of each step, is written up in docs/CHANGE.md. Please do all three steps in the `contacts` package: the new shape (store.py), the migration of the old data (a new migrate.py, run on the repository's own data/contacts.json too), and the report (report.py). Follow docs/CHANGE.md exactly; the steps build on each other, so do them in that order. Run `python3 -m unittest discover -s tests -t . -q` when you are done.",
+  "check": "python3 -m unittest discover -s tests -t . -q",
+  "timeout": 1200,
+  "check_timeout": 60
+}

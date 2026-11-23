@@ -1,0 +1,49 @@
+{
+  "version": 2,
+  "contacts": [
+    {
+      "first": "Ada",
+      "last": "Lovelace",
+      "phones": [
+        "555-0100"
+      ],
+      "email": "ada@example.com"
+    },
+    {
+      "first": "Mary",
+      "last": "Ann Smith",
+      "phones": [
+        "555-0111"
+      ],
+      "email": null
+    },
+    {
+      "first": "Cher",
+      "last": "",
+      "phones": [],
+      "email": null
+    },
+    {
+      "first": "Jean-Luc",
+      "last": "de la Mer",
+      "phones": [
+        "555-0122"
+      ],
+      "email": "jl@example.com"
+    },
+    {
+      "first": "Grace",
+      "last": "Hopper",
+      "phones": [],
+      "email": "grace@example.com"
+    },
+    {
+      "first": "Alan",
+      "last": "Turing",
+      "phones": [
+        "555-0133"
+      ],
+      "email": null
+    }
+  ]
+}
