@@ -978,3 +978,23 @@
   .agentgraph .ag-loopbox .ag-loop-cmp-row[data-differs="true"] .ag-loop-cmp-mark, .agentgraph .ag-loopbox .ag-loop-cmp-row[data-differs="unknown"] .ag-loop-cmp-mark { grid-column: 1 / -1; }
 }
 .agentgraph .ag-loopbox button { max-width: 100%; }
+/* v11: timed loop panel and schedule fields. Quiet by default: peach for a loop that is going, coral only where it needs you; nothing animates (the countdown is only numbers). */
+.agentgraph .ag-loopbox .ag-timed { margin: 4px 0 12px; padding: 8px 0; border-top: 1px solid var(--ag-row-divider); border-bottom: 1px solid var(--ag-row-divider); min-width: 0; }
+.agentgraph .ag-loopbox .ag-timed p { margin: 0 0 3px; white-space: normal; }
+.agentgraph .ag-loopbox .ag-timed-head { font-size: 12px; }
+.agentgraph .ag-loopbox .ag-timed-state { font-weight: 600; color: var(--ag-ink); }
+.agentgraph .ag-loopbox .ag-timed-state[data-state="running"], .agentgraph .ag-loopbox .ag-timed-state[data-state="starting"] { color: var(--ag-work); }
+.agentgraph .ag-loopbox .ag-timed-state[data-state="paused"], .agentgraph .ag-loopbox .ag-timed-state[data-state="stopped"] { color: var(--ag-muted); }
+.agentgraph .ag-loopbox .ag-timed-state[data-state="waiting"], .agentgraph .ag-loopbox .ag-timed-state[data-state="interrupted"] { color: var(--ag-danger); }
+.agentgraph .ag-loopbox .ag-timed-phase, .agentgraph .ag-loopbox .ag-timed-kind { color: var(--ag-muted); }
+.agentgraph .ag-loopbox .ag-timed-kind { margin-bottom: 6px; }
+.agentgraph .ag-loopbox .ag-timed-row { display: flex; flex-wrap: wrap; gap: 0 8px; font-variant-numeric: tabular-nums; }
+.agentgraph .ag-loopbox .ag-timed-label { flex: 0 0 8em; color: var(--ag-muted); }
+.agentgraph .ag-loopbox .ag-timed-value { flex: 1 1 8em; min-width: 0; color: var(--ag-ink); }
+.agentgraph .ag-loopbox .ag-timed-buttons { margin-top: 8px; }
+.agentgraph .ag-loopbox .ag-timed .ag-loop-ask { margin: 8px 0 0; }
+.agentgraph .ag-loopbox .ag-timed button[aria-disabled="true"] { opacity: .55; cursor: default; }
+.agentgraph .ag-loopbox .ag-loop-schedule { margin: 0 0 6px; min-width: 0; }
+.agentgraph .ag-loopbox .ag-loop-duration { display: flex; gap: 6px; align-items: center; }
+.agentgraph .ag-loopbox .ag-loop-duration input { flex: 0 1 6em; min-width: 0; }
+.agentgraph .ag-loopbox .ag-loop-duration select { flex: 0 1 auto; }

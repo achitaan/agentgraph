@@ -4042,7 +4042,7 @@
     function lcValues(settings, path) {
       const limits = settings?.limits || {}, fromNumber = value => lcKnown(value) ? String(value) : '';
       const values = { goal: text(settings?.goal), check: text(settings?.check?.command), attempts: fromNumber(limits.attempts), attempt_seconds: fromNumber(limits.attempt_seconds), seconds: fromNumber(limits.seconds), cost: fromNumber(limits.cost),
-        session: settings?.session === 'fresh' ? 'fresh' : 'reuse', allow_asks: settings?.allow_asks === true };
+        session: settings?.session === 'fresh' ? 'fresh' : 'reuse', allow_asks: settings?.allow_asks === true, ...lcSchedValues(settings?.timing) };
       if (Array.isArray(path) && path.length > 2) {
         const { worker, judges } = lcTeamOf(path), steps = settings?.steps || {}, one = steps[worker] || {};
         values.approval = settings?.approval === 'before_pass'; values.artifacts = (Array.isArray(settings?.artifacts) ? settings.artifacts : []).map(text).join('\n');
@@ -4073,8 +4073,8 @@
         if (!/^\d+(\.\d+)?$/.test(said) || !(value > 0) || value > top || (whole && !Number.isInteger(value))) return { error: name + ' must be a number above 0 and at most ' + top + '.' };
         return { value };
       };
-      const attempts = String(values.attempts).trim();
-      if (!/^\d+$/.test(attempts) || Number(attempts) < 1 || Number(attempts) > 50) return { error: 'Attempts is required: a whole number from 1 to 50.' };
+      const attempts = String(values.attempts).trim(), noAttempts = values.schedule === 'timebox' && !attempts; // a time box may have no attempt limit
+      if (!noAttempts && (!/^\d+$/.test(attempts) || Number(attempts) < 1 || Number(attempts) > 50)) return { error: values.schedule === 'timebox' ? 'Attempts must be a whole number from 1 to 50, or empty for no limit.' : 'Attempts is required: a whole number from 1 to 50.' };
       const each = number(values.attempt_seconds, 86400, 'Seconds per attempt'), total = number(values.seconds, 604800, 'Seconds in total'), spend = number(values.cost, 10000, 'The spend amount');
       const bad = [each, total, spend].find(item => item.error); if (bad) return { error: bad.error };
       const old = entry.settings?.check || {}, command = values.check.trim();
@@ -4082,13 +4082,14 @@
       if (values.goal.trim()) settings.goal = values.goal;
       if (command) settings.check = { command, timeout: lcKnown(old.timeout) ? old.timeout : 300, inconclusive_codes: Array.isArray(old.inconclusive_codes) ? old.inconclusive_codes : [75] };
       settings.session = values.session === 'fresh' ? 'fresh' : 'reuse';
-      settings.limits = { attempts: Number(attempts) };
+      settings.limits = noAttempts ? {} : { attempts: Number(attempts) };
       if (!each.none) settings.limits.attempt_seconds = each.value;
       if (!total.none) settings.limits.seconds = total.value;
       if (!spend.none) settings.limits.cost = spend.value;
       settings.allow_asks = values.allow_asks === true;
-      // The form does not edit the schedule of a timed loop, but a save says what it is: the server refuses a save that leaves it out (it would have to guess).
-      if (entry.settings?.timing) settings.timing = entry.settings.timing;
+      // The schedule: the form's own fields (v11). A save always says what it is for a loop that has one (the server refuses a save that leaves it out): the block, or null for "run once".
+      const timed = lcBuildTiming(entry, values, spend, each); if (timed.error) return timed;
+      if (timed.timing !== undefined) settings.timing = timed.timing;
       if (!lcSelf(entry)) { const team = lcBuildTeam(entry, values, !!command); if (team.error) return team; Object.assign(settings, team.extra); }
       return { settings };
     }
@@ -4156,7 +4157,7 @@
       ask(lcAction, request).then(reply => { if (alive) { lcWrites++; done(reply); } }, error => {
         if (!alive) return;
         lcWrites++;
-        lcNotes.set(id, { kind: 'error', text: sentence(plainWords(text(error?.message))) || 'Not changed.', ...(runId ? { run: runId } : {}) });
+        lcNotes.set(id, { kind: 'error', text: sentence(lcPlain(text(error?.message))) || 'Not changed.', ...(runId ? { run: runId } : {}) });
         const draft = lcDrafts.get(id); if (draft && isStale(error) && typeof error.rev === 'string') draft.rev = error.rev;
       }).then(() => { lcBusy.delete(id); if (alive) { lcRedraw(wanted); lcLoad(true); } });
     }
@@ -4260,9 +4261,9 @@
       }
       else if (kind === 'session') {
         box = el('select', 'ag-input'); [['reuse', 'One session for every attempt'], ['fresh', 'A fresh session for each attempt']].forEach(([value, said]) => { const option = el('option', '', said); option.value = value; box.append(option); });
-      } else { box = el('input', 'ag-input'); box.type = 'text'; box.autocomplete = 'off'; box.spellcheck = false; if (kind === 'number') box.inputMode = 'decimal'; }
+      } else { box = el('input', 'ag-input'); box.type = kind === 'datetime' ? 'datetime-local' : 'text'; box.autocomplete = 'off'; box.spellcheck = false; if (kind === 'number') box.inputMode = 'decimal'; }
       box.value = values[name]; box.dataset.loopField = name; box.dataset.saved = text(lcValues(entry.settings, entry.path)[name]);
-      if (name === 'attempts') box.setAttribute('aria-required', 'true');
+      if (name === 'attempts' && values.schedule !== 'timebox') box.setAttribute('aria-required', 'true');
       const edit = () => lcEdit(entry, { [name]: box.value });
       box.addEventListener(kind === 'session' || kind === 'select' ? 'change' : 'input', edit);
       box.addEventListener('blur', () => { if (lcLate) { lcLate = false; later(() => lcRedraw('', false), 0); } });
@@ -4304,14 +4305,199 @@
       const ends = [timing.until ? 'at ' + text(timing.until) : '', lcKnown(timing.for) ? 'after ' + Number(timing.for) + '\u00a0s' : '', lcKnown(timing.ticks) ? 'after ' + plural(Number(timing.ticks), 'tick', 'ticks') : ''].filter(Boolean);
       return 'Timed loop: ' + (timing.kind === 'interval' ? 'wakes the agent every ' + Number(timing.every) + '\u00a0s' : 'works until the check passes or the deadline') + (ends.length ? ', ends ' + ends.join(' or ') : '') + '.';
     }
+    // ---- v11: timed loops: the status panel, its buttons, and the schedule in the form ----
+    const LC_UNITS = [['s', 'seconds', 1], ['min', 'minutes', 60], ['h', 'hours', 3600]];
+    const lcPick = seconds => { const s = Number(seconds), at = s % 3600 === 0 ? 2 : s % 60 === 0 ? 1 : 0; return [String(s / LC_UNITS[at][2]), LC_UNITS[at][0]]; };
+    // A length of time in the two largest units that say it: "10 min", "2 h", "1 min 30 s", "1 h 30 min".
+    function lcSpan(seconds) {
+      let left = Math.max(0, Math.round(Number(seconds) || 0));
+      const parts = [['d', 86400], ['h', 3600], ['min', 60], ['s', 1]].map(([name, size]) => { const n = Math.floor(left / size); left -= n * size; return [n, name]; });
+      const first = parts.findIndex(([n]) => n > 0);
+      if (first < 0) return '0 s';
+      return parts.slice(first, first + 2).filter(([n]) => n > 0).map(([n, name]) => n + ' ' + name).join(' ');
+    }
+    // A countdown: seconds under a minute, minutes and seconds under an hour, hours and minutes beyond (no seconds: they would only flicker).
+    function lcCountdown(seconds) {
+      const s = Math.max(0, Math.floor(Number(seconds) || 0)), pad = n => String(n).padStart(2, '0');
+      return s < 60 ? s + ' s' : s < 3600 ? Math.floor(s / 60) + ' min ' + pad(s % 60) + ' s' : Math.floor(s / 3600) + ' h ' + pad(Math.floor(s % 3600 / 60)) + ' min';
+    }
+    const LC_DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], LC_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    function lcClock(epoch) {
+      const when = new Date(Number(epoch) * 1000), pad = n => String(n).padStart(2, '0'), hm = pad(when.getHours()) + ':' + pad(when.getMinutes());
+      return when.toDateString() === new Date().toDateString() ? hm : LC_DAYS[when.getDay()] + ' ' + when.getDate() + ' ' + LC_MONTHS[when.getMonth()] + ' ' + hm;
+    }
+    const lcCountText = (kind, at) => { const left = Number(at) - Date.now() / 1000; return left <= 0 ? (kind === 'next' ? 'any moment' : 'time is up') : 'in ' + lcCountdown(left); };
+    const lcPlain = said => plainWords(said).replace(/\btiming\.every\b/g, 'The interval').replace(/\btiming\.for\b/g, 'The time to keep going').replace(/\btiming\.until\b/g, 'The end time')
+      .replace(/\btiming\.ticks\b/g, 'The number of ticks').replace(/\blimits\.cost\b/g, 'the spend limit (dollars)').replace(/\blimits\.attempt_seconds\b/g, 'Seconds per attempt');
+    const lcPad2 = n => String(n).padStart(2, '0');
+    // A stored `until` (ISO 8601 with an offset, or Unix seconds) as the local "YYYY-MM-DDTHH:MM" a date-time field holds; '' for none or one that cannot be read.
+    function lcUntilLocal(raw) {
+      if (raw === undefined || raw === null || raw === '') return '';
+      const ms = typeof raw === 'number' ? raw * 1000 : Date.parse(raw);
+      if (!Number.isFinite(ms)) return '';
+      const d = new Date(ms);
+      return d.getFullYear() + '-' + lcPad2(d.getMonth() + 1) + '-' + lcPad2(d.getDate()) + 'T' + lcPad2(d.getHours()) + ':' + lcPad2(d.getMinutes());
+    }
+    // The schedule as form values (text): which kind, the interval, the end(s).
+    function lcSchedValues(timing) {
+      const none = { schedule: 'once', every_n: '', every_unit: 'min', for_n: '', for_unit: 'h', until: '', ticks: '' };
+      if (!timing || typeof timing !== 'object' || (timing.kind !== 'interval' && timing.kind !== 'timebox')) return none;
+      const every = lcKnown(timing.every) ? lcPick(timing.every) : ['', 'min'], span = lcKnown(timing.for) ? lcPick(timing.for) : ['', 'h'];
+      return { schedule: timing.kind, every_n: every[0], every_unit: every[1], for_n: span[0], for_unit: span[1], until: lcUntilLocal(timing.until), ticks: lcKnown(timing.ticks) ? String(timing.ticks) : '' };
+    }
+    // The schedule to save from the form: `{ timing: block | null }`, `{}` when there is none and none was saved (the key is left out), or `{ error }`. The server judges
+    // too; these are its rules (looptime.validate) said before anything is sent. A value left as it was saved is sent as it was stored.
+    function lcBuildTiming(entry, values, spend, each) {
+      const saved = entry.settings?.timing && typeof entry.settings.timing === 'object' ? entry.settings.timing : null, kind = values.schedule;
+      if (kind !== 'interval' && kind !== 'timebox') return { timing: saved ? null : undefined };
+      if (spend.none) return { error: 'A timed loop needs a spend limit: fill in the dollars above.' };
+      if (each.none) return { error: 'A timed loop needs Seconds per attempt (above): the most one turn may take.' };
+      const base = lcSchedValues(saved), same = saved && saved.kind === kind;
+      const timing = same ? { ...saved } : { kind, ...(saved && lcKnown(saved.cache_seconds) ? { cache_seconds: saved.cache_seconds } : {}), ...(saved && typeof saved.notes === 'string' ? { notes: saved.notes } : {}) };
+      ['every', 'for', 'until', 'ticks'].forEach(key => { delete timing[key]; });
+      const amount = (n, unit) => { const said = String(n ?? '').trim(); return /^\d+(\.\d+)?$/.test(said) ? Math.round(Number(said) * LC_UNITS.find(item => item[0] === unit)[2] * 1e6) / 1e6 : NaN; };
+      const keep = (names, key) => same && saved[key] !== undefined && names.every(name => String(values[name] ?? '') === String(base[name]));
+      if (kind === 'interval') {
+        if (!String(values.every_n ?? '').trim()) return { error: 'Say how often to wake the agent: a number and a unit.' };
+        const every = keep(['every_n', 'every_unit'], 'every') ? saved.every : amount(values.every_n, values.every_unit);
+        if (!(every >= 10 && every <= 86400)) return { error: 'The agent can be woken every 10 seconds up to every 24 hours.' };
+        timing.every = every;
+      }
+      if (String(values.for_n ?? '').trim()) {
+        const span = keep(['for_n', 'for_unit'], 'for') ? saved.for : amount(values.for_n, values.for_unit);
+        if (!(span > 0 && span <= 31536000)) return { error: 'The time to ' + (kind === 'interval' ? 'stop after' : 'keep going for') + ' must be above 0 and at most 365 days.' };
+        timing.for = span;
+      }
+      const until = String(values.until ?? '').trim();
+      if (until) {
+        if (keep(['until'], 'until')) timing.until = saved.until;
+        else {
+          const when = new Date(until);
+          if (!Number.isFinite(when.getTime())) return { error: 'Until needs a date and a time.' };
+          if (when.getTime() / 1000 > Date.now() / 1000 + 31536000) return { error: 'Until is more than 365 days ahead.' };
+          const offset = -when.getTimezoneOffset(), sign = offset < 0 ? '-' : '+';
+          timing.until = until.slice(0, 16) + ':00' + sign + lcPad2(Math.floor(Math.abs(offset) / 60)) + ':' + lcPad2(Math.abs(offset) % 60);
+        }
+      } else if (same && saved.until !== undefined && base.until === '') timing.until = saved.until; // one the form cannot show is not dropped by accident
+      if (kind === 'interval' && String(values.ticks ?? '').trim()) {
+        const said = String(values.ticks).trim();
+        if (!(keep(['ticks'], 'ticks') || (/^\d+$/.test(said) && Number(said) >= 1 && Number(said) <= 1000000))) return { error: 'The number of ticks must be a whole number from 1 to 1000000.' };
+        timing.ticks = keep(['ticks'], 'ticks') ? saved.ticks : Number(said);
+      }
+      if (kind === 'interval' && !['for', 'until', 'ticks'].some(key => timing[key] !== undefined)) return { error: 'The loop needs an end: give a time, a date and time, or a number of ticks.' };
+      if (kind === 'timebox' && !['for', 'until'].some(key => timing[key] !== undefined)) return { error: 'A time-boxed loop needs an end: a time to keep going for, or a date and time to stop at.' };
+      // The saved block's own key order is kept, so a save that changes nothing sends the block as it was stored.
+      const ordered = {}; [...(same ? Object.keys(saved) : []), ...Object.keys(timing)].forEach(name => { if (name in timing && !(name in ordered)) ordered[name] = timing[name]; });
+      return { timing: ordered };
+    }
+    function lcDurationRow(entry, label, numberName, unitName, hint) {
+      const values = lcCurrent(entry), saved = lcValues(entry.settings, entry.path), field = el('div', 'ag-field ag-loop-field'), row = el('span', 'ag-loop-duration');
+      const number = el('input', 'ag-input'); number.type = 'text'; number.autocomplete = 'off'; number.spellcheck = false; number.inputMode = 'decimal';
+      number.value = values[numberName]; number.dataset.loopField = numberName; number.dataset.saved = text(saved[numberName]); number.setAttribute('aria-label', label);
+      const unit = el('select', 'ag-input'); LC_UNITS.forEach(([value, said]) => { const option = el('option', '', said); option.value = value; unit.append(option); });
+      unit.value = values[unitName]; unit.dataset.loopField = unitName; unit.dataset.saved = text(saved[unitName]); unit.setAttribute('aria-label', label + ', unit');
+      number.addEventListener('input', () => lcEdit(entry, { [numberName]: number.value })); unit.addEventListener('change', () => lcEdit(entry, { [unitName]: unit.value }));
+      number.addEventListener('blur', () => { if (lcLate) { lcLate = false; later(() => lcRedraw('', false), 0); } });
+      row.append(number, unit); field.append(el('span', 'ag-form-label', label), row);
+      if (hint) field.append(el('span', 'ag-loop-hint', hint));
+      return field;
+    }
+    function lcTimingFields(form, entry) {
+      const values = lcCurrent(entry), box = el('div', 'ag-loop-schedule'); box.dataset.loopSchedule = '';
+      const pick = el('label', 'ag-field ag-loop-field'), select = el('select', 'ag-input');
+      [['once', 'Run once (normal)'], ['interval', 'Every … (interval)'], ['timebox', 'Keep going for … or until …']].forEach(([value, said]) => { const option = el('option', '', said); option.value = value; select.append(option); });
+      select.value = values.schedule; select.dataset.loopField = 'schedule'; select.dataset.saved = text(lcValues(entry.settings, entry.path).schedule);
+      select.addEventListener('change', () => { lcEdit(entry, { schedule: select.value }); lcRedraw('f:schedule'); });
+      pick.append(el('span', 'ag-form-label', 'Schedule'), select); box.append(pick);
+      if (values.schedule === 'interval') {
+        box.append(lcDurationRow(entry, 'Wake the agent every', 'every_n', 'every_unit', 'From 10 seconds to 24 hours.'), lcDurationRow(entry, 'Stop after (optional)', 'for_n', 'for_unit'),
+          lcFieldRow(entry, 'Or stop at (optional)', 'until', 'datetime'), lcFieldRow(entry, 'Or after this many ticks (optional)', 'ticks', 'number', 'Give at least one way to stop. A timed loop also needs the spend and the seconds per attempt above.'));
+      } else if (values.schedule === 'timebox') {
+        box.append(lcDurationRow(entry, 'Keep going for (optional)', 'for_n', 'for_unit'), lcFieldRow(entry, 'Or until (optional)', 'until', 'datetime', 'Works until the check passes or the first of these is reached; give at least one. A timed loop also needs the spend and the seconds per attempt above.'));
+      }
+      form.append(box);
+    }
+    // The state of a timed run in four words and a few more: running, paused, finished (the check passed or the schedule ran out), stopped.
+    const LC_ENDED = /^(?:deadline\b|the schedule ended)/i;
+    function lcTimedState(run) {
+      const status = run.status;
+      if (status === 'passed' || (status === 'limit' && LC_ENDED.test(text(run.reason)))) return ['finished', 'Finished'];
+      if (status === 'queued') return ['starting', 'Starting'];
+      if (status === 'running') return ['running', 'Running'];
+      if (status === 'paused') return ['paused', 'Paused'];
+      if (status === 'waiting') return ['waiting', 'Waiting for your answer'];
+      if (status === 'interrupted') return ['interrupted', 'Interrupted'];
+      return ['stopped', 'Stopped'];
+    }
+    function lcTimedKind(timing) {
+      const ends = [];
+      if (lcKnown(timing.deadline)) ends.push(/^until/.test(text(timing.end)) || !lcKnown(timing.anchor) ? 'until ' + lcClock(timing.deadline) : 'for ' + lcSpan(Number(timing.deadline) - Number(timing.anchor)));
+      if (lcKnown(timing.ticks_limit)) ends.push((ends.length ? 'or after ' : 'for ') + plural(Number(timing.ticks_limit), 'tick', 'ticks'));
+      if (timing.kind === 'interval') return 'Wakes the agent every ' + (lcKnown(timing.every) ? lcSpan(timing.every) : '…') + (ends.length ? ', ' + ends.join(' ') : '') + '.';
+      return 'Keeps going until the check passes' + (ends.length ? ', ' + (/^until/.test(ends[0]) ? ends[0] : 'for up to ' + ends[0].slice(4)) : '') + '.';
+    }
+    const LC_PHASE = { waiting: 'waiting for the next wake', watch: 'checking now', wake: 'the agent is working' };
+    let lcStopAsk = '', lcCountTimer = null;
+    function lcCountTick() {
+      lcCountTimer = null;
+      if (!lcHere() || document.hidden) return;
+      const nodes = [...detailScroll.querySelectorAll('[data-loop-countdown]')]; if (!nodes.length) return;
+      let fast = false;
+      nodes.forEach(node => { const at = Number(node.dataset.at), said = lcCountText(node.dataset.loopCountdown, at); if (node.textContent !== said) node.textContent = said; if (at - Date.now() / 1000 < 3600) fast = true; });
+      lcCountTimer = later(lcCountTick, fast ? 1000 : 15000);
+    }
+    const lcCountStart = () => { if (!lcCountTimer && lcHere() && !document.hidden) lcCountTimer = later(lcCountTick, 1000); };
+    listen(document, 'visibilitychange', () => { if (document.hidden || !lcHere()) return; if (lcCountTimer) { clearTimeout(lcCountTimer); timers.delete(lcCountTimer); lcCountTimer = null; } lcCountTick(); });
+    function lcTimedPanel(item, entry) {
+      const run = lcRunsOf(entry.flow).find(one => one.timing && typeof one.timing === 'object'); if (!run) return;
+      const timing = run.timing, [key, word] = lcTimedState(run), id = run.run, busy = lcBusy.has(entry.flow), over = key === 'finished' || key === 'stopped';
+      const box = el('div', 'ag-timed'); box.dataset.loopTimed = id; box.dataset.state = key; box.setAttribute('role', 'group'); box.setAttribute('aria-label', 'Timed loop status');
+      const head = el('p', 'ag-timed-head'), state = el('span', 'ag-timed-state', word); state.dataset.state = key; head.append(state);
+      if (key === 'running' && LC_PHASE[timing.phase]) head.append(el('span', 'ag-timed-phase', ' · ' + LC_PHASE[timing.phase]));
+      box.append(head, el('p', 'ag-timed-kind', lcTimedKind(timing)));
+      const row = (name, label, value) => { const line = el('p', 'ag-timed-row'); line.dataset.loopTimedRow = name; const v = el('span', 'ag-timed-value'); v.append(...(Array.isArray(value) ? value : [value])); line.append(el('span', 'ag-timed-label', label), v); box.append(line); };
+      const count = (kind, at) => { const span = el('span', 'ag-timed-count', lcCountText(kind, at)); span.dataset.loopCountdown = kind; span.dataset.at = String(at); return span; };
+      if (timing.kind === 'interval' && key === 'running' && timing.phase === 'waiting' && lcKnown(timing.next_at)) row('next', 'Next wake', count('next', Number(timing.next_at)));
+      if (timing.kind === 'interval') { const woke = lcKnown(timing.wakes) ? Number(timing.wakes) : lcKnown(timing.counts?.woken) ? Number(timing.counts.woken) : null; row('wakes', 'Wakes so far', woke === null ? 'not known' : String(woke)); }
+      else { const seen = Number(run.attempts) || 0, limit = Number(run.limit) || 0; row('attempts', 'Attempts so far', limit ? seen + ' of ' + limit : String(seen)); }
+      if (over) { if (lcKnown(run.ended)) row('ends', 'Ended', lcClock(run.ended)); }
+      else if (lcKnown(timing.deadline)) row('ends', 'Ends', [document.createTextNode(lcClock(timing.deadline) + ' ('), count('end', Number(timing.deadline)), document.createTextNode(')')]);
+      row('spent', over ? 'Spent' : 'Spent so far', lcCost(run.cost));
+      if (busy) box.append(el('p', 'ag-loop-hint ag-timed-busy', 'Working on it…'));
+      const stoppable = ['starting', 'running', 'paused', 'waiting', 'interrupted'].includes(key);
+      if (lcStopAsk === id && stoppable) {
+        const dialog = el('div', 'ag-loop-ask'); dialog.dataset.loopTimedAsk = ''; dialog.setAttribute('role', 'group'); dialog.setAttribute('aria-label', 'Confirm stop');
+        dialog.append(el('p', '', ['paused', 'interrupted'].includes(key) ? 'Stop this loop? It cannot be resumed after that.' : 'Stop this loop? The turn now running is stopped and no new wake begins.'));
+        const buttons = el('span', 'ag-form-buttons');
+        buttons.append(setupButton('Stop the loop', { loopControl: 'timed-stop-confirm:' + id }, () => {
+          if (lcBusy.has(entry.flow)) return;
+          lcStopAsk = '';
+          lcWrite(entry.flow, { op: 'cancel', run: id }, reply => { lcNotes.set(entry.flow, { kind: 'ok', text: reply?.result === 'cancelled' ? 'The loop is stopped.' : 'Stop asked. The loop ends at once or before its next wake.', run: id, cancel: true }); }, 'c:timed-stop:' + id, id);
+        }, 'ag-form-submit'), setupButton('Keep it going', { loopControl: 'timed-stop-keep:' + id }, () => { lcStopAsk = ''; lcRedraw('c:timed-stop:' + id); }));
+        if (busy) buttons.querySelectorAll('button').forEach(button => button.setAttribute('aria-disabled', 'true'));
+        dialog.append(buttons); box.append(dialog);
+      } else if (stoppable) {
+        const buttons = el('span', 'ag-form-buttons ag-timed-buttons');
+        const press = (name, label, go, className) => { const button = setupButton(label, { loopControl: 'timed-' + name + ':' + id }, () => { if (lcBusy.has(entry.flow)) return; go(); }, className); if (busy) button.setAttribute('aria-disabled', 'true'); buttons.append(button); };
+        if (key === 'running') press('pause', 'Pause', () => lcRunOp(run, { op: 'pause', run: id }, 'Pause asked. The loop finishes the step it is on, then waits.', 'c:timed-pause:' + id));
+        if (key === 'paused' || key === 'interrupted') press('resume', 'Resume', () => lcRunOp(run, { op: 'resume', run: id }, 'Resumed. The loop goes on.', 'c:timed-resume:' + id), 'ag-form-submit');
+        press('stop', 'Stop', () => { lcStopAsk = id; lcRedraw('c:timed-stop-confirm:' + id); });
+        box.append(buttons);
+      }
+      const said = lcNotes.get(entry.flow), reason = key === 'running' ? '' : lcReason(run.reason);
+      if (said && said.run === id && lcOpen !== id) { const line = el('p', said.kind === 'error' ? 'ag-form-error ag-loop-line' : 'ag-form-reason ag-loop-line', said.text); line.dataset.loopLine = said.kind; line.setAttribute('role', said.kind === 'error' ? 'alert' : 'status'); box.append(line); }
+      else if (reason) box.append(el('p', 'ag-loop-hint ag-timed-reason', sentence(reason)));
+      if (box.querySelector('[data-loop-countdown]')) lcCountStart();
+      item.append(box);
+    }
     function lcForm(item, entry) {
       const team = !lcSelf(entry), form = el('div', 'ag-loop-form'); form.dataset.loopForm = entry.flow;
       if (team) form.append(lcPathList(entry), el('p', 'ag-loop-hint', 'Then back to ' + lcTeamOf(entry.path).worker + '.'));
       form.append(lcFieldRow(entry, 'Goal', 'goal', 'textarea'), lcFieldRow(entry, team ? 'Check command (optional)' : 'Check command', 'check', 'text', team ? 'With a judge the loop can pass without a check: it passes when the check (if any) exits 0 and every judge passes.' : 'The loop is done when it exits 0.'),
-        lcFieldRow(entry, 'Attempts (1 to 50, required)', 'attempts', 'number'), lcFieldRow(entry, 'Seconds per attempt (optional)', 'attempt_seconds', 'number'),
+        lcFieldRow(entry, lcCurrent(entry).schedule === 'timebox' ? 'Attempts (1 to 50, optional when time-boxed)' : 'Attempts (1 to 50, required)', 'attempts', 'number'), lcFieldRow(entry, 'Seconds per attempt (optional)', 'attempt_seconds', 'number'),
         lcFieldRow(entry, 'Seconds in total (optional)', 'seconds', 'number'), lcFieldRow(entry, 'No new attempt once spend reaches… (dollars, optional)', 'cost', 'number', 'Checked before each attempt; an attempt already begun can pass it.'),
         lcFieldRow(entry, 'Session', 'session', 'session'));
-      if (entry.settings?.timing) { const line = el('p', 'ag-loop-hint', lcTimingText(entry.settings.timing) + ' The form does not change it: use agentgraph loop set.'); line.dataset.loopTiming = ''; form.append(line); }
+      lcTimingFields(form, entry);
       if (team) {
         form.append(lcFieldRow(entry, 'Files the worker must write (optional, one path per line)', 'artifacts', 'textarea', 'A turn that leaves one of them out is sent back to the worker.'));
         const approval = el('label', 'ag-check ag-loop-asks'), tick = el('input'); tick.type = 'checkbox'; tick.checked = lcCurrent(entry).approval === true; tick.dataset.loopField = 'approval';
@@ -4828,7 +5014,7 @@
       if (entry.runnable === true) {
         item.append(el('p', 'ag-loop-intro', lcSelf(entry) ? 'Runs this agent again and again. After each turn your check command runs; the loop is done when it exits 0, or when a limit is reached.'
           : lcTeamOf(entry.path).worker + ' works, then each judge reads the result. A failed check or judge sends the work back to ' + lcTeamOf(entry.path).worker + '; the loop is done when the check (if any) exits 0 and every judge passes, or when a limit is reached.'));
-        lcForm(item, entry); lcLines(item, entry);
+        lcTimedPanel(item, entry); lcForm(item, entry); lcLines(item, entry);
         const runRow = el('div', 'ag-loop-runrow'), blocked = lcNeedsCheck(entry);
         // A loop with no saved check command cannot run: said before Run, and Run is off with that reason (Save still works).
         const why = 'A loop on one agent needs a check command to run. Enter one above and press Save.';

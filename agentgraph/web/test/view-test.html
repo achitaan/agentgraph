@@ -9607,7 +9607,7 @@
       (options.answered || []).forEach(id => { details.get(id).answered = true; }); // v7 r4: runs whose answer is saved and not taken yet
       (options.dead || []).forEach(id => { details.get(id).run.live = false; }); // v7 r3: a run that says waiting (or running) with no controller
       if (options.queued) add(loopDetail('20261121-052000-0004', 'fix-loop', 'queued', { created: now - 5, reason: '', cost: null, attempts: [] }));
-      const listed = () => order.map(id => details.get(id).run).sort((a, b) => b.created - a.created).map(run => ({ run: run.run, flow: run.flow, status: run.status, reason: run.reason, live: run.live, attempts: run.attempts.length, limit: run.limits.attempts, cost: run.totals.cost, seconds: run.totals.seconds, created: run.created, ended: run.ended, goal: run.goal, check: 'sh check.sh', last_check: run.attempts.length ? run.attempts.at(-1).check || null : null, passed_by: run.passed_by ?? null, waiting: run.waiting ?? null, trial: !!run.trial, settings_sha256: run.settings_sha256 ?? null, ...(options.answeredField ? { answered: !!details.get(run.run).answered } : {}) }));
+      const listed = () => order.map(id => details.get(id).run).sort((a, b) => b.created - a.created).map(run => ({ run: run.run, flow: run.flow, status: run.status, reason: run.reason, live: run.live, attempts: run.attempts.length, limit: run.limits.attempts, cost: run.totals.cost, seconds: run.totals.seconds, created: run.created, ended: run.ended, goal: run.goal, check: 'sh check.sh', last_check: run.attempts.length ? run.attempts.at(-1).check || null : null, passed_by: run.passed_by ?? null, waiting: run.waiting ?? null, trial: !!run.trial, settings_sha256: run.settings_sha256 ?? null, ...(run.timing ? { timing: run.timing } : {}), ...(options.answeredField ? { answered: !!details.get(run.run).answered } : {}) }));
       const fail = (message, status = 400, extra = {}) => { throw Object.assign(new Error(message), { status, ...extra }); };
       let readsFailed = 0, listReads = 0;
       const loops = async request => {
@@ -9736,10 +9736,10 @@
 
     // M1 of round 3: a save from the page always says what the schedule is (the block, or null for none): the server refuses a save that leaves it out.
     const LOOP_TIMING = { kind: 'interval', every: 600, watch: 'sh watch.sh', ticks: 8 };
-    await test('v9 timed loops: the form shows the schedule read-only in one plain line, and a save, an Undo and a restored version each send `timing` out loud (the stored block, or null for an untimed version)', async () => {
+    await test('v9 timed loops: the form shows the schedule in its own fields, and a save, an Undo and a restored version each send `timing` out loud (the stored block, or null for an untimed version)', async () => {
       await loopMount({ timing: LOOP_TIMING }, async (root, fakes) => {
-        const line = loopSection(root).querySelector('[data-loop-timing]');
-        assert(line && /Timed loop: wakes the agent every 600.s, ends after 8 ticks\./.test(line.textContent) && /agentgraph loop set/.test(line.textContent) && !line.querySelector('input, button'), 'timing line: ' + line?.textContent);
+        const shown = ['schedule', 'every_n', 'every_unit', 'ticks'].map(name => loopField(root, name)?.value).join('|');
+        assert(shown === 'interval|10|min|8' && !loopSection(root).querySelector('[data-loop-timing]') && !/cannot change|agentgraph loop set/.test(loopSection(root).textContent), 'schedule fields: ' + shown);
         typeIn(loopField(root, 'attempts'), '6'); await loopClick(root, 'save');
         const post = fakes.calls.find(call => call.op === 'save');
         assert(post && sameJson(post.settings.timing, LOOP_TIMING), 'a save of a timed loop did not carry its schedule: ' + JSON.stringify(post));
@@ -9749,13 +9749,13 @@
       });
       // The loop is untimed, a restored version is timed: Undo must put back an untimed loop (null), not leave the key out.
       await loopMount({ versions: [{ version: '20261121T060000-000001', time: Date.now() / 1000 - 3000, sha256: 'aa11bb22cc33dd44' }], restored: { ...LOOP_SAVED, limits: { attempts: 2, attempt_seconds: 60, cost: 1 }, timing: LOOP_TIMING } }, async (root, fakes) => {
-        assert(!loopSection(root).querySelector('[data-loop-timing]'), 'an untimed loop shows a schedule line');
+        assert(loopField(root, 'schedule').value === 'once' && !loopField(root, 'every_n'), 'an untimed loop shows a schedule');
         await loopClick(root, 'restore:20261121T060000-000001');
-        assert(loopSection(root).querySelector('[data-loop-timing]'), 'the restored loop does not show its schedule');
+        assert(loopField(root, 'schedule').value === 'interval' && loopField(root, 'every_n').value === '10', 'the restored loop does not show its schedule');
         await loopClick(root, 'undo');
         const back = fakes.calls.filter(call => call.op === 'save').at(-1);
         assert(back && back.settings.timing === null && 'timing' in back.settings, 'Undo of a restore did not send timing: null: ' + JSON.stringify(back));
-        assert(!fakes.state.loops[0].settings.timing && !loopSection(root).querySelector('[data-loop-timing]'), 'the loop is timed after the Undo');
+        assert(!fakes.state.loops[0].settings.timing && loopField(root, 'schedule').value === 'once', 'the loop is timed after the Undo');
       });
     });
 
