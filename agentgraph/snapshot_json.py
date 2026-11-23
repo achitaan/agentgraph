@@ -508,9 +508,9 @@ class _Shape:
 
 def live_activity(snapshot: Snapshot, db_path=None, *, detail: bool = True) -> dict[str, dict]:
     """What each busy session of the snapshot is doing now (chatfeed.activities), for `snapshot_document`'s
-    `activity`. One short query per busy session; {} when the database cannot be read. The hub's own entry (the
-    root session, when busy) also gets `zone`, `status`, and with `detail` its `target` and a short `recent`
-    trail (chatfeed.hub_activity); another agent's entry is exactly what `activities` reads."""
+    `activity`. One short query per busy session; {} when the database cannot be read. Every entry also gets
+    `zone` and `status`, and with `detail` a cleaned `target` (chatfeed.busy_activities); the hub's own entry (the
+    root session, when busy) also gets a short `recent` trail with `detail`, which a worker's never has."""
     from . import chatfeed
     from .sources import DB_PATH
     busy = [item.id for item in ([snapshot.root] if snapshot.root is not None else []) + snapshot.sessions
@@ -518,9 +518,8 @@ def live_activity(snapshot: Snapshot, db_path=None, *, detail: bool = True) -> d
     path = db_path if db_path is not None else DB_PATH
     found = chatfeed.activities(busy, db_path=path) if busy else {}
     root = snapshot.root
-    if root is not None and root.busy and root.id in found:
-        found[root.id] = chatfeed.hub_activity(root.id, found[root.id], detail=detail, db_path=path)
-    return found
+    hub_id = root.id if root is not None and root.busy else None
+    return chatfeed.busy_activities(found, hub_id, detail=detail, db_path=path) if found else found
 
 
 def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, *,
@@ -725,7 +724,7 @@ def skills_document(config_dir: Path | None = None, *, skills_dir: Path | None =
 
 def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, session: str | None = None,
                   detail: bool = True) -> dict:
-    """The snapshot document plus `learning` for a live source. `detail` False leaves the hub's activity
+    """The snapshot document plus `learning` for a live source. `detail` False leaves every agent's activity
     `target` and `recent` out (the `agentgraph snapshot` command, which agents run inside chats)."""
     document = snapshot_document(snapshot, source, task, session=session,
                                  structure=load_structure() if source == "live" else None,
@@ -771,10 +770,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--session", metavar="ID", help="orchestrator session to watch")
     parser.add_argument("--task", metavar="NAME", help="task to show instead of the newest one")
     parser.add_argument("--activity-detail", dest="detail", action="store_true", default=True,
-                        help="the main chat's activity carries `target` and `recent` (the default here; "
+                        help="every busy agent's activity carries `target`, the main chat's also `recent` (the default here; "
                              "`bin/agentgraph snapshot` turns it off unless this flag is given)")
     parser.add_argument("--no-activity-detail", dest="detail", action="store_false",
-                        help="leave the main chat's activity `target` and `recent` out")
+                        help="leave every agent's activity `target` and the main chat's `recent` out")
     args = parser.parse_args(argv)
     try:
         if args.demo:

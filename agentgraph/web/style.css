@@ -261,6 +261,7 @@
 /* A selected (or focused) agent at work still shows its ring over the busy halo. */
 .agentgraph .ag-agent[data-selected="true"]:not([data-busy="0"]) .ag-halo, .agentgraph .ag-agent:focus-visible:not([data-busy="0"]) .ag-halo { stroke: var(--ag-work); stroke-width: 2.4; animation: none; }
 .agentgraph .ag-agent-name { fill: var(--ag-ink); font-size: 12px; font-weight: 500; paint-order: stroke; stroke: var(--ag-bg); stroke-width: 7px; stroke-linejoin: round; pointer-events: none; transition: opacity .18s ease; }
+.agentgraph .ag-agent-cost { fill: var(--ag-muted); font-size: 10px; font-weight: 400; paint-order: stroke; stroke: var(--ag-bg); stroke-width: 6px; stroke-linejoin: round; pointer-events: none; transition: opacity .18s ease; }
 .agentgraph .ag-hub .ag-agent-name, .agentgraph .ag-chips > .ag-agent-name { font-family: Georgia, 'Times New Roman', serif; font-size: 18px; font-weight: 400; }
 .agentgraph .ag-council-lead .ag-agent-name, .agentgraph .ag-team-lead .ag-agent-name { font-family: Georgia, 'Times New Roman', serif; font-size: 15px; font-weight: 400; }
 .agentgraph .ag-busy-count { fill: var(--ag-work); font-size: 10px; font-weight: 600; paint-order: stroke; stroke: var(--ag-bg); stroke-width: 6px; stroke-linejoin: round; pointer-events: none; }
@@ -329,8 +330,8 @@
 .agentgraph .ag-side-mix { fill: var(--ag-muted); }
 .agentgraph .ag-sidemoon[data-under-name="1"] .ag-side-core, .agentgraph .ag-sidemoon[data-under-name="1"] .ag-side-ball, .agentgraph .ag-sidemoon[data-under-name="1"] .ag-side-sphere { opacity: .3; }
 .agentgraph .ag-side-name { fill: var(--ag-ink); font-size: 12px; font-weight: 500; paint-order: stroke; stroke: var(--ag-bg); stroke-width: 7px; stroke-linejoin: round; pointer-events: none; transition: opacity .18s ease; }
-@media (prefers-reduced-motion: reduce) { .agentgraph .ag-agent-name, .agentgraph .ag-side-name { transition: none; } }
-.agentgraph[data-ag-motion="none"] .ag-agent-name, .agentgraph[data-ag-motion="none"] .ag-side-name { transition: none; }
+@media (prefers-reduced-motion: reduce) { .agentgraph .ag-agent-name, .agentgraph .ag-agent-cost, .agentgraph .ag-side-name { transition: none; } }
+.agentgraph[data-ag-motion="none"] .ag-agent-name, .agentgraph[data-ag-motion="none"] .ag-agent-cost, .agentgraph[data-ag-motion="none"] .ag-side-name { transition: none; }
 .agentgraph .ag-detail .ag-side-model { margin: 0 0 8px; color: var(--ag-muted); }
 .agentgraph .ag-detail .ag-side[data-state="asking"] .ag-side-send, .agentgraph .ag-detail .ag-side[data-state="busy"] .ag-side-send { opacity: .55; }
 /* The sun (n119). At rest a ball lit from the upper left, still. Fired up (the hub at work): flame spikes and a glow in
@@ -522,6 +523,12 @@
 .agentgraph .ag-live-glyph * { vector-effect: non-scaling-stroke; }
 .agentgraph .ag-live-glyph .f { fill: var(--ag-z); stroke: none; }
 .agentgraph .ag-live-dot { pointer-events: all; }
+/* A busy worker's zone, as one small still mark at the centre of its circle (in the place of the spark dot): the same glyphs as
+   the orchestrator's chip, in the busy ink; no text, no motion, never over a name. */
+.agentgraph .ag-zone-mark { pointer-events: none; }
+.agentgraph .ag-zone-mark .ag-live-glyph { stroke: var(--ag-busy-ink); stroke-width: 1.2; }
+.agentgraph .ag-zone-mark .ag-live-glyph .f { fill: var(--ag-busy-ink); }
+.agentgraph .ag-agent[data-zone]:not(.ag-hub) > .ag-spark { display: none; }
 .agentgraph .ag-live-ring { fill: var(--ag-paper); stroke: var(--ag-z); stroke-width: 1; }
 .agentgraph .ag-live-dot[data-status="error"] .ag-live-ring { stroke: var(--ag-danger); stroke-width: 1.6; }
 .agentgraph .ag-live[data-fresh="true"] .ag-live-chip { animation: ag-live-in .35s ease-out backwards; }
@@ -771,6 +778,7 @@
 /* A chat on every agent (n5): thinking quieter than speech, tool lines as a name and a state, the user's words marked,
    a caret that moves only while the agent works. The panel's monospace face; the palette's own colours. */
 .agentgraph .ag-detail-activity { margin: -4px 0 8px; color: var(--ag-work); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.agentgraph .ag-detail-target { margin: -6px 0 8px; color: var(--ag-muted); font: 10.5px/1.4 ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agentgraph .ag-chat-sessions { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; color: var(--ag-muted); font-size: 11px; }
 .agentgraph .ag-chat-sessions .ag-text-button { padding: 2px 6px; text-decoration: none; font-size: 13px; }
 .agentgraph .ag-chat-sessions .ag-text-button:disabled { opacity: .35; cursor: default; }
