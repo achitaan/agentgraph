@@ -6325,7 +6325,7 @@
     const ORBIT_LOW = 0, ORBIT_HIGH = Math.PI / 2, ORBIT_TURN_PX = .008, ORBIT_TILT_PX = .006, ORBIT_KEY_TURN = Math.PI / 12, ORBIT_KEY_TILT = Math.PI / 24;
     const ORBIT_KEY = POSITIONS_KEY + ':view';
     const ORBIT_LOOK_SAID = '3D is for looking: press D to change things in 2D.';
-    const orbit = { want: '2d', shown: false, k: 0, change: null, turn: 0, moon: 0, elevation: ORBIT_ELEVATION, base: null, saved: null, from3d: null, figure: null, depth: new Map(), order: '', raf: 0, last: 0, pausedUntil: 0, resume: null, waiting: false, holding: false, grab: null, frames: 0, frameMs: [] };
+    const orbit = { want: '2d', shown: false, k: 0, change: null, turn: 0, moon: 0, elevation: ORBIT_ELEVATION, base: null, saved: null, from3d: null, figure: null, depth: new Map(), order: '', raf: 0, last: 0, pausedUntil: 0, resume: null, waiting: false, holding: false, grab: null, fixed: false, frames: 0, frameMs: [] };
     const orbitLayer = svg('g', { class: 'ag-orbits', 'aria-hidden': 'true' });
     stage.insertBefore(orbitLayer, edgeLayer);
     // An <svg> of its own (not a <g>, which would read as the camera's stage), turned by the one layer inside it.
@@ -6498,7 +6498,7 @@
       if (orbitNoteTimer) { clearTimeout(orbitNoteTimer); timers.delete(orbitNoteTimer); }
       orbitNoteTimer = later(() => { orbitNoteTimer = null; orbitNote.hidden = true; orbitNote.textContent = ''; }, 3500);
     }
-    function orbitStore(value) { try { const store = positionStore(); if (store) { if (value === undefined) return store.getItem(ORBIT_KEY); store.setItem(ORBIT_KEY, value); } } catch (_) { /* no storage (the Desktop panel may have none) */ } return null; }
+    function orbitStore(value) { if (orbit.fixed) return null; try { const store = positionStore(); if (store) { if (value === undefined) return store.getItem(ORBIT_KEY); store.setItem(ORBIT_KEY, value); } } catch (_) { /* no storage (the Desktop panel may have none) */ } return null; }
     function orbitMark() {
       root.dataset.agView = orbit.want;
       orbitButton.setAttribute('aria-pressed', String(orbit.want === '3d'));
@@ -6878,7 +6878,7 @@
       orbitMark();
     }
     function orbitSpins() {
-      return orbit.want === '3d' && !reducedMotion() && !document.hidden && root.clientWidth > 0 && !pointers.size && !draft?.held && performance.now() >= orbit.pausedUntil;
+      return !orbit.fixed && orbit.want === '3d' && !reducedMotion() && !document.hidden && root.clientWidth > 0 && !pointers.size && !draft?.held && performance.now() >= orbit.pausedUntil;
     }
     function orbitRequest() { if (alive && orbit.shown && !orbit.raf) orbit.raf = requestAnimationFrame(orbitTick); }
     function orbitTick(now) {
@@ -7145,7 +7145,14 @@
     }, true);
     listen(document, 'visibilitychange', () => { if (!document.hidden) { orbit.last = 0; orbitRequest(); } });
     cleanups.push(() => { if (orbit.raf) cancelAnimationFrame(orbit.raf); orbit.raf = 0; });
-    if (orbitStore() === '3d') { orbit.want = '3d'; orbitWait(); }
+    // The look-only option (index.html: ?view=3d&turn=DEG&tilt=DEG): 3D held at an angle, nothing turning, nothing stored.
+    if (root.dataset.look === '3d') {
+      const deg = Number(root.dataset.lookTurn), tilt = Number(root.dataset.lookTilt);
+      orbit.fixed = true; orbit.want = '3d';
+      if (root.dataset.lookTurn !== undefined && root.dataset.lookTurn !== '' && Number.isFinite(deg)) orbit.turn = deg * Math.PI / 180;
+      if (root.dataset.lookTilt !== undefined && root.dataset.lookTilt !== '' && Number.isFinite(tilt)) orbit.elevation = clamp(tilt * Math.PI / 180, ORBIT_LOW, ORBIT_HIGH);
+      orbitWait();
+    } else if (orbitStore() === '3d') { orbit.want = '3d'; orbitWait(); }
     orbitMark();
     // ---- orbit lane (n105) ----
 
