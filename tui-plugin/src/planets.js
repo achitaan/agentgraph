@@ -194,7 +194,8 @@ function buildPlanets(doc, w, h, now, options) {
   const W = w;
   const H = h * 2;
   const px = new Pixels(W, H);
-  const L = orbitLayout(doc, w, h);
+  // row 0 is the pill's: the figure is laid out in the rows below it
+  const L = orbitLayout(doc, w, Math.max(1, h - 1));
   const F = figure3D(L);
   const cam = orbitCamera(options.orbit, reduced ? 0 : now);
   const project = camera3D(L, cam.turn, cam.elevation);
@@ -206,7 +207,7 @@ function buildPlanets(doc, w, h, now, options) {
 
   // the figure a little smaller than the orbit's (the same places, scaled about the middle) so balls and names have room
   const K = small ? 0.8 : h < 34 ? 0.8 : 0.9;
-  const at = (q) => ({ x: (L.cx + (q.x - L.cx) * K) / 2, y: (L.cy + (q.y - L.cy) * K) / 2, depth: q.depth });
+  const at = (q) => ({ x: (L.cx + (q.x - L.cx) * K) / 2, y: (L.cy + (q.y - L.cy) * K) / 2 + 2, depth: q.depth });
   const hubQ = project([0, 0, 0]);
   const hubP = at({ x: project.hub.x, y: project.hub.y, depth: 0 });
   const base = Math.min(W, H);
@@ -421,7 +422,6 @@ function buildPlanets(doc, w, h, now, options) {
   };
 
   // the cells a ball covers (its ring included): names and the pill keep off them
-  const occ = new Float32Array(w * h).fill(-Infinity);
   const canvas = new Canvas(w, h, new Styles());
   for (const b of order) {
     const reach = b.r + 0.6 + 0.5;
@@ -429,17 +429,11 @@ function buildPlanets(doc, w, h, now, options) {
       for (let c = Math.max(0, Math.floor(b.x - reach)); c <= Math.min(w - 1, Math.floor(b.x + reach)); c += 1) {
         if (Math.hypot(c + 0.5 - b.x, 2 * r + 1 - b.y) <= reach + 0.5) {
           canvas.plotBody(c, r, " ", 0, b.depth);
-          occ[r * w + c] = Math.max(occ[r * w + c], b.depth);
         }
       }
     }
   }
-  const hubCell = { c: Math.floor(hubP.x), r: Math.floor(hubP.y / 2) };
-  const hubReach = hubR + 0.6 + 0.5;
-  const hubTop = Math.max(0, Math.floor((hubP.y - hubReach) / 2));
-  const hubBottom = Math.min(h - 1, Math.floor((hubP.y + hubReach) / 2));
-
-  // the hub's name and the pill
+  // the hub's name (the header line says it; it is not drawn in the picture) and the pill
   const hubName = truncate(clean(L.hub && L.hub.name) || "main", NAME_MAX + 4);
   const act = L.hub && isObject(L.hub.activity) ? L.hub.activity : null;
   let pillParts = [];
@@ -453,7 +447,7 @@ function buildPlanets(doc, w, h, now, options) {
   } else {
     pillParts = ["☾", "resting", "", MUTED, MUTED];
   }
-  const maxPill = Math.max(0, Math.min(w - 2, 46));
+  const maxPill = Math.max(0, Math.min(w - 3, 46));
   let pill = null;
   {
     let [glyph, verb, target, glyphColor, verbColor] = pillParts;
@@ -477,99 +471,38 @@ function buildPlanets(doc, w, h, now, options) {
     }
     if (maxPill >= 5) pill = { g, glyphColor, verb, verbColor, tg, width: displayWidth(inner) + 2 };
   }
-  const cost = (c0, c1, r) => {
-    if (r < 0 || r >= h) return Infinity;
-    let n = 0;
-    for (let c = c0; c <= c1; c += 1) if (c < 0 || c >= w) return Infinity;
-    for (let c = c0; c <= c1; c += 1) if (occ[r * w + c] > -Infinity) n += 1;
-    return n;
-  };
-  const centred = (cw, dx) => Math.round(hubCell.c - cw / 2) + dx;
-  const nameW = displayWidth(hubName);
-  const pillW = pill ? pill.width : 0;
-  const shifts = [0];
-  for (let s = 1; s <= Math.floor(w / 4); s += 1) shifts.push(s, -s);
-  const best = (cw, r, penalty = 0.01) => {
-    let found = null;
-    for (const dx of shifts) {
-      const c0 = centred(cw, dx);
-      const cst = cost(c0, c0 + cw - 1, r) + Math.abs(dx) * penalty;
-      if (!found || cst < found.cost) found = { c0, dx, cost: cst };
-      if (found.cost === 0 && dx === 0) break;
-    }
-    return found;
-  };
-  // the name goes as near the hub as it can without covering a ball: under it, over it, or beside it; then the pill
-  // goes below or above the hub where it covers fewest balls (and never the name)
-  const fit = (c0, c1, r) => r >= 0 && r < h && c0 >= 0 && c1 < w;
-  const nameCands = [];
-  for (const dr of [1, 2, 3]) {
-    for (const dx of shifts.slice(0, 13)) {
-      nameCands.push({ c0: centred(nameW, dx), r: hubBottom + dr, d: 0.15 * Math.abs(dx) + 1.2 * (dr - 1) });
-      nameCands.push({ c0: centred(nameW, dx), r: hubTop - dr, d: 0.15 * Math.abs(dx) + 1.2 * (dr - 1) + 0.3 });
-    }
-  }
-  for (const dr of [0, 1, -1]) {
-    nameCands.push({ c0: Math.ceil(hubP.x + hubReach) + 1, r: hubCell.r + dr, d: 2 + Math.abs(dr) });
-    nameCands.push({ c0: Math.floor(hubP.x - hubReach) - nameW, r: hubCell.r + dr, d: 2 + Math.abs(dr) });
-  }
-  nameCands.push({ c0: centred(nameW, 0), r: h - 3, d: 9 });
-  let chosen = null;
-  for (const nc of nameCands) {
-    if (!fit(nc.c0, nc.c0 + nameW - 1, nc.r)) continue;
-    const nameCost = cost(nc.c0, nc.c0 + nameW - 1, nc.r);
-    if (nameCost > 0 && chosen && chosen.nameCost === 0) continue;
-    const rowsFor = [[hubBottom + 1, 0], [hubBottom + 2, 0.6], [hubBottom + 3, 1.2], [hubTop - 3, 0.4], [hubTop - 4, 1.0], [h - 3, 5]];
-    let blk = null;
-    for (const [pr, pd] of rowsFor) {
-      if (pr === nc.r || pr < 0 || pr >= h) continue;
-      const p = pill ? best(pillW, pr) : { c0: 0, cost: 0 };
-      if (!p) continue;
-      const total = p.cost * 4 + pd;
-      if (Number.isFinite(total) && (!blk || total < blk.total)) blk = { pr, p, total };
-    }
-    if (!blk) continue;
-    const total = nameCost * 4 + nc.d + blk.total;
-    if (!chosen || total < chosen.total) chosen = { n: { c0: nc.c0 }, nr: nc.r, nameCost, blk, total };
-  }
   const info = { hub: { x: hubP.x, y: hubP.y, r: hubR, name: hubName }, balls: [], labels: [], pill: null, zone, owner: null };
   const reserve = (c0, c1, r) => {
     for (let c = c0 - 1; c <= c1 + 1; c += 1) canvas.put(c, r, " ", 0);
   };
-  if (chosen) {
-    const nr = chosen.nr;
-    const { pr } = chosen.blk;
-    chosen.p = chosen.blk.p;
-    // the name (bold)
-    putText(chosen.n.c0, nr, hubName, INK, true);
-    info.hub.label = { c0: chosen.n.c0, c1: chosen.n.c0 + nameW - 1, r: nr };
-    reserve(chosen.n.c0, chosen.n.c0 + nameW - 1, nr);
-    if (pill) {
-      const tint = mix(BG, PEACH, 0.14);
-      const c0 = chosen.p.c0;
-      let col = c0 + 1;
-      const put = (str, fg, bold) => {
-        for (const ch of str) {
-          putText(col, pr, ch, fg, bold, tint);
-          col += charWidth(ch);
-        }
-      };
-      put(" ", INK);
-      if (pill.g) {
-        put(pill.g, pill.glyphColor, true);
-        put(" ", INK);
+  // the pill: always on row 0, directly under the header line, from column 1 (the header's own left edge)
+  const pillW = pill ? pill.width : 0;
+  if (pill) {
+    const pr = 0;
+    const c0 = 1;
+    const tint = mix(BG, PEACH, 0.14);
+    let col = c0 + 1;
+    const put = (str, fg, bold) => {
+      for (const ch of str) {
+        putText(col, pr, ch, fg, bold, tint);
+        col += charWidth(ch);
       }
-      put(pill.verb, pill.verbColor, true);
-      if (pill.tg) {
-        put(" ", INK);
-        put(pill.tg, INK);
-      }
+    };
+    put(" ", INK);
+    if (pill.g) {
+      put(pill.g, pill.glyphColor, true);
       put(" ", INK);
-      text[pr * w + c0] = { ch: "▐", fg: tint, bold: false, bg: null, cap: true };
-      text[pr * w + c0 + pillW - 1] = { ch: "▌", fg: tint, bold: false, bg: null, cap: true };
-      reserve(c0, c0 + pillW - 1, pr);
-      info.pill = { c0, c1: c0 + pillW - 1, r: pr, text: (pill.g ? pill.g + " " : "") + pill.verb + (pill.tg ? " " + pill.tg : "") };
     }
+    put(pill.verb, pill.verbColor, true);
+    if (pill.tg) {
+      put(" ", INK);
+      put(pill.tg, INK);
+    }
+    put(" ", INK);
+    text[pr * w + c0] = { ch: "▐", fg: tint, bold: false, bg: null, cap: true };
+    text[pr * w + c0 + pillW - 1] = { ch: "▌", fg: tint, bold: false, bg: null, cap: true };
+    reserve(c0, c0 + pillW - 1, pr);
+    info.pill = { c0, c1: c0 + pillW - 1, r: pr, text: (pill.g ? pill.g + " " : "") + pill.verb + (pill.tg ? " " + pill.tg : "") };
   }
 
   // ---- the other names, placed as the orbit places them

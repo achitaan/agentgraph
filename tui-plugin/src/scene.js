@@ -334,9 +334,11 @@ export class Canvas {
   }
 
   // A cell of a body (a ball): as plot, and the cell then counts as that body's until something nearer covers it.
-  plotBody(c, r, ch, style, depth) {
+  // `bodyDepth` (default `depth`) is the depth the body's cell counts at: a ball drawn raised to cover the sun's flames
+  // is still only as near as its real depth to the bodies that land on it.
+  plotBody(c, r, ch, style, depth, bodyDepth = depth) {
     if (!this.plot(c, r, ch, style, depth)) return false;
-    this.bodyDepth[r * this.w + c] = depth;
+    this.bodyDepth[r * this.w + c] = bodyDepth;
     return true;
   }
 
@@ -1550,7 +1552,7 @@ function drawBall3D(canvas, project, style, P) {
 // A shaded ball in block shades: `ball` { x, y, rx, ry } its centre and radii in dots, `rho` its radius in figure radii
 // (the depth it adds toward the viewer), `depth` its centre's depth. The cells are the ball's body cells: a name never
 // covers one. -> how many cells show (a cell a nearer thing covers does not count)
-function drawShadedBall(canvas, ball, rho, depth, style) {
+function drawShadedBall(canvas, ball, rho, depth, style, lift = 0) {
   const c0 = Math.floor((ball.x - ball.rx) / 2) - 1;
   const c1 = Math.ceil((ball.x + ball.rx) / 2) + 1;
   const r0 = Math.floor((ball.y - ball.ry) / 4) - 1;
@@ -1565,7 +1567,7 @@ function drawShadedBall(canvas, ball, rho, depth, style) {
       const nz = Math.sqrt(1 - d2);
       const lum = ballLum(dx, -dy, nz);
       const k = clamp(Math.round((1 - lum) * (BALL_SHADES.length - 1)), 0, BALL_SHADES.length - 1);
-      if (canvas.plotBody(c, r, BALL_SHADES[k], style, depth + rho * nz)) shown += 1;
+      if (canvas.plotBody(c, r, BALL_SHADES[k], style, depth + lift + rho * nz, depth + rho * nz)) shown += 1;
     }
   }
   return shown;
@@ -1890,7 +1892,7 @@ function draw3D(doc, L, canvas, S, P, now, frame, cam, options) {
     const rd = Math.max(SIDE_BALL_MIN_DOTS, project.hub.rx * SIDE_BALL_PART) * s;
     sideBall = { x: sideQ.x, y: sideQ.y, rx: rd, ry: rd };
     const lit = sideBusyNow && sideQ.depth >= 0;
-    sideShown = drawShadedBall(canvas, sideBall, (project.hubRho || HUB_RADIUS3) * SIDE_BALL_PART, sideQ.depth >= 0 ? sideQ.depth + SUN_TOP : sideQ.depth, lit ? S.get("plain", undefined, 4) : S.get("muted"));
+    sideShown = drawShadedBall(canvas, sideBall, (project.hubRho || HUB_RADIUS3) * SIDE_BALL_PART, sideQ.depth, lit ? S.get("plain", undefined, 4) : S.get("muted"), sideQ.depth >= 0 ? SUN_TOP : 0);
   }
   // text: the hub's glyph, then every body's glyph, then every name (see placeBodies)
   const hubAt = project([0, 0, 0]);
