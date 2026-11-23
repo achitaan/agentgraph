@@ -69,8 +69,6 @@ only); `tests/test_bench_hard.py` uses them to prove that the fixture fails the 
 and fails the hidden check, and the reference passes both. Hidden checks only test what the prompt or the fixture's own
 spec states. The suite has 4 tasks, too few for a verdict alone.
 
-spec states.
-
 ## What a run can touch
 
 Shared with the real install: the scratch HOME links three real folders, so sessions are stored and costed in the real
