@@ -1163,6 +1163,8 @@ test("panel: a failing host open does not throw into the host", () => {
 
 const demoPython = fakePython("panel-demo-python", `cat "${path.join(here, "fixtures", "demo.json")}"`);
 
+const cursorRow = (view) => screen(view).findIndex((l) => l.startsWith("›"));
+
 test("panel: other panel names render nothing; its own name draws the list with a cursor and one key line; width follows and is capped", async () => {
   const { ctx, state, panelClaim } = makePanelHost({ python: demoPython });
   const stop = tui.setup(ctx);
@@ -1179,15 +1181,22 @@ test("panel: other panel names render nothing; its own name draws the list with 
     setName("agentgraph.graph");
     assert.deepEqual(screen(view), ["Loading"]);
     await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
-    // the demo: the stalled agent first (with the cursor), the hub and the idle count, who works, progress, spend, keys
+    // the demo: the status bar, the stalled agent first (with the cursor, under its rule), the hub and the idle count, who works,
+    // then one footer block: progress, spend, keys
     const widthOf = (i) => R.displayWidth(screen(view)[i]);
-    const hubIndex = () => screen(view).findIndex((l) => l.startsWith(" ◉ orchestrator"));
-    assert.match(screen(view)[0], /^›! impl-claude stalled ↻5  .* \d+[smhd]\w*$/);
+    const hubIndex = () => screen(view).findIndex((l) => l.startsWith(" ◉ orchestrator") && l.includes("idle"));
+    const first = cursorRow(view);
+    assert.equal(first, 2, "the bar, the NEEDS YOU rule, then the stalled agent");
+    assert.match(screen(view)[0], /^ ◉ orchestrator .* 4\/11 +\$[\d.]+ $/);
+    assert.match(screen(view)[1], /^ ── NEEDS YOU ─+$/);
+    assert.match(screen(view)[first], /^›! impl-claude +stalled ↻5 +.* +\d+[smhd]\w*$/);
     assert.match(screen(view)[hubIndex()], / 11 idle$/);
+    assert.match(screen(view).at(-4), /^ ─+$/, "a rule over the footer");
     assert.match(screen(view).at(-3), /4\/11  .*gate reviewer refuted$/);
     assert.equal(screen(view).at(-1), " ↑↓ select  g graph  q close");
     assert.ok(!screen(view).some((l) => l.trim() === ""), "no blank rows");
     assert.equal(widthOf(0), 80);
+    assert.equal(widthOf(first), 80);
     assert.equal(widthOf(hubIndex()), 80);
     // wider panel, wider lines
     setWidth(100);
@@ -1205,7 +1214,8 @@ test("panel: other panel names render nothing; its own name draws the list with 
     setWidth(37);
     const sidebarView = state.claims[0].render({ sessionID: "ses_p" });
     await waitFor(() => screen(sidebarView).length > 3, 5000, "sidebar snapshot");
-    assert.equal(screen(view).length, screen(sidebarView).length + 1);
+    // the panel adds the gutter's key line, the status bar and three rules (NEEDS YOU, AT WORK, the footer)
+    assert.equal(screen(view).length, screen(sidebarView).length + 5);
     assert.ok(screen(sidebarView).every((l) => !/^[› ]/.test(l) && R.displayWidth(l) <= 37), "the sidebar has no gutter");
     assert.ok(screen(view).every((l) => /^[› ]/.test(l) && R.displayWidth(l) <= 37), "the panel has the gutter");
     // the name changes away: nothing is drawn
@@ -1313,7 +1323,6 @@ function makeActionHost({ router = true, client = true, dialog = true, answers =
   };
   return Object.assign(host, { calls, key });
 }
-const cursorRow = (view) => screen(view).findIndex((l) => l.startsWith("›"));
 
 test("panel keys: up and down move the cursor through the rows that act, clamped; return opens the row's session", async () => {
   const host = makeActionHost({ client: false, dialog: false });
@@ -1322,17 +1331,18 @@ test("panel keys: up and down move the cursor through the rows that act, clamped
     const view = host.panelClaim().render(makePanel({ sessionID: "ses_keys", width: 80 }));
     await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
     const { key, calls } = host;
-    assert.deepEqual(screen(view).map((l) => l[0]), ["›", " ", " ", " ", " ", " "]); // stalled, hub, designer, progress, spend, keys
+    // the bar, a rule, stalled, a rule, hub, designer, a rule, progress, spend, keys
+    assert.deepEqual(screen(view).map((l) => l[0]), [" ", " ", "›", " ", " ", " ", " ", " ", " ", " "]);
     assert.equal(key("up").enabled(), true);
     key("up").run();
-    assert.equal(cursorRow(view), 0, "clamped at the top");
+    assert.equal(cursorRow(view), 2, "clamped at the top");
     key("down").run();
-    assert.equal(cursorRow(view), 1);
-    assert.ok(screen(view)[1].startsWith("›◉ orchestrator"));
+    assert.equal(cursorRow(view), 4);
+    assert.ok(screen(view)[4].startsWith("›◉ orchestrator"));
     key("down").run();
     key("down").run();
     key("down").run();
-    assert.equal(cursorRow(view), 2, "clamped at the last row that acts: the progress and spend rows are not selectable");
+    assert.equal(cursorRow(view), 5, "clamped at the last row that acts: the progress and spend rows are not selectable");
     assert.equal(screen(view).at(-1), " ↑↓ select  ⏎ open  g graph  q close");
     key("return").run();
     assert.deepEqual(calls.at(-1), ["navigate", { type: "session", sessionID: "ses_h" }]);
@@ -1354,7 +1364,7 @@ test("panel keys: up and down move the cursor through the rows that act, clamped
     for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
     const again = host.panelClaim().render(makePanel({ sessionID: "ses_keys", width: 80 }));
     await waitFor(() => screen(again).length > 3, 5000, "remounted snapshot");
-    assert.ok(screen(again)[1].startsWith("›◉ orchestrator"), screen(again).join("\n"));
+    assert.ok(screen(again)[4].startsWith("›◉ orchestrator"), screen(again).join("\n"));
   } finally {
     for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
     stop();
@@ -1466,7 +1476,7 @@ test("panel keys: while a host dialog is open the list keys do nothing, and the 
     }
     await sleep(20);
     assert.deepEqual(calls, []);
-    assert.equal(cursorRow(view), 0);
+    assert.equal(cursorRow(view), 2);
     mode.v = "base";
     // our own confirm: from `s` until a moment after it closes, the list keys do nothing
     key("s").run();
@@ -1474,7 +1484,7 @@ test("panel keys: while a host dialog is open the list keys do nothing, and the 
     for (const bind of ["up", "down", "return", "s", "m"]) assert.equal(key(bind).enabled(), false, bind + " enabled under the confirm");
     key("down").run();
     key("return").run();
-    assert.equal(cursorRow(view), 0, "down did not move the cursor under the dialog");
+    assert.equal(cursorRow(view), 2, "down did not move the cursor under the dialog");
     // Enter answers the confirm; the same key reaching the panel must not open anything
     // The host dispatches that Enter in one go: the confirm resolves, its promise chain settles (microtasks), and the
     // same key may then reach the panel before any timer runs. The list keys must still be off then.
@@ -1530,10 +1540,11 @@ test("panel: pending permission requests and questions from the host's data come
     const view = host.panelClaim().render(makePanel({ sessionID: "ses_req", width: 80 }));
     await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
     const lines = screen(view);
-    assert.match(lines[0], /^›! designer wants permission  2 requests +\S+$/);
-    assert.match(lines[1], /^ \? orchestrator asks you  Add per-user rate limiting +\S+$/);
+    // the bar and the NEEDS YOU rule, then the rows in columns
+    assert.match(lines[2], /^›! designer +wants permission +2 requests +\S+$/);
+    assert.match(lines[3], /^ \? orchestrator +asks you +Add per-user rate limiting +\S+$/);
     assert.ok(lines.includes(" ○ 11 idle"), "the hub's row is up there: the idle count has its own row\n" + lines.join("\n"));
-    assert.match(lines[2], /^ ! impl-claude stalled ↻5/);
+    assert.match(lines[4], /^ ! impl-claude +stalled ↻5/);
     assert.ok(!lines.some((l) => l.includes("global")), "the global form is not a session's");
     assert.ok(!lines.some((l) => /^ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] designer/.test(l)), "designer is not also among the working");
     host.key("return").run();
@@ -1545,7 +1556,7 @@ test("panel: pending permission requests and questions from the host's data come
     try {
       const v2 = bare.panelClaim().render(makePanel({ sessionID: "ses_req2", width: 80 }));
       await waitFor(() => screen(v2).length > 3, 5000, "bare snapshot");
-      assert.match(screen(v2)[0], /^›! impl-claude stalled/);
+      assert.match(screen(v2)[2], /^›! impl-claude +stalled/);
     } finally {
       stop2();
     }
@@ -1624,7 +1635,11 @@ test("panel: no title, banner or legend; the keys are one muted line at the bott
     assert.equal(lines.filter((l) => /\bq close\b/.test(l)).length, 1, all);
     assert.equal(lines.at(-1), " g graph  q close"); // one row: nothing to select, no session to open on this host
     const keyLine = view.children.at(-1);
-    assert.ok(keyLine.children.every((c) => nodeText(c) === " " || c.props.fg === "#888888"), "the key line is muted");
+    // the key letters are plain, their labels muted: nothing in the accent or the danger colour
+    // dark panel: the key letters in the ink colour, their labels in the dim one (own colours); never the accent or the danger colour
+    const marked = keyLine.children.filter((c) => nodeText(c).trim() !== "");
+    assert.ok(marked.length >= 4 && marked.every((c) => c.props.fg !== "#d08040" && c.props.fg !== "#e05050"), "the key line has no accent");
+    assert.ok(marked.filter((c) => /^ \S/.test(nodeText(c))).every((c) => c.props.fg === "#94a3b8"), "the labels are dim");
     const hub = view.children[0].children.find((c) => nodeText(c) === "◉");
     assert.equal(hub.props.fg, "#d08040");
   } finally {
@@ -1768,7 +1783,7 @@ test("host theme: the sidebar and the panel draw the view with the real host's t
     const view = panelClaim().render(makePanel({ sessionID: "ses_theme" }));
     for (const v of [side, view]) {
       await waitFor(() => shows(v, "t-ses_theme"), 5000, "snapshot with the host theme");
-      assert.match(screen(v)[0], /^›?◉ orchestrator/);
+      assert.ok(screen(v).some((l) => /^[› ]?◉ orchestrator/.test(l)), "the hub's row (the panel has a bar over it)");
       const fgs = allFg(v);
       assert.ok(fgs.length > 0);
       assert.ok(fgs.every((fg) => typeof fg === "string" && /^#[0-9a-f]{6}$/.test(fg)), "every fg is a hex string: " + fgs.join(","));
@@ -4977,7 +4992,7 @@ test("paths: no paths, no `r`: no key, nothing in the key line, no paths row", a
     await sleep(50);
     assert.equal(p.key("r"), undefined);
     assert.ok(!screen(p.view).some((l) => / r run|paths?\b/.test(l)), screen(p.view).join(" | "));
-    assert.deepEqual(screen(p.view).map((l) => l.slice(1, 15)), ["◉ orchestrator", "$1.50", "⏎ open  g grap"]);
+    assert.deepEqual(screen(p.view).map((l) => l.slice(1, 15)), ["◉ orchestrator", "── AGENTS ────", "◉ orchestrator", "──────────────", "$1.50", "⏎ open  g grap"]);
   } finally {
     p.done();
   }
@@ -4987,7 +5002,16 @@ test("paths: one path skips the chooser; the goal; the back end's run message is
   const p = await pathsPanel("ses_p1", { answers: { prompt: "  add a cache  " } });
   try {
     await waitFor(() => p.key("r"), 2000, "r key");
-    assert.deepEqual(screen(p.view).map((l) => l.slice(1)), [pad("◉ orchestrator  t-ses_p1", "1 idle", 79), "1 path", "$1.50", "⏎ open  r run  g graph  q close"]);
+    assert.deepEqual(screen(p.view).map((l) => l.slice(1)), [
+      pad("◉ orchestrator", "$1.50 ", 79),
+      "── AGENTS " + "─".repeat(69),
+      pad("◉ orchestrator  idle  t-ses_p1", "1 idle", 79),
+      "── PATHS " + "─".repeat(70),
+      "1 path",
+      "─".repeat(79),
+      "$1.50",
+      "⏎ open  r run  g graph  q close",
+    ]);
     assert.equal(p.key("r").enabled(), true);
     p.key("r").run();
     await waitFor(() => sends(p.calls).length === 1, 5000, "sent");
@@ -5004,7 +5028,7 @@ test("paths: one path skips the chooser; the goal; the back end's run message is
 test("paths: several: the host's chooser lists them, most recently run first, stats as each row's footer; the choice is run", async () => {
   const p = await pathsPanel("ses_p3", { answers: { select: "ccc", prompt: "goal two" } });
   try {
-    assert.equal(screen(p.view)[1], " 3 paths · last impl-loop " + R.formatElapsed(Date.now() - 1795000000 * 1000) + " ago");
+    assert.ok(screen(p.view).includes(" 3 paths · last impl-loop " + R.formatElapsed(Date.now() - 1795000000 * 1000) + " ago"), screen(p.view).join("\n"));
     await waitFor(() => p.key("r"), 2000, "r key");
     p.key("r").run();
     await waitFor(() => sends(p.calls).length === 1, 5000, "sent");
@@ -5842,8 +5866,8 @@ test("chat panel: the chat shows under the rows, thinking and what was said apar
   try {
     await c.settle(1);
     const lines = c.lines();
-    assert.match(lines[0], /^›! impl-claude stalled/);
-    assert.equal(lines[1].trimEnd(), "   ▸ edit", "the tool a working agent runs, one line");
+    assert.match(lines[2], /^›! impl-claude +stalled/);
+    assert.equal(lines[3].trimEnd(), "   ▸ edit", "the tool a working agent runs, one line");
     assert.ok(lines.some((l) => l.trimEnd() === "   Splitting the work into three lanes"), "what the hub said");
     assert.ok(lines.some((l) => /^   · Weighing the contrast of the limiter…$/.test(l.trimEnd())), "thinking, cut to the width: " + lines.join("|"));
     const at = lines.findIndex((l) => l.startsWith(" chat · impl-claude"));
@@ -5983,7 +6007,7 @@ test("chat panel: where there is no room, c opens the chat in place of the lower
     await c.settle(1);
     const lines = c.lines();
     assert.equal(lines.length, 14);
-    assert.match(lines[0], /^›! impl-claude stalled/);
+    assert.match(lines[0], /^›! impl-claude +stalled/);
     assert.ok(lines[1].startsWith(" chat · impl-claude"));
     assert.equal(lines[12].trimEnd(), " message 40");
     assert.match(lastLine(lines), /↑↓ scroll  ⏎ open  s stop  m message  c back/);

@@ -1139,6 +1139,171 @@ function keysRow(keys, width) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// The styled list (`styled: true`, the panel's text list): the rooms' status bar on top, rules with a label between
+// the sections, rows in aligned columns (mark, name, state, task, time), one footer block under a rule. A dark theme
+// gets backgrounds (the bar, the selected row); a light one gets the tones only. The rows, items and keys are the plain
+// list's: only the look differs.
+
+export const PANEL_BAR = Object.freeze([30, 35, 49]);
+export const PANEL_INK = Object.freeze([226, 232, 240]);
+export const PANEL_MUTED = Object.freeze([148, 163, 184]);
+const PANEL_SELECTED = [37, 45, 64];
+const PANEL_RULE = [71, 85, 105];
+const PANEL_GOLD = [250, 204, 21];
+const STATE_MAX = 18;
+
+const hexOf = (c) => "#" + c.map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0")).join("");
+// A span with, on a dark theme only, a colour, a background and bold.
+function ssp(text, tone, color, bold, bg) {
+  const span = { text, tone };
+  if (color) span.color = hexOf(color);
+  if (bold) span.bold = true;
+  if (bg) span.bg = hexOf(bg);
+  return span;
+}
+const padRight = (text, n) => text + " ".repeat(Math.max(0, n - displayWidth(text)));
+const padLeftTo = (text, n) => " ".repeat(Math.max(0, n - displayWidth(text))) + text;
+const fillTo = (line, width, bg) => (lineWidth(line) >= width ? line : [...line, ssp(" ".repeat(width - lineWidth(line)), "plain", null, false, bg)]);
+const tint = (line, bg) => line.map((span) => (span.bg ? span : { ...span, bg: hexOf(bg) }));
+
+// A rule with its label: " ── NEEDS YOU 2 ───────".
+function ruleRow(label, count, width, dark) {
+  const c = (v) => (dark ? v : null);
+  const dash = (n) => ssp("─".repeat(Math.max(0, n)), "muted", c(PANEL_RULE));
+  if (!label) return [ssp(" ", "plain"), dash(width - 1)];
+  const room = width - 6;
+  const text = truncate(count ? `${label} ${count}` : label, Math.max(1, room));
+  return [ssp(" ", "plain"), dash(2), ssp(" ", "plain"), ssp(text, "muted", c(PANEL_MUTED), true), ssp(" ", "plain"), dash(width - 5 - displayWidth(text))];
+}
+
+// The status bar: the hub's mark and name on the left, the steps and the spend on the right.
+function barRow(doc, hub, width, dark, frame) {
+  const c = (v) => (dark ? v : null);
+  const bg = dark ? PANEL_BAR : null;
+  const working = !!hub && hubWorking(doc, hub);
+  const rootName = isObject(doc.root) && typeof doc.root.agent === "string" ? doc.root.agent : "";
+  const name = clean(hub ? hub.name : rootName) || "?";
+  const graph = graphOf(doc);
+  const progress = graph && isObject(graph.progress) ? graph.progress : null;
+  const total = progress ? Math.max(0, Math.floor(Number(progress.total) || 0)) : 0;
+  const passed = progress ? Math.min(total, Math.max(0, Math.floor(Number(progress.passed) || 0))) : 0;
+  const cost = isObject(doc.totals) ? finiteNumber(doc.totals.cost) : null;
+  const right = [];
+  if (total) right.push(ssp(String(passed), "plain", c(PANEL_INK), true, bg), ssp("/" + total, "muted", c(PANEL_MUTED), false, bg));
+  if (cost !== null) right.push(ssp((right.length ? "  " : "") + formatDollars(cost), "plain", c(PANEL_INK), false, bg));
+  let rightW = lineWidth(right);
+  const tail = working ? 2 : 0; // " ⠋"
+  const shown = width - 4 - tail - (rightW ? 2 + rightW : 0) >= Math.min(3, displayWidth(name)) ? right : [];
+  rightW = lineWidth(shown);
+  const nameRoom = Math.max(1, width - 4 - tail - (rightW ? 2 + rightW : 0));
+  const left = [
+    ssp(" ", "plain", null, false, bg),
+    ssp(MARK_HUB, working ? "accent" : "muted", null, false, bg),
+    ssp(" ", "plain", null, false, bg),
+    ssp(truncate(name, nameRoom), "plain", c(PANEL_INK), true, bg),
+    ...(working ? [ssp(" ", "plain", null, false, bg), ssp(spinnerGlyph(frame), "accent", null, false, bg)] : []),
+  ];
+  const gap = width - lineWidth(left) - (shown.length ? rightW + 1 : 0);
+  const line = shown.length && gap >= 1 ? [...left, ssp(" ".repeat(gap), "plain", null, false, bg), ...shown, ssp(" ", "plain", null, false, bg)] : left;
+  return fillTo(line, width, bg);
+}
+
+// What a working agent does, for the state column: the zone's glyph and verb for a tool, else a word. -> { text, tone }
+function stateOf(agent) {
+  const a = agent && isObject(agent.activity) ? agent.activity : null;
+  const kind = a && (a.kind === "tool" || a.kind === "reasoning" || a.kind === "text") ? a.kind : null;
+  if (!kind) return { text: "working", tone: "muted" };
+  if (kind === "reasoning") return { text: "thinking", tone: "muted" };
+  if (kind === "text") return { text: "replying", tone: "muted" };
+  const tool = clean(a.tool).toLowerCase();
+  const glyph = own(ZONE_GLYPHS, a.zone);
+  const bad = a.status === "error";
+  if (!glyph || !tool) return { text: "working", tone: bad ? "danger" : "muted" };
+  const verb = own(TOOL_VERBS, tool) || `${own(ZONE_VERBS, a.zone)} ${tool}`;
+  return { text: `${glyph} ${verb}`, tone: bad ? "danger" : "accent" };
+}
+
+// The line under a working agent's row. A tool with a zone shows only its target (the verb is in the state column).
+function detailRow(agent, width) {
+  const a = agent && isObject(agent.activity) ? agent.activity : null;
+  if (a && a.kind === "tool" && own(ZONE_GLYPHS, a.zone) && clean(a.tool)) {
+    const target = clean(a.target);
+    if (!target || width < 6) return null;
+    return [ssp("  ", "plain"), ssp("↳ ", "muted"), ssp(truncate(target, width - 4), "muted")];
+  }
+  return activityRow(agent, width);
+}
+
+// One row in columns: mark, name, state (a colour), task (cut at its end), time (flush right). `cols` are shared by all the
+// rows so the columns line up.
+function columnRow(width, cols, spec) {
+  let { nameW, stateW, rightW } = cols;
+  let fixed = 2 + nameW + 2 + stateW + (rightW ? 2 + rightW : 0);
+  while (fixed > width && nameW > 6) {
+    nameW -= 1;
+    fixed -= 1;
+  }
+  while (fixed > width && stateW > 4) {
+    stateW -= 1;
+    fixed -= 1;
+  }
+  let withRight = rightW > 0;
+  if (fixed > width && withRight) {
+    fixed -= 2 + rightW;
+    withRight = false;
+  }
+  const room = Math.max(0, width - fixed - 2);
+  const loop = spec.rounds >= 2 ? ` ${LOOP_MARK}${spec.rounds}` : "";
+  const label = truncate(spec.state, Math.max(1, stateW - displayWidth(loop)));
+  const stateCells = displayWidth(label) + displayWidth(loop);
+  const line = [
+    ssp(spec.mark, spec.markTone, spec.markColor, spec.strong),
+    ssp(" ", "plain"),
+    ssp(padRight(truncateMiddle(spec.name, nameW), nameW), spec.nameTone || "plain", spec.nameColor, spec.nameBold),
+    ssp("  ", "plain"),
+    ssp(label, spec.stateTone, spec.stateColor),
+    ...(loop ? [ssp(loop, "accent")] : []),
+    ssp(" ".repeat(Math.max(0, stateW - stateCells)), "plain"),
+    ssp("  ", "plain"),
+  ];
+  if (room >= 6 && spec.task) line.push(ssp(padRight(truncate(spec.task, room), room), "muted"));
+  else line.push(ssp(" ".repeat(room), "plain"));
+  if (withRight) line.push(ssp("  ", "plain"), ssp(padLeftTo(spec.right || "", rightW), spec.rightTone || "muted"));
+  return line;
+}
+
+function columnsOf(specs, width) {
+  const nameCap = Math.max(8, Math.floor(width * 0.3));
+  let nameW = 4;
+  let stateW = 4;
+  let rightW = 0;
+  for (const spec of specs) {
+    nameW = Math.max(nameW, Math.min(nameCap, displayWidth(spec.name)));
+    stateW = Math.max(stateW, Math.min(STATE_MAX, displayWidth(spec.state) + (spec.rounds >= 2 ? 1 + displayWidth(LOOP_MARK + spec.rounds) : 0)));
+    rightW = Math.max(rightW, displayWidth(spec.right || ""));
+  }
+  return { nameW, stateW, rightW };
+}
+
+// The key hints: the key plain, its label dim, two spaces between the pairs, as many as fit.
+function keysStyled(keys, width, dark) {
+  const c = (v) => (dark ? v : null);
+  const out = [];
+  let used = 0;
+  for (const pair of list(keys)) {
+    if (!Array.isArray(pair) || pair.length < 2) continue;
+    const key = String(pair[0]);
+    const label = String(pair[1]);
+    const need = (out.length ? 2 : 0) + displayWidth(key) + 1 + displayWidth(label);
+    if (used + need > width) break;
+    if (out.length) out.push(ssp("  ", "plain"));
+    out.push(ssp(key, "plain", c(PANEL_INK)), ssp(" " + label, "muted", c(PANEL_MUTED)));
+    used += need;
+  }
+  return out.length ? out : null;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // Entry point
 
 // layout(snapshot, { width, frame, now, requests, cursor, selected, keys, activity, trail }) -> { lines, items, selected, keysLine }
@@ -1174,23 +1339,16 @@ export function layout(snapshot, options = {}) {
   const at = now ?? epochMs(snapshot.generated);
   const graph = graphOf(snapshot);
   const hub = findHub(snapshot, agents);
-  const rows = []; // { line, item? }
+  const rows = []; // { line, item?, full? }
+  const styled = options.styled === true && width >= 30;
+  const dark = options.dark !== false;
+  const section = (label, count) => {
+    if (styled) rows.push({ line: ruleRow(label, count >= 2 ? count : 0, width, dark), full: true });
+  };
 
-  // 1. what needs the user
+  // what needs the user, who works now: the hub, then the others (longest at it first); idle agents are a count on the hub's row
   const needs = needsItems(snapshot, agents, hub, options.requests);
   const shownNeeds = needs.length > NEEDS_MAX + 1 ? needs.slice(0, NEEDS_MAX) : needs;
-  for (const item of shownNeeds) {
-    rows.push({ line: needsRow(item, inner, at), item });
-    const who = options.activity === true && item.agent && !item.hub ? agents.find((a) => a.name === item.agent) : null;
-    const doing = who && busyCount(who) > 0 ? activityRow(who, inner) : null;
-    if (doing) rows.push({ line: doing });
-  }
-  if (shownNeeds.length < needs.length) rows.push({ line: [sp(`+${needs.length - shownNeeds.length} more`, "muted")] });
-
-  for (const line of proposalRows(snapshot, inner)) rows.push({ line });
-  for (const line of loopRows(snapshot, inner)) rows.push({ line });
-
-  // 2. who works now: the hub, then the others (longest at it first); idle agents are a count on the hub's row
   const flagged = new Set(needs.map((n) => n.agent).filter(Boolean));
   const working = agents
     .filter((a) => a !== hub && busyCount(a) > 0 && !flagged.has(a.name))
@@ -1204,32 +1362,81 @@ export function layout(snapshot, options = {}) {
     })
     .sort((x, y) => (x.since ?? Infinity) - (y.since ?? Infinity) || x.order - y.order);
   const idle = agents.filter((a) => a !== hub && busyCount(a) <= 0 && !flagged.has(a.name)).length;
-  if (!flagged.has(hub ? hub.name : "")) {
+  const shownWorking = working.length > WORKING_MAX + 1 ? working.slice(0, WORKING_MAX) : working;
+  const side = sideChatOf(snapshot);
+  const asking = options.asking === true;
+  const hubShown = !flagged.has(hub ? hub.name : "");
+  const hubBusy = !!hub && hubWorking(snapshot, hub);
+
+  // the styled list's columns, shared by the rows that have them
+  let specs = null;
+  let cols = null;
+  if (styled) {
+    const hubName = clean(hub ? hub.name : isObject(snapshot.root) && typeof snapshot.root.agent === "string" ? snapshot.root.agent : "") || "?";
+    const rootTitle = isObject(snapshot.root) ? clean(snapshot.root.title) : "";
+    const k = (v) => (dark ? v : null);
+    specs = {
+      needs: shownNeeds.map((item) => ({
+        mark: item.mark, markTone: item.tone, strong: true, name: item.name, state: item.label, stateTone: item.tone, rounds: item.rounds, task: item.what, right: elapsedText(item.since, at),
+      })),
+      hub: hubShown ? { mark: MARK_HUB, markTone: hubBusy ? "accent" : "muted", name: hubName, nameBold: true, state: "idle", stateTone: "muted", task: rootTitle, right: idle > 0 ? `${idle} idle` : "" } : null,
+      side: side ? { mark: side.busy || asking ? spinnerGlyph(frame) : MARK_SIDE, markTone: side.busy || asking ? "accent" : "muted", name: SIDE_NAME, state: side.busy || asking ? "answering" : "", stateTone: "accent", task: asking ? "" : side.model, right: "" } : null,
+      working: shownWorking.map((item, i) => ({
+        mark: spinnerGlyph(frame, i + 1), markTone: "accent", name: item.name, ...(() => { const st = stateOf(item.doing); return { state: st.text, stateTone: st.tone }; })(), rounds: item.rounds, task: item.what, right: elapsedText(item.since, at),
+      })),
+    };
+    if (specs.hub && hubBusy) {
+      const st = stateOf(hub);
+      specs.hub.state = st.text;
+      specs.hub.stateTone = st.tone;
+    }
+    cols = columnsOf([...specs.needs, ...(specs.hub ? [specs.hub] : []), ...(specs.side ? [specs.side] : []), ...specs.working], width - (cursor ? 1 : 0));
+  }
+
+  if (styled) rows.push({ line: barRow(snapshot, hub, width, dark, frame), full: true });
+
+  // 1. what needs the user
+  if (shownNeeds.length) section("NEEDS YOU", needs.length);
+  shownNeeds.forEach((item, i) => {
+    rows.push({ line: styled ? columnRow(inner, cols, specs.needs[i]) : needsRow(item, inner, at), item });
+    const who = options.activity === true && item.agent && !item.hub ? agents.find((a) => a.name === item.agent) : null;
+    const doing = who && busyCount(who) > 0 ? (styled ? detailRow(who, inner) : activityRow(who, inner)) : null;
+    if (doing) rows.push({ line: doing });
+  });
+  if (shownNeeds.length < needs.length) rows.push({ line: [sp(`+${needs.length - shownNeeds.length} more`, "muted")] });
+
+  const proposals = proposalRows(snapshot, inner);
+  if (proposals.length) section("PROPOSALS");
+  for (const line of proposals) rows.push({ line });
+  const loops = loopRows(snapshot, inner);
+  if (loops.length) section("LOOP RUNS");
+  for (const line of loops) rows.push({ line });
+
+  // 2. who works now
+  if (hubShown || side || shownWorking.length) section(hubBusy || working.length ? "AT WORK" : "AGENTS", working.length + (hubBusy ? 1 : 0) || undefined);
+  if (hubShown) {
     const rootId = isObject(snapshot.root) && typeof snapshot.root.id === "string" ? snapshot.root.id : null;
     const hubSessions = hub ? agentSessions(hub) : { open: null };
     rows.push({
-      line: hubRow(snapshot, hub, idle, inner, frame),
+      line: styled ? columnRow(inner, cols, specs.hub) : hubRow(snapshot, hub, idle, inner, frame),
       item: { key: `agent:${hub ? hub.name : "hub"}`, kind: "hub", agent: hub ? hub.name : null, name: hub ? displayName(hub) : "hub", hub: true, open: rootId || hubSessions.open, busy: null },
     });
   }
-  if (options.activity === true && hub && !flagged.has(hub.name) && hubWorking(snapshot, hub)) {
-    const doing = activityRow(hub, inner);
+  if (options.activity === true && hub && hubShown && hubBusy) {
+    const doing = styled ? detailRow(hub, inner) : activityRow(hub, inner);
     if (doing) rows.push({ line: doing });
-    const earlier = doing && options.trail !== false ? trailRow(hub, inner) : null;
+    const earlier = (doing || styled) && options.trail !== false ? trailRow(hub, inner) : null;
     if (earlier) rows.push({ line: earlier });
   }
-  const side = sideChatOf(snapshot);
   if (side) {
-    const asking = options.asking === true;
     rows.push({
-      line: sideRow(side, asking, inner, frame),
+      line: styled ? columnRow(inner, cols, specs.side) : sideRow(side, asking, inner, frame),
       item: { key: "sidechat", kind: "sidechat", agent: null, name: SIDE_NAME, hub: false, open: side.session, busy: null, live: side.busy || asking },
     });
   }
-  const shownWorking = working.length > WORKING_MAX + 1 ? working.slice(0, WORKING_MAX) : working;
   shownWorking.forEach((item, i) => {
-    rows.push({ line: workingRow(item, inner, frame, i, at), item });
-    const doing = options.activity === true ? activityRow(item.doing, inner) : null;
+    rows.push({ line: styled ? columnRow(inner, cols, specs.working[i]) : workingRow(item, inner, frame, i, at), item });
+    const doing = options.activity === true ? (styled ? detailRow(item.doing, inner) : activityRow(item.doing, inner)) : null;
     if (doing) rows.push({ line: doing });
   });
   if (shownWorking.length < working.length) rows.push({ line: [sp(`+${working.length - shownWorking.length} more working`, "muted")] });
@@ -1238,20 +1445,30 @@ export function layout(snapshot, options = {}) {
 
   // the paths, at rest only (busy, the rows above matter more)
   const flows = sortFlows(flowsOf(snapshot));
-  if (flows.length && !needs.length && !working.length && !hubWorking(snapshot, hub)) rows.push({ line: pathsRow(flows, inner, at) });
+  if (flows.length && !needs.length && !working.length && !hubWorking(snapshot, hub)) {
+    section("PATHS", flows.length);
+    rows.push({ line: pathsRow(flows, inner, at) });
+  }
 
-  // 3. the task's progress, 4. spend and context, 5. the keys
+  // 3. the task's progress, 4. spend and context, 5. the keys: one block under a rule
   const progress = progressRow(snapshot, inner);
-  if (progress) rows.push({ line: progress });
   const cost = costRow(snapshot, inner);
+  const keys = options.keys ? (styled ? keysStyled(options.keys, inner, dark) : keysRow(options.keys, inner)) : null;
+  if (styled && (progress || (cost && cost.length) || keys)) section(null);
+  if (progress) rows.push({ line: progress });
   if (cost && cost.length) rows.push({ line: cost });
-  const keys = options.keys ? keysRow(options.keys, inner) : null;
   const keysAt = keys ? rows.length : null;
   if (keys) rows.push({ line: keys });
 
   const selectable = rows.filter((r) => r.item);
   const selected = selectable.some((r) => r.item.key === options.selected) ? options.selected : selectable.length ? selectable[0].item.key : null;
-  const lines = rows.map((r) => (cursor ? [sp(r.item && r.item.key === selected ? CURSOR : " ", "accent"), ...r.line] : r.line));
+  const lines = rows.map((r) => {
+    if (r.full) return r.line;
+    const mine = r.item && r.item.key === selected;
+    const glow = styled && dark && mine ? PANEL_SELECTED : null; // the selected row's tint, gutter and all
+    const body = glow ? tint(fillTo(r.line, inner, glow), glow) : r.line;
+    return cursor ? [glow ? ssp(CURSOR, "accent", null, false, glow) : sp(mine ? CURSOR : " ", "accent"), ...body] : body;
+  });
   const items = [];
   rows.forEach((r, i) => {
     if (!r.item) return;
