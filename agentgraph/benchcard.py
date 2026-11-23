@@ -5,11 +5,14 @@ A label names `bench/results/<label>.jsonl` (rows of `bench run` and `bench suit
 `l-suite.jsonl` made by one method (`direct`, `loop-1`, `loop-2`). Runs are paired by task; a task only one label has is
 listed and left out of the verdicts. Verdicts say how B compares with A, by a fixed rule that is printed on the card:
 
-- Passing: a sign test over tasks. Each task goes to the setup that passed the larger share of its runs (a tie goes to
-  neither); the two-sided exact p value of that split must be at most 0.10.
-- Cost, time, turns, agent calls: the median over tasks of B divided by A (each task's value is the median over its runs);
-  at least 5 tasks, and at least 80% of them lower (better), equal (same) or higher (worse).
-- Anything else is `too few runs to say`. A verdict also needs at least 5 compared tasks.
+- Every verdict uses the same exact two-sided sign test (p at most 0.10) over the tasks both labels have, and needs at
+  least 5 of them, so a suite of fewer than 5 tasks never gives a verdict.
+- Passing: a task goes to the setup that passed the larger share of its runs. Cost, time, turns, agent calls: a task goes
+  to the setup with the lower value (the median over its runs). Ties go to neither. The median B/A is shown as the size.
+- `same`: every task tied (passing), or every task's B/A within 5 percent of 1 (the other measures). Anything else is
+  `too few runs to say`.
+- A broken run (an error recorded, or no session found) counts as a failed run but is left out of cost, time, turns and
+  agent calls; a task with no unbroken run in a setup is left out of those comparisons and listed.
 
 The text and the page hold task ids, labels, numbers and the model name only, never a prompt, command, session id or path.
 """
@@ -25,18 +28,23 @@ from pathlib import Path
 from . import bench
 
 MIN_TASKS = 5
-MIN_AGREE = 0.8
+SAME_BAND = 0.05
 MAX_P = 0.10
 TOO_FEW = "too few runs to say"
 LSUITE = "l-suite"
 MEASURES = (("cost", "cost a run"), ("minutes", "time a run"), ("turns", "turns a run"), ("calls", "agent calls a run"))
 RULE = (
-    f"Passing: a sign test over tasks. Each task goes to the setup that passed the larger share of its runs; ties go to neither. "
-    f"A verdict needs a p value of at most {MAX_P:.2f}.",
-    f"Cost, time, turns and agent calls: the median over tasks of B divided by A (a task's value is the median of its runs). "
-    f"A verdict needs at least {MIN_TASKS} tasks and at least {MIN_AGREE:.0%} of them pointing the same way.",
-    f"Better, worse and same describe B compared with A, and every verdict needs at least {MIN_TASKS} tasks both have. "
+    f"Every verdict compares B with A on the tasks both setups have, and needs at least {MIN_TASKS} of them. "
+    f"A suite with fewer than {MIN_TASKS} tasks can never give a verdict.",
+    "Passing: a task goes to the setup that passed the larger share of its runs. Cost, time, turns and agent calls: a task goes to "
+    "B when B's value (the median of its runs) is lower, and to A when it is higher. Equal values go to neither.",
+    f"Better or worse: one setup wins more tasks, and an exact two-sided sign test gives a p value of at most {MAX_P:.2f} "
+    f"(the chance of a split that lopsided if the setups were really equal). For example, 5 of 5 tasks gives a verdict, "
+    f"4 of 5 does not. The median of B divided by A is shown as the size of the difference.",
+    f"Same: for passing, every task tied; for the other measures, every task's B divided by A is within {SAME_BAND:.0%} of 1.",
     f"Anything else is \"{TOO_FEW}\".",
+    "A broken run (an error was recorded, or its session was not found) counts as a failed run, but is left out of cost, time, "
+    "turns and agent calls. A task with no unbroken run in a setup is left out of those comparisons and listed.",
 )
 
 
@@ -46,13 +54,19 @@ def _number(value):
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
+def _broken(row: dict) -> bool:
+    """A crashed run or one whose session was not found: its cost, time and counts are zeros, not real numbers. Rows from
+    older files without these keys are not broken."""
+    return bool(row.get("error")) or _number(row.get("sessions")) == 0
+
+
 def _scenario_run(row: dict):
     check = row.get("check")
     passed = check.get("passed") if isinstance(check, dict) else None
     if row.get("probe_agent") or not isinstance(passed, bool) or not isinstance(row.get("scenario"), str):
         return None
     calls = row.get("agent_calls")
-    return {"task": row["scenario"], "passed": passed, "cost": _number(row.get("cost")), "seconds": _number(row.get("wall_seconds")),
+    return {"task": row["scenario"], "passed": passed, "broken": _broken(row), "cost": _number(row.get("cost")), "seconds": _number(row.get("wall_seconds")),
             "turns": _number(row.get("turns")),
             "calls": sum(v for v in calls.values() if _number(v) is not None) if isinstance(calls, dict) else None}
 
@@ -62,13 +76,13 @@ def _lsuite_run(row: dict):
     if row.get("fake") or not isinstance(row.get("task"), str) or not isinstance(row.get("visible"), bool) or not isinstance(row.get("hidden"), bool):
         return None
     roots, sessions = row.get("roots"), _number(row.get("sessions"))
-    return {"task": row["task"], "passed": row["visible"] and row["hidden"], "cost": _number(row.get("cost")),
+    return {"task": row["task"], "passed": row["visible"] and row["hidden"], "broken": _broken(row), "cost": _number(row.get("cost")),
             "seconds": _number(row.get("seconds")), "turns": _number(row.get("calls")),
             "calls": max(0, sessions - len(roots)) if sessions is not None and isinstance(roots, list) else None}
 
 
 def load_runs(spec: str, results: Path | None = None, suite: str | None = None) -> dict:
-    """{label, runs, hashes, models, notes} for a label or `l-suite:METHOD`. A label with no file or no rows gives no runs
+    """{label, runs, hashes, models, models_used, models_off, notes} for a label or `l-suite:METHOD`. A label with no file or no rows gives no runs
     and a note."""
     name, colon, method = spec.partition(":")
     lsuite = bool(colon) and name == LSUITE
@@ -97,10 +111,17 @@ def load_runs(spec: str, results: Path | None = None, suite: str | None = None) 
     if len(hashes) > 1:
         notes.append(f"{spec}: rows from {len(hashes)} different configs ({', '.join(hashes)}); they are not one setup")
     models = sorted({str(row["model"]) for row, _ in pairs if row.get("model")})
+    used, off = set(), set()
+    for row, _ in pairs:
+        listed = [m for m in row.get("models_used") or [] if isinstance(m, str)] if isinstance(row.get("models_used"), list) else []
+        used.update(listed)
+        if row.get("model"):
+            off.update(m for m in listed if m != str(row["model"]))
     runs = [run for _, run in pairs]
     for run in runs:
         run["minutes"] = run["seconds"] / 60 if run["seconds"] is not None else None
-    return {"label": spec, "runs": runs, "hashes": hashes, "models": models, "notes": notes}
+    return {"label": spec, "runs": runs, "hashes": hashes, "models": models, "models_used": sorted(used),
+            "models_off": sorted(off), "notes": notes}
 
 
 # ---- the numbers ----
@@ -117,19 +138,27 @@ def _by_task(runs: list[dict]) -> dict:
     return tasks
 
 
+def _clean(runs: list[dict]) -> list[dict]:
+    return [r for r in runs if not r["broken"]]
+
+
 def _task_row(runs: list[dict] | None) -> dict | None:
+    """Passing counts every run; the measures use the unbroken runs only (None when there is none)."""
     if not runs:
         return None
-    return {"runs": len(runs), "passed": sum(1 for r in runs if r["passed"]),
-            **{key: _median([r[key] for r in runs]) for key, _ in MEASURES}}
+    clean = _clean(runs)
+    return {"runs": len(runs), "passed": sum(1 for r in runs if r["passed"]), "broken": len(runs) - len(clean),
+            **{key: _median([r[key] for r in clean]) for key, _ in MEASURES}}
 
 
 def _summary(data: dict) -> dict:
     runs = data["runs"]
     tasks = _by_task(runs)
+    clean = _clean(runs)
     return {"label": data["label"], "runs": len(runs), "passed": sum(1 for r in runs if r["passed"]), "tasks": len(tasks),
+            "broken": len(runs) - len(clean),
             "tasks_all_passed": sum(1 for t in tasks.values() if all(r["passed"] for r in t)),
-            **{key: _median([r[key] for r in runs]) for key, _ in MEASURES}}
+            **{key: _median([r[key] for r in clean]) for key, _ in MEASURES}}
 
 
 def sign_test_p(wins_a: int, wins_b: int) -> float:
@@ -152,6 +181,21 @@ def _tasks(n: int) -> str:
     return f"{n} task" + ("" if n == 1 else "s")
 
 
+def _runs(n: int) -> str:
+    return f"{n} run" + ("" if n == 1 else "s")
+
+
+def _decide(tasks: int, b_wins: int, a_wins: int, same: bool) -> str:
+    """The one rule for every measure: at least MIN_TASKS tasks; `same` first; else the sign test must reach MAX_P."""
+    if tasks < MIN_TASKS:
+        return TOO_FEW
+    if same:
+        return "same"
+    if sign_test_p(a_wins, b_wins) <= MAX_P:
+        return "better" if b_wins > a_wins else "worse"
+    return TOO_FEW
+
+
 def passing_verdict(pairs: list[tuple[dict, dict]]) -> dict:
     """pairs: (task row of A, task row of B)."""
     a_more = sum(1 for a, b in pairs if Fraction(a["passed"], a["runs"]) > Fraction(b["passed"], b["runs"]))
@@ -159,32 +203,24 @@ def passing_verdict(pairs: list[tuple[dict, dict]]) -> dict:
     tied = len(pairs) - a_more - b_more
     p = sign_test_p(a_more, b_more)
     detail = f"B passed a larger share on {_tasks(b_more)}, A on {_tasks(a_more)}, {tied} tied" + (f"; p = {p:.3f}" if a_more + b_more else "")
-    if len(pairs) < MIN_TASKS:
-        verdict = TOO_FEW
-    elif a_more + b_more == 0:
-        verdict = "same"
-    elif p <= MAX_P:
-        verdict = "better" if b_more > a_more else "worse"
-    else:
-        verdict = TOO_FEW
+    verdict = _decide(len(pairs), b_more, a_more, a_more + b_more == 0)
     return {"measure": "passing", "name": "passing", "verdict": verdict, "detail": detail, "tasks": len(pairs)}
 
 
 def measure_verdict(key: str, name: str, pairs: list[tuple[dict, dict]]) -> dict:
-    ratios = [_ratio(a[key], b[key]) for a, b in pairs if a[key] is not None and b[key] is not None]
-    if not ratios:
+    """pairs: (task row of A, task row of B); a task with no number on one side is left out of this measure."""
+    both = [(a[key], b[key]) for a, b in pairs if a[key] is not None and b[key] is not None]
+    if not both:
         return {"measure": key, "name": name, "verdict": TOO_FEW, "detail": "no task has this number on both sides", "tasks": 0}
-    lower, higher = sum(1 for r in ratios if r < 1), sum(1 for r in ratios if r > 1)
-    equal = len(ratios) - lower - higher
+    ratios = [_ratio(a, b) for a, b in both]
+    lower, higher = sum(1 for a, b in both if b < a), sum(1 for a, b in both if b > a)
+    equal = len(both) - lower - higher
     median = statistics.median(ratios)
     shown = "no ratio (A is zero)" if median == float("inf") else f"median B/A {median:.2f}"
-    detail = f"{shown}; B lower on {_tasks(lower)}, higher on {_tasks(higher)}, equal on {equal}"
-    verdict = TOO_FEW
-    if len(ratios) >= MIN_TASKS:
-        for count, word in ((lower, "better"), (equal, "same"), (higher, "worse")):
-            if count / len(ratios) >= MIN_AGREE:
-                verdict = word
-    return {"measure": key, "name": name, "verdict": verdict, "detail": detail, "tasks": len(ratios)}
+    detail = f"{shown}; B lower on {_tasks(lower)}, higher on {_tasks(higher)}, equal on {equal}" + (
+        f"; p = {sign_test_p(higher, lower):.3f}" if lower + higher else "")
+    same = all(abs(r - 1) <= SAME_BAND + 1e-9 for r in ratios)      # the slack is for float rounding at exactly 5%
+    return {"measure": key, "name": name, "verdict": _decide(len(both), lower, higher, same), "detail": detail, "tasks": len(both)}
 
 
 def build_card(a: dict, b: dict, suite: str | None = None) -> dict:
@@ -201,7 +237,24 @@ def build_card(a: dict, b: dict, suite: str | None = None) -> dict:
         warnings.append(f"tasks only in {b['label']}, left out of the verdicts: {', '.join(only_b)}")
     if a["models"] and b["models"] and a["models"] != b["models"]:
         warnings.append("the two setups did not use the same model")
-    return {"a": _summary(a), "b": _summary(b), "compared": both, "only_a": only_a, "only_b": only_b, "verdicts": verdicts,
+    if a["models_used"] and b["models_used"] and a["models_used"] != b["models_used"]:
+        warnings.append(f"the two setups ran different models: {a['label']} used {', '.join(a['models_used'])}; "
+                        f"{b['label']} used {', '.join(b['models_used'])}")
+    for side in (a, b):
+        if side["models_off"]:
+            warnings.append(f"{side['label']} used a model other than its pinned model: {', '.join(side['models_off'])}")
+    summary_a, summary_b = _summary(a), _summary(b)
+    for summary in (summary_a, summary_b):
+        if summary["broken"]:
+            warnings.append(f"{summary['label']}: {_runs(summary['broken'])} broken (an error, or no session found); they count as "
+                            f"failed runs but are left out of cost, time, turns and agent calls")
+    no_clean = {}
+    for side, tasks in (("a", tasks_a), ("b", tasks_b)):
+        no_clean[side] = [t for t in both if not _clean(tasks[t])]
+        if no_clean[side]:
+            warnings.append(f"tasks with no unbroken run in {(a if side == 'a' else b)['label']}, left out of the cost, time, turns "
+                            f"and agent call comparisons: {', '.join(no_clean[side])}")
+    return {"a": summary_a, "b": summary_b, "compared": both, "no_clean": no_clean, "only_a": only_a, "only_b": only_b, "verdicts": verdicts,
             "table": [{"task": t, "a": _task_row(tasks_a.get(t)), "b": _task_row(tasks_b.get(t)), "compared": t in both}
                       for t in sorted(set(tasks_a) | set(tasks_b))],
             "warnings": warnings, "suite": suite, "models": sorted(set(a["models"]) | set(b["models"]))}
@@ -238,6 +291,8 @@ def render_text(card: dict) -> str:
     names = ("runs passed", "tasks all passed", "cost a run (median)", "minutes a run (median)", "turns (median)", "agent calls (median)")
     for name, x, y in zip(names, _cells(a), _cells(b)):
         lines.append(f"{name:<24}{x:>{width}}{y:>{width}}")
+    if a["broken"] or b["broken"]:
+        lines.append(f"{'broken runs':<24}{a['broken'] or '-':>{width}}{b['broken'] or '-':>{width}}")
     lines += ["", f"B compared with A, on {_tasks(len(card['compared']))} both have:"]
     lines += [f"  {v['name']:<18}{v['verdict']:<22}{v['detail']}" for v in card["verdicts"]]
     lines += ["", "How to read this:"] + [f"  {text}" for text in RULE]
@@ -259,6 +314,7 @@ h2 { font-size: 20px; font-weight: 500; margin: 64px 0 20px; color: #f0b79a; }
 .setups { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; margin-top: 40px; }
 .setup h3 { font-size: 16px; font-weight: 500; margin: 0 0 16px; }
 .numbers { display: flex; gap: 32px; }
+.setup > .small.worse { margin-top: 14px; }
 .number .big { font-size: 40px; line-height: 1.1; font-weight: 300; color: #f0b79a; }
 .number .small { display: block; margin-top: 8px; color: #8f8a85; }
 ul.verdicts { list-style: none; padding: 0; margin: 0; }
@@ -295,11 +351,13 @@ def _dots(row) -> str:
 
 
 def _setup_block(name: str, summary: dict) -> str:
+    broken = (f'<div class="small worse">{_e(_runs(summary["broken"]))} broken, left out of cost and time</div>'
+              if summary["broken"] else "")
     return (f'<div class="setup"><h3>{_e(name)}</h3><div class="numbers">'
             f'<div class="number"><span class="big">{_e(summary["passed"])} of {_e(summary["runs"])}</span><span class="small">runs passed</span></div>'
             f'<div class="number"><span class="big">{_e(_money(summary["cost"]))}</span><span class="small">cost a run</span></div>'
             f'<div class="number"><span class="big">{_e(_minutes(summary["minutes"]))}</span><span class="small">minutes a run</span></div>'
-            "</div></div>")
+            f"</div>{broken}</div>")
 
 
 def _cell(row, key: str) -> str:
@@ -323,9 +381,9 @@ def render_html(card: dict) -> str:
              "<th>Minutes in A</th><th>Minutes in B</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
              if rows else '<p class="muted">No runs to show.</p>')
     notes = "".join(f"<li>{_e(w)}</li>" for w in card["warnings"])
-    how = (f'<div class="how"><p>{_e(RULE[0])}</p><p>{_e(RULE[1])}</p><p>{_e(RULE[2])}</p>'
+    how = (f'<div class="how">{"".join(f"<p>{_e(text)}</p>" for text in RULE)}'
            f'<p>Runs: {_e(a["runs"])} in A and {_e(b["runs"])} in B; {_e(len(card["compared"]))} tasks are in both. '
-           f'Model: {_e(", ".join(card["models"]) or "not recorded")}. The numbers at the top use all of a setup\'s own runs; '
+           f'Model: {_e(", ".join(card["models"]) or "not recorded")}. The numbers at the top use all of a setup\'s own runs (cost and time only its unbroken ones); '
            f'the verdicts use only the tasks both have.</p>'
            + (f'<p class="accent">Warnings</p><ul>{notes}</ul>' if notes else '<p class="muted">No warnings.</p>') + "</div>")
     return ('<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">'

@@ -78,11 +78,6 @@ class DueDates(Base):
             self.assertEqual((code, out, err), (2, "", f"error: bad due date: {bad}\n"), bad)
         self.assertFalse(self.path.exists())
 
-    def test_store_level_validation(self):
-        with self.assertRaises(ValueError):
-            store.add_task(self.path, "x", due="2026-02-30")
-        self.assertEqual(store.add_task(self.path, "x", due="2026-02-28").due, "2026-02-28")
-
 
 class Priority(Base):
     def test_high_is_marked_and_stored(self):

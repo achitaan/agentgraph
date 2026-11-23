@@ -1,5 +1,6 @@
 """agentgraph.benchcard: made-up result rows in a temporary folder; the real results and config are never read."""
 import contextlib
+import html
 import io
 import json
 import re
@@ -53,6 +54,10 @@ class SignTestTests(unittest.TestCase):
         self.assertAlmostEqual(benchcard.sign_test_p(1, 7), 0.0703125)
         self.assertAlmostEqual(benchcard.sign_test_p(1, 6), 0.125)
         self.assertAlmostEqual(benchcard.sign_test_p(3, 3), 1.0)
+        self.assertAlmostEqual(benchcard.sign_test_p(1, 4), 0.375)        # 4 of 5
+        self.assertAlmostEqual(benchcard.sign_test_p(1, 5), 0.21875)      # 5 of 6
+        self.assertAlmostEqual(benchcard.sign_test_p(0, 6), 0.03125)      # 6 of 6
+        self.assertAlmostEqual(benchcard.sign_test_p(1, 7), 0.0703125)    # 7 of 8
 
 
 class PassingVerdictTests(CardBase):
@@ -71,6 +76,14 @@ class PassingVerdictTests(CardBase):
         self.assertEqual(self.verdicts()["passing"], benchcard.TOO_FEW)
         self.tasks(5, [1] + [0] * 4, [0, 1, 1, 1, 0])        # 3 to 1 with one tied
         self.assertEqual(self.verdicts()["passing"], benchcard.TOO_FEW)
+
+    def test_the_boundaries_of_the_one_rule(self):
+        for b_wins, a_wins, expected in ((5, 0, "better"), (4, 1, benchcard.TOO_FEW), (5, 1, benchcard.TOO_FEW), (6, 0, "better"),
+                                         (7, 1, "better"), (1, 7, "worse"), (0, 5, "worse")):
+            with self.subTest(b_wins=b_wins, a_wins=a_wins):
+                n = b_wins + a_wins
+                self.tasks(n, [0] * b_wins + [1] * a_wins, [1] * b_wins + [0] * a_wins)
+                self.assertEqual(self.verdicts()["passing"], expected)
 
     def test_fewer_than_five_tasks_never_gives_a_verdict(self):
         self.tasks(4, [0] * 4, [1] * 4)                      # p = 0.125 anyway
@@ -103,11 +116,35 @@ class MeasureVerdictTests(CardBase):
         self.write("B", [row("B", f"t{i}", True, cost=b[i], seconds=b[i] * 600, turns=b[i] * 10, calls=int(b[i] * 10), **kw) for i in range(n)])
         return self.verdicts()
 
-    def test_four_of_five_pointing_the_same_way_is_enough_and_three_of_five_is_not(self):
-        self.assertEqual(self.costs([1, 1, 1, 1, 1], [.5, .5, .5, .5, 2])["cost"], "better")      # 80%
-        self.assertEqual(self.costs([1, 1, 1, 1, 1], [.5, .5, .5, 2, 2])["cost"], benchcard.TOO_FEW)   # 60%
-        self.assertEqual(self.costs([1, 1, 1, 1, 1], [2, 2, 2, 2, .5])["cost"], "worse")
-        self.assertEqual(self.costs([1, 1, 1, 1, 1], [1, 1, 1, 1, 2])["cost"], "same")          # four equal of five
+    def split(self, b_lower, a_lower, tied=0, **kw):
+        """B is half of A on `b_lower` tasks, double on `a_lower`, equal on `tied`."""
+        return self.costs([1] * (b_lower + a_lower + tied), [.5] * b_lower + [2] * a_lower + [1] * tied, **kw)
+
+    def test_the_boundaries_of_the_one_rule_for_every_measure(self):
+        for b_lower, a_lower, expected in ((5, 0, "better"), (4, 1, benchcard.TOO_FEW), (5, 1, benchcard.TOO_FEW), (6, 0, "better"),
+                                           (7, 1, "better"), (1, 7, "worse"), (0, 5, "worse"), (3, 2, benchcard.TOO_FEW)):
+            with self.subTest(b_lower=b_lower, a_lower=a_lower):
+                verdicts = self.split(b_lower, a_lower)
+                self.assertEqual({verdicts[k] for k in ("cost", "minutes", "turns", "calls")}, {expected})
+
+    def test_ties_are_dropped_before_the_test(self):
+        self.assertEqual(self.split(5, 0, tied=3)["cost"], "better")                 # 5 to 0 of 8 tasks
+        self.assertEqual(self.split(4, 1, tied=3)["cost"], benchcard.TOO_FEW)
+
+    def test_same_needs_every_task_within_five_percent(self):
+        self.assertEqual(self.costs([1] * 5, [1] * 5)["cost"], "same")
+        self.assertEqual(self.costs([1] * 5, [1.04, .96, 1.05, .95, 1])["cost"], "same")
+        self.assertEqual(self.costs([1] * 5, [1.04, .96, 1.05, .95, 1.2])["cost"], benchcard.TOO_FEW)   # one task outside
+        self.assertEqual(self.costs([1] * 5, [1, 1, 1, 1, 2])["cost"], benchcard.TOO_FEW)               # four equal of five
+
+    def test_a_small_but_steady_difference_is_the_same(self):
+        verdicts = self.costs([1] * 5, [.97] * 5)       # B lower on all five, but inside the band
+        self.assertEqual(verdicts["cost"], "same")
+
+    def test_the_detail_shows_the_size_and_the_p_value(self):
+        detail = next(v["detail"] for v in self.card()["verdicts"] if v["measure"] == "cost") if self.split(5, 0) else ""
+        self.assertIn("median B/A 0.50", detail)
+        self.assertIn("p = 0.062", detail)
 
     def test_fewer_than_five_tasks_is_too_few_however_clear(self):
         self.assertEqual(self.costs([1] * 4, [.5] * 4)["cost"], benchcard.TOO_FEW)
@@ -133,6 +170,53 @@ class MeasureVerdictTests(CardBase):
         self.write("B", [dict(row("B", f"t{i}", True), cost=None) for i in range(5)])
         verdicts = self.verdicts()
         self.assertEqual((verdicts["cost"], verdicts["minutes"]), (benchcard.TOO_FEW, "same"))
+
+
+class BrokenRunTests(CardBase):
+    def five(self, label, **kw):
+        return [row(label, f"t{i}", True, **kw) for i in range(5)]
+
+    def test_a_broken_run_is_a_failed_run_but_leaves_every_measure(self):
+        crashed = dict(row("A", "t0", False, cost=0.0, seconds=0.0, turns=0, calls=0), error="boom", sessions=0)
+        self.write("A", self.five("A", cost=0.4, seconds=120.0, turns=8, calls=4)[1:] + [crashed, row("A", "t0", True, cost=0.4, seconds=120.0, turns=8, calls=4)])
+        card = self.card()
+        self.assertEqual((card["a"]["runs"], card["a"]["passed"], card["a"]["broken"]), (6, 5, 1))
+        self.assertEqual((card["a"]["cost"], card["a"]["minutes"], card["a"]["turns"], card["a"]["calls"]), (0.4, 2.0, 8, 4))
+        task = next(t for t in card["table"] if t["task"] == "t0")["a"]
+        self.assertEqual((task["runs"], task["passed"], task["broken"], task["cost"]), (2, 1, 1, 0.4))
+
+    def test_either_sign_of_a_broken_run_counts(self):
+        self.write("A", [dict(row("A", "t0", True), error="x"), dict(row("A", "t1", True), sessions=0), row("A", "t2", True, sessions=3),
+                         {k: v for k, v in row("A", "t3", True).items() if k not in ("error", "sessions")}])
+        runs = benchcard.load_runs("A", self.dir)["runs"]
+        self.assertEqual([r["broken"] for r in runs], [True, True, False, False])
+        self.write("l-suite", [lrow("direct", "t0", sessions=0), lrow("direct", "t1", error="x"), lrow("direct", "t2")])
+        self.assertEqual([r["broken"] for r in benchcard.load_runs("l-suite:direct", self.dir)["runs"]], [True, True, False])
+
+    def test_broken_runs_do_not_make_a_setup_look_cheap(self):
+        self.write("A", self.five("A", cost=1.0))
+        self.write("B", [dict(r, cost=0.0, error="boom", sessions=0, check={"passed": False, "detail": "d"}) for r in self.five("B", cost=1.0)[:3]] + self.five("B", cost=1.0)[3:])
+        card = self.card()
+        verdicts = {v["measure"]: v["verdict"] for v in card["verdicts"]}
+        self.assertEqual((verdicts["cost"], verdicts["minutes"]), (benchcard.TOO_FEW, benchcard.TOO_FEW))   # two tasks have numbers
+        self.assertEqual(card["b"]["cost"], 1.0)
+        self.assertEqual(card["no_clean"], {"a": [], "b": ["t0", "t1", "t2"]})
+        self.assertTrue(any("no unbroken run in B" in w and "t0, t1, t2" in w for w in card["warnings"]))
+        self.assertTrue(any("B: 3 runs broken" in w for w in card["warnings"]))
+        self.assertIn("A on 3 tasks", card["verdicts"][0]["detail"])                                          # broken runs still failed
+
+    def test_the_card_shows_the_count_in_text_and_page(self):
+        self.write("A", self.five("A"))
+        self.write("B", self.five("B")[:4] + [dict(row("B", "t4", False), error="boom", sessions=0)])
+        card = self.card()
+        text, page = benchcard.render_text(card), benchcard.render_html(card)
+        self.assertRegex(text, r"broken runs\s+-\s+1\n")
+        self.assertIn("warning: B: 1 run broken", text)
+        self.assertIn('<div class="small worse">1 run broken', page)
+        self.assertEqual(page.count("broken, left out"), 1)                                                   # only B has any
+        self.assertNotIn("boom", page + text)
+        clean = benchcard.render_text(self.card("A", "A"))
+        self.assertNotIn("broken", clean.split("How to read this")[0])
 
 
 class LabelProblemsTests(CardBase):
@@ -180,6 +264,21 @@ class LabelProblemsTests(CardBase):
         self.write("B", [row("B", "t0", True, model="openai/other")])
         self.assertTrue(any("not use the same model" in w for w in self.card()["warnings"]))
 
+    def test_models_used_that_differ_or_stray_from_the_pin_warn(self):
+        self.write("A", [row("A", "t0", True, models_used=[MODEL])])
+        self.write("B", [row("B", "t0", True, models_used=[MODEL, "openai/stray"])])
+        warnings = self.card()["warnings"]
+        self.assertTrue(any("ran different models" in w and "openai/stray" in w for w in warnings))
+        self.assertTrue(any(w.startswith("B used a model other than its pinned model: openai/stray") for w in warnings))
+        self.assertFalse(any(w.startswith("A used a model other") for w in warnings))
+        self.write("B", [row("B", "t0", True, models_used=[MODEL])])
+        self.assertFalse(any("model" in w for w in self.card()["warnings"]))
+
+    def test_rows_without_models_used_give_no_model_warning(self):
+        self.write("A", [row("A", "t0", True)])
+        self.write("B", [row("B", "t0", True, models_used="junk")])
+        self.assertFalse(any("model" in w for w in self.card()["warnings"]))
+
     def test_the_suite_option_keeps_only_that_suites_rows(self):
         self.write("A", [row("A", f"t{i}", True, suite="one") for i in range(5)] + [row("A", "extra", False)])
         self.write("B", [row("B", f"t{i}", True, suite="one") for i in range(5)])
@@ -218,9 +317,10 @@ class TextAndPageTests(CardBase):
         lines = text.splitlines()
         self.assertIn("passing           better", text)
         self.assertIn("5 of 5", text)
-        self.assertTrue(lines[-1].startswith("  Better, worse and same"))
-        self.assertIn("p value of at most 0.10", lines[-3])
-        self.assertIn("at least 80%", lines[-2])
+        self.assertEqual(lines[-len(benchcard.RULE):], [f"  {t}" for t in benchcard.RULE])
+        rule = " ".join(benchcard.RULE)
+        for words in ("fewer than 5 tasks can never give a verdict", "p value of at most 0.10", "within 5% of 1", "every task tied", "broken run"):
+            self.assertIn(words, rule)
         self.assertEqual(text.count("1 task "), 0)
 
     def test_html_escapes_everything_taken_from_the_rows(self):
@@ -247,6 +347,8 @@ class TextAndPageTests(CardBase):
         for colour in ("#121111", "#f0b79a", "#e8705f"):
             self.assertIn(colour, page)
         self.assertIn("How to read this", page)
+        for text in benchcard.RULE:
+            self.assertIn(f"<p>{html.escape(text)}</p>", page)
         body = re.sub(r"h1 \{[^}]*\}|h2 \{[^}]*\}|\.number \.big \{[^}]*\}", "", benchcard.CSS)   # headings and the big numbers aside
         self.assertEqual(sorted(set(re.findall(r"font(?:-size)?:\s*(\d+)px", body))), ["13", "16"])
 

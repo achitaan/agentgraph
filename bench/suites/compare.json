@@ -1,13 +1,11 @@
 {
   "name": "compare",
-  "note": "The four hard tasks plus the older tasks whose prompt names no toolkit feature, so plain OpenCode can be compared fairly on at least five tasks.",
+  "note": "Six distinct tasks: the four hard ones plus s1-simple and s2-parallel. All are checked by plain unit tests and none has a prompt that names a toolkit feature, so plain OpenCode can be compared fairly. With six tasks a verdict needs a clear sweep (one setup wins 5 or 6 of them with no win for the other); 5 wins to 1 is not enough.",
   "scenarios": [
     "h1-page-count",
     "h2-contact-shape",
     "h3-todo-flags",
     "h4-duration-spec",
-    "p4-graph-two",
-    "p4-solo",
     "s1-simple",
     "s2-parallel"
   ]

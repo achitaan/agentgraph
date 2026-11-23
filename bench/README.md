@@ -32,8 +32,8 @@ Three commands answer "on the same fixed tasks, is setup A better than setup B?"
 
 ```
 agentgraph bench plain-config --to DIR                    # plain OpenCode: provider entries and pinned model only, agent build
-agentgraph bench suite basic --setup toolkit=DIR1 --setup plain=DIR2 --reps 3 --budget 10
-agentgraph bench card toolkit plain --suite basic --html card.html
+agentgraph bench suite compare --setup toolkit=DIR1 --setup plain=DIR2 --reps 3 --budget 10
+agentgraph bench card toolkit plain --suite compare --html card.html
 ```
 
 - `plain-config` makes a scratch HOME like `scratch-config`, but keeps only an allow-list of settings keys (`PLAIN_KEYS`
@@ -45,9 +45,14 @@ agentgraph bench card toolkit plain --suite basic --html card.html
   reached the suite stops before the next run, says so and exits with code 3. Rows go to `bench/results/<LABEL>.jsonl`
   with a `suite` field.
 - `card A B` reads existing rows and prints a scorecard; `--html FILE` also writes a self-contained page. `l-suite:METHOD`
-  names the rows of `l-suite.jsonl` for one method. `--suite NAME` keeps only rows made by that suite. Passing is a sign
-  test over tasks (p <= 0.10); cost, time, turns and agent calls use the median over tasks of B/A, needing at least 5 tasks
-  with 80% or more the same way. Otherwise the line says "too few runs to say".
+  names the rows of `l-suite.jsonl` for one method. `--suite NAME` keeps only rows made by that suite.
+- Every verdict (passing, cost, time, turns, agent calls) uses one rule over the tasks both setups have: a task goes to the
+  setup that is better on it (passing: the larger share of runs passed; the others: the lower median), ties go to neither,
+  and an exact two-sided sign test must give p <= 0.10 (5 of 5 tasks is enough, 4 of 5 or 5 of 6 is not). `same` means
+  every task tied (passing) or within 5 percent (the others). At least 5 tasks are needed, so `hard` (4 tasks) and `basic`
+  (3 tasks) can never give a verdict on their own; use `compare` (six tasks, plain unit-test checks only) for plain against
+  toolkit. A run with an error or no session is broken: it counts as failed but is left out of cost, time, turns and calls.
+  Anything else says "too few runs to say".
 
 ## Hard tasks (`bench/suites/hard.json`)
 
@@ -62,4 +67,4 @@ Each task folder also has `solutions/reference/` (a correct solution) and `solut
 the files that differ from `fixture/`. They are never copied into a run's work folder (`prepare_work` copies `fixture/`
 only); `tests/test_bench_hard.py` uses them to prove that the fixture fails the visible check, the naive fix passes it
 and fails the hidden check, and the reference passes both. Hidden checks only test what the prompt or the fixture's own
-spec states.
+spec states. The suite has 4 tasks, too few for a verdict alone.
