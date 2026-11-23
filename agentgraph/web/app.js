@@ -115,6 +115,27 @@
       chip: verb + (named ? ' ' + tool : ''), key: [zone, kind, tool, target].join('|'),
       line: verb + (named ? ' ' + tool : '') + (target ? ' · ' + target : '') };
   }
+  // What a zone means in plain words (the details line "Now: ..."); a file tool that changes a file says so.
+  const LIVE_NOW = { terminal: 'running a command', files: 'reading a file', search: 'searching', web: 'reading a site', messaging: 'talking to a worker', spawn: 'talking to a worker', thinking: 'thinking', tasks: 'planning', tools: 'using a tool', replying: 'replying' };
+  const LIVE_EDITS = ['edit', 'multiedit', 'write', 'patch', 'apply_patch'];
+  function liveNow(live) {
+    if (!live) return '';
+    return live.zone === 'files' && LIVE_EDITS.includes(live.tool) ? 'editing a file' : LIVE_NOW[live.zone] || '';
+  }
+  // How long ago the agent's newest item was written, against the snapshot's own clock: "3 s ago", "2 min ago"; nothing when unknown.
+  function liveAgo(time, generated) {
+    const at = Number.isFinite(Number(generated)) && Number(generated) > 0 ? Number(generated) : Date.now() / 1000;
+    if (!(Number(time) > 0)) return '';
+    const seconds = Math.max(0, Math.floor(at - Number(time)));
+    return (seconds >= 3600 ? Math.floor(seconds / 3600) + ' h' : seconds >= 60 ? Math.floor(seconds / 60) + ' min' : seconds + ' s') + ' ago';
+  }
+  // What one agent has spent: the sum of its sessions' cost; '' under one cent (nothing is drawn then).
+  function liveSpent(agent) {
+    const sum = (Array.isArray(agent?.sessions) ? agent.sessions : []).reduce((total, session) => total + (Number(session && session.cost) > 0 ? Number(session.cost) : 0), 0);
+    return sum >= .01 ? '$' + sum.toFixed(2) : '';
+  }
+  // The size of a worker's zone mark, by its circle (a small still glyph at its centre).
+  const zoneMarkSize = r => Math.max(9, Math.min(14, Math.round((Number(r) || 0) * .42)));
   function liveGlyph(zone, size, centred) {
     const group = svg('g', { class: 'ag-live-glyph', 'aria-hidden': 'true', transform: (centred ? 'translate(' + (-size / 2) + ' ' + (-size / 2) + ') ' : '') + 'scale(' + (size / 14).toFixed(3) + ')' });
     (LIVE_GLYPHS[zone] || LIVE_GLYPHS.tools).forEach(([tag, attrs]) => group.append(svg(tag, attrs)));
@@ -1682,27 +1703,48 @@
     function resetMoves() {
       if (applyMoves(layoutKey(), {}, true)) fitView(false);
     }
+    // The dim amount after a name (".ag-agent-cost", "· $1.20"): its width with the gap before it (0 when none is drawn), and its place
+    // to the right of the name whose centre is at x and whose width is `width`.
+    const COST_GAP = 4;
+    const costSizes = new Map();
+    function costExtra(node) {
+      const label = node.querySelector(':scope > .ag-agent-cost'), words = label ? label.textContent : '';
+      if (!words) return 0;
+      let width = costSizes.get(words);
+      if (width === undefined) { width = label.getBBox().width; if (!(width > 0)) return 0; if (costSizes.size > 200) costSizes.clear(); costSizes.set(words, width); }
+      return width + COST_GAP;
+    }
+    function costPlace(node, x, width) {
+      const label = node.querySelector(':scope > .ag-agent-cost'), name = node.querySelector(':scope > .ag-agent-name');
+      if (!label) return;
+      const at = (x + width / 2 + COST_GAP).toFixed(2), y = name.getAttribute('y');
+      if (label.getAttribute('x') !== at) label.setAttribute('x', at);
+      if (label.getAttribute('y') !== y) label.setAttribute('y', y);
+    }
     function measureLabels(node, point) {
       if (!node || !point) return false;
       let low = -point.r - 8, high = point.r + 8;
       ['.ag-agent-name'].forEach(selector => {
-        const label = node.querySelector(selector);
+        const label = node.querySelector(selector), amount = costExtra(node);
         let measured = label.getBBox().width, shift = 0;
         if (arrangement === 'compact' && viewport.clientWidth > 0) {
-          const half = viewport.clientWidth / 2, limit = Math.max(24, viewport.clientWidth - 12), original = label.textContent;
+          const half = viewport.clientWidth / 2, limit = Math.max(24, viewport.clientWidth - 12 - amount), original = label.textContent;
           let count = original.length;
           while (measured > limit && count > 1) {
             count = Math.max(1, Math.floor(count * limit / measured) - 1);
             label.textContent = original.slice(0, count).trim() + '…';
             measured = label.getBBox().width;
           }
-          const room = Math.max(0, half - measured / 2 - 6);
+          const room = Math.max(0, half - (measured + amount) / 2 - 6);
           shift = clamp(point.x, -room, room) - point.x;
         }
-        label.setAttribute('x', shift); label.setAttribute('y', point.labelUp ? -point.r - 8 : point.r + 20); // the layout's own place (labelsPlace moves it after)
-        low = Math.min(low, shift - measured / 2 - 2); high = Math.max(high, shift + measured / 2 + 2);
+        // The name with its dim amount to its right is one box, centred where the name alone would be.
+        const nameX = shift - amount / 2;
+        label.setAttribute('x', nameX); label.setAttribute('y', point.labelUp ? -point.r - 8 : point.r + 20); // the layout's own place (labelsPlace moves it after)
+        costPlace(node, nameX, measured);
+        low = Math.min(low, shift - (measured + amount) / 2 - 2); high = Math.max(high, shift + (measured + amount) / 2 + 2);
         // The name's height, for lines that keep clear of it.
-        const box = label.getBBox(); Object.assign(point, { labelLeft: box.x, labelRight: box.x + box.width, labelTop: box.y, labelBottom: box.y + box.height, labelShift: shift });
+        const box = label.getBBox(); Object.assign(point, { labelLeft: box.x, labelRight: box.x + box.width + amount, labelTop: box.y, labelBottom: box.y + box.height, labelShift: shift });
       });
       const changed = Math.abs((point.labelMin ?? 0) - low) > .1 || Math.abs((point.labelMax ?? 0) - high) > .1;
       point.labelMin = low; point.labelMax = high; point.labelWidth = Math.max(-low, high);
@@ -1767,8 +1809,8 @@
         const chosen = (selected?.type === 'agent' && selected.key === t.id) || labelHover === t.id || labelFocus === t.id;
         const seat = !!p.parent && t.id !== hubName;
         const tier = t.id === hubName ? 0 : needs ? 1 : busy ? 2 : chosen ? 3 : seat ? 5 : 4;
-        const core = (Number(p.r) || 0) * s;
-        return { id: t.id, w: (size.w + 2 * LABEL_PAD) * s, h: (size.h + LABEL_PAD) * s, asc: (size.asc + LABEL_PAD / 2) * s, cx: p.x, cy: p.y, r: core + (t.id === hubName ? 0 : 4 * s), cr: core, z: t.z, tier, forced: chosen || needs, asked: chosen, claim: t.id === hubName, dx: (Number(p.labelShift) || 0) * s,
+        const core = (Number(p.r) || 0) * s, extra = costExtra(node);
+        return { id: t.id, extra, w: (size.w + extra + 2 * LABEL_PAD) * s, h: (size.h + LABEL_PAD) * s, asc: (size.asc + LABEL_PAD / 2) * s, cx: p.x, cy: p.y, r: core + (t.id === hubName ? 0 : 4 * s), cr: core, z: t.z, tier, forced: chosen || needs, asked: chosen, claim: t.id === hubName, dx: (Number(p.labelShift) || 0) * s,
           // The orchestrator's name has the spot under it. A seat above its lead has its name above it first (in 2D, where that is where the layout put it).
           places: t.id === hubName ? ['below'] : !in3d && p.labelUp ? labelOrder(['above', 'below', 'right', 'left']) : undefined, prev: labelState.get(t.id), size };
       }).filter(Boolean);
@@ -1789,10 +1831,11 @@
         labelState.set(item.id, found);
         const thing = item.id === SIDE_KEY ? { node: moon, p: { x: pose.x, y: pose.y }, label: moon.querySelector('.ag-side-name'), s: pose.scale } : things.find(t => t.id === item.id);
         const { p, label, s } = thing;
-        const x = ((found.x + found.w / 2) - p.x) / s, y = (found.baseline - p.y) / s;
+        const extra = item.extra || 0, x = ((found.x + found.w / 2) - p.x) / s - extra / 2, y = (found.baseline - p.y) / s;
         const fx = x.toFixed(2), fy = y.toFixed(2);
         if (label.getAttribute('x') !== fx) label.setAttribute('x', fx);
         if (label.getAttribute('y') !== fy) label.setAttribute('y', fy);
+        if (extra) costPlace(thing.node, x, item.size.w);
         if (label.hasAttribute('transform')) label.removeAttribute('transform');
         const shown = found.shown;
         if (calm) label.style.transition = 'none'; else if (label.style.transition) label.style.transition = '';
@@ -1813,6 +1856,8 @@
         }
         if (shown && !raise) { if (label.style.opacity) label.style.opacity = ''; } else if (label.style.opacity !== '0') label.style.opacity = '0';
         label.dataset.place = found.place; label.dataset.shown = shown ? '1' : '0'; label.dataset.held = found.held ? '1' : '0';
+        const costText = thing.node?.querySelector?.(':scope > .ag-agent-cost');
+        if (costText) { const quiet = label.style.opacity === '0' ? '0' : ''; if (costText.style.opacity !== quiet) costText.style.opacity = quiet; if (costText.style.transition !== label.style.transition) costText.style.transition = label.style.transition; }
         if (item.id !== SIDE_KEY) p.placedBox = shown ? { left: found.x + LABEL_PAD * s - p.x, right: found.x + found.w - LABEL_PAD * s - p.x, top: found.y + LABEL_PAD / 2 * s - p.y, bottom: found.y + found.h - LABEL_PAD / 2 * s - p.y } : null; // (the name's own box: the backing's margin is not an obstacle)
         else side.placedBox = shown ? { left: found.x, right: found.x + found.w, top: found.y, bottom: found.y + found.h } : null;
       });
@@ -1849,6 +1894,8 @@
           node.style.setProperty('--ag-order', String(nodes.size)); node.style.setProperty('--ag-phase', (-(nodes.size * 1.37) % 7).toFixed(2) + 's');
           node.append(svg('circle', { class: 'ag-ping' }), svg('circle', { class: 'ag-halo' }), svg('circle', { class: 'ag-hub-wake' }), svg('circle', { class: 'ag-hub-orbit' }), svg('circle', { class: 'ag-core' }), svg('circle', { class: 'ag-hub-progress', transform: 'rotate(-90)' }), svg('circle', { class: 'ag-spark' }));
           node.append(svg('text', { class: 'ag-agent-name', 'text-anchor': 'middle' }));
+          // What the agent has spent, dim, on the line of its name (drawn only above one cent, and not for the orchestrator).
+          node.append(svg('text', { class: 'ag-agent-cost', 'text-anchor': 'start', 'aria-hidden': 'true' }));
           // The only text on an agent is its name, and a count of its sessions working now when there are two or more.
           node.append(svg('text', { class: 'ag-busy-count', 'data-busy-count': agent.name, 'text-anchor': 'middle', 'dominant-baseline': 'central' }));
           node.append(svg('circle', { class: 'ag-learn-track' }), svg('g', { class: 'ag-learn-beads' }), svg('circle', { class: 'ag-learn-hit', 'data-learning': '', role: 'button', tabindex: 0, 'aria-label': 'Learning' }), svg('circle', { class: 'ag-alert', r: 4 }), svg('title'));
@@ -1859,10 +1906,21 @@
         const work = busy && active.length ? text(active[0].goal || active[0].id) + (active.length > 1 ? ', and ' + (active.length - 1) + ' more' : '') : '';
         node.dataset.busy = String(busy); node.dataset.group = agent.group;
         // The hub's live detail (zone chip and trail), when the back end gives a zone; nothing otherwise.
-        const live = isHub ? liveOf(agent) : null, shownLive = node.querySelector(':scope > .ag-live');
-        if (!live) { shownLive?.remove(); delete node.dataset.zone; }
+        // A worker that is busy gets only a small still mark of its zone inside its circle (never a chip, never its target).
+        const live = busy || isHub ? liveOf(agent) : null, shownLive = node.querySelector(':scope > .ag-live');
+        const zoneMark = node.querySelector(':scope > .ag-zone-mark');
+        if (!live || isHub) { shownLive?.remove(); }
+        if (!live) delete node.dataset.zone;
+        if (!live || isHub) zoneMark?.remove();
         else {
           node.dataset.zone = live.zone;
+          if (!zoneMark || zoneMark.dataset.zone !== live.zone || zoneMark.dataset.r !== String(p.r)) {
+            const next = svg('g', { class: 'ag-zone-mark', 'aria-hidden': 'true', 'data-zone': live.zone, 'data-r': String(p.r) });
+            const glyph = liveGlyph(live.zone, zoneMarkSize(p.r), true); next.append(glyph);
+            if (zoneMark) zoneMark.replaceWith(next); else node.querySelector('.ag-spark').after(next);
+          }
+        }
+        if (live && isHub) {
           const stamp = JSON.stringify([live, p.r]);
           if (!shownLive || shownLive.dataset.stamp !== stamp) {
             const next = liveGroup(live, p.r, !reducedMotion() && (!shownLive || shownLive.dataset.key !== live.key)); next.dataset.stamp = stamp;
@@ -1922,13 +1980,15 @@
         // A group's lead with its members round it is drawn as the council is.
         node.classList.toggle('ag-team-lead', !council && Array.from(positions.values()).some(point => point.parent === agent.name));
         node.querySelector('.ag-agent-name').textContent = displayName(agent);
+        const spent = isHub ? '' : liveSpent(agent), costLabel = node.querySelector(':scope > .ag-agent-cost');
+        if (costLabel.textContent !== '· ' + spent && (spent || costLabel.textContent)) costLabel.textContent = spent ? '· ' + spent : '';
         node.querySelector('title').textContent = flowErrors.get(agent.name) || agent.name;
         node.dataset.armed = String(!trailPending && trail.at(-1) === agent.name);
         node.dataset.trail = String(trail.includes(agent.name));
         const writes = (rosterAction ? (canAddAgent() ? ' N' : '') + (removableOf(agent.name).ok ? ' Delete' : '') : '');
         if (flowAction) node.setAttribute('aria-keyshortcuts', 'Enter Shift+Enter I Shift+F10 ContextMenu C L R Alt+ArrowUp Alt+ArrowDown Alt+ArrowLeft Alt+ArrowRight Backspace Escape' + writes);
         else if (writes) node.setAttribute('aria-keyshortcuts', writes.trim()); else node.removeAttribute('aria-keyshortcuts');
-        node.setAttribute('aria-label', agent.name + (busy ? ', working' + (work ? ', ' + work : '') + (live ? ', ' + live.line : '') : ', idle') + (alerts.has(agent.name) ? ', ' + alerts.get(agent.name) : ''));
+        node.setAttribute('aria-label', agent.name + (busy ? ', working' + (work ? ', ' + work : '') + (live ? ', ' + (isHub ? live.line : liveNow(live)) : '') : ', idle') + (alerts.has(agent.name) ? ', ' + alerts.get(agent.name) : ''));
         positionNode(agent.name);
         labelsChanged = measureLabels(node, p) || labelsChanged;
       });
@@ -5858,9 +5918,16 @@
         eyebrow.textContent = 'Agent';
         if (!agent) { detailScroll.append(el('h2', 'ag-detail-title', 'Unavailable')); return; }
         detailScroll.append(el('h2', 'ag-detail-title', agent.name));
-        const doing = activityLine(agent);
-        if (doing) { const line = el('p', 'ag-detail-activity', doing); line.dataset.kind = text(agent.activity.kind); detailScroll.append(line); }
-        const recent = liveOf(agent);
+        const recent = liveOf(agent), words = agent.busy ? liveNow(recent) : '';
+        if (words) {
+          // "Now: reading a file · 3 s ago", then what it is working on (its cleaned target) on a line of its own, dim and cut short.
+          const ago = liveAgo(agent.activity.time, snapshot?.generated), line = el('p', 'ag-detail-activity ag-detail-now', 'Now: ' + words + (ago ? ' · ' + ago : ''));
+          line.dataset.kind = text(agent.activity.kind); line.dataset.zone = recent.zone; detailScroll.append(line);
+          if (recent.target) { const target = el('p', 'ag-detail-target', recent.target); target.title = recent.target; detailScroll.append(target); }
+        } else if (agent.busy) {
+          const doing = activityLine(agent);
+          if (doing) { const line = el('p', 'ag-detail-activity', doing); line.dataset.kind = text(agent.activity.kind); detailScroll.append(line); }
+        }
         if (recent && recent.recent.length) detailScroll.append(liveList(recent));
         if (agent.about) detailScroll.append(el('p', 'ag-detail-about', text(agent.about)));
         detailScroll.append(el('p', 'ag-detail-intro', agent.model || '—'));
@@ -7088,6 +7155,8 @@
       node.querySelector(':scope > .ag-ping')?.setAttribute('r', r);
       node.querySelector(':scope > .ag-halo')?.setAttribute('r', Math.max(r + 8, MOON_PICK / ((camera.scale || 1) * d.s)).toFixed(2));
       node.querySelector(':scope > .ag-spark')?.setAttribute('r', (4 * k).toFixed(2));
+      const zoneMark = node.querySelector(':scope > .ag-zone-mark');
+      if (zoneMark) { if (Math.abs(k - 1) > .005) zoneMark.setAttribute('transform', 'scale(' + k.toFixed(3) + ')'); else zoneMark.removeAttribute('transform'); }
       const mark = node.querySelector(':scope > .ag-alert'); if (mark) { mark.setAttribute('cx', -r * .72); mark.setAttribute('cy', -r * .72); }
       const badge = node.querySelector(':scope > .ag-busy-count'), corner = (r + 10) * Math.SQRT1_2;
       if (badge) { badge.setAttribute('x', corner); badge.setAttribute('y', -corner); }

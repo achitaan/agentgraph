@@ -2930,6 +2930,39 @@ await check("the hub's live detail: a zone chip with its target and a trail of f
   assert.equal(bare.find("ag-live-target").length, 0);
 });
 
+await check("a worker's live words, age and spend: plain words from its zone, 'N s ago' against the snapshot clock, an amount only from one cent", () => {
+  const source = fs.readFileSync(path.join(ORCHESTRATION, "agentgraph", "web", "app.js"), "utf8");
+  const block = source.slice(source.indexOf("// live-activity:begin"), source.indexOf("// live-activity:end"));
+  assert.match(CODE, /ag-zone-mark/);
+  assert.match(CODE, /ag-agent-cost/);
+  assert.match(CODE, /ag-detail-target/);
+  const helpers = new Function("document", "NS", "el", "svg", `${block}\nreturn { liveOf, liveNow, liveAgo, liveSpent };`)({}, "ns", () => ({}), () => ({}));
+  const worker = (zone, tool, extra = {}) => ({ busy: 1, activity: { kind: tool ? "tool" : "reasoning", tool, zone, time: 1, ...extra } });
+  const words = (zone, tool) => helpers.liveNow(helpers.liveOf(worker(zone, tool)));
+  assert.equal(words("terminal", "shell"), "running a command");
+  assert.equal(words("files", "read"), "reading a file");
+  assert.equal(words("files", "edit"), "editing a file");
+  assert.equal(words("files", "apply_patch"), "editing a file");
+  assert.equal(words("search", "grep"), "searching");
+  assert.equal(words("web", "webfetch"), "reading a site");
+  assert.equal(words("spawn", "subagent"), "talking to a worker");
+  assert.equal(words("messaging", "send"), "talking to a worker");
+  assert.equal(words("thinking", null), "thinking");
+  assert.equal(helpers.liveNow(null), "");
+  assert.equal(helpers.liveAgo(100, 103.4), "3 s ago");
+  assert.equal(helpers.liveAgo(100, 100), "0 s ago");
+  assert.equal(helpers.liveAgo(100, 250), "2 min ago");
+  assert.equal(helpers.liveAgo(100, 100 + 7300), "2 h ago");
+  assert.equal(helpers.liveAgo(0, 100), "");
+  assert.equal(helpers.liveAgo(200, 100), "0 s ago");
+  assert.equal(helpers.liveSpent({ sessions: [{ cost: 0.004 }, { cost: 0.004 }] }), "");
+  assert.equal(helpers.liveSpent({ sessions: [{ cost: 0.0049 }] }), "");
+  assert.equal(helpers.liveSpent({ sessions: [{ cost: 0.6 }, { cost: 0.6 }, { cost: "bad" }, null] }), "$1.20");
+  assert.equal(helpers.liveSpent({ sessions: [{ cost: 0.01 }] }), "$0.01");
+  assert.equal(helpers.liveSpent({ sessions: [{ cost: -3 }] }), "");
+  assert.equal(helpers.liveSpent({}), "");
+});
+
 await check("n20 bundle: the page code in the panel tells a quiet or orphan step from a live one (plain words, no animation), as the web page does", () => {
   assert.match(CODE, /Reported running · no session/);
   assert.match(CODE, /Reported running · ' \+ idleFor\(/);

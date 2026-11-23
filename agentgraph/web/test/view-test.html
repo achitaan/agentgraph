@@ -2911,6 +2911,125 @@
       });
       window.nameSizes = sizes;
     });
+    // A worker's live mark, its spend beside its name, and the "Now:" lines (made-up values only).
+    function workerFixture() {
+      const data = fixture(), by = name => data.agents.find(item => item.name === name);
+      data.generated = 1000;
+      by('impl-openai').activity = { kind: 'tool', tool: 'shell', text: null, time: 995, zone: 'terminal', status: 'running', target: 'make build-demo --flag' };
+      by('impl-openai').sessions = [{ id: 's1', title: 'Work', busy: true, model: 'Test model', cost: 0.7 }, { id: 's1b', title: 'Before', busy: false, model: 'Test model', cost: 0.5 }];
+      by('impl-claude').busy = 1; by('impl-claude').sessions = [{ id: 's2', title: 'Work', busy: true, model: 'Test model', cost: 0.003 }];
+      by('impl-claude').activity = { kind: 'tool', tool: 'edit', text: null, time: 990, zone: 'files', status: 'running', target: 'src/made-up/file.py' };
+      by('impl-hard').busy = 1; by('impl-hard').sessions = [{ id: 's3', title: 'Work', busy: true, model: 'Test model', cost: 0 }];
+      by('impl-hard').activity = { kind: 'reasoning', text: null, time: 999, zone: 'thinking' };
+      by('reviewer').sessions = [{ id: 's4', title: 'Old', busy: false, model: 'Test model', cost: 2.5 }];
+      by('reviewer').activity = { kind: 'tool', tool: 'shell', time: 1, zone: 'terminal', target: 'idle-agent-secret-target' };
+      return data;
+    }
+    await test('worker marks: a busy worker with a zone has one small still glyph at the centre of its circle (no text, no chip, no animation, the spark dot gives way); an idle one, or the orchestrator\'s, has none', async () => {
+      await using(workerFixture(), async root => {
+        for (const [width, height] of [[1400, 900], [530, 670]]) {
+          await resizeTo(root, width, height); await settled();
+          const marks = [...root.querySelectorAll('.ag-drawing .ag-zone-mark')];
+          assert(marks.length === 3, 'expected 3 marks, got ' + marks.length + ' at ' + width);
+          const zones = Object.fromEntries(marks.map(mark => [mark.parentNode.dataset.agent, mark.dataset.zone]));
+          assert(JSON.stringify(zones) === JSON.stringify({ 'impl-openai': 'terminal', 'impl-claude': 'files', 'impl-hard': 'thinking' }), 'marks: ' + JSON.stringify(zones));
+          marks.forEach(mark => {
+            const node = mark.parentNode, core = box(node.querySelector('.ag-core')), glyph = box(mark);
+            assert(node.dataset.zone === mark.dataset.zone && !mark.querySelector('text') && !node.querySelector('.ag-live'), 'a worker has text or a chip: ' + node.dataset.agent);
+            assert(glyph.width >= 4 && glyph.width <= 16 && glyph.height <= 16, 'the mark is not small: ' + glyph.width + ' x ' + glyph.height);
+            assert(glyph.left >= core.left && glyph.right <= core.right && glyph.top >= core.top && glyph.bottom <= core.bottom, 'the mark is not inside its circle: ' + node.dataset.agent);
+            assert(Math.abs((glyph.left + glyph.right) / 2 - (core.left + core.right) / 2) < 2 && Math.abs((glyph.top + glyph.bottom) / 2 - (core.top + core.bottom) / 2) < 2, 'the mark is not at the centre');
+            assert(getComputedStyle(node.querySelector('.ag-spark')).display === 'none', 'the spark dot is still drawn under the mark');
+            assert(getComputedStyle(mark).animationName === 'none' && getComputedStyle(mark.firstElementChild).animationName === 'none', 'the mark moves');
+            assert(mark.getAttribute('aria-hidden') === 'true' && !/make build|file\.py|secret/.test(node.getAttribute('aria-label')), 'the target is in the accessible name: ' + node.getAttribute('aria-label'));
+          });
+          assert(/running a command/.test(nodeOf(root, 'impl-openai').getAttribute('aria-label')), 'the zone is not in the accessible name');
+          ['reviewer', 'orchestrator', 'oracle'].forEach(name => { const node = nodeOf(root, name); if (node) assert(!node.querySelector('.ag-zone-mark') && !(name !== 'orchestrator' && node.dataset.zone), name + ' has a mark though it is not working'); });
+          // None of the target text is anywhere on the canvas.
+          assert(!/make build|file\.py|secret/.test(root.querySelector('.ag-drawing').textContent), 'a target is drawn on the canvas');
+        }
+      });
+    });
+    await test('worker spend: "· $1.20" beside a name above one cent (the name text stays the name), nothing under a cent or at zero or for the orchestrator; names stay 11 px, apart from each other and inside the canvas', async () => {
+      for (const [width, height] of [[1400, 900], [900, 600], [530, 670]]) await using(workerFixture(), async root => {
+        {
+          await resizeTo(root, width, height); await settled();
+          await new Promise(resolve => setTimeout(resolve, 450)); await settled(); // (a name held in its place for 300 ms while blocked)
+          const costs = Object.fromEntries([...root.querySelectorAll('.ag-drawing .ag-agent')].map(node => [node.dataset.agent, node.querySelector('.ag-agent-cost').textContent]));
+          assert(costs['impl-openai'] === '· $1.20' && costs['reviewer'] === '· $2.50', 'amounts: ' + JSON.stringify(costs));
+          assert(costs['impl-claude'] === '' && costs['impl-hard'] === '' && costs['orchestrator'] === '', 'a small or zero amount is drawn: ' + JSON.stringify(costs));
+          assert(nodeOf(root, 'impl-openai').querySelector('.ag-agent-name').textContent === 'impl-openai', 'the name text changed');
+          const view = box(root.querySelector('.ag-viewport')), shown = [];
+          root.querySelectorAll('.ag-drawing .ag-agent').forEach(node => {
+            const name = node.querySelector('.ag-agent-name'), cost = node.querySelector('.ag-agent-cost');
+            if (name.dataset.shown !== '1' || getComputedStyle(name).opacity === '0') return;
+            const a = box(name); shown.push({ id: node.dataset.agent, a });
+            if (cost.textContent) {
+              const b = box(cost);
+              assert(getComputedStyle(cost).opacity !== '0', 'the amount is hidden while its name shows: ' + node.dataset.agent);
+              assert(b.left >= a.right - 1 && b.left - a.right < 12 && Math.abs((b.top + b.bottom) / 2 - (a.top + a.bottom) / 2) < 6, 'the amount is not on the name\'s line: ' + node.dataset.agent + ' ' + [a.right, b.left]);
+              assert(b.left >= view.left - 1 && b.right <= view.right + 1, 'the amount leaves the canvas at ' + width + ': ' + node.dataset.agent + ' ');
+              shown.push({ id: node.dataset.agent + '$', a: b });
+              assert(parseFloat(getComputedStyle(cost).fontSize) < parseFloat(getComputedStyle(name).fontSize) && getComputedStyle(cost).fill !== getComputedStyle(name).fill, 'the amount is not dimmer and smaller');
+            }
+          });
+          assert(nameSize(root) >= 11 - .01, 'names under 11 px at ' + width);
+          shown.forEach((one, i) => shown.slice(i + 1).forEach(other => {
+            if (one.id + '$' === other.id || other.id + '$' === one.id) return;
+            const x = Math.min(one.a.right, other.a.right) - Math.max(one.a.left, other.a.left), y = Math.min(one.a.bottom, other.a.bottom) - Math.max(one.a.top, other.a.top);
+            assert(!(x > 1 && y > 1), one.id + ' and ' + other.id + ' overlap at ' + width);
+          }));
+          // No name or amount sits over a planet's circle.
+          root.querySelectorAll('.ag-drawing .ag-agent').forEach(node => {
+            const core = box(node.querySelector('.ag-core')), cx = (core.left + core.right) / 2, cy = (core.top + core.bottom) / 2, r = core.width / 2;
+            shown.forEach(item => {
+              if (item.id.replace('$', '') === node.dataset.agent) return;
+              const nx = Math.max(item.a.left, Math.min(cx, item.a.right)), ny = Math.max(item.a.top, Math.min(cy, item.a.bottom));
+              assert(Math.hypot(nx - cx, ny - cy) >= r - 1, item.id + ' covers the circle of ' + node.dataset.agent + ' at ' + width);
+            });
+          });
+        }
+      });
+    });
+    await test('worker details: "Now: <words> · N s ago" under the name, the cleaned target on a line of its own, "Spent" for the agent; no Now line for an idle agent; no target anywhere else', async () => {
+      await using(workerFixture(), async root => {
+        await openAgent(root, 'impl-openai'); await settled();
+        const now = root.querySelector('.ag-detail-now'), target = root.querySelector('.ag-detail-target');
+        assert(now && now.textContent === 'Now: running a command · 5 s ago', 'the Now line: ' + now?.textContent);
+        assert(root.querySelector('.ag-detail-title').nextElementSibling === now && now.nextElementSibling === target, 'the lines are not under the name in order');
+        assert(target.textContent === 'make build-demo --flag' && getComputedStyle(target).whiteSpace === 'nowrap' && getComputedStyle(target).textOverflow === 'ellipsis', 'the target line is not one truncated line: ' + target.textContent);
+        assert(parseFloat(getComputedStyle(target).fontSize) < parseFloat(getComputedStyle(now).fontSize) + 1 && getComputedStyle(target).color !== getComputedStyle(root.querySelector('.ag-detail-title')).color, 'the target is not dim');
+        const spent = [...root.querySelectorAll('.ag-stat')].find(item => item.querySelector('.ag-stat-label').textContent === 'Spent');
+        assert(spent && spent.querySelector('.ag-stat-value').textContent === '$1.20', 'Spent: ' + spent?.textContent);
+        root.querySelector('.ag-close').click(); await settled();
+        await openAgent(root, 'impl-claude'); await settled();
+        assert(root.querySelector('.ag-detail-now').textContent === 'Now: editing a file · 10 s ago', 'edit tool: ' + root.querySelector('.ag-detail-now')?.textContent);
+        root.querySelector('.ag-close').click(); await settled();
+        await openAgent(root, 'impl-hard'); await settled();
+        assert(root.querySelector('.ag-detail-now').textContent === 'Now: thinking · 1 s ago' && !root.querySelector('.ag-detail-target'), 'thinking: ' + root.querySelector('.ag-detail-now')?.textContent);
+        root.querySelector('.ag-close').click(); await settled();
+        await openAgent(root, 'reviewer'); await settled();
+        assert(!root.querySelector('.ag-detail-now') && !root.querySelector('.ag-detail-target') && !/idle-agent-secret-target/.test(root.textContent), 'an idle agent shows a Now line or its stale target');
+        const spentIdle = [...root.querySelectorAll('.ag-stat')].find(item => item.querySelector('.ag-stat-label').textContent === 'Spent');
+        assert(spentIdle && spentIdle.querySelector('.ag-stat-value').textContent === '$2.50', 'idle Spent: ' + spentIdle?.textContent);
+      });
+    });
+    await test('worker marks in 3D: the marks and amounts show there too, scaled with their planets, no chip, names apart', async () => {
+      await using(workerFixture(), async root => {
+        await resizeTo(root, 1400, 900); await settled();
+        root.querySelector('.ag-viewport').focus({ preventScroll: true }); press(root.querySelector('.ag-viewport'), 'd');
+        for (let i = 0; i < 100 && !(root.dataset.agView === '3d' && root.dataset.agBlend === '1'); i++) await new Promise(resolve => setTimeout(resolve, 20));
+        assert(root.dataset.agView === '3d' && root.dataset.agBlend === '1', 'the 3D view did not open');
+        await new Promise(resolve => setTimeout(resolve, 600)); await settled();
+        const marks = [...root.querySelectorAll('.ag-drawing .ag-zone-mark')];
+        assert(marks.length === 3, 'marks in 3D: ' + marks.length);
+        marks.forEach(mark => {
+          const core = box(mark.parentNode.querySelector('.ag-core')), glyph = box(mark);
+          assert(glyph.left >= core.left - .5 && glyph.right <= core.right + .5 && glyph.top >= core.top - .5 && glyph.bottom <= core.bottom + .5, 'a mark is outside its planet in 3D');
+        });
+        assert(nodeOf(root, 'impl-openai').querySelector('.ag-agent-cost').textContent === '· $1.20', 'no amount in 3D');
+      });
+    });
     await test('ui E/F (report): which lines show in the busy state; none ends outside the canvas; lines near a third agent', async () => {
       await using(busyFixture(), async root => {
         await resizeTo(root, 530, 670); await settled();
