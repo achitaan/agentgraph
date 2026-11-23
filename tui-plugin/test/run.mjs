@@ -3189,6 +3189,116 @@ test("rooms round 2: with the hub in TERMINAL or TEAM at 62 x 38 the furniture k
   }
 });
 
+// --- the styled list (the panel's text list): a status bar, labelled rules, aligned columns, one footer block ---------
+const SL_text = (line) => line.map((x) => x.text).join("");
+const SL_layout = (doc, width, extra = {}) => R.layout(doc, Object.assign({ width, now: 1234, cursor: true, activity: true, styled: true, dark: true, keys: [["o", "orbit"], ["g", "rooms"], ["d", "detail"]] }, extra));
+const SL_doc = () => DM.demoDocument(demo, 60000);
+
+test("styled list: row 0 is a status bar of exactly the width: hub name left, steps and spend right, a background on dark and none on light", () => {
+  for (const width of [36, 62, 100]) {
+    for (const dark of [true, false]) {
+      const { lines } = SL_layout(SL_doc(), width, { dark });
+      const bar = lines[0];
+      const text = SL_text(bar);
+      assert.equal(R.displayWidth(text), width, "the bar fills the width");
+      assert.ok(text.startsWith(" ◉ orchestrator"), text);
+      assert.match(text, /\d+\/\d+ +\$[\d.]+ $/, "steps and spend flush right: " + text);
+      if (dark) assert.ok(bar.every((x) => x.bg === "#" + R.PANEL_BAR.map((v) => v.toString(16).padStart(2, "0")).join("")), "every span of the bar has the bar's background");
+      else assert.ok(lines.every((l) => l.every((x) => x.bg === undefined)), "a light theme gets tones only, no background");
+      assert.equal(lines.slice(1).some((l) => l.some((x) => x.bg && x.bg === bar[0].bg)), false, "no other row has the bar's background");
+    }
+  }
+});
+
+test("styled list: sections have a labelled rule; the footer is one block under a plain rule; no blank rows; every line is the width or less", () => {
+  for (const width of [30, 36, 62, 100]) {
+    const { lines } = SL_layout(SL_doc(), width);
+    const texts = lines.map(SL_text);
+    assert.ok(texts.every((t) => R.displayWidth(t) <= width), "within the width at " + width);
+    assert.ok(texts.every((t) => t.trim() !== ""), "no blank rows");
+    assert.match(texts[1], /^ ── NEEDS YOU( \d+)? ─+$/);
+    assert.ok(texts.some((t) => /^ ── AT WORK( \d+)? ─+$/.test(t)));
+    const footer = texts.findLastIndex((t) => /^ ─+$/.test(t));
+    assert.ok(footer > 3, "a rule over the footer");
+    assert.ok(texts.slice(footer + 1).length >= 2 && !texts.slice(footer + 1).some((t) => /^ ── /.test(t)), "the footer block holds progress, spend and keys");
+    assert.match(texts.at(-1), /^ ?o orbit/);
+  }
+});
+
+test("styled list: name, state and task start in the same cell on every needs, hub and working row; the time ends at the width", () => {
+  for (const width of [62, 100]) {
+    const { lines, items } = SL_layout(SL_doc(), width);
+    const rows = items.map((it) => lines[it.line]);
+    assert.ok(rows.length >= 3);
+    const starts = rows.map((line) => {
+      // gutter, mark, space, name; the columns are the spans' offsets
+      let x = 0;
+      const at = [];
+      for (const span of line) {
+        at.push([x, span.text]);
+        x += R.displayWidth(span.text);
+      }
+      return { at, width: x };
+    });
+    const nameAt = new Set(starts.map((r) => r.at[3][0]));
+    assert.equal(nameAt.size, 1, "one name column");
+    const stateAt = new Set(starts.map((r) => r.at[5][0]));
+    assert.equal(stateAt.size, 1, "one state column: " + [...stateAt]);
+    assert.ok(starts.every((r) => r.width === width), "every row is the width: " + starts.map((r) => r.width));
+    const texts = rows.map(SL_text);
+    const stateCol = [...stateAt][0];
+    assert.ok(texts.every((t) => t[stateCol - 1] === " " && t[stateCol] !== " "), "the state's first letter is at one column, after a space: " + texts.join("|"));
+    // the times (right column) end flush at the width
+    assert.ok(texts.some((t) => /\d+[smhd]\w*$/.test(t)));
+  }
+});
+
+test("styled list: items[].line points at the row of the item (mouse mapping); bars and rules are never items; the cursor marks the selection only", () => {
+  for (const dark of [true, false]) {
+    for (const width of [36, 62, 100]) {
+      const base = SL_layout(SL_doc(), width, { dark });
+      assert.ok(base.items.length >= 3);
+      assert.ok(base.items.every((it) => !/^ [─◉ ]*─/.test(SL_text(base.lines[it.line]).slice(0, 4)) || it.kind === "hub"), "items sit on rows");
+      for (const it of base.items) {
+        const picked = SL_layout(SL_doc(), width, { dark, selected: it.key });
+        const lines = picked.lines.map(SL_text);
+        assert.equal(lines.filter((t) => t[0] === "›").length, 1, "one cursor");
+        assert.equal(lines[picked.items.find((x) => x.key === it.key).line][0], "›");
+        assert.ok(lines[it.line].includes(it.kind === "hub" ? "orchestrator" : it.name.slice(0, 3)), it.name + " on its row: " + lines[it.line]);
+      }
+      // bar, rules, progress, spend and keys are not items
+      const itemRows = new Set(base.items.map((it) => it.line));
+      base.lines.forEach((l, i) => {
+        if (/^ (─|◉ orchestrator .*\d+\/\d+)/.test(SL_text(l)) && !itemRows.has(i)) assert.ok(true);
+        if (i === 0 || /^ ──/.test(SL_text(l))) assert.equal(itemRows.has(i), false, "row " + i + " is not an item");
+      });
+      assert.equal(itemRows.has(base.keysLine), false);
+    }
+  }
+});
+
+test("styled list: only the panel asks for it; without `styled` the list is the plain one; a narrow width stays plain; the selected row is tinted on dark only; hostile text stays plain", () => {
+  const doc = SL_doc();
+  const plain = R.layout(doc, { width: 62, now: 1234, cursor: true, activity: true });
+  assert.ok(!plain.lines.some((l) => /^ ?── /.test(SL_text(l))), "no rules in the plain list");
+  assert.ok(plain.lines.every((l) => l.every((x) => x.bg === undefined && x.bold === undefined)));
+  const tiny = R.layout(doc, { width: 24, now: 1234, cursor: true, styled: true, dark: true });
+  assert.ok(tiny.lines.every((l) => R.displayWidth(SL_text(l)) <= 24 && l.every((x) => x.bg === undefined)), "below 30 cells it stays plain");
+  const first = SL_layout(doc, 62, { selected: SL_layout(doc, 62).items[0].key });
+  const tinted = first.lines.filter((l) => l.some((x) => x.bg === "#252d40"));
+  assert.equal(tinted.length, 1, "one tinted row");
+  assert.equal(R.displayWidth(SL_text(tinted[0])), 62);
+  assert.ok(tinted[0].every((x) => x.bg === "#252d40"), "gutter and every cell");
+  const light = SL_layout(doc, 62, { dark: false, selected: SL_layout(doc, 62).items[0].key });
+  assert.ok(light.lines.every((l) => l.every((x) => x.bg === undefined)));
+  const hostile = JSON.parse(JSON.stringify(doc));
+  hostile.agents[0].name = "evil\u001b[31m\u0007name\u009b";
+  hostile.root.title = "t\u001b]0;x\u0007itle\u2028";
+  hostile.totals = { cost: NaN };
+  const out = SL_layout(hostile, 62);
+  assert.ok(out.lines.every((l) => R.displayWidth(SL_text(l)) <= 62 && !/[\u0000-\u001f\u007f-\u009f\u2028]/.test(SL_text(l))), out.lines.map(SL_text).join("\n"));
+});
+
 test("demo: demoDocument adds a growing wear history and moving costs; the runner spawns nothing", async () => {
   const a = DM.demoDocument(demo, 0);
   const b = DM.demoDocument(demo, 30000);
