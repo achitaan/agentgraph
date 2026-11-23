@@ -87,7 +87,7 @@ const GROUP_ORDER = ["council", "decide", "build", "verify", "understand"];
 const REST_MIX = 0.5; // an agent at rest: its group colour half way to the muted colour
 const DEPTH_MIX = [0.72, 0.6, 0.45, 0.3, 0.15, 0]; // 3D: far to near, toward the muted colour
 const NEEDS_MAX = 3;
-const NAME_MAX = 12;
+export const NAME_MAX = 12;
 const DRAW_MAX_WIDTH = 400; // larger sizes are drawn at this size and padded with blank cells
 const DRAW_MAX_HEIGHT = 200;
 const TWEEN_MS = 700;
@@ -109,7 +109,7 @@ const SIDE_NODE = 0.7; // radians clockwise from the top: where its plane crosse
 const SIDE_TILT = 1.3; // radians: the plane's lean (flat at rise 0)
 const SIDE_REST = 2.2; // radians round its orbit where the moon waits
 const MOON_RADIUS_STEP = 0.14; // moon i's orbit is r * (1 + 0.14 i): no two moons of a parent at the same distance
-const PERSPECTIVE = 4; // the camera's distance in figure radii
+export const PERSPECTIVE = 4; // the camera's distance in figure radii
 
 // braille dot bits by [row 0-3][column 0-1]
 const DOT_BITS = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
@@ -274,7 +274,7 @@ export function padLine(line, width) {
 // The canvas: a text layer over a layer of depth characters (3D) over braille dots (2D)
 
 // Styles of one frame: id -> { tone, color }, and a rank (a dot of a higher rank wins its cell). Id 0: blank.
-class Styles {
+export class Styles {
   constructor() {
     this.items = [{ tone: "plain" }];
     this.rank = [0];
@@ -294,7 +294,7 @@ class Styles {
   }
 }
 
-class Canvas {
+export class Canvas {
   constructor(w, h, styles) {
     this.w = w;
     this.h = h;
@@ -1928,9 +1928,9 @@ const SIDE_BALL_MIN_DOTS = 4; // the side chat's ball: radius in dots, at least 
 const SIDE_BALL_PART = 0.5; // ... and half the hub's
 const MEMORY_TURN = 0.35; // radians: how far the camera may be from the last frame's for its places to count
 const labelMemory = new Map(); // "w x h" -> { cam, places: Map(body id -> { side, dr, dc }) }: the places of the last frame
-function placeBodies(L, canvas, S, P, bodies, env) {
+export function placeBodies(L, canvas, S, P, bodies, env) {
   const { frame, blinkOn, muted, hubBall, trace, cam } = env;
-  const size = L.w + "x" + L.h;
+  const size = (env.memoryKey || "") + L.w + "x" + L.h; // another picture (the planets) keeps its own places: env.memoryKey
   // the last frame's places count only while the camera is close to that frame's (a turning view moves a little each
   // frame; a jump of the camera starts afresh), so a frame is the same whatever was drawn long before it
   const near = (a, b) => {
@@ -1954,7 +1954,9 @@ function placeBodies(L, canvas, S, P, bodies, env) {
   for (const b of bodies) {
     const { q } = b;
     b.hidden = canvas.bodyAt(q.col, q.row) > q.depth; // under a nearer ball
-    if (b.kind === "planet") {
+    if (env.noGlyphs) {
+      b.drawn = !b.hidden && (b.kind !== "side" || b.shown > 0); // a picture of balls (the planets) draws no glyph: the ball is the body
+    } else if (b.kind === "planet") {
       const p = b.p;
       if (!b.hidden && canvas.free(q.col, q.row)) {
         let st = agentStyle(S, P, p, blinkOn);
