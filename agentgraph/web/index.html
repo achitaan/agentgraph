@@ -16,6 +16,13 @@
       const root = document.getElementById('root');
       const selected = params.get('select');
       if (selected) root.dataset.initialSelection = selected;
+      // A look-only option for pictures and checks: ?view=3d&turn=<degrees>[&tilt=<degrees>] opens the 3D view held at that
+      // angle (nothing turns, nothing is stored). It changes nothing else.
+      if (params.get('view') === '3d') {
+        root.dataset.look = '3d';
+        if (params.has('turn')) root.dataset.lookTurn = params.get('turn');
+        if (params.has('tilt')) root.dataset.lookTilt = params.get('tilt');
+      }
       const request = new URLSearchParams();
       for (const key of ['task', 'demo']) {
         if (params.has(key)) request.set(key, params.get(key));
