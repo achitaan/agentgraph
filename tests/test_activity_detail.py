@@ -124,6 +124,15 @@ class Targets(unittest.TestCase):
             ("curl example.com/reset?code=SECRET1", "curl", "SECRET1"),
             ("wget 'localhost:8080/x?sig=abc'", "wget", "sig=abc"),
             ("curl example.com/a#token=SECRET2", "curl", "SECRET2"),
+            ('ssh db1 "mysql -phunter2"', "mysql", "hunter2"),  # the client inside quotes, $( or backticks
+            ("bash -c 'mysql -phunter2'", "mysql", "hunter2"),
+            ("x=$(mysql -phunter2 -e q)", "mysql", "hunter2"),
+            ("echo `mysql -phunter2`", "mysql", "hunter2"),
+            ('sh -c "curl -b sid=abc123 x"', "curl", "abc123"),
+            ('curl -sSb "sid=abc123" x', "curl", "abc123"),
+            ("curl 10.0.0.5:8080/cb?code=SECRET1", "curl", "SECRET1"),
+            ("curl api.example.com?sig=abc", "curl", "sig=abc"),
+            ('curl -u "admin:hunter2 and', "curl", "hunter2"),  # a quote the cut left open
             ('A_KEY="' + "x" * 400 + '" B_TOKEN="hunter 2 and more', "A_KEY", "hunter"),  # the cut leaves a quote open
         )
         for text, kept, secret in more:

@@ -372,18 +372,18 @@ _TARGET_MASKS = (
     (re.compile(r"(?i)\b(" + _NAME + r"*(?:key|token|secret|passw(?:or)?d|credential|auth)" + _NAME + r"*|"
                 + _NAME + r"+pwd" + _NAME + r"*|pwd" + _NAME + r"+)[ \t]*=[ \t]*" + _VALUE), lambda m: m.group(0)[:m.start(2) - m.start()] + _MASK),
     (re.compile(r"(?i)(--?[\w-]*(?:password|passwd|token|secret|api[-_]?key|auth)[\w-]*[ =][ \t]*)" + _VALUE), r"\1" + _MASK),
-    (re.compile(r"(?<![\w-])(-[A-Za-z]*[uU][ ]*|--(?:proxy-)?user[ =])(\"[^\"]*:[^\"]*\"|'[^']*:[^']*'|[^\s\"']*:[^\s\"']*)"), r"\1" + _MASK),  # user:password
+    (re.compile(r"(?<![\w-])(-[A-Za-z]*[uU][ ]*|--(?:proxy-)?user[ =])(\"[^\"]*:[^\"]*(?:\"|$)|'[^']*:[^']*(?:'|$)|[^\s\"']*:[^\s\"']*)"), r"\1" + _MASK),  # user:password
     (re.compile(r"(?<![\w-])(--cookie[ =])" + _VALUE), r"\1" + _MASK),
     (re.compile(r"(\w+://)[^/\s]+@"), r"\1" + _MASK + "@"),  # up to the last @ before the path
 )
 # `-p` is a password only after these clients, wherever they stand in the line (elsewhere it is --parents, --preserve,
 # a port ...); `-b` is a cookie only for curl (git checkout -b is a branch).
-_CLIENT = r"(?:^|[\s;&|/])(%s)(?=\s)"
+_CLIENT = r"(?:^|[\s;&|/\"'(`])(%s)(?=\s)"  # also inside quotes, $( and backticks
 _P_CLIENTS = re.compile(_CLIENT % "mysql|mysqldump|mysqladmin|mariadb|mariadb-dump|psql|pg_dump|pg_dumpall|pg_restore|sshpass")
 _CURL = re.compile(_CLIENT % "curl")
 _P_ATTACHED = re.compile(r"(?<=\s)(-p)(?=[^\s-])" + _VALUE)
 _P_SEPARATE = re.compile(r"(?<=\s)(-p[ ]*)" + _VALUE)
-_B_COOKIE = re.compile(r"(?<![\w-])(-b[ ]*)" + _VALUE)
+_B_COOKIE = re.compile(r"(?<![\w-])(-[A-Za-z]*b[ ]*)" + _VALUE)  # -b, or combined as in -sSb
 
 
 def _mask_flags(line: str) -> str:
@@ -452,8 +452,8 @@ def target_of(tool, first, second=None) -> str | None:
         text = next((line.strip() for line in plain(first).split("\n") if line.strip()), None)
         if text:  # a query string or fragment can hold a secret: cut every URL at the first ? or #
             text = re.sub(r"(\w+://[^\s\"'?#]*)[?#][^\s\"']*", r"\1", text[:4 * TARGET_CAP])
-            # the same for an address without a scheme: a host name or localhost, then a path
-            text = re.sub(r"((?<![\w.-])(?:[\w.-]+\.[A-Za-z]{2,}|localhost)(?::\d+)?/[^\s\"'?#]*)[?#][^\s\"']*", r"\1", text)
+            # the same for an address without a scheme: a host name, localhost or an IPv4 address, with or without a path
+            text = re.sub(r"((?<![\w.-])(?:[\w.-]+\.[A-Za-z]{2,}|localhost|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?(?:/[^\s\"'?#]*)?)[?#][^\s\"']*", r"\1", text)
     elif name in ("read", "write", "edit", "multiedit", "grep", "glob", "websearch", "codesearch"):
         text = plain(first)
     elif name in ("subagent", "task"):
