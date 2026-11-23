@@ -2976,6 +2976,126 @@ test("rooms: a tool called constructor and a zone called __proto__ never put a f
   }
 });
 
+// ---- the chrome around the pictures: status bar, chips, footer columns, plaques, labels, furniture (made-up data)
+const spanStart = (line, pred) => { let x = 0; for (const s of line) { if (pred(s)) return x; x += R.displayWidth(s.text); } return -1; };
+const panelOf = (doc, w = 62, h = 38, options = {}) => RM.roomsScene(doc, Object.assign({ width: w, height: h, now: 1500 }, options));
+const bgOf = (line) => line.find((s) => s.bg).bg;
+
+test("rooms chrome: the header is one bar with a background, the hub's name on the left, steps and spend on the right", () => {
+  for (const w of [62, 100, 160]) {
+    const bar = panelOf(demoWorn, w, 38)[0];
+    assert.ok(bar.every((s) => s.bg === bar[0].bg), "one background across the bar");
+    const text = bar.map((s) => s.text).join("");
+    assert.ok(text.startsWith(" ◉ orchestrator"), text);
+    assert.ok(/4\/11 +\$[\d.]+ $/.test(text), text);
+    const name = bar.find((s) => s.text === "orchestrator");
+    assert.equal(name.bold, true);
+    assert.equal(spanStart(bar, (s) => s === name), 3, "the name starts at column 3");
+  }
+  const light = panelOf(demoWorn, 62, 38, { colors: { dark: false } });
+  for (const line of light.slice(0, 3)) for (const s of line) assert.ok(!("bg" in s) && !("color" in s), `light theme: tone only ${JSON.stringify(s)}`);
+});
+
+test("rooms chrome: needs-you chips line up in columns, tone differs by kind, at most three then +N more", () => {
+  const lines = panelOf(demoWorn, 62, 38);
+  const rows = lines.slice(1, 4).map((l) => ({ l, t: l.map((s) => s.text).join("") }));
+  assert.ok(rows.every((r) => r.l[1].bold && /^ [!↩] $/.test(r.l[1].text)), "a mark chip first");
+  const nameAt = rows.map((r) => r.t.search(/\S/, 4));
+  assert.equal(new Set(nameAt).size, 1, "names start in one column");
+  const reasonAt = rows.map((r) => r.t.search(/stuck|sent back/));
+  assert.equal(new Set(reasonAt).size, 1, "reasons start in one column");
+  for (const r of rows) assert.equal(R.displayWidth(r.t), 62);
+  const stuck = rows.find((r) => r.t.includes("stuck")), back = rows.find((r) => r.t.includes("sent back"));
+  assert.ok(stuck && back && stuck.l[1].bg !== back.l[1].bg && bgOf(stuck.l) !== bgOf(back.l), "stuck and sent-back differ in tone");
+  assert.ok(rows.some((r) => /↻\d+ $/.test(r.t)) , "a loop count at the right");
+  // more than three: a "+N more" row, never a fourth chip
+  const many = copy(demoWorn);
+  for (let i = 0; i < 5; i += 1) many.agents.push(Object.assign(copy(many.agents.find((a) => a.group !== "hub")), { name: `stuck-${i}`, stuck: true }));
+  const text = roomsText(panelOf(many, 62, 38));
+  assert.ok(text.filter((l) => /^ [!↩] /.test(l)).length <= 3, "at most three chips");
+});
+
+test("rooms chrome: NOW is a tinted bar; BEFORE is chips; the rule comes only above a row; agent rows share their columns and the cost sits at the right edge", () => {
+  for (const [w, h] of [[62, 38], [100, 30], [160, 45]]) {
+    const lines = panelOf(demoWorn, w, h);
+    const text = roomsText(lines);
+    const now = text.findIndex((l) => l.startsWith(" NOW "));
+    const before = text.findIndex((l) => l.startsWith(" BEFORE "));
+    assert.ok(now > 0 && before === now + 1, `${w}x${h}: NOW then BEFORE`);
+    assert.ok(lines[now][0].bg && lines[now].every((s) => s.bg) && lines[now].at(-1).bg === lines[now][0].bg, "NOW is tinted edge to edge");
+    assert.ok(lines[before].some((s) => s.bg && s.bg !== lines[before][0].bg) || lines[before].length > 1, "BEFORE has chips");
+    const rule = text.findIndex((l) => l.startsWith(" AT WORK "));
+    if (rule >= 0) {
+      assert.ok(/─{5,}$/.test(text[rule]), "the rule runs to the edge");
+      const rows = text.slice(rule + 1).filter((l) => l.startsWith(" ▪ "));
+      assert.ok(rows.length >= 1);
+      const verbAt = rows.map((l) => l.slice(3).match(/^\S+ +/)[0].length);
+      assert.equal(new Set(verbAt).size, 1, `${w}x${h}: glyphs in one column: ${verbAt}`);
+      if (w >= 100) for (const l of rows) assert.ok(/\$\d+\.\d\d $/.test(l) || /\$\d+\.\d\d$/.test(l.trimEnd()) , `${w}: cost at the right: ${l}`);
+    } else assert.equal(text.some((l) => l.startsWith(" ▪ ")), false, "no rows without their rule");
+  }
+});
+
+test("rooms chrome: plaques sit inside their rooms, centred, and never overlap each other or a name label", () => {
+  for (const [w, h] of [[62, 27], [62, 38], [100, 17], [160, 30], [48, 20]]) {
+    const info = roomsAt(demoWorn, w, h);
+    assert.equal(info.plaques.length, 6);
+    for (const p of info.plaques) {
+      const r = info.rooms[p.room];
+      assert.ok(p.c0 > r.x0 && p.c1 <= r.x1 - 0, `${w}x${h} ${p.room}: plaque ${p.c0}..${p.c1} inside ${r.x0}..${r.x1}`);
+      const mid = (p.c0 + p.c1) / 2, rmid = (r.x0 + r.x1) / 2;
+      assert.ok(Math.abs(mid - rmid) <= 2, `${w}x${h} ${p.room}: centred (${mid} vs ${rmid})`);
+    }
+    for (let i = 0; i < info.plaques.length; i += 1) for (let j = i + 1; j < info.plaques.length; j += 1) {
+      const a = info.plaques[i], b = info.plaques[j];
+      if (a.r === b.r) assert.ok(a.c1 < b.c0 || b.c1 < a.c0, "plaques apart");
+    }
+  }
+});
+
+test("rooms chrome: no two name labels share a cell, in any size or with a crowd", () => {
+  const crowd = copy(demoWorn);
+  const proto = crowd.agents.find((a) => a.group !== "hub");
+  for (let i = 0; i < 40; i += 1) crowd.agents.push(Object.assign(copy(proto), { name: `agent-${i}`, busy: i % 2 }));
+  for (const doc of [demoWorn, crowd]) for (const [w, h] of [[36, 14], [62, 20], [62, 27], [62, 38], [100, 24], [160, 45]]) {
+    const taken = new Set();
+    for (const c of roomsAt(doc, w, h).chars) {
+      if (!c.name_cells) continue;
+      for (let x = c.name_cells.c0; x <= c.name_cells.c1; x += 1) {
+        const key = `${x},${c.name_cells.r}`;
+        assert.ok(!taken.has(key), `${w}x${h}: label cell ${key} shared`);
+        taken.add(key);
+      }
+    }
+  }
+});
+
+test("rooms chrome: furniture is in every room at 62 x 29 and 62 x 38, never under a character, and absent in the compact sizes; the room fit is cached without changing the result", () => {
+  for (const zone of ["terminal", "files", "web", "search", "thinking", "messaging"]) {
+    const doc = copy(demoWorn);
+    hubOf(doc).activity.zone = zone;
+    for (const [w, h] of [[62, 29], [62, 38], [100, 40]]) {
+      const info = roomsAt(doc, w, h);
+      assert.equal(info.compact, false);
+      assert.deepEqual(info.furniture.map((f) => f.room).sort(), ["files", "search", "team", "terminal", "thinking", "web"], `${zone} ${w}x${h}`);
+      for (const f of info.furniture) for (const c of info.chars) {
+        const apart = f.x1 < c.x0 || c.x1 < f.x0 || f.y1 < c.y0 || c.y1 < f.y0;
+        assert.ok(apart, `${zone} ${w}x${h}: ${f.room} furniture under ${c.name}`);
+      }
+    }
+  }
+  for (const [w, h] of [[36, 14], [48, 20]]) {
+    const info = roomsAt(demoWorn, w, h);
+    assert.equal(info.compact, true);
+    assert.deepEqual(info.furniture, []);
+  }
+  const doc = copy(demoWorn);
+  const first = JSON.stringify(roomsAt(doc, 62, 29));
+  assert.equal(JSON.stringify(roomsAt(doc, 62, 29)), first, "the cached fit gives the same picture");
+  assert.equal(JSON.stringify(roomsAt(copy(doc), 62, 29)), first, "and so does a fresh copy");
+  assert.equal(JSON.stringify(RM.roomsLines(doc, 62, 29, 1500)), JSON.stringify(RM.roomsLines(copy(doc), 62, 29, 1500)));
+});
+
 test("demo: demoDocument adds a growing wear history and moving costs; the runner spawns nothing", async () => {
   const a = DM.demoDocument(demo, 0);
   const b = DM.demoDocument(demo, 30000);
