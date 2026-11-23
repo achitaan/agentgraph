@@ -260,7 +260,7 @@
 .agentgraph .ag-agent:not([data-busy="0"]) .ag-halo { fill: var(--ag-busy-halo-fill); stroke: var(--ag-busy-halo-stroke); animation: ag-breathe 2.8s ease-in-out infinite; }
 /* A selected (or focused) agent at work still shows its ring over the busy halo. */
 .agentgraph .ag-agent[data-selected="true"]:not([data-busy="0"]) .ag-halo, .agentgraph .ag-agent:focus-visible:not([data-busy="0"]) .ag-halo { stroke: var(--ag-work); stroke-width: 2.4; animation: none; }
-.agentgraph .ag-agent-name { fill: var(--ag-ink); font-size: 12px; font-weight: 500; paint-order: stroke; stroke: var(--ag-bg); stroke-width: 5px; stroke-linejoin: round; pointer-events: none; }
+.agentgraph .ag-agent-name { fill: var(--ag-ink); font-size: 12px; font-weight: 500; paint-order: stroke; stroke: var(--ag-bg); stroke-width: 7px; stroke-linejoin: round; pointer-events: none; transition: opacity .18s ease; }
 .agentgraph .ag-hub .ag-agent-name { font-family: Georgia, 'Times New Roman', serif; font-size: 18px; font-weight: 400; }
 .agentgraph .ag-council-lead .ag-agent-name, .agentgraph .ag-team-lead .ag-agent-name { font-family: Georgia, 'Times New Roman', serif; font-size: 15px; font-weight: 400; }
 .agentgraph .ag-busy-count { fill: var(--ag-work); font-size: 10px; font-weight: 600; paint-order: stroke; stroke: var(--ag-bg); stroke-width: 6px; stroke-linejoin: round; pointer-events: none; }
@@ -317,7 +317,6 @@
 .agentgraph .ag-moon-ring { fill: none; stroke: var(--ag-muted); stroke-width: 1.2; vector-effect: non-scaling-stroke; opacity: .48; stroke-dasharray: 2 3; }
 .agentgraph .ag-moon-ring[data-side="far"] { opacity: .22; }
 /* A moon's name drawn again above its parent's disc and its siblings' (3D only). */
-.agentgraph .ag-moon-name { pointer-events: none; }
 /* The side chat's moon (n8): a small disc round the orchestrator, drawn as a moon is and named "side chat". It is not an agent
    (a layer of its own), goes round only while it works and in 3D on a plane of its own; its far half is fainter. */
 .agentgraph .ag-sidemoon { cursor: pointer; outline: none; }
@@ -326,8 +325,11 @@
 .agentgraph .ag-sidemoon[data-busy="1"] .ag-side-core { fill: var(--ag-busy-fill); stroke: var(--ag-busy-stroke); stroke-width: 1.8; }
 .agentgraph .ag-sidemoon:hover .ag-side-halo { fill: var(--ag-hover-fill); stroke: var(--ag-hover-stroke); }
 .agentgraph .ag-sidemoon:focus-visible .ag-side-halo, .agentgraph .ag-sidemoon[data-selected="true"] .ag-side-halo { stroke: var(--ag-work); stroke-width: 2; }
-.agentgraph .ag-sidemoon[data-side="far"] { opacity: .6; }
-.agentgraph .ag-side-name { fill: var(--ag-ink); font-size: 12px; font-weight: 500; paint-order: stroke; stroke: var(--ag-bg); stroke-width: 5px; stroke-linejoin: round; pointer-events: none; }
+.agentgraph .ag-side-ball, .agentgraph .ag-side-sphere, .agentgraph .ag-side-mix { stroke: none; pointer-events: none; }
+.agentgraph .ag-side-mix { fill: var(--ag-muted); }
+.agentgraph .ag-side-name { fill: var(--ag-ink); font-size: 12px; font-weight: 500; paint-order: stroke; stroke: var(--ag-bg); stroke-width: 7px; stroke-linejoin: round; pointer-events: none; transition: opacity .18s ease; }
+@media (prefers-reduced-motion: reduce) { .agentgraph .ag-agent-name, .agentgraph .ag-side-name { transition: none; } }
+.agentgraph[data-ag-motion="none"] .ag-agent-name, .agentgraph[data-ag-motion="none"] .ag-side-name { transition: none; }
 .agentgraph .ag-detail .ag-side-model { margin: 0 0 8px; color: var(--ag-muted); }
 .agentgraph .ag-detail .ag-side[data-state="asking"] .ag-side-send, .agentgraph .ag-detail .ag-side[data-state="busy"] .ag-side-send { opacity: .55; }
 /* The sun (n119). At rest a ball lit from the upper left, still. Fired up (the hub at work): flame spikes and a glow in
