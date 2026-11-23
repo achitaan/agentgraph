@@ -2872,6 +2872,64 @@ await check("the bundle carries the chat: the main command, the window's actions
   assert.equal(body(fs.readFileSync(LIVE_BUNDLE, "utf8")), body(CODE), "gui-experimental.cjs is not the build of src/plugin.cjs, app.js and style.css: run node desktop-plugin/build.mjs");
 });
 
+await check("the hub's live detail: a zone chip with its target and a trail of five, drawn as text only; no zone or target gives nothing new", () => {
+  const source = fs.readFileSync(path.join(ORCHESTRATION, "agentgraph", "web", "app.js"), "utf8");
+  const block = source.slice(source.indexOf("// live-activity:begin"), source.indexOf("// live-activity:end"));
+  assert.ok(block.length > 200, "the live-activity block markers are missing from app.js");
+  assert.match(CODE, /live-activity:begin/);
+  assert.match(CODE, /ag-live-chip/);
+  assert.match(CODE, /Recent actions/);
+  class Node {
+    constructor(tag) { this.tag = tag; this.attrs = {}; this.children = []; this.dataset = {}; this.style = {}; this.text = ""; this.className = ""; this.title = ""; }
+    setAttribute(key, value) { this.attrs[key] = value; }
+    getAttribute(key) { return this.attrs[key]; }
+    append(...items) { this.children.push(...items); }
+    get textContent() { return this.text + this.children.map((child) => child.textContent).join(""); }
+    set textContent(value) { this.text = String(value); this.children = []; }
+    all(tag) { return this.children.flatMap((child) => [...(child.tag === tag ? [child] : []), ...child.all(tag)]); }
+    has(className) { return (this.attrs.class || this.className || "").split(" ").includes(className); }
+    find(className) { return this.children.flatMap((child) => [...(child.has(className) ? [child] : []), ...child.find(className)]); }
+  }
+  const document = { createElement: (tag) => new Node(tag), createElementNS: (_ns, tag) => new Node(tag) };
+  const el = (tag, className, text) => { const item = new Node(tag); item.className = className || ""; if (text !== undefined) item.textContent = text; return item; };
+  const svg = (tag, attrs, text) => { const item = new Node(tag); Object.entries(attrs || {}).forEach(([key, value]) => item.setAttribute(key, String(value))); if (text !== undefined) item.textContent = text; return item; };
+  const withHelpers = new Function("document", "NS", "el", "svg", `${block}\nreturn { liveOf, liveGroup, liveList };`);
+  const live = withHelpers(document, "http://www.w3.org/2000/svg", el, svg);
+  const zones = ["web", "terminal", "files", "search", "spawn"];
+  const recent = zones.map((zone, i) => ({ zone, tool: ["webfetch", "shell", "read", "grep", "subagent"][i], target: `made-up target ${i} <b>not html</b>`, status: i === 3 ? "error" : "completed", time: 1, seconds: 2.1 }));
+  const agent = { activity: { kind: "tool", tool: "webfetch", zone: "web", target: "example.com/docs/intro", status: "running", text: "", time: 1, recent } };
+  const info = live.liveOf(agent);
+  assert.equal(info.zone, "web");
+  assert.equal(info.chip, "fetching");
+  assert.equal(info.line, "fetching · example.com/docs/intro");
+  assert.equal(info.recent.length, 5);
+  const group = live.liveGroup(info, 30, true);
+  assert.equal(group.attrs["data-zone"], "web");
+  assert.equal(group.attrs["data-fresh"], "true");
+  assert.equal(group.find("ag-live-target")[0].textContent, "example.com/docs/intro");
+  assert.equal(group.find("ag-live-verb")[0].textContent, "fetching");
+  assert.equal(group.find("ag-live-dot").length, 5);
+  assert.equal(group.find("ag-live-dot")[3].attrs["data-status"], "error");
+  assert.equal(group.find("ag-live-dot")[0].all("title")[0].textContent, "webfetch: made-up target 0 <b>not html</b> (2.1 s)");
+  assert.equal(group.find("ag-live-dot")[0].all("b").length, 0, "target text became markup");
+  const long = live.liveGroup(live.liveOf({ activity: { ...agent.activity, target: "x".repeat(120) } }), 30, false);
+  assert.ok(long.find("ag-live-target")[0].textContent.endsWith("\u2026") && long.find("ag-live-target")[0].textContent.length <= 26);
+  const list = live.liveList(info);
+  assert.equal(list.find("ag-recent-row").length, 5);
+  assert.equal(list.find("ag-recent-row")[3].dataset.status, "error");
+  assert.equal(list.find("ag-recent-tool")[0].textContent, "webfetch");
+  // Absent keys, an unknown zone, or a plain busy agent give nothing new.
+  assert.equal(live.liveOf({ activity: { kind: "tool", tool: "shell", text: "", time: 1 } }), null);
+  assert.equal(live.liveOf({ activity: { kind: "tool", tool: "shell", zone: "nowhere", time: 1 } }), null);
+  assert.equal(live.liveOf({ activity: null }), null);
+  assert.equal(live.liveOf({}), null);
+  assert.equal(live.liveOf({ activity: { kind: "text", time: 1 } }), null);
+  assert.equal(live.liveOf({ activity: { kind: "text", time: 1, recent } }).chip, "replying");
+  const bare = live.liveGroup(live.liveOf({ activity: { kind: "reasoning", zone: "thinking", time: 1 } }), 30, false);
+  assert.equal(bare.find("ag-live-trail").length, 0);
+  assert.equal(bare.find("ag-live-target").length, 0);
+});
+
 await check("n20 bundle: the page code in the panel tells a quiet or orphan step from a live one (plain words, no animation), as the web page does", () => {
   assert.match(CODE, /Reported running · no session/);
   assert.match(CODE, /Reported running · ' \+ idleFor\(/);

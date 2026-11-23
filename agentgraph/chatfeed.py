@@ -13,6 +13,12 @@ text of a `synthetic` message (the host's own notes: shell output, a sub-agent's
 is shown as a bare `note`. `tests/test_chatfeed.py` proves it with a marker in each of those places and by
 looking at every statement the connection runs.
 
+One exception, for the main chat only and only through `hub_activity`: the "what is it doing now" detail of
+the hub reads a few named `state.input` fields (`command`, `url`, `pattern`, `query`, `code`, `id`, `agent`,
+`subagent_type`, `path`, `description`), each cut in SQL, and shows one short masked line of them (a command's
+first line, a URL's host and path, a file's path). Never the `content` of a write or edit, a prompt, or a
+tool's output.
+
 A message sent with delivery "steer" lands as a `user` message once the session takes it up; until then it
 sits in `session_inbox` (type `user`) with an `enqueued_seq` above the session's newest message, and is shown
 as a `user` item with `pending: true`.
@@ -35,6 +41,7 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .sources import DB_PATH
 
@@ -302,6 +309,201 @@ def activities(session_ids, *, db_path=DB_PATH, timeout: float = TIMEOUT) -> dic
     finally:
         conn.close()
     return found
+
+
+# --- the main chat's live detail (zone, target, status, a short trail) ------------------------------
+# The zone idea (every tool call normalised to one activity zone) and the short trail of recent actions come
+# from AgentMove (github.com/FoothillSolutions/agent-move, MIT); the table and code here are our own.
+
+ZONES = ("files", "terminal", "search", "web", "thinking", "messaging", "tasks", "spawn", "tools")
+TARGET_CAP = 120
+TRAIL = 5                 # recent tool calls kept besides the current one
+TRAIL_MESSAGES = 6        # assistant messages looked at for them
+_ZONE_NAMES = {
+    "read": "files", "write": "files", "edit": "files", "multiedit": "files", "glob": "files", "patch": "files",
+    "apply_patch": "files", "applypatch": "files", "list": "files", "ls": "files",
+    "shell": "terminal", "bash": "terminal", "terminal": "terminal",
+    "grep": "search", "websearch": "search", "codesearch": "search",
+    "webfetch": "web",
+    "question": "thinking", "skill": "thinking",
+    "subagent": "spawn", "task": "spawn",
+}
+_ZONE_TOKENS = (  # first rule with a matching word of the name wins; MCP tools are `server_tool`
+    ("messaging", {"message", "messages", "reply", "replies"}),
+    ("tasks", {"todo", "todos", "todowrite", "todoread"}),
+    ("thinking", {"plan", "think", "thinking"}),
+    ("web", {"browser", "playwright", "puppeteer", "webfetch", "fetch", "navigate"}),
+    ("search", {"search", "grep"}),
+)
+_NAMESPACE_ZONES = {"browser": "web", "context7": "search", "gh_grep": "search"}
+_CALL = re.compile(r"\btools\.([A-Za-z_$][\w$]*)\s*(?:\.\s*([A-Za-z_$][\w$]*)|\[\s*[\"']([^\"']+)[\"']\s*\])")
+
+
+def _call_of(code) -> tuple[str, str] | None:
+    """The first `tools.<namespace>.<name>(...)` (or `["name"]`) of an `execute` tool's code."""
+    match = _CALL.search(code) if isinstance(code, str) else None
+    return (match.group(1), match.group(2) or match.group(3)) if match else None
+
+
+def zone_of(tool, code=None) -> str:
+    """The activity zone of a tool name (lower-cased; `execute` by the first namespace its code calls)."""
+    name = str(tool or "").strip().lower()
+    if name == "execute":
+        call = _call_of(code)
+        return _NAMESPACE_ZONES.get(call[0].lower(), "tools") if call else "tools"
+    if name in _ZONE_NAMES:
+        return _ZONE_NAMES[name]
+    words = set(re.split(r"[^a-z0-9]+", name))
+    if any(word.startswith(("browser", "playwright")) for word in words):
+        return "web"
+    for zone, wanted in _ZONE_TOKENS:
+        if words & wanted:
+            return zone
+    return "tools"
+
+
+_TARGET_MASKS = (
+    (re.compile(r"(?i)\b(authorization\s*[:=]\s*).*"), r"\1" + _MASK),
+    (re.compile(r"(?i)\b(bearer\s+)[^\s\"']+"), r"\1" + _MASK),
+    (re.compile(r"(?i)\b([A-Z0-9_.-]*(?:key|token|secret|passw(?:or)?d|credential|auth)[A-Z0-9_.-]*[ \t]*=[ \t]*)"
+                r"(\"[^\"]*\"|'[^']*'|[^\s\"']+)"), r"\1" + _MASK),
+    (re.compile(r"(?i)(--?(?:password|passwd|token|secret|api[-_]?key|auth)[ =])[^\s\"']+"), r"\1" + _MASK),
+    (re.compile(r"(\w+://)[^/\s@]+@"), r"\1" + _MASK + "@"),
+)
+
+
+def _tidy(text, cap: int = TARGET_CAP) -> str | None:
+    """One short plain line: secrets masked first, whitespace collapsed, then cut to `cap` with an ellipsis."""
+    line = mask_secrets(plain(text))
+    for pattern, replacement in _TARGET_MASKS:
+        line = pattern.sub(replacement, line)
+    line = re.sub(r"\s+", " ", line).strip()
+    if not line:
+        return None
+    return line if len(line) <= cap else line[:cap - 1].rstrip() + "\u2026"
+
+
+def _tilde(text: str) -> str:
+    home = str(Path.home())
+    if len(home) > 1 and (text == home or text.startswith(home + "/")):
+        return "~" + text[len(home):]
+    return text.replace(home + "/", "~/") if len(home) > 1 else text
+
+
+def _site(url) -> str | None:
+    """A URL as host and path only: no scheme, user:password, query string or fragment."""
+    text = str(url or "").strip()
+    if not text:
+        return None
+    try:
+        parts = urlsplit(text if "://" in text else "//" + text)
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return None
+    if not host:
+        return None
+    if ":" in host:
+        host = f"[{host}]"
+    path = "" if parts.path == "/" else parts.path
+    return host + (f":{port}" if port else "") + path
+
+
+def target_of(tool, first, second=None) -> str | None:
+    """One short line saying what a tool call acts on, or None. `first` is the call's `command`, `url`,
+    `path`, `pattern`, `query`, `code`, `id` or `agent` (whichever it has); `second` its `description`."""
+    name = str(tool or "").strip().lower()
+    first = first if isinstance(first, str) else None
+    second = second if isinstance(second, str) else None
+    if not first and not (name in ("subagent", "task") and second):
+        return None
+    if name == "webfetch":
+        text = _site(first)
+    elif name in ("shell", "bash", "terminal"):
+        text = next((line.strip() for line in plain(first).split("\n") if line.strip()), None)
+    elif name in ("read", "write", "edit", "multiedit", "grep", "glob", "websearch", "codesearch"):
+        text = plain(first)
+    elif name in ("subagent", "task"):
+        who = (first or "").strip()
+        text = f"{who}: {second}" if who and second else (who or second)
+    elif name == "skill":
+        text = first
+    elif name == "execute":
+        call = _call_of(first)
+        text = f"{call[0]}.{call[1]}" if call else None
+    else:
+        return None
+    return _tidy(_tilde(text), TARGET_CAP) if text else None
+
+
+def _tool_sql(detail: bool) -> str:
+    keys = ("command", "url", "pattern", "query", "code", "id", "agent", "subagent_type", "path")
+    field = "json_extract(m.data, c.fullkey || '.state.input.%s')"
+    if detail:
+        first = "substr(COALESCE(" + ", ".join(field % key for key in keys) + "), 1, 2000)"
+        second = "substr(" + field % "description" + ", 1, 400)"
+    else:  # the zone of an `execute` needs its code; every other tool is read by name and status alone
+        first = "CASE WHEN json_extract(m.data, c.fullkey || '.name') = 'execute' THEN substr(" + field % "code" + ", 1, 2000) END"
+        second = "NULL"
+    return (
+        "SELECT json_extract(m.data, c.fullkey || '.name'), json_extract(m.data, c.fullkey || '.state.status'), "
+        "json_extract(m.data, c.fullkey || '.time.created'), json_extract(m.data, c.fullkey || '.time.ran'), "
+        "json_extract(m.data, c.fullkey || '.time.completed'), m.time_created, " + first + ", " + second + " "
+        "FROM (SELECT seq, time_created, data FROM session_message WHERE session_id = ?1 AND type = 'assistant' "
+        "ORDER BY seq DESC LIMIT ?2) m, json_each(m.data, '$.content') c "
+        "WHERE json_extract(m.data, c.fullkey || '.type') = 'tool' ORDER BY m.seq DESC, c.key DESC LIMIT ?3"
+    )
+
+
+_STATUS = {"streaming": "running", "running": "running", "completed": "completed", "error": "error"}
+
+
+def _call_row(row, detail: bool) -> dict:
+    name, status, created, ran, completed, message_time, first, second = row
+    zone = zone_of(name, first)
+    done = None
+    if isinstance(ran, (int, float)) and isinstance(completed, (int, float)) and completed >= ran > 0:
+        done = round((completed - ran) / 1000.0, 3)
+    return {"zone": zone, "tool": _word(name) or "tool", "target": target_of(name, first, second) if detail else None,
+            "status": _STATUS.get(status), "time": _seconds(created, message_time), "seconds": done}
+
+
+def hub_activity(session_id, base: dict, *, detail: bool = True, db_path=DB_PATH, timeout: float = TIMEOUT) -> dict:
+    """`base` (one `activities()` entry of the hub's session) with `zone`, `status` and, when `detail`,
+    `target` and `recent`. `zone` is `thinking` for reasoning and absent for text. With `detail` False no
+    `state.input` is read except an `execute` tool's code (for its zone), and `target` and `recent` are left out.
+    Any failure returns `base` unchanged."""
+    if not isinstance(base, dict) or not valid_session(session_id) or not Path(db_path).exists():
+        return base
+    try:
+        conn = _connection(db_path, timeout)
+    except Exception:  # noqa: BLE001
+        return base
+    try:
+        rows = conn.execute(_tool_sql(detail), (session_id, TRAIL_MESSAGES, TRAIL + 1 if detail else 1)).fetchall()
+    except Exception:  # noqa: BLE001
+        return base
+    finally:
+        conn.close()
+    try:
+        calls = [_call_row(row, detail) for row in rows]
+        found = dict(base)
+        if base.get("kind") == "tool":
+            now = calls[0] if calls and calls[0]["tool"] == base.get("tool") else None
+            found["zone"] = now["zone"] if now else zone_of(base.get("tool"))
+            found["status"] = now["status"] if now else None
+            if detail:
+                found["target"] = now["target"] if now else None
+                found["recent"] = calls[1:TRAIL + 1] if now else []
+        else:
+            if base.get("kind") == "reasoning":
+                found["zone"] = "thinking"
+            found["status"] = None
+            if detail:
+                found["target"] = None
+                found["recent"] = calls[:TRAIL]
+        return found
+    except Exception:  # noqa: BLE001
+        return base
 
 
 def activity_of(item: dict) -> dict | None:

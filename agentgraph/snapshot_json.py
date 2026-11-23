@@ -506,14 +506,21 @@ class _Shape:
         return self.structure["escalation"] if self.structure else contract.ESCALATION
 
 
-def live_activity(snapshot: Snapshot, db_path=None) -> dict[str, dict]:
+def live_activity(snapshot: Snapshot, db_path=None, *, detail: bool = True) -> dict[str, dict]:
     """What each busy session of the snapshot is doing now (chatfeed.activities), for `snapshot_document`'s
-    `activity`. One short query per busy session; {} when the database cannot be read."""
+    `activity`. One short query per busy session; {} when the database cannot be read. The hub's own entry (the
+    root session, when busy) also gets `zone`, `status`, and with `detail` its `target` and a short `recent`
+    trail (chatfeed.hub_activity); another agent's entry is exactly what `activities` reads."""
     from . import chatfeed
     from .sources import DB_PATH
     busy = [item.id for item in ([snapshot.root] if snapshot.root is not None else []) + snapshot.sessions
             if item.busy and item.id]
-    return chatfeed.activities(busy, db_path=db_path if db_path is not None else DB_PATH) if busy else {}
+    path = db_path if db_path is not None else DB_PATH
+    found = chatfeed.activities(busy, db_path=path) if busy else {}
+    root = snapshot.root
+    if root is not None and root.busy and root.id in found:
+        found[root.id] = chatfeed.hub_activity(root.id, found[root.id], detail=detail, db_path=path)
+    return found
 
 
 def snapshot_document(snapshot: Snapshot, source: str, task: str | None = None, *,
@@ -716,12 +723,14 @@ def skills_document(config_dir: Path | None = None, *, skills_dir: Path | None =
     return found
 
 
-def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, session: str | None = None) -> dict:
-    """The snapshot document plus `learning` for a live source."""
+def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, session: str | None = None,
+                  detail: bool = True) -> dict:
+    """The snapshot document plus `learning` for a live source. `detail` False leaves the hub's activity
+    `target` and `recent` out (the `agentgraph snapshot` command, which agents run inside chats)."""
     document = snapshot_document(snapshot, source, task, session=session,
                                  structure=load_structure() if source == "live" else None,
-                                 activity=live_activity(snapshot) if source == "live"
-                                 else demo_activity(snapshot.now) if source == "demo" else None)
+                                 activity=live_activity(snapshot, detail=detail) if source == "live"
+                                 else demo_activity(snapshot.now, detail=detail) if source == "demo" else None)
     if source == "live":
         from . import mcpview, roster, skillfiles, skillset  # each imports this module
         document["learning"] = _json_safe(learning_document())
@@ -761,6 +770,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dir", type=Path, help="directory of graph JSON files")
     parser.add_argument("--session", metavar="ID", help="orchestrator session to watch")
     parser.add_argument("--task", metavar="NAME", help="task to show instead of the newest one")
+    parser.add_argument("--activity-detail", dest="detail", action="store_true", default=True,
+                        help="the main chat's activity carries `target` and `recent` (the default here; "
+                             "`bin/agentgraph snapshot` turns it off unless this flag is given)")
+    parser.add_argument("--no-activity-detail", dest="detail", action="store_false",
+                        help="leave the main chat's activity `target` and `recent` out")
     args = parser.parse_args(argv)
     try:
         if args.demo:
@@ -769,7 +783,7 @@ def main(argv: list[str] | None = None) -> int:
             snapshot = build_snapshot(graph_dir=args.dir, root_id=args.session,
                                       session_graph_dir=None if args.dir else ORCHESTRATION_GRAPH_DIR)
         line = json.dumps(live_document(snapshot, "demo" if args.demo else "live", args.task,
-                                            session=None if args.demo else args.session),
+                                            session=None if args.demo else args.session, detail=args.detail),
                           allow_nan=False)
     except Exception as exc:
         print(json.dumps({"version": 1, "error": str(exc)}))

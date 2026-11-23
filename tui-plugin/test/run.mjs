@@ -5469,6 +5469,56 @@ test("rows: a working agent's activity is one line under its row (the tool, or t
   assert.ok(!out.some((l) => l.includes("idle agents")));
 });
 
+test("rows: the hub's activity with a zone is a glyph, a verb and the target, then a dim trail row; without the keys it is today's row", () => {
+  const recent = [
+    { zone: "web", tool: "webfetch", target: "example.com/docs/intro", status: "completed" },
+    { zone: "terminal", tool: "shell", target: "npm test", status: "completed" },
+    { zone: "search", tool: "grep", target: "retry_after", status: "error" },
+    { zone: "nowhere", tool: "x", target: null, status: "completed" },
+  ];
+  const withZone = (activity) => chatDoc((d) => { d.agents.find((a) => a.name === "orchestrator").activity = Object.assign({ time: d.generated - 1 }, activity); });
+  const opts = { width: 42, now: 1795075100000, activity: true };
+  const hubLines = (doc, o = opts) => R.layout(doc, o).lines.map(joined);
+  const fetching = withZone({ kind: "tool", tool: "webfetch", text: "", zone: "web", target: "example.com/docs/intro", status: "running", recent });
+  const lines = hubLines(fetching);
+  const at = lines.findIndex((l) => l.startsWith("  ⊕ fetching"));
+  assert.ok(at > 0, lines.join("\n"));
+  assert.equal(lines[at], "  ⊕ fetching · example.com/docs/intro");
+  assert.equal(lines[at + 1], "  ⊕ ❯ ⊙! ◇");
+  assert.ok(lines.every((l) => R.displayWidth(l) <= 42));
+  // a failed call is danger, a target is plain text
+  const spans = R.layout(fetching, opts).lines[at];
+  assert.equal(spans[1].tone, "accent");
+  assert.equal(R.layout(withZone({ kind: "tool", tool: "shell", text: "", zone: "terminal", target: "npm test", status: "error" }), opts).lines.find((l) => joined(l).includes("npm test"))[1].tone, "danger");
+  // a tool without a verb gets the zone's verb and its own name; narrow widths cut the target, then the verb
+  assert.ok(hubLines(withZone({ kind: "tool", tool: "browser", text: "", zone: "tools", target: "page" })).includes("  ◇ using browser · page"));
+  const narrow = hubLines(fetching, { ...opts, width: 22 });
+  assert.ok(narrow.includes("  ⊕ fetching · exampl…"), narrow.join("\n"));
+  assert.ok(narrow.every((l) => R.displayWidth(l) <= 22));
+  const tiny = hubLines(fetching, { ...opts, width: 8 });
+  assert.ok(tiny.includes("  ⊕ fet…"), tiny.join("\n"));
+  assert.ok(tiny.every((l) => R.displayWidth(l) <= 8));
+  assert.ok(hubLines(fetching, { ...opts, width: 5 }).every((l) => R.displayWidth(l) <= 5));
+  // the trail goes first when asked: the rows are then as many as without it
+  const noTrail = hubLines(fetching, { ...opts, trail: false });
+  assert.equal(noTrail.length, lines.length - 1);
+  assert.ok(noTrail.includes("  ⊕ fetching · example.com/docs/intro") && !noTrail.some((l) => l.startsWith("  ⊕ ❯")));
+  // only the glyphs that fit; escape sequences in the target are cleaned
+  assert.ok(hubLines(fetching, { ...opts, width: 8 }).includes("  ⊕ ❯ ⊙!"));
+  assert.ok(hubLines(withZone({ kind: "tool", tool: "shell", text: "", zone: "terminal", target: "\u001b[31mnpm\u001b[0m test" }), opts).includes("  ❯ running · npm test"));
+  // absent keys: today's row, and no trail row
+  const plain = hubLines(withZone({ kind: "tool", tool: "shell", text: "" }));
+  assert.ok(plain.includes("  ▸ shell") && !plain.some((l) => /❯|⊕/.test(l)));
+  const unknown = hubLines(withZone({ kind: "tool", tool: "shell", text: "", zone: "nowhere", target: "npm test", recent }));
+  assert.ok(unknown.includes("  ▸ shell") && !unknown.some((l) => /npm test|⊕/.test(l)));
+  // thinking and text keep their own rows
+  assert.ok(hubLines(withZone({ kind: "reasoning", tool: null, text: "Weighing the options", zone: "thinking", recent })).includes("  · Weighing the options"));
+  // the demo's hub shows the new row with the made-up trail
+  const demoLines = R.layout(DM.demoDocument(demo, 60000), { width: 60, now: 1234, activity: true }).lines.map(joined);
+  assert.ok(demoLines.some((l) => l.startsWith("  ┬ starting · explorer: add the 429 page")), demoLines.join("\n"));
+  assert.ok(demoLines.includes("  ⊕ ❯ ▤ ⊙! ┬"));
+});
+
 test("orbit labels at 42x38 in 2D: when room is short a working agent's task title is cut first, ↻ and cost stay", () => {
   const doc = DM.demoDocument(demo, 60000);
   const lines = sceneText(S.sceneStrict(doc, { width: 42, height: 38, now: 1234 }));

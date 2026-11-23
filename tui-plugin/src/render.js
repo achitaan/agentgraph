@@ -1061,8 +1061,21 @@ function pathsRow(flows, width, now) {
   return candidates.find((c) => lineWidth(c) <= width) || count;
 }
 
+// The zone of a tool call (snapshot `agents[].activity.zone`, as the web view): one single-width glyph for each. The
+// idea of zones and of a short trail of recent actions comes from AgentMove (MIT).
+const ZONE_GLYPHS = Object.freeze({ web: "⊕", terminal: "❯", files: "▤", search: "⊙", thinking: "·", messaging: "»", tasks: "☰", spawn: "┬", tools: "◇" });
+const ZONE_VERBS = Object.freeze({ web: "browsing", terminal: "running", files: "reading", search: "searching", thinking: "thinking", messaging: "messaging", tasks: "planning", spawn: "starting", tools: "using" });
+const TOOL_VERBS = Object.freeze({
+  webfetch: "fetching", shell: "running", bash: "running", execute: "running", read: "reading", write: "writing", edit: "editing", multiedit: "editing",
+  patch: "editing", apply_patch: "editing", grep: "searching", glob: "searching", websearch: "searching", codesearch: "searching", question: "asking",
+  skill: "loading", subagent: "starting", task: "starting",
+});
+const TRAIL_MAX = 5;
+
 // What a working agent is doing now, one line under its row: the tool it runs, or the first words of what it thinks
 // or says (snapshot `agents[].activity`: { kind: "tool" | "reasoning" | "text", tool, text }). Null when it has none.
+// With a zone (the hub's, from the back end) a tool shows its zone glyph, a verb and what it acts on (`target`): a site, a
+// command, a path; without one the row is what it always was.
 function activityRow(agent, width) {
   const a = agent && isObject(agent.activity) ? agent.activity : null;
   if (!a) return null;
@@ -1070,10 +1083,44 @@ function activityRow(agent, width) {
   if (!kind) return null;
   const text = clean(kind === "tool" ? a.tool : a.text);
   if (!text) return null;
+  const glyph = kind === "tool" && typeof a.zone === "string" ? ZONE_GLYPHS[a.zone] : undefined;
+  if (glyph) {
+    const tool = text.toLowerCase();
+    const verb = TOOL_VERBS[tool] || ZONE_VERBS[a.zone];
+    const what = TOOL_VERBS[tool] ? verb : `${verb} ${tool}`;
+    const target = clean(a.target);
+    const room = width - 2 - displayWidth(glyph) - 1;
+    if (room < 1) return null;
+    const head = truncate(what, room);
+    const left = room - displayWidth(head) - 3;
+    const mark = a.status === "error" ? "danger" : "accent";
+    return [sp("  ", "plain"), sp(glyph, mark), sp(` ${head}`, "muted"), ...(target && left >= 2 ? [sp(" · ", "muted"), sp(truncate(target, left), "plain")] : [])];
+  }
   const mark = kind === "tool" ? "▸ " : kind === "reasoning" ? "· " : "";
   const room = width - 2 - displayWidth(mark);
   if (room < 1) return null;
   return [sp("  ", "plain"), ...(mark ? [sp(mark, "muted")] : []), sp(truncate(text, room), kind === "text" ? "plain" : "muted")];
+}
+
+// The hub's last few actions, newest first, one dim row of zone glyphs; a failed call has a "!" after its glyph. Null
+// when it has none. Only as many as fit are drawn.
+function trailRow(agent, width) {
+  const a = agent && isObject(agent.activity) ? agent.activity : null;
+  const known = a && typeof a.zone === "string" && ZONE_GLYPHS[a.zone];
+  const recent = known && Array.isArray(a.recent) ? a.recent.filter(isObject).slice(0, TRAIL_MAX) : [];
+  const spans = [];
+  let used = 2;
+  for (const item of recent) {
+    const glyph = typeof item.zone === "string" && ZONE_GLYPHS[item.zone] ? ZONE_GLYPHS[item.zone] : ZONE_GLYPHS.tools;
+    const bad = item.status === "error";
+    const need = displayWidth(glyph) + (bad ? 1 : 0) + (spans.length ? 1 : 0);
+    if (used + need > width) break;
+    if (spans.length) spans.push(sp(" ", "muted"));
+    spans.push(sp(glyph, "muted"));
+    if (bad) spans.push(sp("!", "danger"));
+    used += need;
+  }
+  return spans.length ? [sp("  ", "plain"), ...spans] : null;
 }
 
 // The keys: [[key, label], ...] -> one muted line of the pairs that fit, in order.
@@ -1092,13 +1139,14 @@ function keysRow(keys, width) {
 // ---------------------------------------------------------------------------------------------------------------
 // Entry point
 
-// layout(snapshot, { width, frame, now, requests, cursor, selected, keys, activity }) -> { lines, items, selected, keysLine }
+// layout(snapshot, { width, frame, now, requests, cursor, selected, keys, activity, trail }) -> { lines, items, selected, keysLine }
 //   lines: the rows, each at most `width` columns. items: the rows that can be selected, in order, each
 //   { key, line, kind, agent, name, hub, open, busy }: `open` the session Enter opens, `busy` the running session stop
 //   and message act on (null for the hub and for agents that do not work). selected: the selected item's key (the
 //   first item's when `selected` names none). With `cursor` every row has a one-column gutter, `›` on the selected
 //   row; `keys` adds the dim key line ([[key, label], ...]; `keysLine` is its index in `lines`, else null); `activity`
-//   adds one line under each working agent's row with what it is doing now. A side chat (snapshot `sidechat.installed`) is one
+//   adds one line under each working agent's row with what it is doing now; the hub's, when the back end gives it a zone, shows the
+//   zone's glyph, a verb and the target, and a dim row of its last few actions follows unless `trail` is false. A side chat (snapshot `sidechat.installed`) is one
 //   more row after the orchestrator's (kind "sidechat", `live` while it answers or `asking` says a question of ours is out). Also returned: `flows` (the drawn paths, most recently run
 //   first) and `root` (the root session's id, the orchestrator's session, or null). With paths and nothing at work
 //   (nothing needs the user, nobody works, the hub is idle) one row after the hub says how many and which ran last.
@@ -1165,6 +1213,8 @@ export function layout(snapshot, options = {}) {
   if (options.activity === true && hub && !flagged.has(hub.name) && hubWorking(snapshot, hub)) {
     const doing = activityRow(hub, inner);
     if (doing) rows.push({ line: doing });
+    const earlier = doing && options.trail !== false ? trailRow(hub, inner) : null;
+    if (earlier) rows.push({ line: earlier });
   }
   const side = sideChatOf(snapshot);
   if (side) {

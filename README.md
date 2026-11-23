@@ -109,6 +109,10 @@ Keys in the live view: `1` agents, `2` tasks, `3` loops, `4` events, `5` issues,
 - `LESSONS.md`: lessons from finished graphs.
 - `tests/`: `python3 -m unittest discover -s tests -t .`
 
+## Credits
+
+- The main chat's live detail on the graph (each tool call sorted into an activity zone, and a short fading trail of recent actions) takes two ideas from [AgentMove](https://github.com/FoothillSolutions/agent-move) (MIT). No code was copied; the zone table, the privacy rules and the drawing are our own.
+
 ## Limits
 
 - **Nothing here enforces the protocol.** The orchestrator is a model following prompts. `check` catches a malformed or inconsistent graph file; it cannot stop the orchestrator from skipping a step.

@@ -9,6 +9,15 @@
   --ag-loop: #857487;
   --ag-work-loop: #81728c;
   --ag-danger: #b64f42;
+  --ag-zone-files: #a38558;
+  --ag-zone-terminal: #5f7a68;
+  --ag-zone-search: #5f7d93;
+  --ag-zone-web: #4f7f86;
+  --ag-zone-thinking: #857487;
+  --ag-zone-messaging: #a4687f;
+  --ag-zone-tasks: #7d8450;
+  --ag-zone-spawn: #ac563d;
+  --ag-zone-tools: #8b7d74;
   --ag-notice-bg: #f7e8df;
   --ag-notice-ink: #81553e;
   --ag-idle: #b4a69d;
@@ -94,6 +103,15 @@
   --ag-loop: #b39bb8;
   --ag-work-loop: #b39bb8;
   --ag-danger: #ed9583;
+  --ag-zone-files: #cdb27c;
+  --ag-zone-terminal: #9cc0a8;
+  --ag-zone-search: #9bbdd3;
+  --ag-zone-web: #8cc3c9;
+  --ag-zone-thinking: #b39bb8;
+  --ag-zone-messaging: #dca0b7;
+  --ag-zone-tasks: #b9c186;
+  --ag-zone-spawn: #dfa183;
+  --ag-zone-tools: #b0a39c;
   --ag-notice-bg: #39271f;
   --ag-notice-ink: #e7b395;
   --ag-idle: #8f8178;
@@ -479,6 +497,42 @@
 .agentgraph[data-ag-motion="full"] .ag-hub .ag-hub-wake[data-active="true"] { display: initial; animation: ag-hub-spin-back 6s linear infinite; }
 .agentgraph[data-ag-motion="full"] .ag-loop, .agentgraph[data-ag-motion="full"] .ag-work-loop { animation: ag-arrive .6s ease-out backwards; }
 @keyframes ag-arrive { from { opacity: 0; } }
+/* The hub's live detail (ideas from AgentMove, MIT): a chip under its name for what it is doing now and a short trail of
+   what it did just before; one accent per zone, the danger colour for a failed call. */
+.agentgraph [data-zone="files"] { --ag-z: var(--ag-zone-files); }
+.agentgraph [data-zone="terminal"] { --ag-z: var(--ag-zone-terminal); }
+.agentgraph [data-zone="search"] { --ag-z: var(--ag-zone-search); }
+.agentgraph [data-zone="web"] { --ag-z: var(--ag-zone-web); }
+.agentgraph [data-zone="thinking"] { --ag-z: var(--ag-zone-thinking); }
+.agentgraph [data-zone="messaging"] { --ag-z: var(--ag-zone-messaging); }
+.agentgraph [data-zone="tasks"] { --ag-z: var(--ag-zone-tasks); }
+.agentgraph [data-zone="spawn"] { --ag-z: var(--ag-zone-spawn); }
+.agentgraph [data-zone="tools"] { --ag-z: var(--ag-zone-tools); }
+.agentgraph [data-zone="replying"] { --ag-z: var(--ag-muted); }
+.agentgraph .ag-hub[data-zone] .ag-hub-wake { stroke: var(--ag-z); }
+.agentgraph .ag-live-box { fill: var(--ag-paper); stroke: var(--ag-z); stroke-width: 1.2; pointer-events: all; }
+.agentgraph .ag-live[data-status="error"] .ag-live-box { stroke: var(--ag-danger); }
+.agentgraph .ag-live-verb, .agentgraph .ag-live-target { font: 10px ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace; dominant-baseline: central; pointer-events: none; }
+.agentgraph .ag-live-verb { fill: var(--ag-z); }
+.agentgraph .ag-live-target { fill: var(--ag-ink); }
+.agentgraph .ag-live-glyph { fill: none; stroke: var(--ag-z); stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.3; }
+.agentgraph .ag-live-glyph * { vector-effect: non-scaling-stroke; }
+.agentgraph .ag-live-glyph .f { fill: var(--ag-z); stroke: none; }
+.agentgraph .ag-live-dot { pointer-events: all; }
+.agentgraph .ag-live-ring { fill: var(--ag-paper); stroke: var(--ag-z); stroke-width: 1; }
+.agentgraph .ag-live-dot[data-status="error"] .ag-live-ring { stroke: var(--ag-danger); stroke-width: 1.6; }
+.agentgraph .ag-live[data-fresh="true"] .ag-live-chip { animation: ag-live-in .35s ease-out backwards; }
+.agentgraph .ag-live[data-fresh="true"] .ag-live-trail { animation: ag-live-fade .5s ease-out backwards; }
+@keyframes ag-live-in { from { opacity: 0; transform: translateY(-4px); } }
+@keyframes ag-live-fade { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .agentgraph .ag-live-chip, .agentgraph .ag-live-trail { animation: none !important; } }
+.agentgraph .ag-recent-list { margin: 0; padding: 0; list-style: none; }
+.agentgraph .ag-recent-row { display: flex; align-items: center; gap: 7px; padding: 2px 0; font-size: 11px; line-height: 1.4; min-width: 0; }
+.agentgraph .ag-recent-icon { flex: none; }
+.agentgraph .ag-recent-tool { flex: none; color: var(--ag-z); }
+.agentgraph .ag-recent-target { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ag-ink); font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace; }
+.agentgraph .ag-recent-time { flex: none; color: var(--ag-muted); }
+.agentgraph .ag-recent-row[data-status="error"] .ag-recent-tool, .agentgraph .ag-recent-row[data-status="error"] .ag-recent-time { color: var(--ag-danger); }
 @keyframes ag-ping { from { scale: 1; opacity: .5; } to { scale: 1.8; opacity: 0; } }
 @keyframes ag-spark { 50% { scale: 1.3; } }
 @keyframes ag-hub-spin-back { to { stroke-dashoffset: 88; } }

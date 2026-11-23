@@ -70,7 +70,8 @@ case "$1" in
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.sidechat "$@" ;;
   snapshot)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.snapshot_json "$@" ;;
+    # an agent runs this inside a chat: the main chat's `target` and `recent` stay out unless --activity-detail follows
+    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.snapshot_json --no-activity-detail "$@" ;;
   flow)
     PYTHONPATH="$HERE" exec python3 -P -m agentgraph.structure "$@" ;;
   structure)

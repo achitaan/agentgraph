@@ -282,9 +282,11 @@ def demo_chat(session_id, now: float | None = None) -> dict | None:
             "truncated": False, "more": False, "warning": None}
 
 
-def demo_activity(now: float | None = None) -> dict[str, dict]:
-    """`activity` of each busy demo session, from the last item of its chat."""
+def demo_activity(now: float | None = None, *, detail: bool = True) -> dict[str, dict]:
+    """`activity` of each busy demo session, from the last item of its chat. The hub's one also carries a zone,
+    a status and, with `detail`, a made-up target and trail (web, terminal, files, search, spawn; one failed)."""
     from .chatfeed import activity_of
+    now = time.time() if now is None else now
     snap = demo_snapshot(now)
     found = {}
     for session in [snap.root, *snap.sessions]:
@@ -292,4 +294,17 @@ def demo_activity(now: float | None = None) -> dict[str, dict]:
         activity = activity_of(feed["items"][-1]) if feed and feed["items"] else None
         if activity is not None:
             found[session.id] = activity
+    root = snap.root
+    if root is not None and root.id in found and found[root.id].get("kind") == "tool":
+        found[root.id].update(zone="spawn", status="running")
+        if detail:
+            trail = (("web", "webfetch", "docs.example.com/guide/rate-limits", "completed", 2.1, 70),
+                     ("terminal", "shell", "npm test -- limiter", "completed", 8.4, 150),
+                     ("files", "read", "~/project/src/limiter.ts", "completed", 0.2, 190),
+                     ("search", "grep", "Retry-After", "error", 0.4, 260),
+                     ("spawn", "subagent", "explorer: map the limiter middleware", "completed", 41.0, 680))
+            found[root.id].update(
+                target="explorer: add the 429 page", recent=[
+                    {"zone": zone, "tool": tool, "target": target, "status": status, "time": round(now - ago, 3),
+                     "seconds": seconds} for zone, tool, target, status, seconds, ago in trail])
     return found

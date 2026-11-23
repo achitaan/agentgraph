@@ -4,6 +4,10 @@ An OpenCode Desktop GUI plugin that adds an **Agent graph** tab to a session's s
 view as `agentgraph serve`: the agent roster, busy counts and the current task graph, drawn by the framework-free
 `../agentgraph/web/app.js` with `../agentgraph/web/style.css` (see `../WEB_API.md`, section 4).
 
+While the hub works, its planet carries a chip with a glyph for the kind of action (web, shell, files, search, subagent), the
+site or command, and a short trail of the last few actions; the details panel lists them. The snapshot's
+`activity.zone`, `target` and `recent` feed it (`../WEB_API.md`); the zone and trail idea is AgentMove's (MIT).
+
 It is a GUI-only plugin (no server or TUI part), loaded as a local directory. Its id is the `name` in `package.json`:
 **`agentgraph-desktop`** (not reserved, not in the `opencode` namespace).
 

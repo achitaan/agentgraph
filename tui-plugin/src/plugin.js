@@ -686,6 +686,11 @@ export function createPlugin(host) {
           // the panel's rows carry what each working agent is doing; they go when the panel is too short for the rows
           let more = listOptions.activity ? { activity: true } : {};
           let first = layout(snap.doc, Object.assign({}, base, more));
+          // the hub's trail of recent actions goes first, then the activity lines altogether
+          if (more.activity && height && first.lines.length + 1 > height) {
+            more = { activity: true, trail: false };
+            first = layout(snap.doc, Object.assign({}, base, more));
+          }
           if (more.activity && height && first.lines.length + 1 > height) {
             more = {};
             first = layout(snap.doc, base);

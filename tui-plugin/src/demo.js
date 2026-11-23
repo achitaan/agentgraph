@@ -45,7 +45,16 @@ function shiftTimes(value, delta) {
 // nowMs (optional): the clock; the document's times are moved so that `generated` is now.
 // What the demo's working agents are doing now (the live demo snapshot, `snapshot_json --demo`, has the same lines).
 const DEMO_ACTIVITY = {
-  orchestrator: { kind: "tool", tool: "subagent", text: null },
+  orchestrator: {
+    kind: "tool", tool: "subagent", text: null, zone: "spawn", target: "explorer: add the 429 page", status: "running",
+    recent: [
+      { zone: "web", tool: "webfetch", target: "example.com/docs/intro", status: "completed", seconds: 1.2 },
+      { zone: "terminal", tool: "shell", target: "npm test", status: "completed", seconds: 8.4 },
+      { zone: "files", tool: "edit", target: "~/project/src/limits.js", status: "completed", seconds: 0.1 },
+      { zone: "search", tool: "grep", target: "retry_after", status: "error", seconds: 0.3 },
+      { zone: "spawn", tool: "subagent", target: "explorer: map the limiter", status: "completed", seconds: 41 },
+    ],
+  },
   "impl-claude": { kind: "tool", tool: "shell", text: null },
   designer: { kind: "reasoning", tool: null, text: "Check the three widths before writing the copy." },
 };

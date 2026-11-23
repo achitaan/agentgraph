@@ -64,6 +64,106 @@
   function amount(value) { const n = Number(value) || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(n >= 1e5 ? 0 : 1) + 'k' : String(Math.round(n)); }
   function named(labels, value) { return Object.hasOwn(labels, value) ? labels[value] : text(value); }
   function state(value) { return named(STATES, value); }
+  // ---- The main chat's live detail (WEB_API.md: activity.zone, target, status, recent) ----
+  // Experimental. Every tool call is sorted into a zone (web, terminal, files, search, ...) and the last few are shown as a
+  // short fading trail: the two ideas of AgentMove (github.com/FoothillSolutions/agent-move, MIT). No code of it is used.
+  // The hub's planet carries a "now" chip (a glyph, a verb and the target) and a row of its recent actions; the details panel
+  // lists them. Every word of it reaches the page as textContent or an attribute, never as markup. Without `zone` (an older
+  // back end, any other agent) none of this is drawn. The pure part sits between the markers: the test harness runs it alone.
+  // live-activity:begin
+  const LIVE_ZONES = ['files', 'terminal', 'search', 'web', 'thinking', 'messaging', 'tasks', 'spawn', 'tools'];
+  const LIVE_STATUS = ['running', 'completed', 'error'];
+  const LIVE_TRAIL = 5, LIVE_CHIP_CHARS = 26, LIVE_CHAR = 6.05;
+  // One glyph for each zone on a 14 x 14 grid (a class `f` is a filled dot); `replying` is the hub writing text.
+  const LIVE_GLYPHS = {
+    web: [['circle', { cx: 7, cy: 7, r: 5.5 }], ['ellipse', { cx: 7, cy: 7, rx: 2.4, ry: 5.5 }], ['path', { d: 'M1.5 7h11' }]],
+    terminal: [['path', { d: 'M2 3.5 6 7l-4 3.5' }], ['path', { d: 'M7.5 11h4.5' }]],
+    files: [['path', { d: 'M3.5 1.5h5l3 3v8h-8z' }], ['path', { d: 'M8.5 1.5v3h3' }], ['path', { d: 'M5.5 8h4M5.5 10.5h4' }]],
+    search: [['circle', { cx: 6, cy: 6, r: 3.9 }], ['path', { d: 'm9 9 3.6 3.6' }]],
+    spawn: [['circle', { cx: 3.5, cy: 3, r: 1.5 }], ['circle', { cx: 3.5, cy: 11, r: 1.5 }], ['circle', { cx: 10.5, cy: 5, r: 1.5 }], ['path', { d: 'M3.5 4.5v5M10.5 6.5c0 2.4-2.6 3-7 3.4' }]],
+    thinking: [['rect', { x: 1.5, y: 3, width: 11, height: 6.5, rx: 3.2 }], ['circle', { class: 'f', cx: 4.6, cy: 6.25, r: .9 }], ['circle', { class: 'f', cx: 7, cy: 6.25, r: .9 }], ['circle', { class: 'f', cx: 9.4, cy: 6.25, r: .9 }], ['path', { d: 'M4 9.5 2.8 12' }]],
+    messaging: [['path', { d: 'M2 3h10v7H6.6L4 12.5V10H2z' }]],
+    tasks: [['path', { d: 'm2.5 3.8 1.2 1.2 2.1-2.3M2.5 9.3l1.2 1.2 2.1-2.3M8 4.2h4M8 9.7h4' }]],
+    tools: [['path', { d: 'M7 1.5 12 4.3v5.4L7 12.5 2 9.7V4.3z' }], ['path', { d: 'M2 4.3 7 7.1l5-2.8M7 7.1v5.4' }]],
+    replying: [['path', { d: 'M2 3h10v7H6.6L4 12.5V10H2z' }], ['path', { d: 'M4.5 5.5h5M4.5 7.5h3' }]],
+  };
+  // The verb of a tool; a tool not listed gets its zone's verb and its own name beside it.
+  const LIVE_VERBS = { webfetch: 'fetching', shell: 'running', bash: 'running', execute: 'running', read: 'reading', write: 'writing', edit: 'editing', multiedit: 'editing', patch: 'editing', apply_patch: 'editing', grep: 'searching', glob: 'searching', websearch: 'searching', codesearch: 'searching', question: 'asking', skill: 'loading', subagent: 'starting', task: 'starting' };
+  const LIVE_ZONE_VERBS = { web: 'browsing', terminal: 'running', files: 'reading', search: 'searching', thinking: 'thinking', messaging: 'messaging', tasks: 'planning', spawn: 'starting', tools: 'using' };
+  const liveLine = (value, max) => (value == null ? '' : String(value)).replace(/\s+/g, ' ').trim().slice(0, max);
+  const liveCut = (value, max) => value.length > max ? value.slice(0, max - 1).trimEnd() + '…' : value;
+  function liveTaken(seconds) {
+    if (!(seconds >= 0)) return '';
+    return seconds < .05 ? '<0.1 s' : seconds < 60 ? (seconds < 10 ? seconds.toFixed(1) : String(Math.round(seconds))) + ' s' : Math.floor(seconds / 60) + ' min ' + String(Math.round(seconds % 60)) + ' s';
+  }
+  function liveOf(agent) {
+    const doing = agent && agent.activity;
+    if (!doing || typeof doing !== 'object') return null;
+    const recent = (Array.isArray(doing.recent) ? doing.recent : []).filter(item => item && typeof item === 'object').slice(0, LIVE_TRAIL).map(item => ({
+      zone: LIVE_ZONES.includes(item.zone) ? item.zone : 'tools', tool: liveLine(item.tool, 60) || 'tool', target: liveLine(item.target, 120),
+      status: LIVE_STATUS.includes(item.status) ? item.status : '', seconds: Number.isFinite(item.seconds) && item.seconds >= 0 ? item.seconds : null,
+    }));
+    const kind = doing.kind === 'tool' || doing.kind === 'reasoning' || doing.kind === 'text' ? doing.kind : '';
+    const zone = LIVE_ZONES.includes(doing.zone) ? doing.zone : kind === 'text' && recent.length ? 'replying' : '';
+    if (!zone) return null;
+    const tool = kind === 'tool' ? liveLine(doing.tool, 60).toLowerCase() : '';
+    const target = kind === 'tool' ? liveLine(doing.target, 120) : '';
+    const verb = kind === 'reasoning' ? 'thinking' : kind === 'text' ? 'replying' : LIVE_VERBS[tool] || LIVE_ZONE_VERBS[zone] || 'using';
+    const status = kind === 'tool' && LIVE_STATUS.includes(doing.status) ? doing.status : '';
+    const named = kind === 'tool' && tool && !LIVE_VERBS[tool];
+    return { zone, kind, tool, target, status, recent, verb, named,
+      chip: verb + (named ? ' ' + tool : ''), key: [zone, kind, tool, target].join('|'),
+      line: verb + (named ? ' ' + tool : '') + (target ? ' · ' + target : '') };
+  }
+  function liveGlyph(zone, size, centred) {
+    const group = svg('g', { class: 'ag-live-glyph', 'aria-hidden': 'true', transform: (centred ? 'translate(' + (-size / 2) + ' ' + (-size / 2) + ') ' : '') + 'scale(' + (size / 14).toFixed(3) + ')' });
+    (LIVE_GLYPHS[zone] || LIVE_GLYPHS.tools).forEach(([tag, attrs]) => group.append(svg(tag, attrs)));
+    return group;
+  }
+  function liveTitle(item) { return item.tool + (item.target ? ': ' + item.target : '') + (item.seconds === null ? '' : ' (' + liveTaken(item.seconds) + ')') + (item.status === 'error' ? ' · failed' : ''); }
+  // The chip and the trail under the hub's name, as one group around the hub's centre; r is the hub's radius.
+  function liveGroup(live, r, fresh) {
+    const group = svg('g', { class: 'ag-live', 'data-zone': live.zone, 'data-status': live.status, 'data-key': live.key, 'data-fresh': String(!!fresh), 'aria-hidden': 'true' });
+    const shown = live.target ? liveCut(live.target, LIVE_CHIP_CHARS) : '';
+    const verbW = live.chip.length * LIVE_CHAR, targetW = shown.length * LIVE_CHAR;
+    const width = 8 + 12 + 5 + verbW + (shown ? 6 + targetW : 0) + 9, top = r + 31, height = 20, left = -width / 2;
+    const chip = svg('g', { class: 'ag-live-chip' });
+    chip.append(svg('rect', { class: 'ag-live-box', x: left, y: top, width, height, rx: height / 2 }));
+    const icon = liveGlyph(live.zone, 12, true); icon.setAttribute('transform', 'translate(' + (left + 14) + ' ' + (top + height / 2) + ') ' + icon.getAttribute('transform'));
+    chip.append(icon);
+    chip.append(svg('text', { class: 'ag-live-verb', x: left + 25, y: top + height / 2 }, live.chip));
+    if (shown) chip.append(svg('text', { class: 'ag-live-target', x: left + 25 + verbW + 6, y: top + height / 2 }, shown));
+    chip.append(svg('title', {}, live.line + (live.status === 'error' ? ' (failed)' : '')));
+    group.append(chip);
+    if (live.recent.length) {
+      const trail = svg('g', { class: 'ag-live-trail' });
+      const sizes = live.recent.map((_, i) => 6.6 - i * .85), gap = 4;
+      let x = -(sizes.reduce((sum, size) => sum + size * 2, 0) + gap * (sizes.length - 1)) / 2;
+      live.recent.forEach((item, i) => {
+        const size = sizes[i], dot = svg('g', { class: 'ag-live-dot', 'data-zone': item.zone, 'data-status': item.status, transform: 'translate(' + (x + size).toFixed(2) + ' ' + (top + height + 10).toFixed(2) + ')' });
+        dot.style.opacity = (.95 - i * .17).toFixed(2); x += size * 2 + gap;
+        dot.append(svg('circle', { class: 'ag-live-ring', r: size }), liveGlyph(item.zone, size * 1.3, true), svg('title', {}, liveTitle(item)));
+        trail.append(dot);
+      });
+      group.append(trail);
+    }
+    return group;
+  }
+  // The details panel's list: newest first, a glyph, the tool, what it acted on, how long it took.
+  function liveList(live) {
+    const section = el('section', 'ag-detail-section ag-recent'); section.append(el('h3', '', 'Recent actions'));
+    const list = el('ul', 'ag-recent-list');
+    live.recent.forEach(item => {
+      const row = el('li', 'ag-recent-row'); row.dataset.zone = item.zone; row.dataset.status = item.status; row.title = liveTitle(item);
+      const icon = svg('svg', { class: 'ag-recent-icon', viewBox: '0 0 14 14', width: 14, height: 14, 'aria-hidden': 'true' }); icon.append(liveGlyph(item.zone, 14, false));
+      row.append(icon, el('span', 'ag-recent-tool', item.tool), el('span', 'ag-recent-target', item.target || '—'),
+        el('span', 'ag-recent-time', (item.status === 'error' ? 'failed' + (item.seconds === null ? '' : ' · ') : '') + (item.seconds === null ? '' : liveTaken(item.seconds))));
+      list.append(row);
+    });
+    section.append(list);
+    return section;
+  }
+  // live-activity:end
   // What the database confirms about a step (WEB_API.md `nodes[].liveness`), against the status the graph reports. Only
   // `live`, or no liveness at all (an older snapshot), reads as working; the others say what they are, in plain words.
   const unconfirmed = node => node?.status === 'running' && (node.liveness === 'quiet' || node.liveness === 'orphan');
@@ -1470,6 +1570,17 @@
         // The task is in the accessible name and the details only, never drawn on the canvas.
         const work = busy && active.length ? text(active[0].goal || active[0].id) + (active.length > 1 ? ', and ' + (active.length - 1) + ' more' : '') : '';
         node.dataset.busy = String(busy); node.dataset.group = agent.group;
+        // The hub's live detail (zone chip and trail), when the back end gives a zone; nothing otherwise.
+        const live = isHub ? liveOf(agent) : null, shownLive = node.querySelector(':scope > .ag-live');
+        if (!live) { shownLive?.remove(); delete node.dataset.zone; }
+        else {
+          node.dataset.zone = live.zone;
+          const stamp = JSON.stringify([live, p.r]);
+          if (!shownLive || shownLive.dataset.stamp !== stamp) {
+            const next = liveGroup(live, p.r, !reducedMotion() && (!shownLive || shownLive.dataset.key !== live.key)); next.dataset.stamp = stamp;
+            if (shownLive) shownLive.replaceWith(next); else node.append(next);
+          }
+        }
         node.dataset.openChat = String(!!sessionToOpen(agent));
         node.dataset.attention = String(alerts.has(agent.name));
         // The outer loop sits round the centre: one bead for each thing the user said, filled until a prompt change answers it.
@@ -1529,7 +1640,7 @@
         const writes = (rosterAction ? (canAddAgent() ? ' N' : '') + (removableOf(agent.name).ok ? ' Delete' : '') : '');
         if (flowAction) node.setAttribute('aria-keyshortcuts', 'Enter Shift+Enter I Shift+F10 ContextMenu C L R Alt+ArrowUp Alt+ArrowDown Alt+ArrowLeft Alt+ArrowRight Backspace Escape' + writes);
         else if (writes) node.setAttribute('aria-keyshortcuts', writes.trim()); else node.removeAttribute('aria-keyshortcuts');
-        node.setAttribute('aria-label', agent.name + (busy ? ', working' + (work ? ', ' + work : '') : ', idle') + (alerts.has(agent.name) ? ', ' + alerts.get(agent.name) : ''));
+        node.setAttribute('aria-label', agent.name + (busy ? ', working' + (work ? ', ' + work : '') + (live ? ', ' + live.line : '') : ', idle') + (alerts.has(agent.name) ? ', ' + alerts.get(agent.name) : ''));
         positionNode(agent.name);
         labelsChanged = measureLabels(node, p) || labelsChanged;
       });
@@ -5176,7 +5287,10 @@
     function activityLine(agent) {
       const doing = agent.activity;
       if (!doing || typeof doing !== 'object') return '';
-      return doing.kind === 'tool' ? 'running ' + (oneLine(doing.tool, 80) || 'a tool') : doing.kind === 'reasoning' ? 'thinking' : doing.kind === 'text' ? 'replying' : '';
+      const line = doing.kind === 'tool' ? 'running ' + (oneLine(doing.tool, 80) || 'a tool') : doing.kind === 'reasoning' ? 'thinking' : doing.kind === 'text' ? 'replying' : '';
+      // The hub's target (a site, a command, a file), as text after the old words.
+      const target = doing.kind === 'tool' ? liveOf(agent)?.target : '';
+      return target ? line + ' · ' + target : line;
     }
     chatBuild();
     // ---- The side chat (n8) ----
@@ -5423,6 +5537,8 @@
         detailScroll.append(el('h2', 'ag-detail-title', agent.name));
         const doing = activityLine(agent);
         if (doing) { const line = el('p', 'ag-detail-activity', doing); line.dataset.kind = text(agent.activity.kind); detailScroll.append(line); }
+        const recent = liveOf(agent);
+        if (recent && recent.recent.length) detailScroll.append(liveList(recent));
         if (agent.about) detailScroll.append(el('p', 'ag-detail-about', text(agent.about)));
         detailScroll.append(el('p', 'ag-detail-intro', agent.model || '—'));
         const badges = el('div', 'ag-detail-badges');

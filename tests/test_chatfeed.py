@@ -691,6 +691,16 @@ class Route(Case):
         self.assertEqual(demo["impl-claude"]["activity"]["tool"], "shell")
         self.assertNotIn("activity", demo["explorer"])
 
+    def test_the_snapshot_carries_the_hubs_detail_and_no_other_agent_does(self):
+        part = {"type": "tool", "id": "c", "name": "webfetch", "state": {"status": "running", "input": {
+            "url": "https://example.com/docs/intro?secret=1"}}, "time": {"created": T0 + 9000}}
+        self.db.assistant("ses_root", [dict(part, name="shell", state={"status": "completed", "input": {"command": "npm test"}}), part])
+        agents = {a["name"]: a for a in json.loads(self.get("/api/snapshot")[2])["agents"]}
+        hub = agents["orchestrator"]["activity"]
+        self.assertEqual((hub["zone"], hub["target"], hub["status"]), ("web", "example.com/docs/intro", "running"))
+        self.assertEqual([(r["zone"], r["target"]) for r in hub["recent"]], [("terminal", "npm test")])
+        self.assertEqual(set(agents["impl-openai"]["activity"]), {"kind", "tool", "text", "time"})
+
     def test_an_unreadable_database_gives_an_empty_feed_not_an_error(self):
         self.db.close()
         self.db.path.rename(self.dir / "moved.db")

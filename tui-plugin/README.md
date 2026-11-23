@@ -37,6 +37,10 @@ that is 2 to 5 rows; a crowded run stays within 16.
    progress row, not here.
 2. **The hub**: `◉`, a spinner while it works, the root session's title, and how many agents are idle (`11 idle`).
    Idle agents are a count, never a list.
+   While the hub works and the back end names a zone for its action, one row under it shows the zone's glyph (`⊕` web,
+   `❯` shell, `▤` files, `⊙` search, `┬` subagent, `◇` other tools), a verb and what it acts on (`⊕ fetching · example.com/docs/intro`),
+   then a dim row of its last few zones, newest first, with `!` after a failed one. The trail row goes first when the
+   panel is short. Without a zone the row is just the tool, as before. The zone and trail idea is AgentMove's (MIT).
 3. **Working**: each busy agent (longest at it first, at most 5, then `+N more working`): spinner, name, `↻N` from
    round 2 of its loop, its step's goal (else its session's title), and the elapsed time on the right (`42s`, `16m`,
    `1h5m`, `12h`, `2d`).
