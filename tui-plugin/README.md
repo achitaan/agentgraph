@@ -170,53 +170,39 @@ view, the list opens as a session panel:
   and stops when it closes or the plugin is disposed.
 - A host without `ui.panel`, `keymap.layer` or `ui.toast` gets the sidebar only, as before.
 
-## The rooms (the panel's default scene)
+## The list (the panel's default)
 
-The panel opens on a floor plan drawn in half-block pixels: six rooms in a 3 by 2 grid with shared one-pixel walls and
-a flat, calm floor, TERMINAL, FILES and WEB above SEARCH, THINKING and TEAM. Each room has its title on a small plaque
-and its own furniture (desk and monitor, cabinet, globe, magnifier, light bulb, sofa), always in front of the
-characters, never under them; the furniture shrinks a size or two before it is dropped. The orchestrator stands in the
-room of what it is doing now (spawning, messages and tasks are TEAM's; tools it has no room for are TERMINAL's; a hub
-that is not working stands in TEAM with nothing lit); that room is lit (brighter floor and wall, a solid plaque) while
-the others are dim. Everyone is the same character: the orchestrator is gold, larger and has an antenna; the others take
-a colour from their name, working ones bob a pixel every 500 ms, idle ones rest in TEAM, dimmed and unnamed, and a stuck
-or sent-back one stands in TEAM with its name and mark. Names are centred under the characters and never share a cell;
-the orchestrator's name comes first, and where room is short, idle people become small unnamed figures and a `+N` says
-how many more there are. A speech bubble with a small tail beside the orchestrator shows its target; furniture moves to
-the corner of the room to make space for it. Faint footprints run along the bare floor from the room of its last action
-to its own. The orchestrator walks for 1.2 s when a new action starts; `reducedMotion: true` stops all of it.
-Everything is a function of the snapshot and the time.
+The panel opens on a calm, plain list: near-black, thin grey rules, white names, one accent colour. Peach means working,
+grey means idle, and a small coral mark means it needs you; nothing else is coloured, and nothing moves. From the top:
 
-Around the picture: a status bar on top (the hub on the left, `4/11  $7.65` on the right) and what needs you as rows
-with a mark chip, the name, the reason and the loop count in columns, red for stuck and amber for sent back (at most 3,
-then `+N more`). Under the picture: a `NOW` bar tinted by the room (zone icon, verb, target), `BEFORE` as small chips of
-the orchestrator's last actions, a thin rule, then one row per working agent in columns (name, icon and verb, task, cost
-at the right edge). Only the orchestrator carries a target. A light theme gets the tones only, no colours or
-backgrounds. As the panel shrinks things give way in this order: the working rows, BEFORE, the furniture, the bubble, the
-names (the orchestrator's last), NOW, what needs you. Below 15 columns per room or 14 pixel rows per room (36 by 14 is
-the smallest) the picture goes compact: short plaque titles, no furniture; below that size the list shows. `o` swaps the
-rooms and the orbit (remembered while the app runs, named in the key hints); `d`, the arrow keys and the mouse belong
-to the orbit. Option `picture: "orbit"` opens on the orbit instead. 
+- The main chat: `◉ orchestrator   replying · 12s` with its spend at the right edge, and its title in grey under it.
+- `NEEDS YOU`: an agent that is stuck or sent back, with the reason in words and how long ago.
+- `PROPOSALS` and `LOOP RUNS`, when there are any.
+- `AT WORK`: one line per working agent, `explorer   reading a file · 12s` (running a command, reading a file, editing a
+  file, searching, reading a site, talking to a worker, thinking), at most five, then `+N more at work`.
+- `Idle: a, b, c, +N more`: idle agents in one grey line.
+- The side chat row, `PATHS` when there are paths, then `4 of 11 steps done · $7.65 in all` and the key hints in plain words.
 
-### The text list (`g`)
+The spend of an agent is at the right edge of its row in grey, only when it is above zero (`$1.20`). The selected row
+(`›`, tinted on a dark theme) shows what it is working on in grey on the line under it; no other row does. Up, down,
+return, the mouse, `d` and the chat opening under a row work as before. Names that do not fit are cut with `…`, no line
+is wider than the panel, and the panel's rows give way (the main chat's title first) down to 36 by 14. A light theme gets
+the tones only. The narrow sidebar keeps its own plain list.
 
-`g` swaps to the text list, drawn in the same style as the rooms (a dark theme gets backgrounds, a light one tones only;
-the narrow sidebar keeps its plain list): a status bar on top (the hub on the left, steps and spend on the right), then
-sections under a labelled rule (`NEEDS YOU`, `PROPOSALS`, `LOOP RUNS`, `AT WORK` or `AGENTS`, `PATHS`). Rows are in
-aligned columns: mark, name, state (a coloured zone icon and verb for a tool, else `working`, `thinking`, `replying`; `↻n`
-after a loop), task cut with `…`, and the time or the idle count at the right edge. A line under a row, indented and
-dim, holds its target or what it says. One footer block under a thin rule holds progress, spend and context, and the key
-hints (the key plain, its label dim). The selected row (`›`) is tinted on a dark theme. Up, down, return, the mouse, `d`
-and the chat opening under a row work as before.
+### The pictures (`g`)
 
-The idea comes from AgentMove (MIT licence); this is a new implementation (`src/rooms.js`), no code copied.
+A picture is opt-in: `g` swaps the list for the planets and back (the key hint says `g picture` in the list and
+`g list` in the picture). The planets are the Desktop graph drawn in half-block pixels: the main chat as a peach sun,
+working agents peach, idle ones grey, a coral mark for what needs you, a few faint orbit lines, and names on a dark
+background, never over a ball. `o` swaps the planets and the older character orbit (below); `d`, the arrow keys and the
+mouse belong to the orbit. A panel smaller than 36 by 14 shows the list, whatever was chosen. Option `picture` names
+what `g` shows first, and can open the panel on a picture instead of the list (`"planets"` or `"orbit"`).
+`reducedMotion: true` stops all motion in the pictures; the list has none. This is a new implementation, no code copied.
 
 ## The orbit (the panel's other scene)
 
-The picture lives in the side panel beside the chat. When the panel is at least 36 columns by 14 rows (the smallest
-that still reads; the sidebar's 37 columns would fit) it opens on the rooms (above; `o` switches to the orbit), drawn instead of the list, whatever its
-size (`g` switches to the list and back; full screen is only ever the user's `f`, or the host's own choice on a narrow
-terminal). Smaller than 36x14, and until the panel's height is known, it draws the list. The sidebar always draws the
+The picture lives in the side panel beside the chat. The orbit is reached with `o` from the planets picture (`g`), or by option `picture: "orbit"`. A picture needs a panel of at least 36 columns by 14 rows
+(the smallest that still reads); smaller than that, and until the panel's height is known, the list is drawn. Full screen is only ever the user's `f`, or the host's own choice on a narrow terminal. The sidebar always draws the
 list.
 
 **Small panels.** The orbit compresses instead of giving up. As space shrinks it gives way in this order: the three
@@ -489,8 +475,8 @@ Restart the TUI. Options go in the `[path, options]` form:
 | `intervalMs` | `4000`                                                                | Refresh period; minimum 1000. |
 | `python`     | `/Users/achita.anantachina/.local/state/tec/toolchain/base_profile/bin/python3` | Absolute path to Python 3.11+ (`/usr/bin/python3` is 3.9 and has no `-P`). `~/` is expanded. |
 | `home`       | `~/.config/opencode/orchestration`                                   | The folder that contains `agentgraph/` (used as `PYTHONPATH`). |
-| `reducedMotion` | `false`                                                            | The 3D sky without shooting stars or fades; the rooms stand still. |
-| `picture`    | `"rooms"`                                                            | What the panel opens on: `"rooms"` or `"orbit"`; `o` swaps them. |
+| `reducedMotion` | `false`                                                            | The pictures and the 3D sky without motion; the list never moves. |
+| `picture`    | `"off"`                                                              | What the panel opens on: `"off"` (the list; `g` shows a picture), `"planets"` or `"orbit"`. |
 
 To keep the built-in sections, use `"mode": "prepend"`.
 
@@ -535,7 +521,8 @@ folder.``
   → exactly `height` lines of exactly `width` cells, spans `{ text, tone, color? }` (`color` a `#rrggbb` group
   colour). `view` is `"2d"` or `"3d"`, `change` `{ from, at }` the camera's move, `colors` `{ dark, muted }`; also
   `orbit` `{ turn, elevation, resume }`, `streaks` `[{ flow, run, at }]`, `motion: "reduced"` and `sky: false`.
-- `src/rooms.js`: the rooms, pure: `roomsScene(snapshot, { width, height, now, motion, colors, keys })` → exactly `height` lines of `width` cells, spans `{ text, tone: "plain", color?, bg?, bold? }`; `roomsLines(doc, w, h, now, options)` is the picture alone.
+- `src/zones.js`: pure: `zoneOfTool`, `zoneOfActivity`, `roomOfActivity`, and `activityWords` (what an agent is doing, in words).
+- `src/planets.js`: the planets picture, pure: `planetsLines(doc, w, h, now, options)`, `planetsScene(snapshot, options)` (header, picture, keys), `planetsInterval`.
 - `src/chat.js`: pure chat rendering: cleaning, wrapping, kinds, window and heading.
 - `src/demo.js`: the demo runner for `AGENTGRAPH_TUI_DEMO`.
 - `src/runner.js`: the snapshot process runner, the chat reader (`createChatRunner`), and `runFlowPrompt` (the run message of a path).

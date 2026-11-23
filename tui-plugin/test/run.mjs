@@ -866,7 +866,7 @@ function makeHost(options = {}) {
   const claims = [];
   const state = { claims, unslotted: 0, renders: 0 };
   const ctx = {
-    options: Object.assign({ python: pluginPython, home: tmp, intervalMs: 1000, picture: "orbit" }, options), // the panel's tests below the rooms ones are of the orbit
+    options: Object.assign({ python: pluginPython, home: tmp, intervalMs: 1000, picture: "orbit" }, options), // the panel tests below are of the orbit
     ui: {
       slot(claim) {
         claims.push(claim);
