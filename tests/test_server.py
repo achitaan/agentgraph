@@ -276,7 +276,7 @@ class LoopEndpointTests(unittest.TestCase):
         self.assertEqual((own["runnable"], own["settings"], own["rev"], own["problem"]), (True, None, "", ""))
         self.assertEqual((pair["runnable"], pair["settings"]), (False, None))
         self.assertIn("does not loop back", pair["reason"])
-        self.assertEqual(self.call("GET", "/api/loops?demo=1")[1]["loops"], [])
+        self.assertEqual([loop["flow"] for loop in self.call("GET", "/api/loops?demo=1")[1]["loops"]], ["watch-build", "nightly-review"])  # made up, never this folder's
 
     def test_save_round_trip_with_before_and_undo(self):
         first = self.save()
@@ -405,13 +405,24 @@ class LoopEndpointTests(unittest.TestCase):
         self.assertEqual(self.post("cancel", expect=400, run="../x")["error"].count("not a run id"), 1)
         self.assertEqual(self.post("cancel", expect=404, run="20261121-043755-90a7")["error"].count("no run"), 1)
 
-    def test_demo_mode_refuses_posts_and_lists_nothing(self):
+    def test_demo_mode_refuses_posts_and_lists_made_up_loops_only(self):
         demo = self.serve(demo=True)
-        for body in ({"op": "save", "flow": "self", "settings": self.SETTINGS, "rev": ""}, {"op": "start", "flow": "self", "goal": "g"}):
+        for body in ({"op": "save", "flow": "self", "settings": self.SETTINGS, "rev": ""}, {"op": "start", "flow": "self", "goal": "g"},
+                     {"op": "pause", "run": "20261123-080000-a1b2"}, {"op": "cancel", "run": "20261123-080000-a1b2"}):
             self.assertEqual(self.call("POST", "/api/loop", body, httpd=demo)[0], 403)
-        self.assertEqual(self.call("GET", "/api/loops", httpd=demo)[1]["loops"], [])
+        listing = self.call("GET", "/api/loops", httpd=demo)[1]
+        self.assertEqual([loop["flow"] for loop in listing["loops"]], ["watch-build", "nightly-review"])  # nothing of the project's own
+        self.assertEqual([(row["flow"], row["status"], row["timing"]["kind"]) for row in listing["runs"]],
+                         [("watch-build", "running", "interval"), ("nightly-review", "paused", "timebox")])
         self.assertEqual(self.call("GET", "/api/loop/run?id=20261121-043755-90a7", httpd=demo)[0], 404)
+        status, detail, _ = self.call("GET", f"/api/loop/run?id={listing['runs'][0]['run']}", httpd=demo)
+        self.assertEqual((status, detail["run"]["status"], detail["run"]["timing"]["wakes"]), (200, "running", 3))
         self.assertFalse((self.structure / ".loops").exists())
+
+    def test_the_demo_snapshot_draws_the_two_demo_loops_as_flows(self):
+        demo = self.serve(demo=True)
+        flows = self.call("GET", "/api/snapshot", httpd=demo)[1]["structure"]["flows"]
+        self.assertEqual([(flow["id"], flow["path"][0] == flow["path"][1]) for flow in flows], [("watch-build", True), ("nightly-review", True)])
 
     def test_protections_like_the_other_endpoints(self):
         body = {"op": "save", "flow": "self", "settings": self.SETTINGS, "rev": ""}

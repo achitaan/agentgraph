@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, unquote
 
 from . import (agentfiles, chatfeed, flowcommands, flowrun, improve, loopapi, mcpview, outputs, roster, setups, sidechat,
                skillfiles, skillset, spend, structure, teams)
-from .demo import demo_activity, demo_setup, demo_sidechat, demo_snapshot, demo_spend
+from .demo import demo_activity, demo_flows, demo_loops, demo_run, demo_setup, demo_sidechat, demo_snapshot, demo_spend
 from .snapshot_json import (ledger_home, learning_document, live_activity, load_structure, skills_document,
                             snapshot_document)
 from .sources import DB_PATH, ORCHESTRATION_GRAPH_DIR, build_snapshot, find_graph_dir
@@ -634,10 +634,11 @@ def make_server(
             shown = demo or params.get("demo", [None])[0] == "1"
             try:
                 if path == _LOOPS_PATH:
-                    answer = ({"project": "", "scratch": False, "loops": [], "orphans": [], "runs": []} if shown
-                              else loopapi.listing(structure_root, self._loop_project(), loop_scratch))
+                    answer = demo_loops() if shown else loopapi.listing(structure_root, self._loop_project(), loop_scratch)
                 elif shown:
-                    raise loopapi.ApiError(404, f"no run {ids[0][:40]}")
+                    answer = demo_run(ids[0])
+                    if answer is None:
+                        raise loopapi.ApiError(404, f"no run {ids[0][:40]}")
                 else:
                     answer = loopapi.run_detail(self._loop_project(), ids[0])
                 body = json.dumps(answer, allow_nan=False).encode("utf-8")
@@ -708,6 +709,7 @@ def make_server(
                                              structure=None if use_demo else load_structure(structure_dir),
                                              activity=activity)
                 if use_demo:
+                    document["structure"]["flows"] = demo_flows()  # two loops on one agent each, so the Loop section can be looked at
                     document["setup"] = demo_setup()
                     document["sidechat"] = demo_sidechat()
                     document["spend"] = demo_spend(document)
