@@ -10,10 +10,10 @@
  * width) and the command "agentgraph.graph" (slash /graph, alias /agents) that opens and closes it. Every host
  * function is feature-detected; a host without them gets the sidebar only.
  *
- * The panel opens on the pixel rooms (src/rooms.js: a floor plan of what each agent is doing) in the side panel, at
- * whatever size it has down to 36 columns by 14 rows (the picture compresses to fit), and on the list below that: `g`
- * switches between the picture and the list, `o` between the rooms and the orbit (src/scene.js), each from then on
+ * The panel opens on a calm plain list (who needs you, who is at work and what they are doing, who is idle). `g`
+ * switches to a picture (the planets, src/planets.js) and back, `o` between the planets and the orbit (src/scene.js), each from then on
  * remembered while the app runs, and neither ever makes the panel full screen (only the user's `f` does, and the host on a narrow terminal);
+ * the picture is drawn at whatever size the panel has down to 36 columns by 14 rows, and a smaller panel has only the list;
  * its size is measured from the panel's own box (OpenTUI `onSizeChange`,
  * `width`, `height`), because the documented panel input has no height. On the orbit, `d` switches it between its 2D view
  * (the ring from above, braille dots) and its 3D view (a turning figure in depth characters). On the 3D view ←/→ turn
@@ -34,7 +34,7 @@ import {
   scene, sceneFits, frameInterval, changeAt, orbitTurned, orbitReset, TURN_STEP, ELEVATION_STEP, DRAG_TURN_PER_CELL, DRAG_ELEVATION_PER_ROW,
   finishedRuns, STREAK_MS, STREAK_GAP_MS,
 } from "./scene.js";
-import { roomsScene, roomsInterval } from "./rooms.js";
+import { planetsScene, planetsInterval } from "./planets.js";
 import { createSnapshotRunner, createChatRunner, createSideAskRunner, createLoopRunner, errorDocument, errorMessage, oneLine, runFlowPrompt, GOAL_LIMIT, SIDE_QUESTION_LIMIT } from "./runner.js";
 import { chatLines, chatWindow, chatHeading, cleanChat, CHAT_MIN_INLINE } from "./chat.js";
 import { createDemoRunner, DEMO_INTERVAL_MS } from "./demo.js";
@@ -75,8 +75,10 @@ export function resolveOptions(raw, { os, path }) {
   const intervalMs = Number.isFinite(requested) && requested > 0 ? Math.max(MIN_INTERVAL_MS, Math.floor(requested)) : DEFAULT_INTERVAL_MS;
   const mode = options.mode === "prepend" ? "prepend" : "replace";
   // reducedMotion: the 3D sky without shooting stars or fades (scene.js `motion: "reduced"`)
-  // picture: what the panel opens on, "rooms" (the default) or "orbit"
-  return { home, python, intervalMs, mode, demo: options.demo === true, reducedMotion: options.reducedMotion === true, picture: options.picture === "orbit" ? "orbit" : "rooms" };
+  // picture: "off" (the default: the panel opens on the plain list; `g` shows a picture), "planets" or "orbit" (the panel
+  // opens on that picture, still switchable to the list with `g`)
+  const picture = options.picture === "orbit" ? "orbit" : options.picture === "planets" ? "planets" : "off";
+  return { home, python, intervalMs, mode, demo: options.demo === true, reducedMotion: options.reducedMotion === true, picture };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -296,7 +298,7 @@ export function createPlugin(host) {
       const tone = tones[span.tone] || tones.plain;
       const own = span.color ? colorProp(span.color) : undefined; // the orbit's group colours
       const fg = own || colorProp(tone.fg);
-      const bg = span.bg ? colorProp(span.bg) : undefined; // the rooms' half-block pixels: top in fg, bottom in bg
+      const bg = span.bg ? colorProp(span.bg) : undefined; // the pictures' half-block pixels: top in fg, bottom in bg
       const bold = span.bold || (!own && tone.bold);
       // a span takes its colour from `style`; OpenTUI ignores a span's `fg` property, kept for the tests' colour checks
       return element("span", Object.assign({ fg }, bg ? { bg } : {}, { style: Object.assign({ fg }, bg ? { bg } : {}, bold ? { bold: true } : {}) }), [span.text]);
@@ -495,7 +497,7 @@ export function createPlugin(host) {
 
     // One watcher follows one session: its latest document, the spinner frame, its timers. The sidebar and the
     // panel each own one; both go through the same runner, which runs one process per session at a time.
-    function createWatcher() {
+    function createWatcher(calm = false) {
       const [state, setState] = host.createSignal({ session: undefined, doc: null });
       const [frame, setFrame] = host.createSignal(0);
       let current; // the session being watched
@@ -513,13 +515,13 @@ export function createPlugin(host) {
         }
       };
 
-      // The frame timer. The list animates only while something works (a spinner every 200 ms); the orbit always
+      // The frame timer. The sidebar's list animates only while something works (a spinner every 200 ms); the panel's list does not move; the orbit always
       // moves while it is shown. Each tick asks `beforeTick` (the orbit's painter) whether the frame changed.
       function spinner(doc) {
         let ms = 0;
         if (!disposed && !stopped) {
           if (sceneOn) ms = isPlainObject(doc) && (doc.error === undefined || doc.error === null) ? sceneInterval(doc) : 0;
-          else ms = isAnimated(doc) || sideBusy(doc) || asking() ? SPINNER_MS : 0;
+          else if (!calm) ms = isAnimated(doc) || sideBusy(doc) || asking() ? SPINNER_MS : 0; // the panel's list never ticks
         }
         if (ms === spinMs && !!spinTimer === ms > 0) return;
         if (spinTimer) timers.clearInterval(spinTimer);
@@ -688,7 +690,8 @@ export function createPlugin(host) {
           const height = resolved.height || null;
           const columns = resolved.columns || null;
           const base = { width, frame: watcher.frame(), now: clock(), requests, cursor: !!listOptions.cursor, selected };
-          if (listOptions.styled) Object.assign(base, { styled: true, dark: sceneColors(ctx.theme, tones).dark });
+          if (listOptions.styled) Object.assign(base, { styled: true, dark: sceneColors(ctx.theme, tones).dark, reduced: options.reducedMotion === true });
+          if (listOptions.styled && height) base.height = height;
           if (typeof listOptions.asking === "function" && listOptions.asking()) base.asking = true;
           // the panel's rows carry what each working agent is doing; they go when the panel is too short for the rows
           let more = listOptions.activity ? { activity: true } : {};
@@ -748,11 +751,11 @@ export function createPlugin(host) {
       };
     }
 
-    // The view chosen with `g` in the panel, remembered while the app runs: "auto" (the orbit when it fits: what the
-    // panel opens on; the list when it does not), "scene" or "list" (chosen with `g`).
-    const [viewMode, setViewMode] = host.createSignal("auto");
+    // The view chosen with `g` in the panel, remembered while the app runs: "list" (what the panel opens on, unless
+    // `options.picture` names a picture) or "scene" (the picture, chosen with `g`).
+    const [viewMode, setViewMode] = host.createSignal(options.picture === "off" ? "list" : "scene");
     const [fullByF, setFullByF] = host.createSignal(false); // the user made the panel full screen with `f`
-    // The orbit is wanted unless the user chose the list with `g`; it is drawn only where it fits (sceneFits).
+    // The picture is wanted only when the user chose it with `g`; it is drawn only where it fits (sceneFits).
     const presentationOf = (p) => {
       try {
         return p ? p.presentation : undefined;
@@ -760,7 +763,10 @@ export function createPlugin(host) {
         return undefined;
       }
     };
-    const wantScene = () => viewMode() !== "list";
+    const wantScene = () => viewMode() === "scene";
+    // whether the panel, as last measured, is big enough for a picture (the list names `g picture` only then)
+    let panelFits = false;
+    const pictureFits = () => panelFits;
 
     // The list's rows in the panel: the selected row's key (remembered while the app runs) and the rows last drawn.
     const [selection, setSelection] = host.createSignal(null);
@@ -863,7 +869,8 @@ export function createPlugin(host) {
       }
       if (plan && plan.win && plan.win.max > 0 && !open) pieces.push(["⇞⇟", "scroll"]);
       if (result && Array.isArray(result.flows) && result.flows.length && canRun() && runShown()) pieces.push(["r", "run"]);
-      pieces.push(["g", "graph"], ["q", "close"]);
+      if (pictureFits()) pieces.push(["g", "picture"]);
+      pieces.push(["q", "close"]);
       return pieces;
     };
     const panelList = {
@@ -1160,10 +1167,10 @@ export function createPlugin(host) {
     // The orbit's view chosen with `d`, remembered while the app runs; it opens in 2D. A switch morphs the old view
     // into the new one over CHANGE_MS (each agent travels from its place in one to its place in the other).
     const [dimension, setDimension] = host.createSignal({ view: "2d", change: null });
-    // The picture chosen with `o`, remembered while the app runs: the pixel rooms (src/rooms.js, the default) or the orbit, which `options.picture` can open on.
-    const [picture, setPicture] = host.createSignal(options.picture);
+    // The picture chosen with `o`, remembered while the app runs: the planets (src/planets.js, the default picture) or the orbit, which `options.picture` can open on.
+    const [picture, setPicture] = host.createSignal(options.picture === "orbit" ? "orbit" : "planets");
     const togglePicture = () => {
-      setPicture(picture() === "rooms" ? "orbit" : "rooms");
+      setPicture(picture() === "planets" ? "orbit" : "planets");
       for (const w of watchers) if (w.retime) w.retime();
       requestRender();
     };
@@ -1243,7 +1250,7 @@ export function createPlugin(host) {
     };
     // The keys named on the 3D view's bottom row while the panel has the turn layer (panelKeys binds them).
     const ORBIT_KEYS = Object.freeze([["←→↑↓", "turn"], ["0", "reset"]]);
-    const ROOMS_KEYS = Object.freeze([["o", "orbit"], ["g", "list"]]);
+    const PLANET_KEYS = Object.freeze([["g", "list"], ["o", "orbit"]]);
     let orbitKeysOn = false;
     // The orbit's frames: rows are reused while their text and tones stay the same, and a tick whose frame equals
     // the last one drawn pushes nothing to the host.
@@ -1287,20 +1294,20 @@ export function createPlugin(host) {
       const viewOptions = () => {
         const d = dimension();
         const o = orbit();
-        if (picture() === "rooms") return Object.assign({ colors }, orbitKeysOn ? { keys: ROOMS_KEYS } : {}, options.reducedMotion ? { motion: "reduced" } : {});
+        if (picture() === "planets") return Object.assign({ colors }, orbitKeysOn ? { keys: PLANET_KEYS } : {}, options.reducedMotion ? { motion: "reduced" } : {});
         return Object.assign({ view: d.view, change: d.change, colors }, o ? { orbit: o } : {}, orbitKeysOn ? { keys: ORBIT_KEYS } : {},
           streaks.length ? { streaks } : {}, options.reducedMotion ? { motion: "reduced" } : {});
       };
       const compute = (snap, size) => {
         noteRuns(snap);
-        if (picture() === "rooms") return roomsScene(snap.doc, Object.assign(viewOptions(), { width: size.width, height: size.height, now: clock() }));
+        if (picture() === "planets") return planetsScene(snap.doc, Object.assign(viewOptions(), { width: size.width, height: size.height, now: clock() }));
         return scene(snap.doc, Object.assign(viewOptions(), { width: size.width, height: size.height, now: clock(), previous: snap.previous ? { doc: snap.previous, at: snap.at } : undefined }));
       };
       // the frame interval at now; the previous document is part of it (the sun's spikes draw back for a second after the hub stops)
       watcher.sceneInterval = (doc) => {
         const snap = watcher.state();
         const previous = snap && snap.doc === doc && snap.previous ? { doc: snap.previous, at: snap.at } : undefined;
-        if (picture() === "rooms") return roomsInterval(doc, viewOptions(), clock());
+        if (picture() === "planets") return planetsInterval(doc, viewOptions(), clock());
         return frameInterval(doc, Object.assign(viewOptions(), previous ? { previous } : {}), clock());
       };
       let lastSize = null;
@@ -1401,7 +1408,8 @@ export function createPlugin(host) {
                 painter.setTones();
               }
               const known = size() || measuredSize(root);
-              const fits = !!known && wantScene(p) && sceneFits(known.width, known.height);
+              panelFits = !!known && sceneFits(known.width, known.height);
+              const fits = panelFits && wantScene(p);
               return { session: sessionOf(p), width: panelWidth(p), height: known ? known.height : null, columns: known ? known.width : null, scene: fits ? known : null, painter, list: panelList };
             },
             panel,
@@ -1449,7 +1457,7 @@ export function createPlugin(host) {
     const panelApi = ctx.ui && ctx.ui.panel && typeof ctx.ui.panel.open === "function" ? ctx.ui.panel : undefined;
     if (panelApi && typeof ctx.ui.slot === "function") {
       try {
-        const panelWatcher = createWatcher();
+        const panelWatcher = createWatcher(true);
         const isOurs = (panel) => {
           try {
             return !!panel && panel.name === PANEL_NAME;
@@ -1556,8 +1564,7 @@ export function createPlugin(host) {
               const told = typeof presentationOf(panel) === "string"; // the host says whether it is full screen
               const before = told ? fullscreenNow() : fullByF();
               act("toggleFullscreen")();
-              setFullByF(!before); // full screen by `f` shows the orbit (when it fits); back to a side panel, the list
-              setViewMode("auto");
+              setFullByF(!before); // `f` only changes the size; the list or the picture stays as it was chosen
               requestRender();
             },
           },

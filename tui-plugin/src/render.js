@@ -15,6 +15,8 @@
  * Every string from the document is untrusted: control characters are removed and nothing is interpreted.
  */
 
+import { activityWords } from "./zones.js";
+
 export const TONES = Object.freeze(["plain", "muted", "accent", "danger"]);
 
 export const SPINNER = Object.freeze(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
@@ -1139,18 +1141,16 @@ function keysRow(keys, width) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// The styled list (`styled: true`, the panel's text list): the rooms' status bar on top, rules with a label between
-// the sections, rows in aligned columns (mark, name, state, task, time), one footer block under a rule. A dark theme
-// gets backgrounds (the bar, the selected row); a light one gets the tones only. The rows, items and keys are the plain
-// list's: only the look differs.
+// The calm list (`styled: true`, the panel's text list): plain words, one line per agent, a lot of room. The main chat
+// on top, then NEEDS YOU, AT WORK, then the idle agents on one dim line, one dim line of totals and the keys. Peach
+// marks work, grey is idle, coral is only for what needs the user. Nothing moves. A dark theme gets these colours and a
+// faint tint on the selected row; a light one gets the tones only. The rows, items and keys are the plain list's.
 
-export const PANEL_BAR = Object.freeze([30, 35, 49]);
-export const PANEL_INK = Object.freeze([226, 232, 240]);
-export const PANEL_MUTED = Object.freeze([148, 163, 184]);
-const PANEL_SELECTED = [37, 45, 64];
-const PANEL_RULE = [71, 85, 105];
-const PANEL_GOLD = [250, 204, 21];
-const STATE_MAX = 18;
+const CALM = Object.freeze({
+  ink: [232, 224, 218], muted: [176, 163, 156], idle: [143, 129, 120], peach: [223, 161, 131], coral: [237, 149, 131], rule: [78, 68, 62], selected: [38, 33, 31],
+});
+const MARK_DOT = "●";
+const ID_SELECTED = CALM.selected;
 
 const hexOf = (c) => "#" + c.map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0")).join("");
 // A span with, on a dark theme only, a colour, a background and bold.
@@ -1162,129 +1162,94 @@ function ssp(text, tone, color, bold, bg) {
   return span;
 }
 const padRight = (text, n) => text + " ".repeat(Math.max(0, n - displayWidth(text)));
-const padLeftTo = (text, n) => " ".repeat(Math.max(0, n - displayWidth(text))) + text;
 const fillTo = (line, width, bg) => (lineWidth(line) >= width ? line : [...line, ssp(" ".repeat(width - lineWidth(line)), "plain", null, false, bg)]);
 const tint = (line, bg) => line.map((span) => (span.bg ? span : { ...span, bg: hexOf(bg) }));
 
-// A rule with its label: " ── NEEDS YOU 2 ───────".
-function ruleRow(label, count, width, dark) {
-  const c = (v) => (dark ? v : null);
-  const dash = (n) => ssp("─".repeat(Math.max(0, n)), "muted", c(PANEL_RULE));
-  if (!label) return [ssp(" ", "plain"), dash(width - 1)];
-  const room = width - 6;
-  const text = truncate(count ? `${label} ${count}` : label, Math.max(1, room));
-  return [ssp(" ", "plain"), dash(2), ssp(" ", "plain"), ssp(text, "muted", c(PANEL_MUTED), true), ssp(" ", "plain"), dash(width - 5 - displayWidth(text))];
+// What a working agent is doing, in words, and when that began (ms, or null): the activity's own time, else the step's start.
+function doingOf(agent, since) {
+  const act = agent && isObject(agent.activity) ? agent.activity : null;
+  const at = act ? epochMs(act.time) : null;
+  return { words: activityWords(act), since: at !== null ? at : since };
 }
 
-// The status bar: the hub's mark and name on the left, the steps and the spend on the right.
-function barRow(doc, hub, width, dark, frame) {
+// One row: "<mark> <name>  <words> · <age>          <spend>". The name is cut at its end, the words before the age,
+// the spend goes first when there is no room for all of the words.
+function calmRow(width, nameW, p) {
+  const c = (v) => (p.dark ? v : null);
+  const room0 = width - 1 - (2 + nameW + 2);
+  const age = p.age || "";
+  const full = p.words + (age ? " · " + age : "");
+  const spend = p.spend || "";
+  let showSpend = spend !== "" && room0 >= displayWidth(full) + 2 + displayWidth(spend);
+  const room = room0 - (showSpend ? displayWidth(spend) + 2 : 0);
+  let status = "";
+  let ageText = "";
+  if (room >= displayWidth(full)) {
+    status = p.words;
+    ageText = age ? " · " + age : "";
+  } else {
+    const suffix = age ? " · " + age : "";
+    if (age && room - displayWidth(suffix) >= 6) {
+      status = truncate(p.words, room - displayWidth(suffix));
+      ageText = suffix;
+    } else if (room >= 3) status = truncate(p.words, room);
+  }
+  const line = [
+    ssp(p.mark, p.markTone, c(p.markColor), false),
+    ssp(" ", "plain"),
+    ssp(padRight(truncate(p.name, nameW), nameW), p.nameTone || "plain", c(p.nameColor || CALM.ink), p.bold),
+    ssp("  ", "plain"),
+  ];
+  if (status) line.push(ssp(status, p.wordsTone, c(p.wordsColor)));
+  if (ageText) line.push(ssp(ageText, "muted", c(CALM.idle)));
+  if (showSpend) {
+    const gap = width - 1 - lineWidth(line) - displayWidth(spend);
+    line.push(ssp(" ".repeat(Math.max(1, gap)), "plain"), ssp(spend, "muted", c(CALM.idle)));
+  }
+  return line;
+}
+
+// A section label with a thin line after it: "NEEDS YOU ─────────".
+function calmRule(label, width, dark, color) {
   const c = (v) => (dark ? v : null);
-  const bg = dark ? PANEL_BAR : null;
-  const working = !!hub && hubWorking(doc, hub);
-  const rootName = isObject(doc.root) && typeof doc.root.agent === "string" ? doc.root.agent : "";
-  const name = clean(hub ? hub.name : rootName) || "?";
+  const room = width - 1;
+  const text = truncate(label, Math.max(1, room));
+  const rest = room - displayWidth(text) - 1;
+  return [ssp(text, color ? "danger" : "muted", c(color || CALM.muted), true), ...(rest >= 2 ? [ssp(" ", "plain"), ssp("─".repeat(rest), "muted", c(CALM.rule))] : [])];
+}
+
+// "Idle: a, b, c" or, when they do not fit, "Idle: a, b, +3 more".
+function idleLine(names, width, dark) {
+  const c = (v) => (dark ? v : null);
+  const head = "Idle: ";
+  const all = names.map((n) => clean(n) || "?");
+  let text = head + all.join(", ");
+  if (displayWidth(text) > width - 1) {
+    let shown = [];
+    for (let i = 0; i < all.length; i++) {
+      const rest = all.length - i - 1;
+      const next = head + [...shown, all[i]].join(", ") + (rest > 0 ? `, +${rest} more` : "");
+      if (displayWidth(next) > width - 1) break;
+      shown = [...shown, all[i]];
+    }
+    const more = all.length - shown.length;
+    text = shown.length ? head + shown.join(", ") + (more > 0 ? `, +${more} more` : "") : truncate(head + all.join(", "), Math.max(1, width - 1));
+  }
+  return [ssp(text, "muted", c(CALM.idle))];
+}
+
+// "3 of 5 steps done · $4.20 in all": the task's steps and the whole spend, when there are any.
+function totalsLine(doc, width, dark) {
   const graph = graphOf(doc);
   const progress = graph && isObject(graph.progress) ? graph.progress : null;
   const total = progress ? Math.max(0, Math.floor(Number(progress.total) || 0)) : 0;
   const passed = progress ? Math.min(total, Math.max(0, Math.floor(Number(progress.passed) || 0))) : 0;
   const cost = isObject(doc.totals) ? finiteNumber(doc.totals.cost) : null;
-  const right = [];
-  if (total) right.push(ssp(String(passed), "plain", c(PANEL_INK), true, bg), ssp("/" + total, "muted", c(PANEL_MUTED), false, bg));
-  if (cost !== null) right.push(ssp((right.length ? "  " : "") + formatDollars(cost), "plain", c(PANEL_INK), false, bg));
-  let rightW = lineWidth(right);
-  const tail = working ? 2 : 0; // " ⠋"
-  const shown = width - 4 - tail - (rightW ? 2 + rightW : 0) >= Math.min(3, displayWidth(name)) ? right : [];
-  rightW = lineWidth(shown);
-  const nameRoom = Math.max(1, width - 4 - tail - (rightW ? 2 + rightW : 0));
-  const left = [
-    ssp(" ", "plain", null, false, bg),
-    ssp(MARK_HUB, working ? "accent" : "muted", null, false, bg),
-    ssp(" ", "plain", null, false, bg),
-    ssp(truncate(name, nameRoom), "plain", c(PANEL_INK), true, bg),
-    ...(working ? [ssp(" ", "plain", null, false, bg), ssp(spinnerGlyph(frame), "accent", null, false, bg)] : []),
-  ];
-  const gap = width - lineWidth(left) - (shown.length ? rightW + 1 : 0);
-  const line = shown.length && gap >= 1 ? [...left, ssp(" ".repeat(gap), "plain", null, false, bg), ...shown, ssp(" ", "plain", null, false, bg)] : left;
-  return fillTo(line, width, bg);
-}
-
-// What a working agent does, for the state column: the zone's glyph and verb for a tool, else a word. -> { text, tone }
-function stateOf(agent) {
-  const a = agent && isObject(agent.activity) ? agent.activity : null;
-  const kind = a && (a.kind === "tool" || a.kind === "reasoning" || a.kind === "text") ? a.kind : null;
-  if (!kind) return { text: "working", tone: "muted" };
-  if (kind === "reasoning") return { text: "thinking", tone: "muted" };
-  if (kind === "text") return { text: "replying", tone: "muted" };
-  const tool = clean(a.tool).toLowerCase();
-  const glyph = own(ZONE_GLYPHS, a.zone);
-  const bad = a.status === "error";
-  if (!glyph || !tool) return { text: "working", tone: bad ? "danger" : "muted" };
-  const verb = own(TOOL_VERBS, tool) || `${own(ZONE_VERBS, a.zone)} ${tool}`;
-  return { text: `${glyph} ${verb}`, tone: bad ? "danger" : "accent" };
-}
-
-// The line under a working agent's row. A tool with a zone shows only its target (the verb is in the state column).
-function detailRow(agent, width) {
-  const a = agent && isObject(agent.activity) ? agent.activity : null;
-  if (a && a.kind === "tool" && own(ZONE_GLYPHS, a.zone) && clean(a.tool)) {
-    const target = clean(a.target);
-    if (!target || width < 6) return null;
-    return [ssp("  ", "plain"), ssp("↳ ", "muted"), ssp(truncate(target, width - 4), "muted")];
-  }
-  return activityRow(agent, width);
-}
-
-// One row in columns: mark, name, state (a colour), task (cut at its end), time (flush right). `cols` are shared by all the
-// rows so the columns line up.
-function columnRow(whole, cols, spec) {
-  const width = whole - 1; // one cell of margin at the right, like the bar
-  let { nameW, stateW, rightW } = cols;
-  let fixed = 2 + nameW + 2 + stateW + (rightW ? 2 + rightW : 0);
-  while (fixed + 2 > width && nameW > 6) {
-    nameW -= 1;
-    fixed -= 1;
-  }
-  while (fixed + 2 > width && stateW > 4) {
-    stateW -= 1;
-    fixed -= 1;
-  }
-  let withRight = rightW > 0;
-  if (fixed + 2 > width && withRight) {
-    fixed -= 2 + rightW;
-    withRight = false;
-  }
-  const room = Math.max(0, width - fixed - 2);
-  const loop = spec.rounds >= 2 ? ` ${LOOP_MARK}${spec.rounds}` : "";
-  const label = truncate(spec.state, Math.max(1, stateW - displayWidth(loop)));
-  const stateCells = displayWidth(label) + displayWidth(loop);
-  const line = [
-    ssp(spec.mark, spec.markTone, spec.markColor, spec.strong),
-    ssp(" ", "plain"),
-    ssp(padRight(truncateMiddle(spec.name, nameW), nameW), spec.nameTone || "plain", spec.nameColor, spec.nameBold),
-    ssp("  ", "plain"),
-    ssp(label, spec.stateTone, spec.stateColor),
-    ...(loop ? [ssp(loop, "accent")] : []),
-    ssp(" ".repeat(Math.max(0, stateW - stateCells)), "plain"),
-    ssp("  ", "plain"),
-  ];
-  if (room >= 6 && spec.task) line.push(ssp(padRight(truncate(spec.task, room), room), "muted"));
-  else line.push(ssp(" ".repeat(room), "plain"));
-  if (withRight) line.push(ssp("  ", "plain"), ssp(padLeftTo(spec.right || "", rightW), spec.rightTone || "muted"));
-  line.push(ssp(" ", "plain"));
-  return line;
-}
-
-function columnsOf(specs, width) {
-  const nameCap = Math.max(8, Math.floor(width * 0.3));
-  let nameW = 4;
-  let stateW = 4;
-  let rightW = 0;
-  for (const spec of specs) {
-    nameW = Math.max(nameW, Math.min(nameCap, displayWidth(spec.name)));
-    stateW = Math.max(stateW, Math.min(STATE_MAX, displayWidth(spec.state) + (spec.rounds >= 2 ? 1 + displayWidth(LOOP_MARK + spec.rounds) : 0)));
-    rightW = Math.max(rightW, displayWidth(spec.right || ""));
-  }
-  return { nameW, stateW, rightW };
+  const parts = [];
+  if (total) parts.push(`${passed} of ${total} steps done`);
+  if (cost !== null && cost > 0) parts.push(`${formatDollars(cost)} in all`);
+  if (!parts.length) return null;
+  return [ssp(truncate(parts.join(" · "), Math.max(1, width - 1)), "muted", dark ? CALM.idle : null)];
 }
 
 // The key hints: the key plain, its label dim, two spaces between the pairs, as many as fit.
@@ -1299,10 +1264,199 @@ function keysStyled(keys, width, dark) {
     const need = (out.length ? 2 : 0) + displayWidth(key) + 1 + displayWidth(label);
     if (used + need > width) break;
     if (out.length) out.push(ssp("  ", "plain"));
-    out.push(ssp(key, "plain", c(PANEL_INK)), ssp(" " + label, "muted", c(PANEL_MUTED)));
+    out.push(ssp(key, "plain", c(CALM.ink)), ssp(" " + label, "muted", c(CALM.idle)));
     used += need;
   }
   return out.length ? out : null;
+}
+
+// layout() for `styled: true`: same result shape.
+function calmLayout(snapshot, agents, options, width, now) {
+  const dark = options.dark !== false;
+  const k = (v) => (dark ? v : null);
+  const cursor = options.cursor === true && width > 2;
+  const inner = cursor ? width - 1 : width;
+  const generated = epochMs(snapshot.generated);
+  const at = options.reduced === true ? generated ?? now : now ?? generated;
+  const hub = findHub(snapshot, agents);
+  const graph = graphOf(snapshot);
+  const needs = needsItems(snapshot, agents, hub, options.requests);
+  const shownNeeds = needs.length > NEEDS_MAX + 1 ? needs.slice(0, NEEDS_MAX) : needs;
+  const flagged = new Set(needs.map((n) => n.agent).filter(Boolean));
+  const hubBusy = !!hub && hubWorking(snapshot, hub);
+  const hubFlagged = !!hub && flagged.has(hub.name);
+  const working = agents
+    .filter((a) => a !== hub && busyCount(a) > 0 && !flagged.has(a.name))
+    .map((a, i) => {
+      const node = busyNodeOf(graph, a.name);
+      const sessions = agentSessions(a);
+      return { agent: a, key: `agent:${a.name}`, name: displayName(a), open: sessions.open, busy: sessions.busy, what: whatOf(graph, a, node), since: sinceOf(node, a), order: i };
+    })
+    .sort((x, y) => (x.since ?? Infinity) - (y.since ?? Infinity) || x.order - y.order);
+  const idle = agents.filter((a) => a !== hub && busyCount(a) <= 0 && !flagged.has(a.name));
+  const side = sideChatOf(snapshot);
+  const asking = options.asking === true;
+  const hubName = displayName(hub || { name: isObject(snapshot.root) && typeof snapshot.root.agent === "string" ? snapshot.root.agent : "" });
+  const rootId = isObject(snapshot.root) && typeof snapshot.root.id === "string" ? snapshot.root.id : null;
+  const hubSessions = hub ? agentSessions(hub) : { open: null };
+  const shownWorking = working.length > WORKING_MAX + 1 ? working.slice(0, WORKING_MAX) : working;
+
+  const candidates = [];
+  if (hub && !hubFlagged) candidates.push(`agent:${hub.name}`);
+  for (const item of shownNeeds) candidates.push(item.key);
+  for (const item of shownWorking) candidates.push(item.key);
+  if (side) candidates.push("sidechat");
+  const selected = candidates.includes(options.selected) ? options.selected : candidates.length ? candidates[0] : null;
+
+  const nameCap = Math.max(8, Math.floor(inner * 0.34));
+  const names = [hubName, ...shownNeeds.map((n) => n.name), ...shownWorking.map((w) => w.name), ...(side ? [SIDE_NAME] : [])];
+  const nameW = Math.max(4, Math.min(nameCap, ...[Math.max(...names.map((n) => displayWidth(n)))]));
+  const ageOf = (since) => (since !== null && since !== undefined && at !== null ? formatElapsed(at - since) : "");
+  const spendOf = (agent) => {
+    const cost = agent ? agentCost(agent) : 0;
+    return cost > 0 ? formatDollars(cost) : "";
+  };
+  const detail = (text) => {
+    const room = inner - 3;
+    return room >= 4 && text ? [ssp("  ", "plain"), ssp(truncate(text, room), "muted", k(CALM.idle))] : null;
+  };
+
+  // rows: { line, item?, extra?, kind } ; kind "blank" and "totals" go first when the panel is short
+  const rows = [];
+  const blank = () => rows.push({ line: [ssp(" ", "plain")], kind: "blank" });
+  const label = (text, color) => {
+    if (rows.length) blank();
+    rows.push({ line: calmRule(text, inner, dark, color), kind: "label" });
+  };
+
+  // the main chat
+  {
+    const c = hubFlagged ? CALM.coral : hubBusy ? CALM.peach : CALM.idle;
+    const act = hub ? doingOf(hub, null) : { words: "", since: null };
+    const hubNeed = hubFlagged ? needs.find((n) => n.agent === hub.name) : null;
+    const words = hubNeed ? hubNeed.label : hubBusy ? act.words : "idle";
+    const row = {
+      mark: MARK_HUB, markTone: hubFlagged ? "danger" : hubBusy ? "accent" : "muted", markColor: c, name: hubName, bold: true,
+      words, wordsTone: hubFlagged ? "danger" : hubBusy ? "accent" : "muted", wordsColor: hubFlagged ? CALM.coral : hubBusy ? CALM.peach : CALM.idle,
+      age: hubBusy ? ageOf(act.since) : "", spend: spendOf(hub), dark,
+    };
+    const item = hub && !hubFlagged
+      ? { key: `agent:${hub.name}`, kind: "hub", agent: hub.name, name: displayName(hub), hub: true, open: rootId || hubSessions.open, busy: null }
+      : null;
+    const a = hub && isObject(hub.activity) ? hub.activity : null;
+    rows.push({ line: calmRow(inner, nameW, row), item, kind: "row", extra: hubBusy && a ? clean(a.target) : "" });
+  }
+
+  if (shownNeeds.length) label("NEEDS YOU", CALM.coral);
+  for (const item of shownNeeds) {
+    const who = item.agent ? agents.find((a) => a.name === item.agent) : null;
+    const row = {
+      mark: MARK_DOT, markTone: "danger", markColor: CALM.coral, name: item.name, words: item.label, wordsTone: "danger", wordsColor: CALM.coral,
+      age: ageOf(item.since), spend: spendOf(who), dark,
+    };
+    rows.push({ line: calmRow(inner, nameW, row), item: { key: item.key, kind: item.kind, agent: item.agent || null, name: item.name, hub: !!item.hub, open: item.open, busy: item.busy }, kind: "row", extra: item.what });
+  }
+  if (shownNeeds.length < needs.length) rows.push({ line: [ssp(`+${needs.length - shownNeeds.length} more`, "muted", k(CALM.idle))], kind: "more" });
+
+  const proposals = proposalRows(snapshot, inner);
+  if (proposals.length) label("PROPOSALS");
+  for (const line of proposals) rows.push({ line, kind: "misc" });
+  const loops = loopRows(snapshot, inner);
+  if (loops.length) label("LOOP RUNS");
+  for (const line of loops) rows.push({ line, kind: "misc" });
+
+  if (shownWorking.length) label("AT WORK");
+  for (const item of shownWorking) {
+    const act = doingOf(item.agent, item.since);
+    const a = isObject(item.agent.activity) ? item.agent.activity : null;
+    const row = {
+      mark: MARK_DOT, markTone: "accent", markColor: CALM.peach, name: item.name, words: act.words, wordsTone: "accent", wordsColor: CALM.peach,
+      age: ageOf(act.since), spend: spendOf(item.agent), dark,
+    };
+    rows.push({ line: calmRow(inner, nameW, row), item: { key: item.key, kind: "working", agent: item.agent.name, name: item.name, hub: false, open: item.open, busy: item.busy }, kind: "work", extra: (a && a.kind === "tool" && clean(a.target)) || item.what });
+  }
+  if (shownWorking.length < working.length) rows.push({ line: [ssp(`+${working.length - shownWorking.length} more at work`, "muted", k(CALM.idle))], kind: "more" });
+
+  if (idle.length) {
+    blank();
+    rows.push({ line: idleLine(idle.map((a) => displayName(a)), inner, dark), kind: "idle" });
+  }
+  if (side) {
+    const live = side.busy || asking;
+    const row = {
+      mark: MARK_SIDE, markTone: live ? "accent" : "muted", markColor: live ? CALM.peach : CALM.idle, name: SIDE_NAME, nameColor: CALM.muted,
+      words: live ? "answering" : clean(side.model), wordsTone: live ? "accent" : "muted", wordsColor: live ? CALM.peach : CALM.idle, age: "", spend: "", dark,
+    };
+    if (!idle.length) blank();
+    rows.push({ line: calmRow(inner, nameW, row), item: { key: "sidechat", kind: "sidechat", agent: null, name: SIDE_NAME, hub: false, open: side.session, busy: null, live }, kind: "row", extra: "" });
+  }
+
+  const flows = sortFlows(flowsOf(snapshot));
+  if (flows.length && !needs.length && !working.length && !hubBusy) {
+    label("PATHS");
+    rows.push({ line: pathsRow(flows, inner, at), kind: "misc" });
+  }
+
+  const totals = totalsLine(snapshot, inner, dark);
+  if (totals) {
+    blank();
+    rows.push({ line: totals, kind: "totals" });
+  }
+
+  // the selected row says more on a line of its own
+  for (const r of rows) {
+    if (r.item && r.item.key === selected && r.extra) {
+      const line = detail(r.extra);
+      if (line) r.under = { line, kind: "under", follow: r.item.key };
+    }
+  }
+  // a short panel: the room between the sections goes first, then the totals, then the working agents from the last
+  const keys = options.keys ? keysStyled(options.keys, inner, dark) : null;
+  const limit = Number.isFinite(Number(options.height)) && options.height > 0 ? Math.floor(options.height) - 1 : Infinity;
+  const count = () => rows.reduce((n, r) => n + 1 + (r.under ? 1 : 0), 0);
+  const drop = (test) => {
+    for (let i = rows.length - 1; i >= 0 && count() > limit; i--) if (test(rows[i], i)) rows.splice(i, 1);
+  };
+  if (count() > limit) {
+    drop((r) => r.kind === "blank" && r !== rows[0]);
+  }
+  if (count() > limit) for (const r of rows) if (r.under && r.item.key !== selected) delete r.under;
+  if (count() > limit) for (const r of rows) if (r.under) delete r.under;
+  if (count() > limit) drop((r) => r.kind === "totals");
+  if (count() > limit) drop((r) => r.kind === "misc");
+  if (count() > limit) drop((r) => r.kind === "label");
+  if (count() > limit) drop((r) => r.kind === "idle");
+  if (count() > limit) drop((r) => r.kind === "more");
+  if (count() > limit) drop((r) => r.kind === "work" && r.item.key !== selected);
+  if (count() > limit) drop((r) => r.kind === "row" && r.item && r.item.key !== selected && r.item.kind !== "hub" && r.item.kind !== "sidechat");
+  if (count() > limit) drop((r) => r.kind === "row" && r.item && r.item.key !== selected);
+  if (count() > limit) drop((r) => r.kind === "row");
+
+  const out = [];
+  for (const r of rows) {
+    out.push(r);
+    if (r.under) out.push(r.under);
+  }
+  if (keys) {
+    if (out.length < limit) out.push({ line: [ssp(" ", "plain")], kind: "blank" });
+    out.push({ line: keys, kind: "keys" });
+  }
+  const keysAt = keys ? out.length - 1 : null;
+  const lines = out.map((r, i) => {
+    const mine = (r.item && r.item.key === selected) || (r.follow && r.follow === selected);
+    const glow = dark && mine ? ID_SELECTED : null;
+    const body = glow ? tint(fillTo(r.line, inner, glow), glow) : r.line;
+    return cursor ? [glow ? ssp(r.item ? CURSOR : " ", "accent", k(CALM.peach), false, glow) : sp(mine && r.item ? CURSOR : " ", "accent"), ...body] : body;
+  });
+  const items = [];
+  out.forEach((r, i) => {
+    if (!r.item) return;
+    const { key, kind, agent, name, hub: isHub, open, busy, live } = r.item;
+    items.push(Object.assign({ key, line: i, kind, agent, name, hub: !!isHub, open: open || null, busy: busy || null }, live === undefined ? {} : { live }));
+  });
+  const finalSelected = items.some((i) => i.key === selected) ? selected : items.length ? items[0].key : null;
+  const root = rootId || null;
+  return { lines: lines.map((line) => clipLine(line, width)), items, selected: finalSelected, flows, root, keysLine: keysAt };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1336,17 +1490,14 @@ export function layout(snapshot, options = {}) {
   const agents = validAgents(snapshot);
   if (!agents.length) return single([sp("No agents", "muted")]);
 
+  if (options.styled === true && width >= 30) return calmLayout(snapshot, agents, options, width, now);
+
   const cursor = options.cursor === true && width > 2;
   const inner = cursor ? width - 1 : width;
   const at = now ?? epochMs(snapshot.generated);
   const graph = graphOf(snapshot);
   const hub = findHub(snapshot, agents);
   const rows = []; // { line, item?, full? }
-  const styled = options.styled === true && width >= 30;
-  const dark = options.dark !== false;
-  const section = (label, count) => {
-    if (styled) rows.push({ line: ruleRow(label, count >= 2 ? count : 0, width, dark), full: true });
-  };
 
   // what needs the user, who works now: the hub, then the others (longest at it first); idle agents are a count on the hub's row
   const needs = needsItems(snapshot, agents, hub, options.requests);
@@ -1370,75 +1521,44 @@ export function layout(snapshot, options = {}) {
   const hubShown = !flagged.has(hub ? hub.name : "");
   const hubBusy = !!hub && hubWorking(snapshot, hub);
 
-  // the styled list's columns, shared by the rows that have them
-  let specs = null;
-  let cols = null;
-  if (styled) {
-    const hubName = clean(hub ? hub.name : isObject(snapshot.root) && typeof snapshot.root.agent === "string" ? snapshot.root.agent : "") || "?";
-    const rootTitle = isObject(snapshot.root) ? clean(snapshot.root.title) : "";
-    const k = (v) => (dark ? v : null);
-    specs = {
-      needs: shownNeeds.map((item) => ({
-        mark: item.mark, markTone: item.tone, strong: true, name: item.name, state: item.label, stateTone: item.tone, rounds: item.rounds, task: item.what, right: elapsedText(item.since, at),
-      })),
-      hub: hubShown ? { mark: MARK_HUB, markTone: hubBusy ? "accent" : "muted", name: hubName, nameBold: true, state: "idle", stateTone: "muted", task: rootTitle, right: idle > 0 ? `${idle} idle` : "" } : null,
-      side: side ? { mark: side.busy || asking ? spinnerGlyph(frame) : MARK_SIDE, markTone: side.busy || asking ? "accent" : "muted", name: SIDE_NAME, state: side.busy || asking ? "answering" : "", stateTone: "accent", task: asking ? "" : side.model, right: "" } : null,
-      working: shownWorking.map((item, i) => ({
-        mark: spinnerGlyph(frame, i + 1), markTone: "accent", name: item.name, ...(() => { const st = stateOf(item.doing); return { state: st.text, stateTone: st.tone }; })(), rounds: item.rounds, task: item.what, right: elapsedText(item.since, at),
-      })),
-    };
-    if (specs.hub && hubBusy) {
-      const st = stateOf(hub);
-      specs.hub.state = st.text;
-      specs.hub.stateTone = st.tone;
-    }
-    cols = columnsOf([...specs.needs, ...(specs.hub ? [specs.hub] : []), ...(specs.side ? [specs.side] : []), ...specs.working], width - (cursor ? 1 : 0));
-  }
-
-  if (styled) rows.push({ line: barRow(snapshot, hub, width, dark, frame), full: true });
-
   // 1. what needs the user
-  if (shownNeeds.length) section("NEEDS YOU", needs.length);
   shownNeeds.forEach((item, i) => {
-    rows.push({ line: styled ? columnRow(inner, cols, specs.needs[i]) : needsRow(item, inner, at), item });
+    rows.push({ line: needsRow(item, inner, at), item });
     const who = options.activity === true && item.agent && !item.hub ? agents.find((a) => a.name === item.agent) : null;
-    const doing = who && busyCount(who) > 0 ? (styled ? detailRow(who, inner) : activityRow(who, inner)) : null;
+    const doing = who && busyCount(who) > 0 ? activityRow(who, inner) : null;
     if (doing) rows.push({ line: doing });
   });
   if (shownNeeds.length < needs.length) rows.push({ line: [sp(`+${needs.length - shownNeeds.length} more`, "muted")] });
 
   const proposals = proposalRows(snapshot, inner);
-  if (proposals.length) section("PROPOSALS");
   for (const line of proposals) rows.push({ line });
   const loops = loopRows(snapshot, inner);
-  if (loops.length) section("LOOP RUNS");
   for (const line of loops) rows.push({ line });
 
   // 2. who works now
-  if (hubShown || side || shownWorking.length) section(hubBusy || working.length ? "AT WORK" : "AGENTS", working.length + (hubBusy ? 1 : 0) || undefined);
   if (hubShown) {
     const rootId = isObject(snapshot.root) && typeof snapshot.root.id === "string" ? snapshot.root.id : null;
     const hubSessions = hub ? agentSessions(hub) : { open: null };
     rows.push({
-      line: styled ? columnRow(inner, cols, specs.hub) : hubRow(snapshot, hub, idle, inner, frame),
+      line: hubRow(snapshot, hub, idle, inner, frame),
       item: { key: `agent:${hub ? hub.name : "hub"}`, kind: "hub", agent: hub ? hub.name : null, name: hub ? displayName(hub) : "hub", hub: true, open: rootId || hubSessions.open, busy: null },
     });
   }
   if (options.activity === true && hub && hubShown && hubBusy) {
-    const doing = styled ? detailRow(hub, inner) : activityRow(hub, inner);
+    const doing = activityRow(hub, inner);
     if (doing) rows.push({ line: doing });
-    const earlier = (doing || styled) && options.trail !== false ? trailRow(hub, inner) : null;
+    const earlier = doing && options.trail !== false ? trailRow(hub, inner) : null;
     if (earlier) rows.push({ line: earlier });
   }
   if (side) {
     rows.push({
-      line: styled ? columnRow(inner, cols, specs.side) : sideRow(side, asking, inner, frame),
+      line: sideRow(side, asking, inner, frame),
       item: { key: "sidechat", kind: "sidechat", agent: null, name: SIDE_NAME, hub: false, open: side.session, busy: null, live: side.busy || asking },
     });
   }
   shownWorking.forEach((item, i) => {
-    rows.push({ line: styled ? columnRow(inner, cols, specs.working[i]) : workingRow(item, inner, frame, i, at), item });
-    const doing = options.activity === true ? (styled ? detailRow(item.doing, inner) : activityRow(item.doing, inner)) : null;
+    rows.push({ line: workingRow(item, inner, frame, i, at), item });
+    const doing = options.activity === true ? activityRow(item.doing, inner) : null;
     if (doing) rows.push({ line: doing });
   });
   if (shownWorking.length < working.length) rows.push({ line: [sp(`+${working.length - shownWorking.length} more working`, "muted")] });
@@ -1448,15 +1568,13 @@ export function layout(snapshot, options = {}) {
   // the paths, at rest only (busy, the rows above matter more)
   const flows = sortFlows(flowsOf(snapshot));
   if (flows.length && !needs.length && !working.length && !hubWorking(snapshot, hub)) {
-    section("PATHS", flows.length);
     rows.push({ line: pathsRow(flows, inner, at) });
   }
 
   // 3. the task's progress, 4. spend and context, 5. the keys: one block under a rule
   const progress = progressRow(snapshot, inner);
   const cost = costRow(snapshot, inner);
-  const keys = options.keys ? (styled ? keysStyled(options.keys, inner, dark) : keysRow(options.keys, inner)) : null;
-  if (styled && (progress || (cost && cost.length) || keys)) section(null);
+  const keys = options.keys ? keysRow(options.keys, inner) : null;
   if (progress) rows.push({ line: progress });
   if (cost && cost.length) rows.push({ line: cost });
   const keysAt = keys ? rows.length : null;
@@ -1465,11 +1583,8 @@ export function layout(snapshot, options = {}) {
   const selectable = rows.filter((r) => r.item);
   const selected = selectable.some((r) => r.item.key === options.selected) ? options.selected : selectable.length ? selectable[0].item.key : null;
   const lines = rows.map((r) => {
-    if (r.full) return r.line;
     const mine = r.item && r.item.key === selected;
-    const glow = styled && dark && mine ? PANEL_SELECTED : null; // the selected row's tint, gutter and all
-    const body = glow ? tint(fillTo(r.line, inner, glow), glow) : r.line;
-    return cursor ? [glow ? ssp(CURSOR, "accent", null, false, glow) : sp(mine ? CURSOR : " ", "accent"), ...body] : body;
+    return cursor ? [sp(mine ? CURSOR : " ", "accent"), ...r.line] : r.line;
   });
   const items = [];
   rows.forEach((r, i) => {

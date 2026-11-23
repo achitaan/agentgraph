@@ -6,9 +6,10 @@
  * text over the picture. Nothing is drawn in letters or digits except those.
  *
  *   planetsLines(doc, w, h, now, options) -> Line[]   exactly `h` lines of exactly `w` cells; Line = Span[],
- *     Span = { text, tone, color?, bg?, bold? } (as the rooms'); never throws
+ *     Span = { text, tone, color?, bg?, bold? }; never throws
  *   planetsInfo(doc, w, h, now, options)  -> where everything stands (for the tests)
  *   planetsInterval(doc, options, now)    -> ms to the next frame, 0 for none
+ *   planetsScene(snapshot, options)       -> the panel: a header, the picture, the keys; exactly `height` lines
  * options: { orbit, motion: "reduced" | undefined, colors: { dark, muted } }
  *
  * Under the hub: its name, a pill saying what the main chat does now (a zone mark, a verb, the target) and a row of five
@@ -17,11 +18,12 @@
 import {
   ZONE_VERBS, TOOL_VERBS, SIDE_NAME,
   charWidth, displayWidth, truncate, clean, seatName, isObject, busyCount, hubWorking, sideBusy,
+  validAgents, findHub, needsEntries, lineWidth, clipLine,
 } from "./render.js";
-import { zoneOfTool, roomOfActivity } from "./rooms.js";
+import { zoneOfTool, roomOfActivity } from "./zones.js";
 import {
   orbitLayout, figure3D, camera3D, orbitCamera, moonPhase, moonPoint, makePalette, Canvas, Styles, placeBodies,
-  NAME_MAX, PERSPECTIVE, frameInterval,
+  NAME_MAX, PERSPECTIVE, frameInterval, scene as orbitScene,
 } from "./scene.js";
 
 export const PLANETS_MIN_WIDTH = 36;
@@ -37,13 +39,8 @@ const MUTED = rgbOfHex("#b0a39c");
 const IDLE = rgbOfHex("#8f8178");
 const PEACH = rgbOfHex("#dfa183");
 const CORAL = rgbOfHex("#ed9583");
-const LAVENDER = rgbOfHex("#b39bb8");
 const WARM = rgbOfHex("#e0874a");
 const ORBIT_LINE = rgbOfHex("#65564e");
-const ZONE_RGB = {
-  files: rgbOfHex("#cdb27c"), terminal: rgbOfHex("#a2abd6"), search: rgbOfHex("#9bbdd3"), web: rgbOfHex("#8cc3c9"), thinking: rgbOfHex("#b39bb8"),
-  messaging: rgbOfHex("#dca0b7"), tasks: rgbOfHex("#b9c186"), spawn: rgbOfHex("#dfa183"), tools: rgbOfHex("#b0a39c"),
-};
 const ZONE_GLYPH = { web: "⊕", terminal: "❯", files: "▤", search: "⊙", thinking: "◇", spawn: "✦", messaging: "◆", tasks: "≡", tools: "◆" };
 const ICON_ZONES = ["web", "terminal", "files", "search", "thinking"];
 const GROUP_TINT = { build: "#b89987", decide: "#a996a7", council: "#b49f8c", understand: "#a5988e", verify: "#a79aac" };
@@ -88,7 +85,7 @@ function idleRamp(key) {
   let r = idleRamps.get(name);
   if (!r) {
     const tint = Object.hasOwn(GROUP_TINT, name) ? rgbOfHex(GROUP_TINT[name]) : FALLBACK_TINT;
-    r = IDLE_RAMP.map((c, i) => (i === 0 || i === IDLE_RAMP.length - 1 ? c : mix(c, tint, 0.18)));
+    r = IDLE_RAMP.map((c, i) => (i === 0 || i === IDLE_RAMP.length - 1 ? c : mix(c, tint, 0.05)));
     idleRamps.set(name, r);
   }
   return r;
@@ -181,7 +178,7 @@ function zoneOfActivity(act) {
   return null;
 }
 
-// What the main chat does, for the pill: { zone, glyph, verb, target } (target cleaned as the rooms clean it).
+// What the main chat does, for the pill: { zone, glyph, verb, target } (target cleaned as the list cleans it).
 function describe(act) {
   const zone = zoneOfActivity(act) || "tools";
   const tool = clean(act.tool).toLowerCase();
@@ -219,17 +216,7 @@ function buildPlanets(doc, w, h, now, options) {
   const light = (depth) => 0.55 + 0.45 * clamp((depth + 1) / 2, 0, 1); // far bodies are dimmer
   const far = (depth) => 0.4 * (1 - clamp((depth + 1) / 2, 0, 1)); // ... and mixed toward the sky
 
-  // ---- the sky: a few fixed, very dim stars
-  if (!small) {
-    const n = Math.round((W * H) / 150);
-    for (let i = 0; i < n; i += 1) {
-      const x = Math.floor(hash(i, 1) * W);
-      const y = Math.floor(hash(i, 2) * H);
-      px.blend(x, y, INK, 0.05 + 0.1 * hash(i, 3));
-    }
-  }
-
-  // ---- orbits: thin, very dim ellipses behind everything
+  // ---- orbits: a few thin, very faint ellipses behind everything
   const sweep = (points, alphaOf, step = 1) => {
     for (let i = 0; i < points.length; i += step) {
       const q = project(points[i]);
@@ -237,13 +224,8 @@ function buildPlanets(doc, w, h, now, options) {
       px.splat(p.x, p.y, alphaOf(q.depth));
     }
   };
-  for (const ring of F.rings) sweep(ring.points, (d) => 0.16 + 0.3 * clamp((d + 1) / 2, 0, 1));
+  for (const ring of F.rings) sweep(ring.points, (d) => 0.07 + 0.12 * clamp((d + 1) / 2, 0, 1));
   px.flush(ORBIT_LINE);
-  if (!small) {
-    for (const ring of F.moonRings) sweep(ring.points, (d) => 0.1 + 0.14 * clamp((d + 1) / 2, 0, 1));
-    if (F.side) sweep(F.side.ring.points, (d) => 0.1 + 0.14 * clamp((d + 1) / 2, 0, 1));
-    px.flush(ORBIT_LINE);
-  }
 
   // ---- the bodies
   const bodies = [];
@@ -278,10 +260,8 @@ function buildPlanets(doc, w, h, now, options) {
     sideBody = { id: "side", kind: "side", depth: q.depth, x: a.x, y: a.y, r: Math.max(1.6, hubR * 0.36 * scaleOf(q.depth)), working: false, needs: false, key: "side", q, busy };
     addBody(sideBody);
   }
-  // live pulse of a working ball: a breath of a few percent
   bodies.forEach((b, i) => {
     b.index = i;
-    if (b.working && !reduced) b.r *= 1 + 0.035 * Math.sin(t / 480 + i * 1.7);
   });
   const byAgent = new Map();
   for (const b of bodies) if (b.kind === "planet") byAgent.set(b.p.agent.name, b);
@@ -289,7 +269,7 @@ function buildPlanets(doc, w, h, now, options) {
   // ---- the hub's glow, under the balls
   {
     const R = hubR * 2.5;
-    const strength = (hubWork ? 0.24 : 0.08) * (hubWork && !reduced ? 1 + 0.12 * Math.sin(t / 700) : 1);
+    const strength = hubWork ? 0.2 : 0.06;
     for (let y = Math.floor(hubP.y - R); y <= Math.ceil(hubP.y + R); y += 1) {
       for (let x = Math.floor(hubP.x - R); x <= Math.ceil(hubP.x + R); x += 1) {
         const d = Math.hypot(x + 0.5 - hubP.x, y + 0.5 - hubP.y);
@@ -317,9 +297,7 @@ function buildPlanets(doc, w, h, now, options) {
     let i1 = run.length - 1;
     while (i1 > i0 && Math.hypot(run[i1].x - aim.x, run[i1].y - aim.y) < aim.r + 1.6) i1 -= 1;
     if (i1 - i0 < 3) continue;
-    const color = back ? LAVENDER : PEACH;
-    let travelled = 0;
-    const flow = reduced ? 0 : t * 0.01;
+    const color = back ? CORAL : PEACH;
     for (let i = i0; i < i1; i += 1) {
       const a = run[i];
       const b = run[i + 1];
@@ -327,11 +305,8 @@ function buildPlanets(doc, w, h, now, options) {
       const n = Math.max(1, Math.ceil(len * 2));
       for (let k = 0; k < n; k += 1) {
         const f = k / n;
-        const dist = travelled + len * f;
-        const on = back || (((dist - flow) % 6) + 6) % 6 < 3.5;
-        if (on) px.splat(a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f, back ? 0.55 : 0.7);
+        px.splat(a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f, 0.45);
       }
-      travelled += len;
     }
     px.flush(color);
     // the arrowhead: a small triangle, tip at the end of the trimmed curve
@@ -406,7 +381,7 @@ function buildPlanets(doc, w, h, now, options) {
     }
     // the core: a bright dot for the hub and the working, a soft lilac one for a resting ball
     const coreR = b.kind === "hub" ? Math.max(1, R * 0.17) : Math.max(0.6, R * 0.14);
-    const coreC = b.kind === "hub" ? CORE_HUB : b.working ? [255, 244, 232] : mix(idleRamp(b.key)[3], LAVENDER, 0.45);
+    const coreC = b.kind === "hub" ? CORE_HUB : b.working ? [255, 244, 232] : mix(idleRamp(b.key)[3], MUTED, 0.4);
     if (R >= 3.2 || b.kind === "hub") {
       for (let y = Math.floor(b.y - coreR - 1); y <= Math.ceil(b.y + coreR + 1); y += 1) {
         for (let x = Math.floor(b.x - coreR - 1); x <= Math.ceil(b.x + coreR + 1); x += 1) {
@@ -416,19 +391,6 @@ function buildPlanets(doc, w, h, now, options) {
           if (a > 0) px.blend(x, y, mix(coreC, BG, fade), a);
         }
       }
-    }
-    // the dashed ring of a working ball, turning slowly
-    if (b.working && b.kind !== "side" && (R >= 2.5 || b.kind === "hub")) {
-      const rr = R + (b.kind === "hub" ? 3 : 2.2);
-      const nd = Math.max(5, Math.round((2 * Math.PI * rr) / 7));
-      const turn = reduced ? 0 : t * 0.0007 * (b.kind === "hub" ? 1 : -1);
-      const step = 0.5 / rr;
-      for (let a = 0; a < 2 * Math.PI; a += step) {
-        const on = (((Math.floor(((a + turn) / (2 * Math.PI)) * nd * 2) % 2) + 2) % 2) === 0;
-        if (!on) continue;
-        px.splat(b.x + Math.cos(a) * rr, b.y + Math.sin(a) * rr, (b.kind === "hub" ? 0.5 : 0.5) * lit);
-      }
-      px.flush(mix(PEACH, BG, fade));
     }
     // needs the user: a small coral dot at the top left
     if (b.needs) {
@@ -463,7 +425,7 @@ function buildPlanets(doc, w, h, now, options) {
   const occ = new Float32Array(w * h).fill(-Infinity);
   const canvas = new Canvas(w, h, new Styles());
   for (const b of order) {
-    const reach = b.r + (b.working && b.kind !== "side" ? (b.kind === "hub" ? 3.8 : 3.2) : 0.6) + 0.5;
+    const reach = b.r + 0.6 + 0.5;
     for (let r = Math.max(0, Math.floor((b.y - reach) / 2)); r <= Math.min(h - 1, Math.floor((b.y + reach) / 2)); r += 1) {
       for (let c = Math.max(0, Math.floor(b.x - reach)); c <= Math.min(w - 1, Math.floor(b.x + reach)); c += 1) {
         if (Math.hypot(c + 0.5 - b.x, 2 * r + 1 - b.y) <= reach + 0.5) {
@@ -474,7 +436,7 @@ function buildPlanets(doc, w, h, now, options) {
     }
   }
   const hubCell = { c: Math.floor(hubP.x), r: Math.floor(hubP.y / 2) };
-  const hubReach = hubR + (hubWork ? 3.8 : 0.6) + 0.5;
+  const hubReach = hubR + 0.6 + 0.5;
   const hubTop = Math.max(0, Math.floor((hubP.y - hubReach) / 2));
   const hubBottom = Math.min(h - 1, Math.floor((hubP.y + hubReach) / 2));
 
@@ -489,7 +451,7 @@ function buildPlanets(doc, w, h, now, options) {
     zone = d.zone;
     const room = roomOfActivity(act, null);
     current = ICON_ZONES.includes(room) ? room : null;
-    pillParts = [d.glyph, d.verb, d.target, ZONE_RGB[zone] || ZONE_RGB.tools, PEACH];
+    pillParts = [d.glyph, d.verb, d.target, PEACH, PEACH];
   } else if (hubWork) {
     pillParts = ["✦", "working", "", PEACH, PEACH];
   } else {
@@ -631,7 +593,7 @@ function buildPlanets(doc, w, h, now, options) {
     ICON_ZONES.forEach((z, k) => {
       const c = chosen.iconC0 + k * 2;
       const lit = z === current;
-      putText(c, ir, ZONE_GLYPH[z], lit ? ZONE_RGB[z] : dim(ZONE_RGB[z]), lit);
+      putText(c, ir, ZONE_GLYPH[z], lit ? PEACH : dim(IDLE), lit);
       marks.push({ zone: z, col: c, lit });
     });
     reserve(chosen.iconC0, chosen.iconC0 + iconWidth - 1, ir);
@@ -668,7 +630,12 @@ function buildPlanets(doc, w, h, now, options) {
     const hidden = owner[Math.min(H - 1, Math.max(0, Math.floor(b.y))) * W + Math.min(W - 1, Math.max(0, Math.floor(b.x)))] !== b.index;
     let fg = strong ? INK : IDLE;
     if (hidden || b.depth < -0.4) fg = mix(fg, BG, 0.35);
-    putText(e.col, e.row, e.text, fg, false);
+    let onBall = false;
+    for (let c = e.col; c < e.col + e.width && !onBall; c += 1) {
+      for (const y of [2 * e.row, 2 * e.row + 1]) if (c >= 0 && c < W && y >= 0 && y < H && owner[y * W + c] >= 0) onBall = true;
+    }
+    if (onBall) continue; // a name is never drawn over a ball
+    putText(e.col, e.row, e.text, fg, false, BG);
     info.labels.push({ id: e.id, text: e.text, c0: e.col, c1: e.col + e.width - 1, r: e.row });
   }
   info.balls = order.map((b) => ({ id: b.id, kind: b.kind, x: b.x, y: b.y, r: b.r, depth: b.depth, working: b.working, needs: b.needs, index: b.index }));
@@ -747,3 +714,60 @@ export function planetsInterval(doc, options = {}, now = 0) {
   return frameInterval(doc, Object.assign({}, o, { view: "3d" }), now);
 }
 
+
+// The whole picture panel, exactly `height` lines of `width` cells: a header row (the main chat's name, and in coral how many
+// agents need the user), the picture, and the keys on the last row. No agents, a loading document or an error is the orbit's
+// own message. options: { width, height, now, motion, colors, keys, orbit }. Never throws.
+export function planetsScene(snapshot, options = {}) {
+  const o = isObject(options) ? options : {};
+  const width = Math.max(0, Math.floor(Number(o.width) || 0));
+  const height = Math.max(0, Math.floor(Number(o.height) || 0));
+  if (!height) return [];
+  try {
+    const agents = isObject(snapshot) && (snapshot.error === undefined || snapshot.error === null) ? validAgents(snapshot) : [];
+    if (!agents.length) return orbitScene(snapshot, o);
+    const now = Number.isFinite(Number(o.now)) ? Number(o.now) : 0;
+    const bg = hex(BG);
+    const sp = (text, color, bold) => {
+      const span = { text, tone: "plain", bg };
+      if (color) span.color = hex(color);
+      if (bold) span.bold = true;
+      return span;
+    };
+    const fit = (line) => {
+      const clipped = clipLine(line, width);
+      const used = lineWidth(clipped);
+      return used < width ? [...clipped, sp(" ".repeat(width - used))] : clipped;
+    };
+    const hub = findHub(snapshot, agents);
+    const working = !!hub && hubWorking(snapshot, hub);
+    const name = clean(hub ? hub.name : isObject(snapshot.root) ? snapshot.root.agent : "") || "main";
+    const needing = needsEntries(snapshot, new Set(agents.map((a) => a.name))).length;
+    const right = needing ? `${needing} ${needing === 1 ? "needs" : "need"} you` : "";
+    const gap = width - 3 - displayWidth(name) - (right ? displayWidth(right) + 2 : 0);
+    const head = [sp(" "), sp("◉", working ? PEACH : IDLE), sp(" "), sp(truncate(name, Math.max(1, width - 4 - (right ? displayWidth(right) + 2 : 0))), INK, true)];
+    if (right && gap >= 1) head.push(sp(" ".repeat(gap)), sp(right, CORAL), sp(" "));
+    const out = [fit(head)];
+    const keys = Array.isArray(o.keys) && o.keys.length ? o.keys : null;
+    const picture = height - 1 - (keys ? 1 : 0);
+    if (picture > 0) out.push(...planetsLines(snapshot, width, picture, now, o));
+    if (keys) {
+      const row = [sp(" ")];
+      let used = 1;
+      for (const pair of keys) {
+        if (!Array.isArray(pair) || pair.length < 2) continue;
+        const k = String(pair[0]);
+        const l = String(pair[1]);
+        const need = (row.length > 1 ? 2 : 0) + displayWidth(k) + 1 + displayWidth(l);
+        if (used + need > width) break;
+        if (row.length > 1) row.push(sp("  "));
+        row.push(sp(k, INK), sp(" " + l, IDLE));
+        used += need;
+      }
+      out.push(fit(row));
+    }
+    return out.slice(0, height).map(fit);
+  } catch (_) {
+    return blankLines(width, height);
+  }
+}
