@@ -459,7 +459,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cache", action="store_true", help="cache-read share and cold turns per agent")
     parser.add_argument("--growth", action="store_true", help="where context growth comes from, by turn and by tool")
     parser.add_argument("--trend", action="store_true", help="cost per turn of root chats, split by the cost settings in force")
-    parser.add_argument("--days", type=int, default=30, help="with --trend: chats updated in the last N days (default 30)")
+    parser.add_argument("--days", type=int, help="with --trend: chats updated in the last N days (default 30); with --check: the recent window (default 7)")
+    parser.add_argument("--check", action="store_true", help="has the cost work paid off: the last 7 days against the baseline before the first recorded change, one verdict a line")
+    parser.add_argument("--check-log", type=Path, help="with --check: the log that gets one dated row (default ~/.local/share/agentgraph/cost-check/cost-check.jsonl)")
+    parser.add_argument("--rollover-log", type=Path, help="with --check: the rollover plugin's log (default ~/.local/share/agentgraph/rollover/rollover.log)")
     parser.add_argument("--settings-log", type=Path, default=SETTINGS_LOG, help="log of the cost settings over time")
     parser.add_argument("--config", type=Path, default=CONFIG_PATH, help="OpenCode config file")
     args = parser.parse_args(argv)
@@ -467,8 +470,12 @@ def main(argv: list[str] | None = None) -> int:
         note_current_settings(args.settings_log, args.config)
     except Exception:
         pass
+    if args.check:
+        from . import costcheck
+        return costcheck.run(args.db, load_history(args.settings_log), days=costcheck.DAYS if args.days is None else args.days, as_json=args.json,
+                             check_log=args.check_log, rollover_log=args.rollover_log)
     if args.trend:
-        periods = trend(args.db, load_history(args.settings_log), days=args.days)
+        periods = trend(args.db, load_history(args.settings_log), days=30 if args.days is None else args.days)
         print(json.dumps(periods) if args.json else trend_report(periods))
         return 0
     wanted = {name for name in ("rollover", "cache", "growth") if getattr(args, name)}
