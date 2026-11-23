@@ -103,6 +103,41 @@ class Targets(unittest.TestCase):
                     self.assertNotIn(secret, got)
                 self.assertIn("[masked]", got)
         self.assertEqual(chatfeed.target_of("shell", "ls -la src"), "ls -la src")
+        home = str(Path.home())
+        more = (  # (command, the command's name that stays, the secret that must go)
+            ("curl -sSu alice:hunter2 https://example.com", "curl", "hunter2"),
+            ("curl --proxy-user alice:hunter2 x", "curl", "hunter2"),
+            ("curl -U alice:hunter2 x", "curl", "hunter2"),
+            ("mysql -p'hunter2'", "mysql", "hunter2"),
+            ('mysql -p"hunter 2"', "mysql", "hunter"),
+            ("sudo mysql -phunter2", "mysql", "hunter2"),
+            ("docker exec db mysql -phunter2", "mysql", "hunter2"),
+            ("cd app && mysql -phunter2", "mysql", "hunter2"),
+            ("MYSQL_HOST=x mysql -phunter2", "mysql", "hunter2"),
+            ("MYSQL_PWD=hunter2 mysql", "mysql", "hunter2"),
+            ("tool --auth-token abc123", "tool", "abc123"),
+            ("tool --api-token x1", "tool", "x1"),
+            ("tool --access-token x2", "tool", "x2"),
+            ("tool --github-token x3", "tool", "x3"),
+            ('curl -b "session=abc123" x', "curl", "abc123"),
+            ('curl --cookie "session=abc123" x', "curl", "abc123"),
+            ("curl example.com/reset?code=SECRET1", "curl", "SECRET1"),
+            ("wget 'localhost:8080/x?sig=abc'", "wget", "sig=abc"),
+            ("curl example.com/a#token=SECRET2", "curl", "SECRET2"),
+            ('A_KEY="' + "x" * 400 + '" B_TOKEN="hunter 2 and more', "A_KEY", "hunter"),  # the cut leaves a quote open
+        )
+        for text, kept, secret in more:
+            with self.subTest(text=text):
+                got = chatfeed.target_of("shell", text)
+                self.assertNotIn(secret, got)
+                self.assertIn(kept, got)
+        for text in ("git checkout -b feature", "PWD=/tmp ls", "mkdir -p build && ls -p", "cp -p a b"):
+            with self.subTest(text=text):
+                self.assertEqual(chatfeed.target_of("shell", text), text)
+        for text, want in ((f"PATH={home}:/bin", "PATH=~:/bin"), (f"open file://{home}/x", "open file://~/x"),
+                           (f"echo [{home}] {{{home}}} `{home}`", "echo [~] {~} `~`")):
+            with self.subTest(text=text):
+                self.assertEqual(chatfeed.target_of("shell", text), want)
 
     def test_credentials_in_flags_headers_and_urls_are_masked(self):
         cases = (

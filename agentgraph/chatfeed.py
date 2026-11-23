@@ -362,34 +362,47 @@ def zone_of(tool, code=None) -> str:
     return "tools"
 
 
-_VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"']+)"  # a quoted value (spaces and = allowed) or a bare word
+_VALUE = r"(\"[^\"]*(?:\"|$)|'[^']*(?:'|$)|[^\s\"']+)"  # a quoted value (spaces and = allowed; an unclosed quote runs to the end) or a bare word
+_NAME = r"[A-Z0-9_.-]"
 _TARGET_MASKS = (
     (re.compile(r"(?i)\b(authorization\s*[:=]\s*).*"), r"\1" + _MASK),
     (re.compile(r"(?i)\b(bearer\s+)[^\s\"']+"), r"\1" + _MASK),
     (re.compile(r"(?i)\b((?:set-)?cookie\s*:\s*)[^\"'\n]*"), r"\1" + _MASK),  # all of it, to the closing quote or the line's end
-    (re.compile(r"(?i)\b([A-Z0-9_.-]*(?:key|token|secret|passw(?:or)?d|credential|auth)[A-Z0-9_.-]*[ \t]*=[ \t]*)"
-                + _VALUE), r"\1" + _MASK),
-    (re.compile(r"(?i)(--?(?:password|passwd|token|secret|api[-_]?key|auth)[ =])" + _VALUE), r"\1" + _MASK),
-    (re.compile(r"(?<![\w-])(-u[ ]*|--user[ =])(\"[^\"]*:[^\"]*\"|'[^']*:[^']*'|[^\s\"']*:[^\s\"']*)"), r"\1" + _MASK),  # user:password
+    # a name with key, token ... in it, or with pwd in it and more around it (MYSQL_PWD; a bare PWD is a folder)
+    (re.compile(r"(?i)\b(" + _NAME + r"*(?:key|token|secret|passw(?:or)?d|credential|auth)" + _NAME + r"*|"
+                + _NAME + r"+pwd" + _NAME + r"*|pwd" + _NAME + r"+)[ \t]*=[ \t]*" + _VALUE), lambda m: m.group(0)[:m.start(2) - m.start()] + _MASK),
+    (re.compile(r"(?i)(--?[\w-]*(?:password|passwd|token|secret|api[-_]?key|auth)[\w-]*[ =][ \t]*)" + _VALUE), r"\1" + _MASK),
+    (re.compile(r"(?<![\w-])(-[A-Za-z]*[uU][ ]*|--(?:proxy-)?user[ =])(\"[^\"]*:[^\"]*\"|'[^']*:[^']*'|[^\s\"']*:[^\s\"']*)"), r"\1" + _MASK),  # user:password
+    (re.compile(r"(?<![\w-])(--cookie[ =])" + _VALUE), r"\1" + _MASK),
     (re.compile(r"(\w+://)[^/\s]+@"), r"\1" + _MASK + "@"),  # up to the last @ before the path
 )
-# `-p` is a password only for these clients (elsewhere it is --parents, --preserve, a port ...): the first word of the line.
-_P_ATTACHED = re.compile(r"(?<=\s)(-p)(?=[^\s\"'-])(" + _VALUE[1:])
+# `-p` is a password only after these clients, wherever they stand in the line (elsewhere it is --parents, --preserve,
+# a port ...); `-b` is a cookie only for curl (git checkout -b is a branch).
+_CLIENT = r"(?:^|[\s;&|/])(%s)(?=\s)"
+_P_CLIENTS = re.compile(_CLIENT % "mysql|mysqldump|mysqladmin|mariadb|mariadb-dump|psql|pg_dump|pg_dumpall|pg_restore|sshpass")
+_CURL = re.compile(_CLIENT % "curl")
+_P_ATTACHED = re.compile(r"(?<=\s)(-p)(?=[^\s-])" + _VALUE)
 _P_SEPARATE = re.compile(r"(?<=\s)(-p[ ]*)" + _VALUE)
-_P_CLIENTS = re.compile(r"\s*(?:\S*/)?(mysql|mysqldump|mysqladmin|mariadb|mariadb-dump|psql|pg_dump|pg_dumpall|pg_restore|sshpass)(?=\s)")
+_B_COOKIE = re.compile(r"(?<![\w-])(-b[ ]*)" + _VALUE)
 
 
-def _mask_p(line: str) -> str:
-    client = _P_CLIENTS.match(line)
-    if not client:
-        return line
-    pattern = _P_SEPARATE if client.group(1) == "sshpass" else _P_ATTACHED
-    return pattern.sub(lambda m: m.group(1) + _MASK, line)
+def _mask_flags(line: str) -> str:
+    client = _P_CLIENTS.search(line)
+    if client:
+        head, tail = line[:client.start(1)], line[client.start(1):]
+        if client.group(1) == "sshpass":
+            tail = _P_SEPARATE.sub(lambda m: m.group(1) + _MASK, tail, count=1)
+        else:
+            tail = _P_ATTACHED.sub(lambda m: m.group(1) + _MASK, tail)
+        line = head + tail
+    if _CURL.search(line):
+        line = _B_COOKIE.sub(lambda m: m.group(1) + _MASK, line)
+    return line
 
 
 def _tidy(text, cap: int = TARGET_CAP) -> str | None:
     """One short plain line: secrets masked first, whitespace collapsed, then cut to `cap` with an ellipsis."""
-    line = _mask_p(mask_secrets(plain(text)))
+    line = _mask_flags(mask_secrets(plain(text)))
     for pattern, replacement in _TARGET_MASKS:
         line = pattern.sub(replacement, line)
     line = re.sub(r"\s+", " ", line).strip()
@@ -399,11 +412,12 @@ def _tidy(text, cap: int = TARGET_CAP) -> str | None:
 
 
 def _tilde(text: str) -> str:
-    """The home folder as `~`, where it is a whole path (followed by `/`, the end, a space or a quote or shell mark)."""
+    """The home folder as `~`, where it is a whole path (after file:// or not after a name character; followed by `/`,
+    the end, a space or a quote or shell mark)."""
     home = str(Path.home())
     if len(home) <= 1:
         return text
-    return re.sub(r"(?<![\w/.-])" + re.escape(home) + r"(?=/|$|[\s\"';&|)])", "~", text)
+    return re.sub(r"(?:(?<=file://)|(?<![\w/.-]))" + re.escape(home) + r"(?=/|$|[\s\"';&|)\]}>,:`])", "~", text)
 
 
 def _site(url) -> str | None:
@@ -438,6 +452,8 @@ def target_of(tool, first, second=None) -> str | None:
         text = next((line.strip() for line in plain(first).split("\n") if line.strip()), None)
         if text:  # a query string or fragment can hold a secret: cut every URL at the first ? or #
             text = re.sub(r"(\w+://[^\s\"'?#]*)[?#][^\s\"']*", r"\1", text[:4 * TARGET_CAP])
+            # the same for an address without a scheme: a host name or localhost, then a path
+            text = re.sub(r"((?<![\w.-])(?:[\w.-]+\.[A-Za-z]{2,}|localhost)(?::\d+)?/[^\s\"'?#]*)[?#][^\s\"']*", r"\1", text)
     elif name in ("read", "write", "edit", "multiedit", "grep", "glob", "websearch", "codesearch"):
         text = plain(first)
     elif name in ("subagent", "task"):
