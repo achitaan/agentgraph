@@ -1181,27 +1181,23 @@ test("panel: other panel names render nothing; its own name draws the list with 
     setName("agentgraph.graph");
     assert.deepEqual(screen(view), ["Loading"]);
     await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
-    // the demo: the status bar, the stalled agent first (with the cursor, under its rule), the hub and the idle count, who works,
-    // then one footer block: progress, spend, keys
+    // the demo: the main chat first (with the cursor), then NEEDS YOU, AT WORK, one idle line, one totals line, the keys
     const widthOf = (i) => R.displayWidth(screen(view)[i]);
-    const hubIndex = () => screen(view).findIndex((l) => l.startsWith(" ◉ orchestrator") && l.includes("idle"));
+    const lines = () => screen(view);
     const first = cursorRow(view);
-    assert.equal(first, 2, "the bar, the NEEDS YOU rule, then the stalled agent");
-    assert.match(screen(view)[0], /^ ◉ orchestrator .* 4\/11 +\$[\d.]+ $/);
-    assert.match(screen(view)[1], /^ ── NEEDS YOU ─+$/);
-    assert.match(screen(view)[first], /^›! impl-claude +stalled ↻5 +.* +\d+[smhd]\w* $/);
-    assert.match(screen(view)[hubIndex()], / 11 idle $/);
-    assert.match(screen(view).at(-4), /^ ─+$/, "a rule over the footer");
-    assert.match(screen(view).at(-3), /4\/11  .*gate reviewer refuted$/);
-    assert.equal(screen(view).at(-1), " ↑↓ select  g graph  q close");
-    assert.ok(!screen(view).some((l) => l.trim() === ""), "no blank rows");
-    assert.equal(widthOf(0), 80);
-    assert.equal(widthOf(first), 80);
-    assert.equal(widthOf(hubIndex()), 80);
+    assert.equal(first, 0, "the cursor starts on the main chat");
+    assert.match(lines()[0], /^›◉ orchestrator +\S.* \$[\d.]+ ?$/);
+    const needs = lines().findIndex((l) => /^ NEEDS YOU ─+$/.test(l));
+    assert.ok(needs > 0, "a NEEDS YOU rule");
+    assert.match(lines()[needs + 1], /^ ● impl-claude +stalled .*\$[\d.]+$/);
+    assert.ok(lines().some((l) => /^ AT WORK ─+$/.test(l)));
+    assert.ok(lines().some((l) => /^ Idle: explorer, .*/.test(l)));
+    assert.ok(lines().some((l) => /^ \d+ of \d+ steps done/.test(l)));
+    assert.equal(lines().at(-1), " ↑↓ select  q close", "the keys, in words, only the ones that act (no picture while the size is unknown)");
+    assert.equal(widthOf(0), 80, "a selected row is tinted to the width");
     // wider panel, wider lines
     setWidth(100);
     assert.equal(widthOf(0), 100);
-    assert.equal(widthOf(hubIndex()), 100);
     // the cap holds
     setWidth(300);
     assert.equal(widthOf(0), 100);
@@ -1210,14 +1206,8 @@ test("panel: other panel names render nothing; its own name draws the list with 
     assert.equal(widthOf(0), 37);
     setWidth(undefined);
     assert.equal(widthOf(0), 37);
-    // at the sidebar's width: the sidebar's rows, plus the gutter and the key line
     setWidth(37);
-    const sidebarView = state.claims[0].render({ sessionID: "ses_p" });
-    await waitFor(() => screen(sidebarView).length > 3, 5000, "sidebar snapshot");
-    // the panel adds the gutter's key line, the status bar and three rules (NEEDS YOU, AT WORK, the footer)
-    assert.equal(screen(view).length, screen(sidebarView).length + 5);
-    assert.ok(screen(sidebarView).every((l) => !/^[› ]/.test(l) && R.displayWidth(l) <= 37), "the sidebar has no gutter");
-    assert.ok(screen(view).every((l) => /^[› ]/.test(l) && R.displayWidth(l) <= 37), "the panel has the gutter");
+    assert.ok(screen(view).every((l) => /^[› ]/.test(l) && R.displayWidth(l) <= 37), "the panel has the gutter and no line is wider than 37");
     // the name changes away: nothing is drawn
     setName("other.panel");
     assert.deepEqual(screen(view), []);
@@ -1331,25 +1321,32 @@ test("panel keys: up and down move the cursor through the rows that act, clamped
     const view = host.panelClaim().render(makePanel({ sessionID: "ses_keys", width: 80 }));
     await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
     const { key, calls } = host;
-    // the bar, a rule, stalled, a rule, hub, designer, a rule, progress, spend, keys
-    assert.deepEqual(screen(view).map((l) => l[0]), [" ", " ", "›", " ", " ", " ", " ", " ", " ", " "]);
+    // the main chat, its title, a rule, stalled, a rule, designer, the idle line, the totals, the keys: the cursor starts on the main chat
+    const rowOf = (re) => screen(view).findIndex((l) => re.test(l));
+    const hubRow = rowOf(/orchestrator/);
+    const stalledRow = rowOf(/impl-claude/);
+    const designerRow = rowOf(/designer/);
+    assert.equal(hubRow, 0);
+    assert.ok(hubRow < stalledRow && stalledRow < designerRow);
+    assert.equal(cursorRow(view), hubRow);
+    assert.equal(screen(view).filter((l) => l[0] === "›").length, 1, "one cursor");
     assert.equal(key("up").enabled(), true);
     key("up").run();
-    assert.equal(cursorRow(view), 2, "clamped at the top");
+    assert.equal(cursorRow(view), hubRow, "clamped at the top");
     key("down").run();
-    assert.equal(cursorRow(view), 4);
-    assert.ok(screen(view)[4].startsWith("›◉ orchestrator"));
-    key("down").run();
+    assert.equal(cursorRow(view), stalledRow);
     key("down").run();
     key("down").run();
-    assert.equal(cursorRow(view), 5, "clamped at the last row that acts: the progress and spend rows are not selectable");
-    assert.equal(screen(view).at(-1), " ↑↓ select  ⏎ open  g graph  q close");
+    key("down").run();
+    assert.equal(cursorRow(view), designerRow, "clamped at the last row that acts: the idle line and the totals are not selectable");
+    assert.equal(screen(view).at(-1), " ↑↓ select  ⏎ open  q close");
     key("return").run();
     assert.deepEqual(calls.at(-1), ["navigate", { type: "session", sessionID: "ses_h" }]);
     key("up").run();
+    key("up").run();
     key("return").run();
     assert.deepEqual(calls.at(-1), ["navigate", { type: "session", sessionID: "ses_root" }], "the hub row opens the root session");
-    key("up").run();
+    key("down").run();
     key("return").run();
     assert.deepEqual(calls.at(-1), ["navigate", { type: "session", sessionID: "ses_g" }], "the stalled agent's session");
     // a failing navigate is a toast, not a throw
@@ -1364,7 +1361,7 @@ test("panel keys: up and down move the cursor through the rows that act, clamped
     for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
     const again = host.panelClaim().render(makePanel({ sessionID: "ses_keys", width: 80 }));
     await waitFor(() => screen(again).length > 3, 5000, "remounted snapshot");
-    assert.ok(screen(again)[4].startsWith("›◉ orchestrator"), screen(again).join("\n"));
+    assert.ok(screen(again).some((l) => l.startsWith("›") && l.includes("designer")), screen(again).join("\n"));
   } finally {
     for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
     stop();
@@ -1377,7 +1374,7 @@ test("panel keys: without a router there is no return key action and no ⏎ in t
   try {
     const view = host.panelClaim().render(makePanel({ sessionID: "ses_norouter", width: 80 }));
     await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
-    assert.equal(screen(view).at(-1), " ↑↓ select  g graph  q close");
+    assert.equal(screen(view).at(-1), " ↑↓ select  q close");
     assert.equal(host.key("return").enabled(), false);
     assert.doesNotThrow(() => host.key("return").run());
     assert.deepEqual(host.calls, []);
@@ -1396,8 +1393,12 @@ test("panel keys: s confirms, then interrupts the working agent's session; m ask
     await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
     const { key, calls, state } = host;
     assert.deepEqual(state.layers.filter((l) => (l.commands || []).some((c) => c.bind === "f")).pop().commands.map((c) => c.bind), ["f", "q", "up", "down", "return", "s", "m", "c", "escape", "pageup", "pagedown"]);
+    // the cursor starts on the main chat: the user's own session, nothing to stop or message
+    assert.equal(screen(view).at(-1), " ↑↓ select  ⏎ open  q close");
+    assert.equal(key("s").enabled(), false);
     // the stalled impl-claude: it works, so s and m act on its running session
-    assert.equal(screen(view).at(-1), " ↑↓ select  ⏎ open  s stop  m message  g graph  q close");
+    key("down").run();
+    assert.equal(screen(view).at(-1), " ↑↓ select  ⏎ open  s stop  m message  q close");
     assert.equal(key("s").enabled(), true);
     key("s").run();
     await waitFor(() => calls.some((c) => c[0] === "interrupt"), 2000, "interrupt");
@@ -1435,8 +1436,8 @@ test("panel keys: s confirms, then interrupts the working agent's session; m ask
       assert.deepEqual(calls, [["prompt", "Message impl-claude"]]);
     }
     // the hub row: the user's own session; nothing to stop or message
-    key("down").run();
-    assert.equal(screen(view).at(-1), " ↑↓ select  ⏎ open  g graph  q close");
+    key("up").run();
+    assert.equal(screen(view).at(-1), " ↑↓ select  ⏎ open  q close");
     assert.equal(key("s").enabled(), false);
     assert.equal(key("m").enabled(), false);
     calls.length = 0;
@@ -1445,6 +1446,7 @@ test("panel keys: s confirms, then interrupts the working agent's session; m ask
     await sleep(30);
     assert.deepEqual(calls, []);
     // designer works: s acts on its session
+    key("down").run();
     key("down").run();
     answers.fail = undefined;
     answers.interrupted = true;
@@ -1468,6 +1470,9 @@ test("panel keys: while a host dialog is open the list keys do nothing, and the 
     const view = host.panelClaim().render(makePanel({ sessionID: "ses_dialog", width: 80 }));
     await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
     const { key, calls } = host;
+    key("down").run(); // the cursor starts on the main chat; the stalled agent is the next row
+    const stalled = cursorRow(view);
+    assert.ok(stalled > 0);
     // any host dialog (the keymap is in "modal" mode): every list key is off and does nothing
     mode.v = "modal";
     for (const bind of ["up", "down", "return", "s", "m"]) {
@@ -1476,7 +1481,7 @@ test("panel keys: while a host dialog is open the list keys do nothing, and the 
     }
     await sleep(20);
     assert.deepEqual(calls, []);
-    assert.equal(cursorRow(view), 2);
+    assert.equal(cursorRow(view), stalled);
     mode.v = "base";
     // our own confirm: from `s` until a moment after it closes, the list keys do nothing
     key("s").run();
@@ -1484,7 +1489,7 @@ test("panel keys: while a host dialog is open the list keys do nothing, and the 
     for (const bind of ["up", "down", "return", "s", "m"]) assert.equal(key(bind).enabled(), false, bind + " enabled under the confirm");
     key("down").run();
     key("return").run();
-    assert.equal(cursorRow(view), 2, "down did not move the cursor under the dialog");
+    assert.equal(cursorRow(view), stalled, "down did not move the cursor under the dialog");
     // Enter answers the confirm; the same key reaching the panel must not open anything
     // The host dispatches that Enter in one go: the confirm resolves, its promise chain settles (microtasks), and the
     // same key may then reach the panel before any timer runs. The list keys must still be off then.
@@ -1540,14 +1545,17 @@ test("panel: pending permission requests and questions from the host's data come
     const view = host.panelClaim().render(makePanel({ sessionID: "ses_req", width: 80 }));
     await waitFor(() => screen(view).length > 3, 5000, "panel snapshot");
     const lines = screen(view);
-    // the bar and the NEEDS YOU rule, then the rows in columns
-    assert.match(lines[2], /^›! designer +wants permission +2 requests +\S+ $/);
-    assert.match(lines[3], /^ \? orchestrator +asks you +Add per-user rate limiting +\S+ $/);
-    assert.ok(lines.includes(" ○ 11 idle"), "the hub's row is up there: the idle count has its own row\n" + lines.join("\n"));
-    assert.match(lines[4], /^ ! impl-claude +stalled ↻5/);
+    // the main chat, its title, the NEEDS YOU rule, then the rows in columns (the main chat is flagged: it asks you)
+    const needs = lines.findIndex((l) => /^ NEEDS YOU ─+$/.test(l));
+    assert.ok(needs > 0, lines.join("\n"));
+    assert.match(lines[needs + 1], /^[› ]● designer +wants permission · \S+ +\$[\d.]+ ?$/);
+    assert.ok(lines.some((l) => /^ ● orchestrator +asks you/.test(l)), lines.join("\n"));
+    assert.match(lines[needs + 2], /2 requests/, "the selected row says more on a line of its own");
+    assert.ok(lines.some((l) => /^ Idle: /.test(l)), "idle agents are one line\n" + lines.join("\n"));
+    assert.ok(lines.some((l) => /^ ● impl-claude +stalled/.test(l)));
     assert.ok(!lines.some((l) => l.includes("global")), "the global form is not a session's");
-    assert.ok(!lines.some((l) => /^ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] designer/.test(l)), "designer is not also among the working");
-    host.key("return").run();
+    assert.equal(lines.filter((l) => l.includes(" designer ")).length, 1, "designer is not also among the working");
+    host.key("return").run(); // the cursor starts on the first row that acts: designer (the flagged main chat is not one)
     assert.deepEqual(host.calls.at(-1), ["navigate", { type: "session", sessionID: "ses_h" }]);
     // a host without the data store: no requests, no error
     const bare = makeActionHost({ client: false, dialog: false });
@@ -1556,7 +1564,7 @@ test("panel: pending permission requests and questions from the host's data come
     try {
       const v2 = bare.panelClaim().render(makePanel({ sessionID: "ses_req2", width: 80 }));
       await waitFor(() => screen(v2).length > 3, 5000, "bare snapshot");
-      assert.match(screen(v2)[2], /^›! impl-claude +stalled/);
+      assert.ok(screen(v2).some((l) => /^ ● impl-claude +stalled/.test(l)));
     } finally {
       stop2();
     }
@@ -1633,15 +1641,13 @@ test("panel: no title, banner or legend; the keys are one muted line at the bott
     const all = lines.join("\n");
     assert.ok(!/fullscreen|full screen|Agent graph|agentgraph|[┌┐└┘╭╮╰╯]/i.test(all), all);
     assert.equal(lines.filter((l) => /\bq close\b/.test(l)).length, 1, all);
-    assert.equal(lines.at(-1), " g graph  q close"); // one row: nothing to select, no session to open on this host
+    assert.equal(lines.at(-1), " q close"); // one row: nothing to select, no session to open on this host, no picture while the size is unknown
     const keyLine = view.children.at(-1);
     // the key letters are plain, their labels muted: nothing in the accent or the danger colour
     // dark panel: the key letters in the ink colour, their labels in the dim one (own colours); never the accent or the danger colour
     const marked = keyLine.children.filter((c) => nodeText(c).trim() !== "");
-    assert.ok(marked.length >= 4 && marked.every((c) => c.props.fg !== "#d08040" && c.props.fg !== "#e05050"), "the key line has no accent");
-    assert.ok(marked.filter((c) => /^ \S/.test(nodeText(c))).every((c) => c.props.fg === "#94a3b8"), "the labels are dim");
-    const hub = view.children[0].children.find((c) => nodeText(c) === "◉");
-    assert.equal(hub.props.fg, "#d08040");
+    assert.ok(marked.length >= 2 && marked.every((c) => c.props.fg !== "#d08040" && c.props.fg !== "#e05050" && c.props.fg !== "#dfa183" && c.props.fg !== "#ed9583"), "the key line has no accent");
+    assert.ok(marked.filter((c) => /^ \S/.test(nodeText(c))).every((c) => c.props.fg === "#8f8178"), "the labels are dim");
   } finally {
     stop();
   }
@@ -1787,7 +1793,7 @@ test("host theme: the sidebar and the panel draw the view with the real host's t
       const fgs = allFg(v);
       assert.ok(fgs.length > 0);
       assert.ok(fgs.every((fg) => typeof fg === "string" && /^#[0-9a-f]{6}$/.test(fg)), "every fg is a hex string: " + fgs.join(","));
-      assert.equal(v.children[0].children.find((c) => nodeText(c) === "◉").props.fg, "#f5a742", "the busy hub mark uses the accent");
+      assert.equal(v.children[0].children.find((c) => nodeText(c) === "◉").props.fg, v === side ? "#f5a742" : "#dfa183", "the busy hub mark: the host's accent in the sidebar, the panel's one peach");
       assert.ok(!fgs.some((fg) => P.isGreen(fg)), "no green");
     }
   } finally {
@@ -3022,652 +3028,173 @@ test("planets: 300 agents draw in under 200 ms a frame, exact size", () => {
 });
 
 // ---------------------------------------------------------------------------------------------------------------
-// The pixel rooms (src/rooms.js): the floor plan, with made-up data
+// Helpers shared by the list and picture tests
 
-const RM = await import(src("rooms.js"));
 const copy = (value) => JSON.parse(JSON.stringify(value));
 const hubOf = (doc) => doc.agents.find((a) => a.group === "hub");
-const ROOM_SIZES = SIZES.concat([[62, 38]]);
-const roomsText = (lines) => lines.map((l) => l.map((s) => s.text).join(""));
-const inside = (c, r) => c.x0 >= r.x0 && c.x1 <= r.x1 && c.y0 >= r.y0 && c.y1 <= r.y1;
-// width and height exact; plain tone, #rrggbb colours (the orbit's rule of merged neighbours does not apply: the header's bold name and its muted count)
-function assertRoomsExact(lines, width, height, what) {
-  assert.equal(lines.length, height, what + ": height");
-  lines.forEach((l, i) => {
-    assert.equal(R.displayWidth(l.map((s) => s.text).join("")), width, `${what}: line ${i} width`);
-    for (const s of l) {
-      assert.ok(R.TONES.includes(s.tone) && typeof s.text === "string" && s.text.length > 0, `${what}: span ${JSON.stringify(s)}`);
-      for (const k of ["color", "bg"]) if (k in s) assert.match(s[k], /^#[0-9a-f]{6}$/, `${what}: ${k} ${s[k]}`);
-    }
-  });
-}
-const roomsAt = (doc, w, h, now = 1500, options = {}) => RM.roomsInfo(doc, w, h, now, options);
 
-test("rooms: exactly w x h at every size, spans with plain tone and #rrggbb colours; half blocks carry the top pixel in the colour and the bottom in the background", () => {
-  for (const [w, h] of ROOM_SIZES) {
-    const lines = RM.roomsLines(demoWorn, w, h, 1500);
-    assert.equal(lines.length, h, `${w}x${h}: height`);
-    lines.forEach((l, i) => {
-      assert.equal(R.displayWidth(l.map((s) => s.text).join("")), w, `${w}x${h}: line ${i} width`);
-      for (const s of l) {
-        assert.equal(s.tone, "plain");
-        assert.ok(s.text.length > 0);
-        for (const k of ["color", "bg"]) if (k in s) assert.match(s[k], /^#[0-9a-f]{6}$/, `${w}x${h}: ${k} ${s[k]}`);
-        if (s.text.startsWith("▀")) assert.ok(s.color && s.bg && s.color !== s.bg, "a half block shows two pixels");
-      }
-    });
-  }
-  const lines = RM.roomsLines(demoWorn, 62, 29, 1500);
-  assert.ok(lines.some((l) => l.some((s) => s.text.includes("▀") && s.bg)), "pixels are half blocks");
-  assert.deepEqual(RM.roomsInfo(demoWorn, 62, 29, 1500).titles.map((t) => t.text), [">_ TERMINAL", "▤ FILES", "◍ WEB", "⌕ SEARCH", "… THINKING", "☾ TEAM"]);
-  // the whole panel at the report's size, from the demo
-  const panel = RM.roomsScene(demoWorn, { width: 62, height: 38, now: 1500 });
-  assertRoomsExact(panel, 62, 38, "roomsScene 62x38");
-  assert.ok(roomsText(panel).some((l) => l.startsWith(" NOW ")) && roomsText(panel).some((l) => l.startsWith(" BEFORE ")));
-  assert.match(roomsText(panel)[0], /^ ◉ orchestrator +4\/11 +\$[\d.]+ $/);
-});
-
-test("rooms: never throws on an empty document, no hub, no activity, a hub with nothing lit, or 30 agents", () => {
-  const thirty = copy(demoWorn);
-  const proto = thirty.agents.find((a) => a.group !== "hub");
-  for (let i = 0; i < 30; i += 1) thirty.agents.push(Object.assign(copy(proto), { name: `extra-${i}`, busy: i % 3 === 0 ? 1 : 0 }));
-  const noHub = copy(demoWorn);
-  noHub.agents = noHub.agents.filter((a) => a.group !== "hub");
-  const noActivity = copy(demoWorn);
-  delete hubOf(noActivity).activity;
-  const resting = copy(demoWorn);
-  hubOf(resting).busy = 0;
-  const docs = [{}, { agents: [] }, { agents: [null, 5, {}] }, null, "x", noHub, noActivity, resting, thirty];
-  for (const doc of docs) {
-    for (const [w, h] of ROOM_SIZES) {
-      for (const now of [0, 1500, 1795075120400]) {
-        const lines = RM.roomsLines(doc, w, h, now);
-        assert.equal(lines.length, h);
-        lines.forEach((l) => assert.equal(R.displayWidth(l.map((s) => s.text).join("")), w));
-        assertRoomsExact(RM.roomsScene(doc || {}, { width: w, height: h, now }), w, h, "roomsScene");
-      }
-    }
-  }
-  const info = roomsAt(resting, 100, 40);
-  assert.equal(info.lit, null, "a hub that is not working lights nothing");
-  assert.equal(info.chars.find((c) => c.hub).room, "team");
-});
-
-test("rooms: the hub's room follows its zone, and its sprite is inside that room", () => {
-  const cases = { files: "files", terminal: "terminal", search: "search", web: "web", thinking: "thinking", messaging: "team", tasks: "team", spawn: "team", tools: "terminal", "made-up-zone": "terminal" };
-  for (const [zone, room] of Object.entries(cases)) {
-    const doc = copy(demoWorn);
-    hubOf(doc).activity.zone = zone;
-    for (const [w, h] of [[100, 40], [62, 29], [160, 45]]) {
-      const info = roomsAt(doc, w, h, 1500);
-      const hub = info.chars.find((c) => c.hub);
-      assert.equal(hub.room, room, `${zone} -> ${room}`);
-      assert.equal(info.lit, room);
-      assert.ok(inside(hub, info.rooms[room]), `${zone} ${w}x${h}: the hub sprite is inside ${room}: ${JSON.stringify(hub)}`);
-    }
-  }
-});
-
-test("rooms: a working agent stands in its tool's room, an idle one in TEAM, dimmed and unnamed; a stuck one in TEAM with name and mark", () => {
-  const doc = copy(demoWorn);
-  const [first, second] = doc.agents.filter((a) => a.group !== "hub" && Number(a.busy) > 0);
-  first.activity = { kind: "tool", tool: "webfetch", text: null };
-  second.activity = { kind: "tool", tool: "grep", text: null };
-  const info = roomsAt(doc, 160, 45, 1500);
-  const of = (name) => info.chars.find((c) => c.name === name);
-  assert.equal(of(first.name).room, "web");
-  assert.equal(of(second.name).room, "search");
-  const idle = info.chars.filter((c) => c.kind === "idle");
-  assert.ok(idle.length >= 3);
-  for (const c of idle) {
-    assert.equal(c.room, "team");
-    assert.equal(c.name, null, "an idle agent has no name");
-    assert.ok(inside(c, info.rooms.team));
-  }
-  const reasoning = copy(demoWorn);
-  assert.equal(roomsAt(reasoning, 160, 45).chars.find((c) => c.name === "designer").room, "thinking", "working with no tool is thinking");
-  const stuck = info.chars.filter((c) => c.kind === "needs");
-  assert.ok(stuck.length >= 2);
-  for (const c of stuck) {
-    assert.equal(c.room, "team");
-    assert.ok(c.name_cells, "a stuck or sent back agent keeps its name at this size");
-  }
-  assert.ok(roomsText(RM.roomsLines(doc, 160, 45, 1500)).some((l) => l.includes("! reviewer")), "the mark goes with the name");
-});
-
-test("rooms: no name overlaps another name or a title, in the demo at every size", () => {
-  const boxes = (info) => [
-    ...info.titles.map((t) => ({ what: "title " + t.text, c0: t.c0, c1: t.c1, r: t.r })),
-    ...info.chars.filter((c) => c.name_cells).map((c) => ({ what: "name " + c.name, c0: c.name_cells.c0, c1: c.name_cells.c1, r: c.name_cells.r })),
-    ...(info.bubble ? [{ what: "bubble", c0: info.bubble.c0, c1: info.bubble.c1, r: info.bubble.r }] : []),
-  ];
-  for (const [w, h] of ROOM_SIZES.concat([[100, 30], [37, 16], [62, 29]])) {
-    for (const doc of [demoWorn, (() => { const d = copy(demoWorn); hubOf(d).activity.zone = "files"; return d; })()]) {
-      for (const now of [1500, 1795075120300, 1795075122000]) {
-        const all = boxes(roomsAt(doc, w, h, now));
-        for (const b of all) assert.ok(b.c0 >= 0 && b.c1 < w && b.r >= 0 && b.r < h, `${w}x${h}: ${b.what} inside the picture`);
-        for (let i = 0; i < all.length; i += 1) {
-          for (let j = i + 1; j < all.length; j += 1) {
-            const a = all[i];
-            const b = all[j];
-            assert.ok(a.r !== b.r || a.c1 < b.c0 || b.c1 < a.c0, `${w}x${h}: ${a.what} overlaps ${b.what}`);
-          }
-        }
-        const hub = roomsAt(doc, w, h, now).chars.find((c) => c.hub);
-        if (hub && w >= 62 && h >= 38 && now === 1500) assert.ok(hub.name_cells, `${w}x${h}: the hub keeps its name`);
-      }
-    }
-  }
-});
-
-test("rooms: reduced motion shows one frame whatever the time; with motion the hub walks for 1.2 s after its action starts and bobbing follows the clock", () => {
-  const start = hubOf(demoWorn).activity.time * 1000;
-  for (const [w, h] of [[100, 40], [62, 29], [36, 14]]) {
-    const a = RM.roomsLines(demoWorn, w, h, start + 300, { motion: "reduced" });
-    assert.deepEqual(a, RM.roomsLines(demoWorn, w, h, start + 2000, { motion: "reduced" }), `${w}x${h}: reduced motion is one frame`);
-    assert.deepEqual(a, RM.roomsLines(demoWorn, w, h, start + 2500, { motion: "reduced" }));
-  }
-  assert.equal(RM.roomsInterval(demoWorn, { motion: "reduced" }, start + 300), 0);
-  assert.equal(RM.roomsInterval(demoWorn, {}, start + 300), 100);
-  assert.ok(RM.roomsInterval(demoWorn, {}, start + 2000) >= 250 / 2);
-  const mid = roomsAt(demoWorn, 100, 40, start + 300);
-  const rest = roomsAt(demoWorn, 100, 40, start + 2000);
-  const hubMid = mid.chars.find((c) => c.hub);
-  const hubRest = rest.chars.find((c) => c.hub);
-  assert.equal(mid.walking, true);
-  assert.equal(rest.walking, false);
-  assert.ok(hubMid.x0 !== hubRest.x0 || hubMid.y0 !== hubRest.y0, "the hub is on its way at +300 ms");
-  assert.ok(!inside(hubMid, mid.rooms.team) || !inside(hubMid, mid.rooms.web), "...not at rest in a room's corner");
-  assert.ok(inside(hubRest, rest.rooms.team), "and at rest in TEAM at +2000 ms");
-  assert.deepEqual(roomsAt(demoWorn, 100, 40, start - 5000).chars.find((c) => c.hub), hubRest, "before the start the hub stands at its place");
-  // a pure function of the document and the time
-  assert.deepEqual(RM.roomsLines(demoWorn, 100, 40, start + 300), RM.roomsLines(copy(demoWorn), 100, 40, start + 300));
-  // a working agent bobs 1 px per 500 ms
-  const a0 = roomsAt(demoWorn, 100, 40, start + 5000).chars.find((c) => c.name === "impl-claude");
-  const a1 = roomsAt(demoWorn, 100, 40, start + 5000 + RM.BOB_MS).chars.find((c) => c.name === "impl-claude");
-  assert.equal(Math.abs(a0.y0 - a1.y0), 1);
-  assert.equal(roomsAt(demoWorn, 100, 40, start + 5000, { motion: "reduced" }).chars.find((c) => c.name === "impl-claude").y0, roomsAt(demoWorn, 100, 40, start + 5000 + RM.BOB_MS, { motion: "reduced" }).chars.find((c) => c.name === "impl-claude").y0);
-});
-
-test("rooms: the target is the hub's alone: in the NOW row, never on an agent's line; the trail runs from the last action's room to the hub's", () => {
-  const doc = copy(demoWorn);
-  hubOf(doc).activity.target = "made-up-hub-target";
-  for (const a of doc.agents) if (a.group !== "hub" && a.activity) a.activity.target = "made-up-agent-target";
-  const text = roomsText(RM.roomsScene(doc, { width: 100, height: 40, now: 1500 }));
-  assert.ok(text.some((l) => l.startsWith(" NOW ") && l.includes("made-up-hub-target")));
-  assert.ok(!text.some((l) => l.includes("made-up-agent-target")), "no agent line carries a target\n" + text.join("\n"));
-  const working = text.filter((l) => l.startsWith(" ▪ "));
-  assert.ok(working.length >= 2 && working.every((l) => !l.includes("made-up")));
-  // the bubble over the hub shows the target, when it stands still
-  hubOf(doc).activity.zone = "files"; // alone in its room, with room for the bubble
-  const info = roomsAt(doc, 160, 45, 1500);
-  assert.ok(info.bubble && "made-up-hub-target".startsWith(info.bubble.text.replace(/…$/, "")));
-  assert.equal(roomsAt(doc, 160, 45, hubOf(doc).activity.time * 1000 + 300).bubble, null, "none while it walks");
-  // footprints between the doors: pixels outside the sprites and props in the rooms between WEB and TEAM
-  const flat = (lines) => lines.map((l) => l.map((s) => s.text + (s.color || "") + (s.bg || "")).join("")).join("\n");
-  const start = hubOf(doc).activity.time * 1000;
-  assert.notEqual(flat(RM.roomsLines(doc, 100, 40, start + 300)), flat(RM.roomsLines(doc, 100, 40, start + 2000)));
-});
-
-test("rooms: the panel gives way in order down to 36x14, always exactly the size, the hub's name in the header", () => {
-  const seen = [];
-  for (const h of [60, 45, 38, 30, 24, 20, 17, 16, 15, 14]) {
-    const lines = RM.roomsScene(demoWorn, { width: 62, height: h, now: 1500 });
-    assertRoomsExact(lines, 62, h, `62x${h}`);
-    const text = roomsText(lines);
-    assert.ok(text[0].includes("orchestrator"), `62x${h}: the header names the hub`);
-    seen.push({ h, now: text.some((l) => l.startsWith(" NOW ")), before: text.some((l) => l.startsWith(" BEFORE ")), working: text.filter((l) => l.startsWith(" ▪ ")).length });
-  }
-  const at = (h) => seen.find((s) => s.h === h);
-  assert.ok(at(60).working >= at(38).working && at(38).working >= at(30).working, "working lines go first");
-  assert.ok(at(60).before && at(60).now, "everything at 62x60");
-  for (const s of seen) if (s.before) assert.ok(s.now, `BEFORE never outlives NOW (${s.h})`);
-  for (const s of seen) if (s.working) assert.ok(s.before, `working lines go before BEFORE (${s.h})`);
-});
-
-test("rooms: a 200x60 frame stays within the orbit's frame cost limit, counted in reference frames (time reported only)", () => {
-  const batch = (fn) => {
-    const t0 = process.hrtime.bigint();
-    for (let i = 0; i < 10; i += 1) fn(i);
-    return Number(process.hrtime.bigint() - t0) / 1e6 / 10;
-  };
-  const kinds = {
-    ref: (i) => referenceFrame(160, 45, i),
-    rooms: (i) => RM.roomsLines(demoWorn, 200, 60, i * 100),
-    "rooms new": (i) => RM.roomsLines(DM.demoDocument(demo, i * 2000), 200, 60, i * 100),
-  };
-  for (const fn of Object.values(kinds)) for (let i = 0; i < 20; i += 1) fn(i);
-  const best = Object.fromEntries(Object.keys(kinds).map((k) => [k, Infinity]));
-  for (let round = 0; round < 15; round += 1) for (const [k, fn] of Object.entries(kinds)) best[k] = Math.min(best[k], batch(fn));
-  console.log(`     frame 200x60: reference ${best.ref.toFixed(3)} ms; rooms ${best.rooms.toFixed(3)} ms (${(best.rooms / best.ref).toFixed(1)} ref), rooms new ${best["rooms new"].toFixed(3)} ms (${(best["rooms new"] / best.ref).toFixed(1)} ref)`);
-  assert.ok(best.rooms / best.ref < FRAME_COST_LIMIT * FRAME_COST_TODAY["2d"], `rooms: ${(best.rooms / best.ref).toFixed(1)} reference frames, limit ${FRAME_COST_LIMIT * FRAME_COST_TODAY["2d"]}`);
-  assert.ok(best["rooms new"] / best.ref < FRAME_COST_LIMIT * FRAME_COST_TODAY["2d new"], `rooms new: ${(best["rooms new"] / best.ref).toFixed(1)} reference frames, limit ${FRAME_COST_LIMIT * FRAME_COST_TODAY["2d new"]}`);
-});
-
-const GOLD = "#facc15";
-const HUB_ROOM = { terminal: "terminal", files: "files", web: "web", search: "search", thinking: "thinking", spawn: "team", messaging: "team", tasks: "team", tools: "terminal" };
-const roomsSettled = (doc) => hubOf(doc).activity.time * 1000 + 5000; // after the walk
-// gold pixels of the sprite (not the labels) inside the room's cells
-function goldIn(lines, r) {
-  let n = 0;
-  for (let row = r.y0 >> 1; row <= r.y1 >> 1; row += 1) {
-    let col = 0;
-    for (const sp of lines[row]) {
-      const w = R.displayWidth(sp.text);
-      if (/^[ ▀]+$/.test(sp.text) && col + w > r.x0 && col <= r.x1 && (sp.bg === GOLD || sp.color === GOLD)) n += 1;
-      col += w;
-    }
-  }
-  return n;
-}
-// no two sprites touch, none leaves its room's inner bounds (walls and the title row are outside them)
-function assertRoomsTidy(info, what) {
-  const sprites = info.chars.filter((c) => !(c.hub && info.walking));
-  for (const c of sprites) {
-    const r = info.rooms[c.room];
-    assert.ok(c.x0 > r.x0 && c.x1 < r.x1 && c.y0 > r.y0 && c.y1 < r.y1, `${what}: ${c.name || c.kind} inside ${c.room}`);
-    for (const t of info.titles) if (t.room === c.room) assert.ok(c.y0 > t.r * 2 + 1, `${what}: ${c.name || c.kind} under the title`);
-  }
-  for (let i = 0; i < sprites.length; i += 1) {
-    for (let j = i + 1; j < sprites.length; j += 1) {
-      const a = sprites[i];
-      const b = sprites[j];
-      assert.ok(a.x1 < b.x0 || b.x1 < a.x0 || a.y1 < b.y0 || b.y1 < a.y0, `${what}: ${a.name || a.kind} overlaps ${b.name || b.kind}`);
-    }
-  }
-}
-
-test("rooms: the hub is drawn in gold inside its room, whatever its zone, at 36x14, 48x20, 62x38 and 100x30", () => {
-  for (const zone of Object.keys(HUB_ROOM)) {
-    const doc = copy(demoWorn);
-    hubOf(doc).activity.zone = zone;
-    for (const [w, h] of [[36, 14], [48, 20], [62, 38], [100, 30]]) {
-      for (const now of [roomsSettled(doc), roomsSettled(doc) + 500]) {
-        const info = roomsAt(doc, w, h, now);
-        const hub = info.chars.find((c) => c.hub);
-        assert.ok(hub, `${zone} ${w}x${h}: the hub has a sprite`);
-        assert.equal(hub.room, HUB_ROOM[zone], `${zone} ${w}x${h}: its room`);
-        assert.ok(inside(hub, info.rooms[hub.room]), `${zone} ${w}x${h}: inside its room`);
-        assert.ok(goldIn(RM.roomsLines(doc, w, h, now), info.rooms[hub.room]) > 0, `${zone} ${w}x${h}: gold pixels in its room`);
-      }
-    }
-  }
-});
-
-test("rooms: the crowded team room at 62x38 keeps the hub full size with its bubble; the idle ones give way; the rest is +N", () => {
-  const info = roomsAt(demoWorn, 62, 38, roomsSettled(demoWorn));
-  const hub = info.chars.find((c) => c.hub);
-  assert.equal(hub.room, "team");
-  assert.deepEqual([hub.x1 - hub.x0 + 1, hub.y1 - hub.y0 + 1], [5, 9], "the full-size hero");
-  assert.ok(info.bubble, "the bubble is shown");
-  assert.ok(info.bubble.r * 2 + 1 < hub.y0 + 1, "the bubble is over the hub");
-  const idle = info.chars.filter((c) => c.room === "team" && c.kind === "idle");
-  // the furniture keeps its size first: the idle ones give way to it, and what is hidden is counted in the +N
-  assert.ok(idle.every((c) => c.x1 - c.x0 + 1 <= 3 && c.y1 - c.y0 + 1 <= 3), "idle agents are small");
-  assert.ok(idle.length >= 3 || (info.furniture.some((f) => f.room === "team") && info.more.some((m) => m.room === "team")), "idle agents are drawn, or the sofa stays and the rest is counted");
-  const needs = info.chars.filter((c) => c.room === "team" && c.kind === "needs");
-  assert.ok(needs.length >= 1, "agents that need the user are drawn");
-  // many more idle agents than room: some are hidden, counted in the title row, the hub and the needs keep their places
-  const crowd = copy(demoWorn);
-  for (let i = 0; i < 40; i += 1) crowd.agents.push({ ...copy(crowd.agents.find((a) => a.group !== "hub" && !a.busy)), name: "idle-" + i });
-  const many = roomsAt(crowd, 62, 38, roomsSettled(crowd));
-  const hub2 = many.chars.find((c) => c.hub);
-  assert.deepEqual([hub2.x1 - hub2.x0 + 1, hub2.y1 - hub2.y0 + 1], [5, 9]);
-  assert.ok(many.bubble, "the bubble stays");
-  assert.equal(many.chars.filter((c) => c.kind === "needs").length, needs.length, "the needs stay");
-  assert.equal(many.more.length, 1);
-  assert.match(many.more[0].text, /^\+\d+$/);
-  assert.equal(many.more[0].room, "team");
-  assert.equal(many.more[0].count, idle.length + info.more.filter((m) => m.room === "team").reduce((t, m) => t + m.count, 0) + 40 - many.chars.filter((c) => c.room === "team" && c.kind === "idle").length, "the +N counts the hidden");
-  assertRoomsTidy(many, "crowded team");
-});
-
-test("rooms: no two sprites overlap and none crosses a wall or a title row, with and without bobbing (36x14 and 62x38)", () => {
-  const crowd = copy(demoWorn);
-  const model = crowd.agents.find((a) => a.group !== "hub");
-  const doc300 = copy(demoWorn);
-  for (let i = 0; i < 300; i += 1) doc300.agents.push({ ...copy(model), name: "w-" + i, busy: 1, activity: { kind: "tool", tool: "bash", zone: "terminal", target: "x", time: 1 } });
-  for (const [label, doc] of [["demo", demoWorn], ["300", doc300]]) {
-    const t0 = hubOf(doc).activity.time * 1000;
-    for (const [w, h] of [[36, 14], [62, 38]]) {
-      for (const [now, options] of [[1500, { motion: "reduced" }], [t0 + 5000, {}], [t0 + 5500, {}]]) {
-        assertRoomsTidy(roomsAt(doc, w, h, now, options), `${label} ${w}x${h} @${now - t0}`);
-      }
-    }
-  }
-});
-
-test("rooms: 300 working agents with one tool fit a 62x38 frame fast and exactly; reduced motion still gives equal frames", () => {
-  const doc = copy(demoWorn);
-  const model = doc.agents.find((a) => a.group !== "hub");
-  for (let i = 0; i < 300; i += 1) doc.agents.push({ ...copy(model), name: "w-" + i, busy: 1, activity: { kind: "tool", tool: "bash", zone: "terminal", target: "x", time: 1 } });
-  const t = performance.now();
-  const lines = RM.roomsScene(doc, { width: 62, height: 38, now: 1500 });
-  const ms = performance.now() - t;
-  assertRoomsExact(lines, 62, 38, "300 agents");
-  assert.ok(ms < 200, `300 agents took ${ms.toFixed(1)} ms`);
-  const a = RM.roomsLines(demoWorn, 62, 38, 1500, { motion: "reduced" });
-  assert.deepEqual(RM.roomsLines(demoWorn, 62, 38, 1500 + 500, { motion: "reduced" }), a);
-  assert.deepEqual(RM.roomsLines(demoWorn, 62, 38, 1500 + 777, { motion: "reduced" }), a);
-});
-
-test("rooms: a tool called constructor and a zone called __proto__ never put a function in a span", () => {
-  const doc = copy(demoWorn);
-  const act = hubOf(doc).activity;
-  act.tool = "constructor";
-  act.zone = "__proto__";
-  act.recent = [{ tool: "constructor", zone: "__proto__", target: "x" }, { tool: "toString", zone: "constructor", target: "y" }];
-  doc.agents.find((a) => a.group !== "hub" && a.busy).activity = { kind: "tool", tool: "constructor", zone: "hasOwnProperty" };
-  for (const [w, h] of [[36, 14], [62, 38], [100, 30]]) {
-    for (const lines of [RM.roomsLines(doc, w, h, 1500), RM.roomsScene(doc, { width: w, height: h, now: 1500 })]) {
-      for (const line of lines) for (const sp of line) assert.ok(typeof sp.text === "string" && !sp.text.includes("function"), `${w}x${h}: ${JSON.stringify(sp)}`);
-    }
-  }
-  const hostile = chatDoc((d) => { d.agents.find((a) => a.name === "orchestrator").activity = { time: d.generated - 1, kind: "tool", tool: "constructor", text: "", zone: "__proto__", target: "x", status: "running", recent: [{ zone: "__proto__", tool: "constructor", target: "y" }, { zone: "constructor", tool: "toString" }] }; });
-  for (const width of [22, 42, 80]) {
-    for (const line of R.layout(hostile, { width, now: 1795075100000, activity: true }).lines) for (const sp of line) assert.ok(typeof sp.text === "string" && !sp.text.includes("function"), JSON.stringify(sp));
-  }
-});
-
-// ---- the chrome around the pictures: status bar, chips, footer columns, plaques, labels, furniture (made-up data)
-const spanStart = (line, pred) => { let x = 0; for (const s of line) { if (pred(s)) return x; x += R.displayWidth(s.text); } return -1; };
-const panelOf = (doc, w = 62, h = 38, options = {}) => RM.roomsScene(doc, Object.assign({ width: w, height: h, now: 1500 }, options));
-const bgOf = (line) => line.find((s) => s.bg).bg;
-
-test("rooms chrome: the header is one bar with a background, the hub's name on the left, steps and spend on the right", () => {
-  for (const w of [62, 100, 160]) {
-    const bar = panelOf(demoWorn, w, 38)[0];
-    assert.ok(bar.every((s) => s.bg === bar[0].bg), "one background across the bar");
-    const text = bar.map((s) => s.text).join("");
-    assert.ok(text.startsWith(" ◉ orchestrator"), text);
-    assert.ok(/4\/11 +\$[\d.]+ $/.test(text), text);
-    const name = bar.find((s) => s.text === "orchestrator");
-    assert.equal(name.bold, true);
-    assert.equal(spanStart(bar, (s) => s === name), 3, "the name starts at column 3");
-  }
-  const light = panelOf(demoWorn, 62, 38, { colors: { dark: false } });
-  for (const line of light.slice(0, 3)) for (const s of line) assert.ok(!("bg" in s) && !("color" in s), `light theme: tone only ${JSON.stringify(s)}`);
-});
-
-test("rooms chrome: needs-you chips line up in columns, tone differs by kind, at most three then +N more", () => {
-  const lines = panelOf(demoWorn, 62, 38);
-  const rows = lines.slice(1, 4).map((l) => ({ l, t: l.map((s) => s.text).join("") }));
-  assert.ok(rows.every((r) => r.l[1].bold && /^ [!↩] $/.test(r.l[1].text)), "a mark chip first");
-  const nameAt = rows.map((r) => r.t.search(/\S/, 4));
-  assert.equal(new Set(nameAt).size, 1, "names start in one column");
-  const reasonAt = rows.map((r) => r.t.search(/stuck|sent back/));
-  assert.equal(new Set(reasonAt).size, 1, "reasons start in one column");
-  for (const r of rows) assert.equal(R.displayWidth(r.t), 62);
-  const stuck = rows.find((r) => r.t.includes("stuck")), back = rows.find((r) => r.t.includes("sent back"));
-  assert.ok(stuck && back && stuck.l[1].bg !== back.l[1].bg && bgOf(stuck.l) !== bgOf(back.l), "stuck and sent-back differ in tone");
-  assert.ok(rows.some((r) => /↻\d+ $/.test(r.t)) , "a loop count at the right");
-  // more than three: a "+N more" row, never a fourth chip
-  const many = copy(demoWorn);
-  for (let i = 0; i < 5; i += 1) many.agents.push(Object.assign(copy(many.agents.find((a) => a.group !== "hub")), { name: `stuck-${i}`, stuck: true }));
-  const text = roomsText(panelOf(many, 62, 38));
-  assert.ok(text.filter((l) => /^ [!↩] /.test(l)).length <= 3, "at most three chips");
-});
-
-test("rooms chrome: NOW is a tinted bar; BEFORE is chips; the rule comes only above a row; agent rows share their columns and the cost sits at the right edge", () => {
-  for (const [w, h] of [[62, 38], [100, 30], [160, 45]]) {
-    const lines = panelOf(demoWorn, w, h);
-    const text = roomsText(lines);
-    const now = text.findIndex((l) => l.startsWith(" NOW "));
-    const before = text.findIndex((l) => l.startsWith(" BEFORE "));
-    assert.ok(now > 0 && before === now + 1, `${w}x${h}: NOW then BEFORE`);
-    assert.ok(lines[now][0].bg && lines[now].every((s) => s.bg) && lines[now].at(-1).bg === lines[now][0].bg, "NOW is tinted edge to edge");
-    assert.ok(lines[before].some((s) => s.bg && s.bg !== lines[before][0].bg) || lines[before].length > 1, "BEFORE has chips");
-    const rule = text.findIndex((l) => l.startsWith(" AT WORK "));
-    if (rule >= 0) {
-      assert.ok(/─{5,}$/.test(text[rule]), "the rule runs to the edge");
-      const rows = text.slice(rule + 1).filter((l) => l.startsWith(" ▪ "));
-      assert.ok(rows.length >= 1);
-      const verbAt = rows.map((l) => l.slice(3).match(/^\S+ +/)[0].length);
-      assert.equal(new Set(verbAt).size, 1, `${w}x${h}: glyphs in one column: ${verbAt}`);
-      if (w >= 100) for (const l of rows) assert.ok(/\$\d+\.\d\d $/.test(l) || /\$\d+\.\d\d$/.test(l.trimEnd()) , `${w}: cost at the right: ${l}`);
-    } else assert.equal(text.some((l) => l.startsWith(" ▪ ")), false, "no rows without their rule");
-  }
-});
-
-test("rooms chrome: plaques sit inside their rooms, centred, and never overlap each other or a name label", () => {
-  for (const [w, h] of [[62, 27], [62, 38], [100, 17], [160, 30], [48, 20]]) {
-    const info = roomsAt(demoWorn, w, h);
-    assert.equal(info.plaques.length, 6);
-    for (const p of info.plaques) {
-      const r = info.rooms[p.room];
-      assert.ok(p.c0 > r.x0 && p.c1 <= r.x1 - 0, `${w}x${h} ${p.room}: plaque ${p.c0}..${p.c1} inside ${r.x0}..${r.x1}`);
-      const mid = (p.c0 + p.c1) / 2, rmid = (r.x0 + r.x1) / 2;
-      assert.ok(Math.abs(mid - rmid) <= 2, `${w}x${h} ${p.room}: centred (${mid} vs ${rmid})`);
-    }
-    for (let i = 0; i < info.plaques.length; i += 1) for (let j = i + 1; j < info.plaques.length; j += 1) {
-      const a = info.plaques[i], b = info.plaques[j];
-      if (a.r === b.r) assert.ok(a.c1 < b.c0 || b.c1 < a.c0, "plaques apart");
-    }
-  }
-});
-
-test("rooms chrome: no two name labels share a cell, in any size or with a crowd", () => {
-  const crowd = copy(demoWorn);
-  const proto = crowd.agents.find((a) => a.group !== "hub");
-  for (let i = 0; i < 40; i += 1) crowd.agents.push(Object.assign(copy(proto), { name: `agent-${i}`, busy: i % 2 }));
-  for (const doc of [demoWorn, crowd]) for (const [w, h] of [[36, 14], [62, 20], [62, 27], [62, 38], [100, 24], [160, 45]]) {
-    const taken = new Set();
-    for (const c of roomsAt(doc, w, h).chars) {
-      if (!c.name_cells) continue;
-      for (let x = c.name_cells.c0; x <= c.name_cells.c1; x += 1) {
-        const key = `${x},${c.name_cells.r}`;
-        assert.ok(!taken.has(key), `${w}x${h}: label cell ${key} shared`);
-        taken.add(key);
-      }
-    }
-  }
-});
-
-test("rooms chrome: furniture is in every room at 62 x 29 and 62 x 38, never under a character, and absent in the compact sizes; the room fit is cached without changing the result", () => {
-  for (const zone of ["terminal", "files", "web", "search", "thinking", "messaging"]) {
-    const doc = copy(demoWorn);
-    hubOf(doc).activity.zone = zone;
-    for (const [w, h] of [[62, 29], [62, 38], [100, 40]]) {
-      const info = roomsAt(doc, w, h);
-      assert.equal(info.compact, false);
-      assert.deepEqual(info.furniture.map((f) => f.room).sort(), ["files", "search", "team", "terminal", "thinking", "web"], `${zone} ${w}x${h}`);
-      for (const f of info.furniture) for (const c of info.chars) {
-        const apart = f.x1 < c.x0 || c.x1 < f.x0 || f.y1 < c.y0 || c.y1 < f.y0;
-        assert.ok(apart, `${zone} ${w}x${h}: ${f.room} furniture under ${c.name}`);
-      }
-    }
-  }
-  for (const [w, h] of [[36, 14], [48, 20]]) {
-    const info = roomsAt(demoWorn, w, h);
-    assert.equal(info.compact, true);
-    assert.deepEqual(info.furniture, []);
-  }
-  const doc = copy(demoWorn);
-  const first = JSON.stringify(roomsAt(doc, 62, 29));
-  assert.equal(JSON.stringify(roomsAt(doc, 62, 29)), first, "the cached fit gives the same picture");
-  assert.equal(JSON.stringify(roomsAt(copy(doc), 62, 29)), first, "and so does a fresh copy");
-  assert.equal(JSON.stringify(RM.roomsLines(doc, 62, 29, 1500)), JSON.stringify(RM.roomsLines(copy(doc), 62, 29, 1500)));
-});
-
-// the cells (pixels) of everything that stands on the floor of a picture: furniture, plaques, characters, names, the bubble
-function standingBoxes(info) {
-  const boxes = [];
-  for (const f of info.furniture) boxes.push(["furniture", f.x0, f.y0, f.x1, f.y1]);
-  for (const t of info.plaques) boxes.push(["plaque", t.c0, t.r * 2, t.c1, t.r * 2 + 1]);
-  for (const c of info.chars) {
-    boxes.push([c.name || c.kind, c.x0, c.y0, c.x1, c.y1]);
-    if (c.name_cells) boxes.push(["name " + c.name, c.name_cells.c0, c.name_cells.r * 2, c.name_cells.c1, c.name_cells.r * 2 + 1]);
-  }
-  for (const m of info.more) boxes.push(["count", m.c0, m.r * 2, m.c1, m.r * 2 + 1]);
-  if (info.bubble) boxes.push(["bubble", info.bubble.c0, info.bubble.r * 2, info.bubble.c1, info.bubble.r * 2 + 1]);
-  return boxes;
-}
-
-test("rooms round 2: footprints stay on bare floor and doors, never on furniture, a plaque, a character, a name or the bubble", () => {
-  let seen = 0;
-  for (const zone of ["terminal", "files", "web", "search", "thinking", "messaging"]) {
-    for (const from of ["webfetch", "read", "grep", "bash"]) {
-      const doc = copy(demoWorn);
-      hubOf(doc).activity.zone = zone;
-      hubOf(doc).activity.recent = [{ kind: "tool", tool: from, text: "made-up" }];
-      for (const [w, h] of [[62, 29], [62, 38], [100, 30], [160, 36], [100, 40]]) {
-        const info = roomsAt(doc, w, h, roomsSettled(doc));
-        const boxes = standingBoxes(info);
-        for (const [x, y] of info.trail) {
-          seen += 1;
-          for (const [what, x0, y0, x1, y1] of boxes) assert.ok(x < x0 || x > x1 || y < y0 || y > y1, `${zone} from ${from} ${w}x${h}: a footprint at ${x},${y} on ${what}`);
-        }
-      }
-    }
-  }
-  assert.ok(seen > 50, "the walks left footprints to check");
-});
-
-test("rooms round 2: the hub's name is shown in full whenever its room holds it alone; a neighbour never gets more than what is left", () => {
-  for (const zone of ["terminal", "messaging"]) {
-    for (const [w, h] of [[62, 29], [62, 38], [100, 40], [160, 36]]) {
-      const doc = copy(demoWorn);
-      hubOf(doc).activity.zone = zone;
-      const info = roomsAt(doc, w, h, roomsSettled(doc));
-      const hub = info.chars.find((c) => c.hub);
-      const room = info.rooms[hub.room];
-      const full = "orchestrator";
-      const width = (c) => (c.name_cells ? c.name_cells.c1 - c.name_cells.c0 + 1 : 0);
-      if (room.x1 - room.x0 - 3 >= full.length) {
-        assert.equal(width(hub), full.length, `${zone} ${w}x${h}: the hub's name in full`);
-        assert.ok(hub.name_cells.c0 > room.x0 && hub.name_cells.c1 < room.x1, `${zone} ${w}x${h}: inside its room`);
-      }
-      for (const c of info.chars) if (c.room === hub.room && !c.hub && c.name_cells) {
-        const a = hub.name_cells;
-        const b = c.name_cells;
-        assert.ok(a.c1 < b.c0 || b.c1 < a.c0 || a.r !== b.r, `${zone} ${w}x${h}: ${c.name} does not touch the hub's name`);
-        if (width(hub) < full.length) assert.ok(width(c) <= width(hub) || width(c) <= 3, `${zone} ${w}x${h}: a shortened hub is not given less than its neighbour`);
-      }
-    }
-  }
-});
-
-test("rooms round 2: with the hub in TERMINAL or TEAM at 62 x 38 the furniture keeps a normal size and the bubble sits beside or under it", () => {
-  for (const [zone, room] of [["terminal", "terminal"], ["messaging", "team"]]) {
-    const doc = copy(demoWorn);
-    hubOf(doc).activity.zone = zone;
-    const lines = RM.roomsScene(doc, { width: 62, height: 38, now: roomsSettled(doc) });
-    assert.equal(lines.length, 38);
-    // the picture rows the panel gives at 62 x 38
-    const picture = lines.length - 1 - 3 - 5; // header, needs, NOW + BEFORE + rule + two agent rows
-    const info = roomsAt(doc, 62, picture + 1, roomsSettled(doc));
-    const f = info.furniture.find((x) => x.room === room);
-    assert.ok(f, `${room}: the furniture is there`);
-    assert.ok(f.x1 - f.x0 + 1 >= 9 && f.y1 - f.y0 + 1 >= (room === "team" ? 4 : 7), `${room}: a normal size, not a stub (${f.x1 - f.x0 + 1}x${f.y1 - f.y0 + 1})`);
-    assert.ok(info.bubble, `${room}: the bubble is shown`);
-    const b = info.bubble;
-    assert.ok(b.c1 < f.x0 || b.c0 > f.x1 || b.r * 2 > f.y1 || b.r * 2 + 1 < f.y0, `${room}: the bubble does not cover the furniture`);
-  }
-});
-
-// --- the styled list (the panel's text list): a status bar, labelled rules, aligned columns, one footer block ---------
+// --- the calm list (the panel's default view): a plain list in words; sections, one accent, no animation ------------------
 const SL_text = (line) => line.map((x) => x.text).join("");
-const SL_layout = (doc, width, extra = {}) => R.layout(doc, Object.assign({ width, now: 1234, cursor: true, activity: true, styled: true, dark: true, keys: [["o", "orbit"], ["g", "rooms"], ["d", "detail"]] }, extra));
+const SL_keys = [["g", "picture"], ["q", "close"]];
+const SL_layout = (doc, width, extra = {}) => R.layout(doc, Object.assign({ width, now: 1795075200000, cursor: true, activity: true, styled: true, dark: true, keys: SL_keys }, extra));
 const SL_doc = () => DM.demoDocument(demo, 60000);
+const SL_SIZES = [[62, 38], [62, 30], [100, 30], [36, 14]];
+// a small made-up team: the main chat and the given workers, each busy with the given activity and spend
+function SL_team(workers, hubBusy = false) {
+  const doc = copy(SL_doc());
+  const hub = hubOf(doc);
+  hub.busy = hubBusy ? 1 : 0;
+  hub.sessions.forEach((s) => (s.busy = hubBusy));
+  const make = (w, i) => ({
+    name: w.name, group: w.group || "build", model: "Model X", effort: "high", pool: null, configured: true, team: "main", parent: "",
+    busy: w.busy === false ? 0 : 1,
+    sessions: [{ id: "ses_w" + i, title: "made-up task", model: "Model X", effort: "high", busy: w.busy !== false, created: 1, updated: 2, cost: w.cost || 0, tokens_in: 1, tokens_out: 1 }],
+    ...(w.activity ? { activity: w.activity } : {}),
+  });
+  doc.agents = [hub, ...workers.map(make)];
+  doc.escalation = {};
+  doc.warnings = [];
+  return doc;
+}
+const SL_NOW = 1795075200000; // a made-up "now" in ms; the snapshot's times are in epoch seconds
+const SL_act = (tool, ageSec) => ({ kind: "tool", tool, text: "", time: SL_NOW / 1000 - ageSec });
 
-test("styled list: row 0 is a status bar of exactly the width: hub name left, steps and spend right, a background on dark and none on light", () => {
-  for (const width of [36, 62, 100]) {
-    for (const dark of [true, false]) {
-      const { lines } = SL_layout(SL_doc(), width, { dark });
-      const bar = lines[0];
-      const text = SL_text(bar);
-      assert.equal(R.displayWidth(text), width, "the bar fills the width");
-      assert.ok(text.startsWith(" ◉ orchestrator"), text);
-      assert.match(text, /\d+\/\d+ +\$[\d.]+ $/, "steps and spend flush right: " + text);
-      if (dark) assert.ok(bar.every((x) => x.bg === "#" + R.PANEL_BAR.map((v) => v.toString(16).padStart(2, "0")).join("")), "every span of the bar has the bar's background");
-      else assert.ok(lines.every((l) => l.every((x) => x.bg === undefined)), "a light theme gets tones only, no background");
-      assert.equal(lines.slice(1).some((l) => l.some((x) => x.bg && x.bg === bar[0].bg)), false, "no other row has the bar's background");
+test("calm list: the default view of the panel is the list, not a picture", () => {
+  const O = P.resolveOptions({}, { os, path });
+  assert.equal(O.picture, "off", "no picture unless asked for");
+  assert.equal(P.resolveOptions({ picture: "rooms" }, { os, path }).picture, "off", "the old rooms option is the list now");
+  assert.equal(P.resolveOptions({ picture: "planets" }, { os, path }).picture, "planets");
+  assert.equal(P.resolveOptions({ picture: "orbit" }, { os, path }).picture, "orbit");
+  const { lines } = SL_layout(SL_doc(), 62);
+  assert.ok(lines.length > 5 && SL_text(lines[0]).includes("orchestrator"));
+});
+
+test("calm list: sections in order (main chat, NEEDS YOU, AT WORK, idle), each only when it has rows; plain words, no glyph rows", () => {
+  const { lines } = SL_layout(SL_doc(), 62);
+  const texts = lines.map(SL_text);
+  const at = (re) => texts.findIndex((t) => re.test(t));
+  const hub = at(/orchestrator/);
+  const needs = at(/^ NEEDS YOU/);
+  const work = at(/^ AT WORK/);
+  const idle = at(/^ Idle: /);
+  assert.equal(hub, 0, "the main chat is the first row");
+  assert.ok(hub < needs && needs < work && work < idle, [hub, needs, work, idle].join(" < "));
+  assert.match(texts.at(-1), /g picture/, "the key line says what g does in words");
+  assert.ok(!texts.some((t) => /rooms|orbit|⊕|▤|⊙/.test(t)), "no cryptic glyph rows or old words");
+  const quiet = SL_team([{ name: "alpha", busy: false }, { name: "beta", busy: false }]);
+  const q = SL_layout(quiet, 62).lines.map(SL_text);
+  assert.ok(!q.some((t) => /NEEDS YOU|AT WORK/.test(t)), "empty sections are left out");
+  assert.ok(q.some((t) => /^ Idle: alpha, beta/.test(t)));
+  const busy = SL_layout(SL_team([{ name: "alpha", activity: SL_act("read", 5) }]), 62).lines.map(SL_text);
+  assert.ok(busy.some((t) => /^ AT WORK/.test(t)) && !busy.some((t) => /^ Idle/.test(t)), "no idle line with no idle agents");
+});
+
+test("calm list: a working agent is one line in words with how long ago: 'reading a file · 12s'", () => {
+  const doc = SL_team([
+    { name: "alpha", activity: SL_act("read", 12) },
+    { name: "beta", activity: SL_act("bash", 75) },
+    { name: "gamma", activity: SL_act("edit", 3) },
+    { name: "delta", activity: SL_act("grep", 5) },
+    { name: "epsilon", activity: SL_act("webfetch", 5) },
+  ]);
+  const more = SL_team([
+    { name: "zeta", activity: { kind: "reasoning", text: "", time: SL_NOW / 1000 - 5 } },
+    { name: "eta", activity: Object.assign(SL_act("task", 5), { zone: "spawn" }) },
+    { name: "theta" },
+  ]);
+  const texts = SL_layout(doc, 62).lines.map(SL_text).concat(SL_layout(more, 62).lines.map(SL_text));
+  const row = (name) => texts.find((t) => t.includes(" " + name + " "));
+  assert.match(row("alpha"), /alpha +reading a file · 12s/);
+  assert.match(row("beta"), /beta +running a command · 1m/);
+  assert.match(row("gamma"), /gamma +editing a file · 3s/);
+  assert.match(row("delta"), /delta +searching · 5s/);
+  assert.match(row("epsilon"), /epsilon +reading a site · 5s/);
+  assert.match(row("zeta"), /zeta +thinking · 5s/);
+  assert.match(row("eta"), /eta +talking to a worker · 5s/);
+  assert.match(row("theta"), /theta +working/, "no activity yet: just 'working'");
+  assert.equal(texts.filter((t) => t.includes(" alpha ")).length, 1, "one line, no second line unless selected");
+});
+
+test("calm list: the target shows dimmed on a second line only for the selected row, cleaned and cut; never by default", () => {
+  const act = Object.assign(SL_act("bash", 4), { target: "made-up task: build the page \u001b[31m" + "x".repeat(200) });
+  const doc = SL_team([{ name: "alpha", activity: act }, { name: "beta", activity: SL_act("read", 4) }]);
+  const plain = SL_layout(doc, 62, { selected: "agent:beta" });
+  assert.ok(!plain.lines.map(SL_text).some((t) => /build the page/.test(t)), "not shown for another row");
+  const picked = SL_layout(doc, 62, { selected: "agent:alpha" });
+  const texts = picked.lines.map(SL_text);
+  const row = picked.items.find((i) => i.key === "agent:alpha").line;
+  assert.ok(texts.every((t) => R.displayWidth(t) <= 62 && !/[\u0000-\u001f\u007f-\u009f]/.test(t)), "within the width, no control characters");
+  if (/build the page/.test(texts[row + 1])) assert.ok(picked.lines[row + 1].some((x) => x.tone === "muted"), "the second line is dim");
+});
+
+test("calm list: spend at the right edge of the row, dim, only above zero, as $1.20", () => {
+  const doc = SL_team([{ name: "alpha", activity: SL_act("read", 5), cost: 1.2 }, { name: "beta", activity: SL_act("read", 5), cost: 0 }]);
+  const { lines } = SL_layout(doc, 62);
+  const texts = lines.map(SL_text);
+  const a = texts.findIndex((t) => t.includes(" alpha "));
+  const b = texts.findIndex((t) => t.includes(" beta "));
+  assert.match(texts[a], /\$1\.20$/);
+  assert.equal(R.displayWidth(texts[a]), 61, "flush at the right edge, one cell of margin");
+  assert.ok(!/\$/.test(texts[b]), "no spend of $0.00: " + texts[b]);
+  const spend = lines[a].at(-1);
+  assert.equal(spend.text, "$1.20");
+  assert.equal(spend.tone, "muted", "dim");
+});
+
+test("calm list: one accent, coral only for needs-you, no rainbow, no animation", () => {
+  const doc = SL_layout(SL_doc(), 62);
+  const colors = new Set();
+  doc.lines.forEach((l) => l.forEach((x) => x.color && colors.add(x.color)));
+  assert.ok(colors.size <= 6, "a handful of colours: " + [...colors]);
+  // frames at two different times and frame counters are the same except for the written ages
+  const one = SL_layout(SL_doc(), 62, { frame: 0, reduced: true, now: 60000 }).lines.map(SL_text);
+  const two = SL_layout(SL_doc(), 62, { frame: 7, reduced: true, now: 99000 }).lines.map(SL_text);
+  assert.deepEqual(one, two, "reduced motion: identical frames at two different times");
+  const f0 = SL_layout(SL_doc(), 62, { frame: 0 }).lines.map(SL_text);
+  const f3 = SL_layout(SL_doc(), 62, { frame: 3 }).lines.map(SL_text);
+  assert.deepEqual(f0, f3, "no spinner: the frame counter changes nothing");
+});
+
+test("calm list: never wider than the width, at 62x38, 62x30, 100x30 and 36x14; never taller than the height", () => {
+  const cases = [["demo", SL_doc()], ["twelve", SL_team(Array.from({ length: 14 }, (_, i) => ({ name: "worker-with-a-long-name-" + i, activity: SL_act("bash", i + 1), cost: i + 0.5, busy: i % 3 !== 0 })))]];
+  for (const [what, doc] of cases) {
+    for (const [w, h] of SL_SIZES) {
+      for (const selected of [undefined, "agent:worker-with-a-long-name-1"]) {
+        const out = SL_layout(doc, w, { height: h, selected });
+        assert.ok(out.lines.length <= h, `${what} ${w}x${h}: ${out.lines.length} rows`);
+        out.lines.forEach((l, i) => assert.ok(R.displayWidth(SL_text(l)) <= w, `${what} ${w}x${h} row ${i}: ${R.displayWidth(SL_text(l))}`));
+        assert.ok(SL_text(out.lines.at(-1)).includes("g picture") || h < 14, `${what} ${w}x${h}: the keys stay`);
+      }
     }
   }
 });
 
-test("styled list: sections have a labelled rule; the footer is one block under a plain rule; no blank rows; every line is the width or less", () => {
-  for (const width of [30, 36, 62, 100]) {
-    const { lines } = SL_layout(SL_doc(), width);
-    const texts = lines.map(SL_text);
-    assert.ok(texts.every((t) => R.displayWidth(t) <= width), "within the width at " + width);
-    assert.ok(texts.every((t) => t.trim() !== ""), "no blank rows");
-    assert.match(texts[1], /^ ── NEEDS YOU( \d+)? ─+$/);
-    assert.ok(texts.some((t) => /^ ── AT WORK( \d+)? ─+$/.test(t)));
-    const footer = texts.findLastIndex((t) => /^ ─+$/.test(t));
-    assert.ok(footer > 3, "a rule over the footer");
-    assert.ok(texts.slice(footer + 1).length >= 2 && !texts.slice(footer + 1).some((t) => /^ ── /.test(t)), "the footer block holds progress, spend and keys");
-    assert.match(texts.at(-1), /^ ?o orbit/);
+test("calm list: no throw with a missing or empty document, no agents, or a dozen and more agents", () => {
+  for (const doc of [undefined, null, {}, { agents: [] }, { agents: "x" }, { error: "boom" }, SL_team([]), SL_team(Array.from({ length: 30 }, (_, i) => ({ name: "a" + i, activity: SL_act("read", i) })))]) {
+    for (const [w, h] of SL_SIZES) {
+      const out = SL_layout(doc, w, { height: h });
+      assert.ok(out.lines.length >= 1);
+      out.lines.forEach((l) => assert.ok(R.displayWidth(SL_text(l)) <= w));
+    }
   }
 });
 
-test("styled list: name, state and task start in the same cell on every needs, hub and working row; the time ends at the width", () => {
-  for (const width of [62, 100]) {
-    const { lines, items } = SL_layout(SL_doc(), width);
-    const rows = items.map((it) => lines[it.line]);
-    assert.ok(rows.length >= 3);
-    const starts = rows.map((line) => {
-      // gutter, mark, space, name; the columns are the spans' offsets
-      let x = 0;
-      const at = [];
-      for (const span of line) {
-        at.push([x, span.text]);
-        x += R.displayWidth(span.text);
-      }
-      return { at, width: x };
-    });
-    const nameAt = new Set(starts.map((r) => r.at[3][0]));
-    assert.equal(nameAt.size, 1, "one name column");
-    const stateAt = new Set(starts.map((r) => r.at[5][0]));
-    assert.equal(stateAt.size, 1, "one state column: " + [...stateAt]);
-    assert.ok(starts.every((r) => r.width === width), "every row is the width: " + starts.map((r) => r.width));
-    const texts = rows.map(SL_text);
-    const stateCol = [...stateAt][0];
-    assert.ok(texts.every((t) => t[stateCol - 1] === " " && t[stateCol] !== " "), "the state's first letter is at one column, after a space: " + texts.join("|"));
-    // the times (right column) end flush at the width
-    assert.ok(texts.some((t) => /\d+[smhd]\w* $/.test(t)), "the times end one cell short of the edge, like the bar");
-  }
-});
-
-test("styled list: items[].line points at the row of the item (mouse mapping); bars and rules are never items; the cursor marks the selection only", () => {
+test("calm list: items[].line points at the row of the item; the cursor marks the selection only; hostile text stays plain", () => {
   for (const dark of [true, false]) {
     for (const width of [36, 62, 100]) {
       const base = SL_layout(SL_doc(), width, { dark });
       assert.ok(base.items.length >= 3);
-      assert.ok(base.items.every((it) => !/^ [─◉ ]*─/.test(SL_text(base.lines[it.line]).slice(0, 4)) || it.kind === "hub"), "items sit on rows");
       for (const it of base.items) {
         const picked = SL_layout(SL_doc(), width, { dark, selected: it.key });
-        const lines = picked.lines.map(SL_text);
-        assert.equal(lines.filter((t) => t[0] === "›").length, 1, "one cursor");
-        assert.equal(lines[picked.items.find((x) => x.key === it.key).line][0], "›");
-        assert.ok(lines[it.line].includes(it.kind === "hub" ? "◉ orc" : it.name.slice(0, 3)), it.name + " on its row: " + lines[it.line]);
+        const texts = picked.lines.map(SL_text);
+        assert.equal(texts.filter((t) => t[0] === "›").length, 1, "one cursor");
+        assert.equal(texts[picked.items.find((x) => x.key === it.key).line][0], "›");
+        if (!dark) assert.ok(picked.lines.every((l) => l.every((x) => x.bg === undefined)), "a light theme gets tones only, no background");
       }
-      // bar, rules, progress, spend and keys are not items
-      const itemRows = new Set(base.items.map((it) => it.line));
-      base.lines.forEach((l, i) => {
-        if (/^ (─|◉ orchestrator .*\d+\/\d+)/.test(SL_text(l)) && !itemRows.has(i)) assert.ok(true);
-        if (i === 0 || /^ ──/.test(SL_text(l))) assert.equal(itemRows.has(i), false, "row " + i + " is not an item");
-      });
-      assert.equal(itemRows.has(base.keysLine), false);
+      assert.equal(new Set(base.items.map((it) => it.line)).has(base.keysLine), false);
     }
   }
-});
-
-test("styled list: only the panel asks for it; without `styled` the list is the plain one; a narrow width stays plain; the selected row is tinted on dark only; hostile text stays plain", () => {
-  const doc = SL_doc();
-  const plain = R.layout(doc, { width: 62, now: 1234, cursor: true, activity: true });
-  assert.ok(!plain.lines.some((l) => /^ ?── /.test(SL_text(l))), "no rules in the plain list");
-  assert.ok(plain.lines.every((l) => l.every((x) => x.bg === undefined && x.bold === undefined)));
-  const tiny = R.layout(doc, { width: 24, now: 1234, cursor: true, styled: true, dark: true });
-  assert.ok(tiny.lines.every((l) => R.displayWidth(SL_text(l)) <= 24 && l.every((x) => x.bg === undefined)), "below 30 cells it stays plain");
-  const first = SL_layout(doc, 62, { selected: SL_layout(doc, 62).items[0].key });
-  const tinted = first.lines.filter((l) => l.some((x) => x.bg === "#252d40"));
-  assert.equal(tinted.length, 1, "one tinted row");
-  assert.equal(R.displayWidth(SL_text(tinted[0])), 62);
-  assert.ok(tinted[0].every((x) => x.bg === "#252d40"), "gutter and every cell");
-  const light = SL_layout(doc, 62, { dark: false, selected: SL_layout(doc, 62).items[0].key });
-  assert.ok(light.lines.every((l) => l.every((x) => x.bg === undefined)));
-  const hostile = JSON.parse(JSON.stringify(doc));
+  const hostile = copy(SL_doc());
   hostile.agents[0].name = "evil\u001b[31m\u0007name\u009b";
   hostile.root.title = "t\u001b]0;x\u0007itle\u2028";
   hostile.totals = { cost: NaN };
@@ -3749,7 +3276,7 @@ test("panel scene: the panel opens on the orbit when it fits (from 36x14, measur
     const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
     await waitFor(() => screen(view).length > 5, 5000, "demo snapshot");
     // the size is not known yet: the list
-    assert.ok(screen(view).some((l) => l.startsWith(" ◉ orchestrator")));
+    assert.ok(screen(view).some((l) => /^[› ]◉ orchestrator/.test(l)));
     assert.ok(screen(view).length < 40 && !isOrbit(screen(view)), "the list while the height is unknown");
     const gLayer = () => state.layers.find((l) => (l.commands || []).some((c) => c.bind === "g"));
     assert.equal(gLayer(), undefined, "no g before there is an orbit to switch to");
@@ -3901,7 +3428,7 @@ test("panel scene: g switches the orbit and the list in the side panel at the si
   }
 });
 
-test("panel scene: f full screen shows the orbit, f back to a side panel that fits keeps it; the list's keys are off while the orbit shows", async () => {
+test("panel scene: f only changes the size: the picture or the list stays as it was chosen; the list's keys are off while a picture shows", async () => {
   const { plugin } = makeScenePlugin({ screen: { width: 160, height: 45 } });
   const { ctx, state, panelClaim } = makePanelHost();
   ctx.ui.router = { navigate: () => {} };
@@ -3911,34 +3438,36 @@ test("panel scene: f full screen shows the orbit, f back to a side panel that fi
     const panel = fullscreenPanel();
     const view = panelClaim().render(panel);
     await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
-    sizePanel(view, 75, 39); // the side panel of a 130x40 terminal: room for the orbit, so it opens on the orbit
-    assert.ok(isOrbit(screen(view)), "the orbit in the side panel");
+    sizePanel(view, 75, 39); // the side panel of a 130x40 terminal: room for a picture; this host opens on the orbit
+    assert.ok(isOrbit(screen(view)), "the picture in the side panel");
     const key = (bind) => state.layers.filter((l) => (l.commands || []).some((c) => c.bind === bind)).pop().commands.find((c) => c.bind === bind);
-    assert.equal(key("down").enabled(), false, "no row keys on the orbit");
+    assert.equal(key("down").enabled(), false, "no row keys on a picture");
     key("g").run();
     assert.ok(!isOrbit(screen(view)) && screen(view).length <= 16, "g: the list in the side panel");
     assert.equal(key("down").enabled(), true);
     key("f").run();
     assert.equal(panel.presentation, "fullscreen");
     sizePanel(view, 160, 45);
-    assert.ok(isOrbit(screen(view)), "f: the orbit, full screen");
-    assert.equal(key("down").enabled(), false, "no row keys on the orbit");
+    assert.ok(!isOrbit(screen(view)), "f: still the list, full screen");
+    assert.equal(key("down").enabled(), true);
+    key("g").run();
+    assert.ok(isOrbit(screen(view)), "g: the picture, full screen");
+    assert.equal(key("down").enabled(), false);
     assert.equal(key("return").enabled(), false);
     key("f").run();
     assert.equal(panel.presentation, "panel");
     sizePanel(view, 75, 39);
-    assert.ok(isOrbit(screen(view)), "f again: a side panel that fits keeps the orbit");
-    assert.equal(key("down").enabled(), false);
+    assert.ok(isOrbit(screen(view)), "f again: a side panel that fits keeps the picture");
     key("g").run();
     assert.ok(!isOrbit(screen(view)), "g: the list");
     assert.equal(key("down").enabled(), true);
-    // the host leaves full screen by its own key: the orbit stays (it fits)
+    // the host leaves full screen by its own key: the list stays
     key("f").run();
     sizePanel(view, 160, 45);
-    assert.ok(isOrbit(screen(view)));
+    assert.ok(!isOrbit(screen(view)));
     panel.presentation = "panel";
     sizePanel(view, 75, 39);
-    assert.ok(isOrbit(screen(view)), "the host's own key: a side panel that fits keeps the orbit");
+    assert.ok(!isOrbit(screen(view)), "the host's own key: the list stays");
   } finally {
     for (const fn of globalThis.__agentgraphStub.cleanups.splice(0)) fn();
     stop();
@@ -4260,54 +3789,62 @@ test("orbit panel: in 3D the arrow keys turn it and 0 resets, only on the 3D orb
   }
 });
 
-test("rooms panel: the panel opens on the rooms; o swaps rooms and orbit and is remembered; d, the arrows and the mouse act only on the orbit; g still shows the list; the key is in the hints", async () => {
+test("picture panel: the panel opens on the list; g shows the planets and back; o swaps planets and orbit and is remembered; too small falls back to the list", async () => {
   const { plugin, clockRef } = makeScenePlugin();
-  const { ctx, state, panelClaim } = makePanelHost({ picture: undefined }); // the option unset: the default picture
+  const { ctx, state, panelClaim } = makePanelHost({ picture: undefined }); // the option unset: the default is the list
   const stop = plugin.setup(ctx);
   globalThis.__agentgraphStub.cleanups.length = 0;
   try {
     const view = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
     await waitFor(() => screen(view).length > 3, 5000, "demo snapshot");
     sizePanel(view, 120, 40);
-    const isRooms = (lines) => lines.length === 40 && lines.some((l) => l.includes(">_ TERMINAL")) && lines.some((l) => l.trim().startsWith("NOW "));
-    assert.ok(isRooms(screen(view)), "opens on the rooms\n" + screen(view).join("\n"));
+    const isPlanets = (lines) => lines.length === 40 && /^ ◉ /.test(lines[0]) && /g list/.test(lines.at(-1)) && /o orbit/.test(lines.at(-1));
+    const isList = (lines) => lines.length < 40 && lines.some((l) => /^ AT WORK/.test(l)) && !isOrbit(lines);
+    assert.ok(isList(screen(view)), "opens on the list\n" + screen(view).join("\n"));
+    assert.match(screen(view).at(-1), /g picture/, "the list names g in words");
     const layer = () => state.layers.find((l) => (l.commands || []).some((c) => c.bind === "g"));
     const cmd = (bind) => layer().commands.find((c) => c.bind === bind);
-    assert.match(screen(view).join("\n"), /o orbit/, "the key is in the hints");
+    cmd("g").run();
+    assert.ok(isPlanets(screen(view)), "g: the planets\n" + screen(view).join("\n"));
+    assert.ok(screen(view).every((l) => R.displayWidth(l) === 120), "every row the width");
     assert.equal(cmd("d").enabled(), false, "d is the orbit's");
-    // the rooms' spans carry the half blocks' background
     const spans = view.children.flatMap((row) => (row.tag === "text" ? [row] : row.children)).flatMap((t) => t.children);
     assert.ok(spans.some((sp) => sp.props.style && sp.props.style.bg), "spans carry bg");
-    // a click and a drag do nothing in the rooms
+    // a click and a drag do nothing on the planets
     const p = view.props;
     const before = screen(view).join("\n");
     p.onMouseDown({ type: "down", button: 0, x: 60, y: 18 });
     p.onMouseDrag({ type: "drag", button: 0, x: 66, y: 20 });
     p.onMouseUp({ type: "up", button: 0, x: 66, y: 20 });
-    p.onMouseDown({ type: "down", button: 0, x: 60, y: 18 });
-    p.onMouseUp({ type: "up", button: 0, x: 60, y: 18 });
     clockRef.t += S.CHANGE_MS + 50;
-    assert.ok(isRooms(screen(view)) && !has3D(screen(view)), "still the rooms");
+    assert.ok(isPlanets(screen(view)) && !has3D(screen(view)), "still the planets");
     assert.equal(before.split("\n").length, screen(view).length);
-    // o: the orbit, d works there; o again: the rooms
+    // o: the orbit, d works there; o again: the planets
     cmd("o").run();
-    assert.ok(isOrbit(screen(view)) && !isRooms(screen(view)), "o: the orbit");
+    assert.ok(isOrbit(screen(view)) && !isPlanets(screen(view)), "o: the orbit");
     assert.equal(cmd("d").enabled(), true);
     cmd("o").run();
-    assert.ok(isRooms(screen(view)));
-    // g: the list and back to the picture last shown
+    assert.ok(isPlanets(screen(view)));
+    // g: the list, and back to the picture last shown
     cmd("o").run();
     cmd("g").run();
-    assert.ok(!isOrbit(screen(view)) && !isRooms(screen(view)), "g: the list");
+    assert.ok(isList(screen(view)), "g: the list");
     cmd("g").run();
     assert.ok(isOrbit(screen(view)), "g: back to the orbit, o's choice remembered");
+    cmd("o").run();
+    // too small for a picture: the list, with no g in the key line
+    sizePanel(view, 30, 10);
+    assert.ok(!isPlanets(screen(view)) && screen(view).length <= 10, "the list when too small\n" + screen(view).join("\n"));
+    assert.ok(!screen(view).some((l) => /g picture/.test(l)));
+    sizePanel(view, 120, 40);
+    assert.ok(isPlanets(screen(view)), "big enough again: the picture the user chose");
     // a new mount opens on the choice
     const again = panelClaim().render(makePanel({ sessionID: "ses_demo", width: 120 }));
     await waitFor(() => screen(again).length > 3, 5000, "demo snapshot");
     sizePanel(again, 120, 40);
-    assert.ok(isOrbit(screen(again)));
-    // reduced motion is one frame, and the rooms' timer follows the picture
-    assert.equal(RM.roomsInterval(demoWorn, { motion: "reduced" }, 0), 0);
+    assert.ok(isPlanets(screen(again)));
+    // reduced motion is one frame, and the planets' timer follows the picture
+    assert.equal(PL.planetsInterval(demoWorn, { motion: "reduced" }, 0), 0);
   } finally {
     stop();
   }
@@ -7385,7 +6922,9 @@ test("n20 scene: the step marks of a quiet or orphan node stand still, a live on
 });
 
 let failed = 0;
+const only = process.env.TEST_ONLY ? new RegExp(process.env.TEST_ONLY) : null; // TEST_ONLY=regex runs only the tests whose name matches
 for (const t of tests) {
+  if (only && !only.test(t.name)) continue;
   try {
     await t.fn();
     console.log("ok   " + t.name);

@@ -1344,7 +1344,7 @@ function calmLayout(snapshot, agents, options, width, now) {
       ? { key: `agent:${hub.name}`, kind: "hub", agent: hub.name, name: displayName(hub), hub: true, open: rootId || hubSessions.open, busy: null }
       : null;
     const a = hub && isObject(hub.activity) ? hub.activity : null;
-    rows.push({ line: calmRow(inner, nameW, row), item, kind: "row", extra: hubBusy && a ? clean(a.target) : "" });
+    rows.push({ line: calmRow(inner, nameW, row), item, kind: "row", extra: hubBusy && a ? clean(a.target) : "", title: isObject(snapshot.root) ? clean(snapshot.root.title) : "" });
   }
 
   if (shownNeeds.length) label("NEEDS YOU", CALM.coral);
@@ -1404,11 +1404,11 @@ function calmLayout(snapshot, agents, options, width, now) {
   }
 
   // the selected row says more on a line of its own
+  // (the main chat's row always has the chat's title in dim under it, which the selected row's own line replaces)
   for (const r of rows) {
-    if (r.item && r.item.key === selected && r.extra) {
-      const line = detail(r.extra);
-      if (line) r.under = { line, kind: "under", follow: r.item.key };
-    }
+    const text = r.item && r.item.key === selected && r.extra ? r.extra : r.title || "";
+    const line = text ? detail(text) : null;
+    if (line) r.under = { line, kind: "under", follow: r.item ? r.item.key : null };
   }
   // a short panel: the room between the sections goes first, then the totals, then the working agents from the last
   const keys = options.keys ? keysStyled(options.keys, inner, dark) : null;
@@ -1420,7 +1420,7 @@ function calmLayout(snapshot, agents, options, width, now) {
   if (count() > limit) {
     drop((r) => r.kind === "blank" && r !== rows[0]);
   }
-  if (count() > limit) for (const r of rows) if (r.under && r.item.key !== selected) delete r.under;
+  if (count() > limit) for (const r of rows) if (r.under && (!r.item || r.item.key !== selected)) delete r.under;
   if (count() > limit) for (const r of rows) if (r.under) delete r.under;
   if (count() > limit) drop((r) => r.kind === "totals");
   if (count() > limit) drop((r) => r.kind === "misc");
