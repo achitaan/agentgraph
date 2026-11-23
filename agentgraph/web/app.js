@@ -1742,7 +1742,12 @@
       const hub = hubName && positions.get(hubName), hubThing = things.find(t => t.id === hubName), chipGroup = hubThing?.node.querySelector(':scope > .ag-live');
       const chips = [];
       let chipWaits = false;
-      if (hub && chipGroup && Number(chipGroup.dataset.boxW) > 0) {
+      if (chipGroup && in3d) {
+        // In 3D the chip and its trail are not drawn at all: the planets and names have the space.
+        if (chipGroup.style.display !== 'none') chipGroup.style.display = 'none';
+        labelChip = null; chipLayer.querySelector(':scope > .ag-live')?.remove();
+      } else if (hub && chipGroup && Number(chipGroup.dataset.boxW) > 0) {
+        if (chipGroup.style.display) chipGroup.style.display = '';
         const s = hubThing.s, top = Number(chipGroup.dataset.boxTop), bottom = Number(chipGroup.dataset.boxBottom);
         const discs = things.filter(t => t !== hubThing).map(t => ({ cx: t.p.x, cy: t.p.y, r: (t.p.r + 3) * t.s }));
         if (moon) discs.push({ cx: pose.x, cy: pose.y, r: (SIDE_R + 3) * pose.scale });
@@ -1753,22 +1758,7 @@
         if ((chipGroup.getAttribute('transform') || '') !== want) { if (want) chipGroup.setAttribute('transform', want); else chipGroup.removeAttribute('transform'); }
         chipGroup.dataset.side = chip.side;
         chips.push({ left: chip.box.left, right: chip.box.right, top: chip.box.top, bottom: chip.box.bottom });
-        // In 3D the chip is drawn again in the top layer (made once for each change of its text), where the planets cannot cover it.
-        if (in3d) {
-          let top3 = chipLayer.querySelector(':scope > .ag-live');
-          if (!top3 || top3.dataset.stamp !== chipGroup.dataset.stamp || top3.dataset.copyOf !== hubName) {
-            top3?.remove();
-            top3 = chipGroup.cloneNode(true); top3.removeAttribute('transform'); top3.dataset.fresh = 'false'; top3.dataset.copyOf = hubName; top3.dataset.copy = '1';
-            top3.querySelectorAll('title').forEach(title => title.remove());
-            chipLayer.append(top3);
-          }
-          const place = 'translate(' + hub.x.toFixed(2) + ' ' + hub.y.toFixed(2) + ')' + (s > 1.0005 ? ' scale(' + s.toFixed(4) + ')' : '') + (want ? ' ' + want : '');
-          if (top3.getAttribute('transform') !== place) top3.setAttribute('transform', place);
-          if (chipGroup.style.opacity !== '0') chipGroup.style.opacity = '0';
-        } else {
-          if (chipGroup.style.opacity) chipGroup.style.opacity = '';
-          chipLayer.querySelector(':scope > .ag-live')?.remove();
-        }
+        chipLayer.querySelector(':scope > .ag-live')?.remove();
       } else { labelChip = null; chipLayer.querySelector(':scope > .ag-live')?.remove(); }
       const items = things.map(t => {
         const size = labelSize(t.label, t.kind);
