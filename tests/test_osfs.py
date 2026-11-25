@@ -210,6 +210,23 @@ class Both:
         finally:
             self.backend.close(outer)
 
+    def test_dup_gives_a_second_handle_for_the_same_folder(self):
+        (self.root / "f").write_bytes(b"x")
+        first = self.backend.open(self.root, os.O_RDONLY | osfs.O_DIRECTORY)
+        second = self.backend.dup(first)
+        try:
+            self.assertNotEqual(first, second)
+            self.backend.close(first)
+            self.assertEqual(self.backend.listdir(second), ["f"])  # the copy outlives the original
+            fd = self.backend.open("f", os.O_RDONLY, dir_fd=second)
+            self.backend.close(fd)
+            if self.backend is not osfs.POSIX:
+                with self.assertRaises(OSError) as raised:
+                    self.backend.dup(first)
+                self.assertEqual(raised.exception.errno, errno.EBADF)
+        finally:
+            self.backend.close(second)
+
     def test_a_closed_handle_is_ebadf_and_closing_twice_too(self):
         if self.backend is osfs.POSIX:
             self.skipTest("a closed descriptor number may be reused by the system; only tokens are tested")

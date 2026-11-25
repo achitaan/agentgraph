@@ -1,6 +1,5 @@
 import contextlib
 import errno
-import fcntl
 import io
 import json
 import os
@@ -12,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agentgraph import ledger
+from agentgraph import ledger, osfs
 
 
 def node(node_id="n1", **overrides):
@@ -659,7 +658,7 @@ class Ledger(unittest.TestCase):
         cwd = Path(ledger.__file__).resolve().parents[1]
         with contextlib.ExitStack() as stack:
             with (self.home / ".lock").open("wb") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+                osfs.lock(lock.fileno())
                 processes = [stack.enter_context(subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE,
                                                                   stderr=subprocess.PIPE, text=True))
                              for command in commands]
@@ -682,7 +681,7 @@ class Ledger(unittest.TestCase):
         def check_locked(path, *args):
             with lock_path.open("rb") as lock:
                 with self.assertRaises(BlockingIOError):
-                    fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    osfs.lock(lock.fileno(), shared=True, block=False)
             return read_graph(path, *args)
 
         with patch.object(ledger.check, "read_graph", side_effect=check_locked) as read:
@@ -705,9 +704,9 @@ class Ledger(unittest.TestCase):
                 raise PermissionError(errno.EACCES, "read-only ledger", str(path))
             return op(path, mode, *args, **kwargs)
 
-        with patch.object(Path, "open", read_only), patch.object(ledger.fcntl, "flock", wraps=fcntl.flock) as flock:
+        with patch.object(Path, "open", read_only), patch.object(ledger.osfs, "lock", wraps=osfs.lock) as flock:
             self.assertEqual(self.report()["pending"]["feedback"], 1)
-            self.assertEqual([call.args[1] for call in flock.call_args_list], [fcntl.LOCK_SH])
+            self.assertEqual([call.kwargs.get("shared") for call in flock.call_args_list], [True])
 
     def test_signals_warns_but_reads_when_lock_cannot_be_opened_or_acquired(self):
         self.assertEqual(self.cli("feedback", "history")[0], 0)
@@ -719,7 +718,7 @@ class Ledger(unittest.TestCase):
             return op(path, mode, *args, **kwargs)
 
         for failing_lock in (patch.object(Path, "open", denied_lock),
-                             patch.object(ledger.fcntl, "flock", side_effect=OSError(errno.EIO, "lock failure"))):
+                             patch.object(ledger.osfs, "lock", side_effect=OSError(errno.EIO, "lock failure"))):
             with failing_lock:
                 code, output, errors = self.cli("signals", "--json")
             self.assertEqual(code, 0)

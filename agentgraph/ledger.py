@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import json
 import math
@@ -19,7 +18,7 @@ from dataclasses import dataclass, replace
 from itertools import groupby
 from pathlib import Path
 
-from . import check, cost, outputs, sources
+from . import check, cost, osfs, outputs, sources
 from .contract import FAILURE_KINDS, VERDICTS, TaskGraph, objective_coverage
 
 DUE_RUNS = 5
@@ -239,7 +238,7 @@ def _lock(home: Path, *, writing: bool):
         return
     with stream:
         try:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX if writing else fcntl.LOCK_SH)
+            osfs.lock(stream.fileno(), shared=not writing)
         except OSError as exc:
             if writing:
                 raise
@@ -273,9 +272,9 @@ def _replace(path: Path, rows: list[_Row]) -> None:
         try:
             stream.writelines(raw for raw, _ in rows)
             stream.flush()
-            os.fsync(stream.fileno())
+            osfs.fsync(stream.fileno())
             stream.close()
-            os.replace(temporary, path)
+            osfs.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -296,7 +295,7 @@ def _append_locked(path: Path, now: float | None, fields: dict) -> dict:
         item = {"time": _now(now), **fields}
         stream.write(separator + _line(item))
         stream.flush()
-        os.fsync(stream.fileno())
+        osfs.fsync(stream.fileno())
     return item
 
 

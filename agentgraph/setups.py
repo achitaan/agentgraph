@@ -62,7 +62,7 @@ import shutil
 import stat
 import sys
 
-from . import agentfiles, flowcommands, names, paths, skillset
+from . import agentfiles, flowcommands, names, osfs, paths, skillset
 from .snapshot_json import STRUCTURE_DIR
 
 SETUPS = paths.resolve("setups")  # your personal folder's when there is one (agentgraph.paths)
@@ -134,7 +134,7 @@ def _path(w: Where, key: str) -> Path:
 def _read_bytes(path: Path, label: str):
     """(bytes, mode) of a regular file read without following a symlink; None when there is no such file."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = osfs.open(path, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK)
     except FileNotFoundError:
         return None
     except NotADirectoryError:
@@ -142,7 +142,7 @@ def _read_bytes(path: Path, label: str):
     except OSError as exc:
         raise SetupError(f"cannot read {label} as a regular file (no symlinks): {exc.strerror}") from exc
     with os.fdopen(fd, "rb") as handle:
-        info = os.fstat(handle.fileno())
+        info = osfs.fstat(handle.fileno())
         if not stat.S_ISREG(info.st_mode):
             raise SetupError(f"{label} must be a regular file, not a symlink or special file")
         if info.st_size > FILE_LIMIT:
@@ -152,7 +152,7 @@ def _read_bytes(path: Path, label: str):
 
 def _entries(folder: Path):
     try:
-        return sorted(os.listdir(folder))
+        return sorted(osfs.listdir(folder))
     except (FileNotFoundError, NotADirectoryError):
         return []
 
@@ -233,16 +233,16 @@ def _ensure_parent(path: Path, created: list) -> None:
     if not _is_plain_dir(folder):
         raise SetupError(f"{folder.name} is not a plain folder (a symlink or a file); nothing was written")
     for folder in reversed(missing):
-        os.mkdir(folder, 0o755)
+        osfs.mkdir(folder, 0o755)
         created.append(folder)
 
 
 def _fsync(folder: Path) -> None:
-    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    fd = osfs.open(folder, os.O_RDONLY | osfs.O_DIRECTORY)
     try:
-        os.fsync(fd)
+        osfs.fsync(fd)
     finally:
-        os.close(fd)
+        osfs.close(fd)
 
 
 def _apply(w: Where, plan: list, keep: set | None = None) -> None:
@@ -272,32 +272,32 @@ def _apply(w: Where, plan: list, keep: set | None = None) -> None:
                 for item in items:
                     key, path, old, new_staged, old_staged, new = item
                     if new_staged is not None:
-                        os.replace(new_staged, path)
+                        osfs.replace(new_staged, path)
                     else:
-                        os.unlink(path)
+                        osfs.unlink(path)
                     done.append(item)
                 for folder in {item[1].parent for item in items}:
                     _fsync(folder)
             except BaseException:
                 for key, path, old, new_staged, old_staged, new in reversed(done):
                     if old_staged is not None:
-                        os.replace(old_staged, path)
+                        osfs.replace(old_staged, path)
                     else:
-                        os.unlink(path)
+                        osfs.unlink(path)
                 for folder in {item[1].parent for item in items if item[1].parent.is_dir()}:
                     _fsync(folder)
                 raise
         except BaseException:
             for folder in reversed(created):
                 try:
-                    os.rmdir(folder)
+                    osfs.rmdir(folder)
                 except OSError:
                     pass
             raise
     for key, _, new in plan:  # a group folder this emptied goes, if the state being put back had none
         if new is None and key.startswith("structure/") and keep is not None and key.split("/")[1] not in keep:
             try:
-                os.rmdir(_path(w, key).parent)
+                osfs.rmdir(_path(w, key).parent)
             except OSError:
                 pass
 
@@ -310,7 +310,7 @@ _RECORD = re.compile(rf"(\d{{4}}-\d{{2}}-\d{{2}})-setups/(?:(preset)-[0-9a-f]{{1
 
 def _mkdir(path: Path) -> None:
     try:
-        os.mkdir(path, 0o700)
+        osfs.mkdir(path, 0o700)
     except FileExistsError:
         pass
     if not _is_plain_dir(path):
@@ -323,16 +323,16 @@ def _record_folder(backups: Path, kind: str, name: str | None) -> Path:
     _mkdir(day)
     token = secrets.token_hex(6)
     folder = day / (f"preset-{token}" if kind == "preset" else f"{kind}-{name}-{token}")
-    os.mkdir(folder, 0o700)
+    osfs.mkdir(folder, 0o700)
     return folder
 
 
 def _write_file(path: Path, data: bytes, mode: int = 0o600) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    fd = osfs.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | osfs.O_NOFOLLOW, mode)
     with os.fdopen(fd, "wb") as stream:
         stream.write(data)
         stream.flush()
-        os.fsync(stream.fileno())
+        osfs.fsync(stream.fileno())
 
 
 def _write_tree(base: Path, files: dict) -> None:
@@ -435,11 +435,11 @@ def _load_record(record, backups: Path):
         if not _is_plain_dir(current):
             raise SetupError("invalid undo record: there is no such record")
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = osfs.open(path, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK)
     except OSError:
         raise SetupError("invalid undo record: there is no such record") from None
     with os.fdopen(fd, "rb") as stream:
-        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+        if not stat.S_ISREG(osfs.fstat(stream.fileno()).st_mode):
             raise SetupError("invalid undo record: not a regular file")
         raw = stream.read(8 * 1024 * 1024 + 1)
     try:
@@ -764,7 +764,7 @@ def _verified(folder: Path, name: str):
 
 def _move_dir(source: Path, target: Path) -> None:
     try:
-        os.rename(source, target)
+        osfs.rename(source, target)
     except OSError:
         shutil.copytree(source, target)
         shutil.rmtree(source)
@@ -866,7 +866,7 @@ def save(name, *, replace=False, expect=None, **paths) -> dict:
         except (UnicodeDecodeError, skillset.SkillsetError) as exc:
             raise SetupError(f"the preset file cannot be saved as it is: {exc}") from exc
         staging = root / f".{name}.{secrets.token_hex(6)}.tmp"
-        os.mkdir(staging, 0o700)
+        osfs.mkdir(staging, 0o700)
         try:
             _write_tree(staging, files)
             manifest = {"version": 1, "name": name, "saved": _now(), "preset": preset, "files": _meta(files),

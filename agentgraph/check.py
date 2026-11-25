@@ -28,7 +28,7 @@ from .contract import (
 from .sources import find_graph_dir, graph_files, graph_from_raw, read_graph_text
 from .snapshot_json import flow_steps, hub_names, is_self_loop, load_structure
 from .teams import problems as team_problems
-from . import outputs, transitions
+from . import osfs, outputs, transitions
 
 
 _NODE_STRINGS = ("id", "type", "agent", "goal", "done_when", "status")
@@ -151,24 +151,24 @@ def _read_result(project: Path, parts: list[str]):
     FIFO would block), is over RESULT_LIMIT or is not JSON. Never raises, never waits."""
     fd = -1
     try:
-        fd = os.open(project, os.O_RDONLY | os.O_DIRECTORY)
+        fd = osfs.open(project, os.O_RDONLY | osfs.O_DIRECTORY)
         for part in parts[:-1]:
             fd, parent = outputs._open_dir(fd, part), fd
-            os.close(parent)
-        leaf = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+            osfs.close(parent)
+        leaf = osfs.open(parts[-1], os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK, dir_fd=fd)
         try:
-            if not stat.S_ISREG(os.fstat(leaf).st_mode):
+            if not stat.S_ISREG(osfs.fstat(leaf).st_mode):
                 return None
             with os.fdopen(leaf, "rb", closefd=False) as handle:
                 body = handle.read(RESULT_LIMIT + 1)
         finally:
-            os.close(leaf)
+            osfs.close(leaf)
         return None if len(body) > RESULT_LIMIT else json.loads(body.decode("utf-8"))
     except (OSError, ValueError, RecursionError, outputs.OutputError):
         return None
     finally:
         if fd >= 0:
-            os.close(fd)
+            osfs.close(fd)
 
 
 def review_copy_warnings(raw: dict, path: Path) -> list[str]:
@@ -766,7 +766,7 @@ def _examine(raw: dict, path: Path, rules: Rules, folder: int | None, write: boo
 def _examine_read_only(raw: dict, path: Path, rules: Rules) -> tuple[TaskGraph, list[str]]:
     folder = None
     try:
-        folder = os.open(path.resolve().parent, os.O_RDONLY | os.O_DIRECTORY)
+        folder = osfs.open(path.resolve().parent, os.O_RDONLY | osfs.O_DIRECTORY)
     except OSError:
         pass
     try:
@@ -774,7 +774,7 @@ def _examine_read_only(raw: dict, path: Path, rules: Rules) -> tuple[TaskGraph, 
         return graph, issues
     finally:
         if folder is not None:
-            os.close(folder)
+            osfs.close(folder)
 
 
 def all_problems(path: Path, rules: Rules | None = None) -> list[str] | None:

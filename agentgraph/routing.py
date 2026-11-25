@@ -28,7 +28,7 @@ import unicodedata
 from datetime import date
 from pathlib import Path
 
-from . import agentfiles, names, roster, skillset
+from . import agentfiles, names, osfs, roster, skillset
 from .snapshot_json import HEAD_BYTES, SETTING_KEYS, SETTING_LINES, STRUCTURE_DIR, load_structure, read_settings
 
 USE_WHEN = "use_when"
@@ -153,7 +153,7 @@ def _find_file(root_fd: int, name: str) -> tuple[str, bytes]:
         try:
             data = roster._read_at(fd, name + ".md")
         finally:
-            os.close(fd)
+            osfs.close(fd)
         if data is not None:
             return folder, data
     raise RouteError(f"unknown agent {name}: there is no {name}.md in the structure folder")
@@ -168,19 +168,19 @@ def _save_record(backups, name: str, record: dict) -> str:
     day = root / f"{date.today().isoformat()}-{RECORD_FOLDER}"
     for path in (root, day):
         try:
-            os.mkdir(path, 0o700)
+            osfs.mkdir(path, 0o700)
         except FileExistsError:
             pass
         if not stat.S_ISDIR(os.lstat(path).st_mode):
             raise RouteError(f"{path} is not a plain folder; nothing was changed")
     folder = day / f"use_when-{name}-{secrets.token_hex(6)}"
-    os.mkdir(folder, 0o700)
+    osfs.mkdir(folder, 0o700)
     path = folder / "record.json"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+    fd = osfs.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | osfs.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
         stream.write(json.dumps(record, indent=2) + "\n")
         stream.flush()
-        os.fsync(stream.fileno())
+        osfs.fsync(stream.fileno())
     return str(path)
 
 
@@ -253,11 +253,11 @@ def _load_record(record, backups) -> tuple[str, dict]:
         except FileNotFoundError:
             raise RouteError("invalid undo record: there is no such record") from None
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = osfs.open(path, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK)
     except OSError:
         raise RouteError("invalid undo record: there is no such record") from None
     with os.fdopen(fd, "rb") as stream:
-        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+        if not stat.S_ISREG(osfs.fstat(stream.fileno()).st_mode):
             raise RouteError("invalid undo record: not a regular file")
         raw = stream.read(1 << 22)
     try:

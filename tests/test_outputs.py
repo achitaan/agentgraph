@@ -764,9 +764,11 @@ class Review7Lock(Base):
     """Minor 5: a flock that fails releases the process lock and closes the folder."""
 
     def test_minor5_a_failed_flock_releases_the_lock_and_the_folder(self):
+        if not os.path.isdir("/dev/fd"):
+            self.skipTest("counts open descriptors through /dev/fd (not on Windows)")
         self.addCleanup(lambda: outputs._LOCK.locked() and outputs._LOCK.release())
         opened = len(os.listdir("/dev/fd"))
-        with patch.object(outputs.fcntl, "flock", side_effect=OSError(errno.ENOLCK, "No locks available")):
+        with patch.object(outputs.osfs, "lock", side_effect=OSError(errno.ENOLCK, "No locks available")):
             with self.assertRaises((OSError, outputs.OutputError)):
                 outputs.read_output("t1", "n1", "report", dirs=[self.graphs])
         self.assertFalse(outputs._LOCK.locked(), "the process lock was kept: every later edit would wait forever")

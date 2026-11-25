@@ -150,6 +150,28 @@ def _posix_rename_new(source, target, *, src_dir_fd=None, dst_dir_fd=None):
         raise OSError(error, os.strerror(error), target)
 
 
+def _swap_function():
+    """macOS renameatx_np(RENAME_SWAP) or Linux renameat2(RENAME_EXCHANGE), or None (Windows has no such call)."""
+    library = _libc()
+    if library is None:
+        return None
+    return getattr(library, "renameatx_np", None) or getattr(library, "renameat2", None)
+
+
+def _posix_swap(folder, first, second):
+    """Exchange two entries of the folder (a real descriptor) in one step; False when the system cannot."""
+    function = _swap_function()
+    if function is None:
+        return False
+    import ctypes
+    if function(folder, os.fsencode(first), folder, os.fsencode(second), 0x2) != 0:
+        error = ctypes.get_errno()
+        if error in (errno.ENOTSUP, errno.EINVAL, errno.ENOSYS, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)):
+            return False
+        raise OSError(error, os.strerror(error), second)
+    return True
+
+
 def _no_handle(fd):
     return False
 
@@ -166,11 +188,11 @@ def _late(name):
 POSIX = None
 if not _NT:
     POSIX = SimpleNamespace(
-        name="posix", open=_late("open"), close=_late("close"), fsync=_late("fsync"), fstat=_late("fstat"),
+        name="posix", open=_late("open"), close=_late("close"), dup=_late("dup"), fsync=_late("fsync"), fstat=_late("fstat"),
         stat=_late("stat"), lstat=_late("lstat"), listdir=_late("listdir"), unlink=_late("unlink"),
         rmdir=_late("rmdir"), mkdir=_late("mkdir"), rename=_late("rename"), replace=_late("replace"),
         link=_late("link"), chmod=_late("chmod"), fchmod=_late("fchmod"), lock=_posix_lock, unlock=_posix_unlock,
-        rename_new=_posix_rename_new, getuid=_late("getuid"), geteuid=_late("geteuid"), is_handle=_no_handle)
+        rename_new=_posix_rename_new, swap=_posix_swap, getuid=_late("getuid"), geteuid=_late("geteuid"), is_handle=_no_handle)
 
 
 # --- the two Windows-only calls, kept tiny ------------------------------------------------------------
@@ -295,6 +317,20 @@ class _Portable:
             os.close(folder.lock_fd)  # closing releases the lock
             folder.lock_fd = None
 
+    def dup(self, fd):
+        """Another handle for the same folder (a second one to close), or os.dup of a descriptor. The copy does
+        not hold a lock the original holds."""
+        folder = self._table.get(fd)
+        if folder is None:
+            if fd >= _TOKEN_BASE:
+                raise OSError(errno.EBADF, "the folder handle is closed")
+            return os.dup(fd)
+        self._where(fd)
+        with self._guard:
+            token = next(self._numbers)
+            self._table[token] = _Folder(folder.path, folder.ident)
+        return token
+
     def _new_handle(self, path):
         info = os.stat(path)
         if not _stat.S_ISDIR(info.st_mode):
@@ -400,6 +436,22 @@ class _Portable:
         if _NT:  # rename onto an existing file fails there (FileExistsError), in one step
             return _retry(lambda: os.rename(a, b, **_dirs(a_dir, b_dir)))
         return _posix_rename_new(a, b, src_dir_fd=a_dir, dst_dir_fd=b_dir)
+
+    def swap(self, folder, first, second):
+        """Exchange two entries of a folder atomically; False where that cannot be done (Windows, or a file system
+        without it): the caller then falls back to a checked replace. A folder handle is opened by its path for
+        the call (not pinned), which only a system with the exchange call (not Windows) ever does."""
+        if _NT or _swap_function() is None:
+            return False
+        if folder not in self._table:
+            if folder >= _TOKEN_BASE:
+                raise OSError(errno.EBADF, "the folder handle is closed")
+            return _posix_swap(folder, first, second)
+        fd = os.open(self._where(folder), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            return _posix_swap(fd, first, second)
+        finally:
+            os.close(fd)
 
     def link(self, src, dst, *, src_dir_fd=None, dst_dir_fd=None, follow_symlinks=True):
         """A hard link; FileExistsError when `dst` exists. Where the file system has no hard links (FAT, some
@@ -535,6 +587,7 @@ BACKEND = _choose()
 backend_name = BACKEND.name
 
 open = BACKEND.open  # (path, flags, mode=0o777, *, dir_fd=None) -> fd; a folder (O_DIRECTORY) gives a handle
+dup = BACKEND.dup  # another descriptor or folder handle for the same thing
 close = BACKEND.close  # a descriptor or a folder handle; releases a lock held through it
 fsync = BACKEND.fsync  # a file; on a folder handle, nothing on Windows
 fstat = BACKEND.fstat
@@ -546,6 +599,8 @@ rmdir = BACKEND.rmdir
 mkdir = BACKEND.mkdir  # (path, mode=0o777, *, dir_fd=None)
 rename = BACKEND.rename  # (src, dst, *, src_dir_fd=None, dst_dir_fd=None); not over a file on Windows
 replace = BACKEND.replace  # same arguments; replaces an existing file
+swap = BACKEND.swap  # (folder, first, second) -> bool: atomic exchange of two names, False when not possible
+CAN_SWAP = not _NT and _swap_function() is not None
 rename_new = BACKEND.rename_new  # same arguments; FileExistsError when dst exists, never a hard link
 link = BACKEND.link  # (src, dst, *, src_dir_fd=None, dst_dir_fd=None, follow_symlinks=True); copy where no links
 chmod = BACKEND.chmod  # no-ops on Windows

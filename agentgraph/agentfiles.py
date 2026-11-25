@@ -33,9 +33,6 @@ import unicodedata
 
 from . import names, osfs, skillset, sources
 
-# outputs.py still reads the C library from here (an atomic exchange of two names); None when there is none (Windows)
-_LIBC = osfs._libc()
-
 AGENTS_DIR = sources.CONFIG_DIR / "agents"
 BACKUPS = skillset.BACKUPS
 LIVE = ("OpenCode watches its agents folder; the change applies at once, without a restart, from the next "

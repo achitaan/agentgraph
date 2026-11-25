@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-import fcntl
 import json
 import math
 import os
@@ -33,6 +32,11 @@ import sqlite3
 import stat
 import sys
 import time
+
+try:  # `python agentgraph/spend.py` runs it as a script, outside the package
+    from . import osfs
+except ImportError:
+    from agentgraph import osfs
 
 FILE = "spend.json"
 LOCK = "spend.lock"
@@ -97,18 +101,18 @@ def _read(project=None):
     not JSON, a figure that does not fit) raises SpendError without saying what it holds."""
     target = path(project)
     try:
-        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = osfs.open(target, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK)
     except FileNotFoundError:
         return None, None
     except OSError as exc:
         raise SpendError(f"{target} cannot be read ({exc.strerror or 'refused'})") from None
     try:
-        info = os.fstat(fd)
+        info = osfs.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size > READ_LIMIT:
             raise SpendError(f"{target} is not a plain spend file")
         raw = os.read(fd, READ_LIMIT + 1)
     finally:
-        os.close(fd)
+        osfs.close(fd)
     try:
         data = json.loads(raw.decode("utf-8"))
         limit = amount(data["limit"])
@@ -125,27 +129,27 @@ def _locked(project=None):
     where = folder(project)
     if not _plain_dir(where, create=True):
         raise SpendError(f"{where} is not a plain folder")
-    fd = os.open(where / LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fd = osfs.open(where / LOCK, os.O_RDWR | os.O_CREAT | osfs.O_NOFOLLOW, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        osfs.lock(fd)
         yield
     finally:
-        os.close(fd)
+        osfs.close(fd)
 
 
 def _stage(project, limit: float, warn: float) -> None:
     target = path(project)
     temporary = target.parent / f".{FILE}.{secrets.token_hex(6)}.tmp"
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    fd = osfs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | osfs.O_NOFOLLOW, 0o600)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
             stream.write(json.dumps({"version": 1, "limit": limit, "warn": warn}, indent=1) + "\n")
             stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, target)
+            osfs.fsync(stream.fileno())
+        osfs.replace(temporary, target)
     except BaseException:
         try:
-            os.unlink(temporary)
+            osfs.unlink(temporary)
         except OSError:
             pass
         raise
@@ -187,7 +191,7 @@ def remove(*, project=None) -> dict:
     with _locked(project):
         before = _previous(project)
         try:
-            os.unlink(path(project))
+            osfs.unlink(path(project))
         except FileNotFoundError:
             pass
     changed = before[0] is not None

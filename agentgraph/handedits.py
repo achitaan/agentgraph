@@ -26,6 +26,11 @@ import sys
 import time
 from pathlib import Path
 
+try:  # also run as a script, outside the package
+    from . import osfs
+except ImportError:
+    from agentgraph import osfs
+
 DAYS = 14
 EDITS = 3      # output edits that make the signal due ...
 TASKS = 2      # ... across at least this many tasks
@@ -54,7 +59,7 @@ def default_paths(home: Path) -> tuple[Path, Path]:
 
 def _tail(path: Path, limit: int) -> bytes:
     with path.open("rb") as stream:
-        size = os.fstat(stream.fileno()).st_size
+        size = osfs.fstat(stream.fileno()).st_size
         if size > limit:
             stream.seek(size - limit)
             stream.readline()  # a cut line
@@ -115,7 +120,7 @@ def _record(path: Path) -> dict | None:
         info = os.lstat(path)
         if not stat.S_ISREG(info.st_mode):
             return None
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = osfs.open(path, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK)
         with os.fdopen(fd, "rb") as stream:
             data = json.loads(stream.read(RECORD_READ + 1).decode("utf-8"))
         before = base64.b64decode(data["before"], validate=True) if data.get("before") is not None else None

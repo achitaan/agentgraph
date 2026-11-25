@@ -35,10 +35,8 @@ import argparse
 import base64
 from collections import Counter, OrderedDict
 import copy
-import ctypes
 import difflib
 import errno
-import fcntl
 import hashlib
 import json
 import os
@@ -52,7 +50,7 @@ import threading
 import time
 import unicodedata
 
-from . import agentfiles, skillset
+from . import agentfiles, osfs, skillset
 from .handedits import AGENT_NAME, OUTPUT_NAME
 from .contract import _contains, _path_parts
 from .sources import MAX_GRAPH_BYTES, ORCHESTRATION_GRAPH_DIR, find_graph_dir, graph_files, read_graph_text
@@ -158,37 +156,37 @@ def _inside(task: str, path) -> list[str] | None:
 
 def _open_dir(parent: int, name: str, *, create: bool = False, created: list | None = None) -> int:
     """A folder inside `parent`, never through a link; with `create`, made when it is missing (and noted)."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    flags = os.O_RDONLY | osfs.O_DIRECTORY | osfs.O_NOFOLLOW
     try:
-        return os.open(name, flags, dir_fd=parent)
+        return osfs.open(name, flags, dir_fd=parent)
     except FileNotFoundError:
         if not create:
             raise
     except OSError as exc:
         raise OutputError(f"{name} is {LINKED} ({exc.strerror})") from None
-    os.mkdir(name, 0o755, dir_fd=parent)
+    osfs.mkdir(name, 0o755, dir_fd=parent)
     if created is not None:
         created.append(name)
-    return os.open(name, flags, dir_fd=parent)
+    return osfs.open(name, flags, dir_fd=parent)
 
 
 def _task_folder(project: Path, task: str) -> int:
     """The task's artifacts folder, opened from the project without following a link below the project."""
-    current = os.open(project, os.O_RDONLY | os.O_DIRECTORY)
+    current = osfs.open(project, os.O_RDONLY | osfs.O_DIRECTORY)
     try:
         for name in (".opencode", "artifacts", task):
             following = _open_dir(current, name)
-            os.close(current)
+            osfs.close(current)
             current = following
     except BaseException:
-        os.close(current)
+        osfs.close(current)
         raise
     return current
 
 
 def _folder_of(task_fd: int, dirs: list[str], *, create: bool = False, created: list | None = None) -> int:
     """The folder `dirs` (parts) inside the task folder; made (each new part noted in `created`) with `create`."""
-    current = os.dup(task_fd)
+    current = osfs.dup(task_fd)
     try:
         made = []
         for index, name in enumerate(dirs):
@@ -196,11 +194,11 @@ def _folder_of(task_fd: int, dirs: list[str], *, create: bool = False, created: 
             following = _open_dir(current, name, create=create, created=made)
             if created is not None and len(made) > before:
                 created.append("/".join(dirs[:index + 1]))
-            os.close(current)
+            osfs.close(current)
             current = following
         return current
     except BaseException:
-        os.close(current)
+        osfs.close(current)
         raise
 
 
@@ -216,14 +214,14 @@ def _open_file(folder: int, name: str):
     """(an open binary stream, its stat) of a regular file with one name in `folder`, never through a link; (None,
     None) when there is none."""
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+        fd = osfs.open(name, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK, dir_fd=folder)
     except FileNotFoundError:
         return None, None
     except OSError as exc:
         raise OutputError(f"{name} is {LINKED} ({exc.strerror})") from None
     stream = os.fdopen(fd, "rb")
     try:
-        info = os.fstat(stream.fileno())
+        info = osfs.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode):
             raise OutputError(f"{name} is not a regular file")
         if info.st_nlink > 1:
@@ -248,22 +246,22 @@ def _write_new(folder: int, name: str, data: bytes) -> None:
     """Write `data` as a new file `name` in `folder`: written beside it, then linked in, never over an entry that
     is there."""
     temporary = f".{name}.{secrets.token_hex(6)}.tmp"
-    handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=folder)
+    handle = osfs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | osfs.O_NOFOLLOW, 0o644, dir_fd=folder)
     try:
         with os.fdopen(handle, "wb") as stream:
             stream.write(data)
             stream.flush()
-            os.fsync(stream.fileno())
+            osfs.fsync(stream.fileno())
         try:
-            os.link(temporary, name, src_dir_fd=folder, dst_dir_fd=folder, follow_symlinks=False)
+            osfs.link(temporary, name, src_dir_fd=folder, dst_dir_fd=folder, follow_symlinks=False)
         except FileExistsError:
             raise OutputError(f"{name} already exists where the next revision goes; nothing was written") from None
     finally:
         try:
-            os.unlink(temporary, dir_fd=folder)
+            osfs.unlink(temporary, dir_fd=folder)
         except FileNotFoundError:
             pass
-    os.fsync(folder)
+    osfs.fsync(folder)
 
 
 # The snapshot's memory of the outputs it read: (path, revision, device, inode, size, mtime ns, ctime ns) -> (rev,
@@ -313,13 +311,13 @@ def _inspect(project: Path | None, task: str, node: dict, artifact: dict, *, cac
         try:
             stream, info = _open_file(folder, parts[-1])
         finally:
-            os.close(folder)
+            osfs.close(folder)
     except HardLinkError:
         return {**shown, "rev": output_rev(path, revision, None), "why": HARD_LINK}
     except OutputError as exc:
         return {**shown, "rev": output_rev(path, revision, None), "why": f"the file is {LINKED}: {exc}"}
     finally:
-        os.close(task_fd)
+        osfs.close(task_fd)
     if stream is None:
         return {**shown, "rev": output_rev(path, revision, None), "why": "the file is missing"}
     with stream:
@@ -464,14 +462,14 @@ class _GraphFolder:
     def __enter__(self) -> int:
         _LOCK.acquire()
         try:
-            self.fd = os.open(self.path, os.O_RDONLY | os.O_DIRECTORY)
+            self.fd = osfs.open(self.path, os.O_RDONLY | osfs.O_DIRECTORY)
         except OSError as exc:
             _LOCK.release()
             raise OutputError(f"the graph folder {self.path} cannot be opened ({exc.strerror})") from None
         try:
-            fcntl.flock(self.fd, fcntl.LOCK_EX)
+            osfs.lock(self.fd)
         except BaseException as exc:
-            os.close(self.fd)
+            osfs.close(self.fd)
             _LOCK.release()
             if isinstance(exc, OSError):
                 raise OutputError(f"the graph folder {self.path} cannot be locked ({exc.strerror}); nothing was "
@@ -480,19 +478,19 @@ class _GraphFolder:
         return self.fd
 
     def __exit__(self, *exc) -> None:
-        os.close(self.fd)
+        osfs.close(self.fd)
         _LOCK.release()
 
 
 def _read_graph(folder: int, name: str) -> bytes:
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+        fd = osfs.open(name, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK, dir_fd=folder)
     except FileNotFoundError:
         raise OutputError(f"the graph file {name} is gone; nothing was changed") from None
     except OSError as exc:
         raise OutputError(f"the graph file {name} is not a regular file ({exc.strerror})") from None
     with os.fdopen(fd, "rb") as stream:
-        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+        if not stat.S_ISREG(osfs.fstat(stream.fileno()).st_mode):
             raise OutputError(f"the graph file {name} is not a regular file")
         data = stream.read(MAX_GRAPH_BYTES + 1)
     if len(data) > MAX_GRAPH_BYTES:
@@ -542,20 +540,13 @@ def _record_of(artifact: dict) -> dict:
 
 
 # An atomic exchange of two names in one folder: macOS renameatx_np(RENAME_SWAP), Linux renameat2(RENAME_EXCHANGE).
-_SWAP = getattr(agentfiles._LIBC, "renameatx_np", None) or getattr(agentfiles._LIBC, "renameat2", None)
-_SWAP_FLAG = 0x2
+# Windows has none: osfs.swap says False and `_replace_graph` takes its checked replace instead.
+_SWAP = True if osfs.CAN_SWAP else None
 
 
 def _swap(folder: int, first: str, second: str) -> bool:
     """Exchange two entries of `folder` atomically; False when the system cannot."""
-    if _SWAP is None:
-        return False
-    if _SWAP(folder, os.fsencode(first), folder, os.fsencode(second), _SWAP_FLAG) != 0:
-        error = ctypes.get_errno()
-        if error in (errno.ENOTSUP, errno.EINVAL, errno.ENOSYS, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)):
-            return False
-        raise OSError(error, os.strerror(error), second)
-    return True
+    return osfs.swap(folder, first, second)
 
 
 def _peek(folder: int, name: str) -> bytes | None:
@@ -575,20 +566,20 @@ def _replace_graph(folder: int, name: str, make) -> tuple[bytes, bytes]:
         merged = make(current)
         if merged == current:
             return current, current
-        mode = stat.S_IMODE(os.stat(name, dir_fd=folder, follow_symlinks=False).st_mode)
+        mode = stat.S_IMODE(osfs.stat(name, dir_fd=folder, follow_symlinks=False).st_mode)
         temporary = f".{name}.{secrets.token_hex(6)}.tmp"
-        handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+        handle = osfs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | osfs.O_NOFOLLOW, 0o600, dir_fd=folder)
         try:
             with os.fdopen(handle, "wb") as stream:
                 stream.write(merged)
                 stream.flush()
-                os.fchmod(stream.fileno(), mode)
-                os.fsync(stream.fileno())
+                osfs.fchmod(stream.fileno(), mode)
+                osfs.fsync(stream.fileno())
             _hook("replace")
             if _swap(folder, temporary, name):
                 displaced = _peek(folder, temporary)
                 if displaced == current:
-                    os.fsync(folder)
+                    osfs.fsync(folder)
                     return current, merged
                 # Another writer replaced the graph after it was read: its file goes back, and the merge is made
                 # again from it.
@@ -600,12 +591,12 @@ def _replace_graph(folder: int, name: str, make) -> tuple[bytes, bytes]:
                 continue
             if _peek(folder, name) != current:
                 continue
-            os.replace(temporary, name, src_dir_fd=folder, dst_dir_fd=folder)
-            os.fsync(folder)
+            osfs.replace(temporary, name, src_dir_fd=folder, dst_dir_fd=folder)
+            osfs.fsync(folder)
             return current, merged
         finally:
             try:
-                os.unlink(temporary, dir_fd=folder)
+                osfs.unlink(temporary, dir_fd=folder)
             except FileNotFoundError:
                 pass
     raise OutputError("the graph file kept changing while this was being saved; nothing was changed. Try again.")
@@ -654,7 +645,7 @@ class _Ledger:
     def __enter__(self):
         self.home.mkdir(parents=True, exist_ok=True)
         self.stream = (self.home / ".lock").open("a+b")
-        fcntl.flock(self.stream.fileno(), fcntl.LOCK_EX)
+        osfs.lock(self.stream.fileno())
         return self
 
     def __exit__(self, *exc):
@@ -689,7 +680,7 @@ def _append_log(home: Path, entry: dict) -> None:
                     separator = b"\n"
             stream.write(separator + (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8"))
             stream.flush()
-            os.fsync(stream.fileno())
+            osfs.fsync(stream.fileno())
 
 
 def _rewrite_log(home: Path, edit_id: str, change) -> bool:
@@ -721,8 +712,8 @@ def _rewrite_log(home: Path, edit_id: str, change) -> bool:
             with temporary.open("xb") as stream:
                 stream.writelines(lines)
                 stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, path)
+                osfs.fsync(stream.fileno())
+            osfs.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
         return True
@@ -876,19 +867,19 @@ def _save_record(backups, record: dict, edit_id: str) -> str:
     root.parent.mkdir(parents=True, exist_ok=True)
     for path in (root, folder):
         try:
-            os.mkdir(path, 0o700)
+            osfs.mkdir(path, 0o700)
         except FileExistsError:
             pass
         if not stat.S_ISDIR(os.lstat(path).st_mode):
             raise OutputError(f"{path} is not a plain folder")
     target = folder / f"edit-{edit_id}"
-    os.mkdir(target, 0o700)
+    osfs.mkdir(target, 0o700)
     path = target / "record.json"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+    fd = osfs.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | osfs.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
         stream.write(json.dumps(record, indent=2) + "\n")
         stream.flush()
-        os.fsync(stream.fileno())
+        osfs.fsync(stream.fileno())
     return str(path)
 
 
@@ -948,13 +939,13 @@ def _load_record(record, backups) -> dict:
         except FileNotFoundError:
             raise OutputError("invalid undo record: there is no such record") from None
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = osfs.open(path, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK)
     except FileNotFoundError:
         raise OutputError("invalid undo record: there is no such record") from None
     except OSError as exc:
         raise OutputError(f"invalid undo record: {exc.strerror}") from None
     with os.fdopen(fd, "rb") as stream:
-        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+        if not stat.S_ISREG(osfs.fstat(stream.fileno()).st_mode):
             raise OutputError("invalid undo record: not a regular file")
         raw = stream.read(RECORD_LIMIT + 1)
     try:
@@ -1100,11 +1091,11 @@ def _plan_entry(graph_path, project, task, node_id, artifact_id, data, text, exp
     would change nothing or be refused, or the graph cannot be read now (the read under the lock decides). Never
     raises."""
     try:
-        folder = os.open(graph_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        folder = osfs.open(graph_path.parent, os.O_RDONLY | osfs.O_DIRECTORY)
         try:
             raw = _parse(_read_graph(folder, graph_path.name), graph_path.name)
         finally:
-            os.close(folder)
+            osfs.close(folder)
         node, artifact = _locate(raw, node_id, artifact_id)
         found = _inspect(project, task, node, artifact)
         if not found["editable"] or found["data"] == data or (expect is not None and expect != found["rev"]):
@@ -1185,11 +1176,11 @@ def _write_locked(folder, name, graph_path, project, task, node_id, artifact_id,
                 used, written = _replace_graph(folder, name, merged)
             except BaseException:
                 if written_file:
-                    os.unlink(parts[-1], dir_fd=target)
+                    osfs.unlink(parts[-1], dir_fd=target)
                 _remove_created(task_fd, created)
                 raise
         finally:
-            os.close(target)
+            osfs.close(target)
         record_data = {"version": 1, "op": "edit", "task": task, "graph": _graph_key(graph_path),
                        "node": node_id, "artifact": artifact_id, "before": before, "after": after,
                        "before_digest": _digest(found["data"]), "after_digest": _digest(data),
@@ -1202,7 +1193,7 @@ def _write_locked(folder, name, graph_path, project, task, node_id, artifact_id,
             _remove_file(task_fd, parts, _digest(data), created)
             raise
     finally:
-        os.close(task_fd)
+        osfs.close(task_fd)
     fresh_node, fresh_artifact = _locate(_parse(written, name), node_id, artifact_id)
     return {"changed": True, "entry": entry, "record": record, "old": old_text, "new": new_text, "written": written,
             "shown": shown_output(project, task, fresh_node, fresh_artifact)}
@@ -1216,11 +1207,11 @@ def _remove_created(task_fd: int, created: list[str]) -> None:
         except (OSError, OutputError):
             continue
         try:
-            os.rmdir(parts[-1], dir_fd=parent)
+            osfs.rmdir(parts[-1], dir_fd=parent)
         except OSError:
             pass
         finally:
-            os.close(parent)
+            osfs.close(parent)
 
 
 def _remove_file(task_fd: int, parts: list[str], digest: str, created: list[str]) -> None:
@@ -1232,9 +1223,9 @@ def _remove_file(task_fd: int, parts: list[str], digest: str, created: list[str]
     try:
         current, _ = _read_file(folder, parts[-1])
         if current is not None and _digest(current) == digest:
-            os.unlink(parts[-1], dir_fd=folder)
+            osfs.unlink(parts[-1], dir_fd=folder)
     finally:
-        os.close(folder)
+        osfs.close(folder)
     _remove_created(task_fd, created)
 
 
@@ -1306,7 +1297,7 @@ def restore_output(record, *, backups, home, dirs, now=None) -> dict:
                 try:
                     found, _ = _read_file(holder, parts[-1])
                 finally:
-                    os.close(holder)
+                    osfs.close(holder)
                 if found is None or _digest(found) != digest:
                     raise OutputError(f"the edit cannot be undone: the file of {what} {label} was "
                                       f"{'removed' if found is None else 'changed'} after the edit; nothing was "
@@ -1339,7 +1330,7 @@ def restore_output(record, *, backups, home, dirs, now=None) -> dict:
             fresh = _parse(written, name)
             fresh_node, fresh_artifact = _locate(fresh, node_id, artifact_id)
         finally:
-            os.close(task_fd)
+            osfs.close(task_fd)
         found = _inspect(project, task, fresh_node, fresh_artifact)
         shown = shown_output(project, task, fresh_node, fresh_artifact)
     finally:

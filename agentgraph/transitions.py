@@ -21,6 +21,11 @@ import stat
 import time
 from pathlib import Path
 
+try:  # also run as a script, outside the package
+    from . import osfs
+except ImportError:
+    from agentgraph import osfs
+
 VERSION = 1
 HISTORY_DIR = ".history"
 SUFFIX = ".state"
@@ -123,11 +128,11 @@ def state_of(raw: dict) -> dict:
 def _open_history(folder: int, *, create: bool) -> int | None:
     if create:
         try:
-            os.mkdir(HISTORY_DIR, 0o700, dir_fd=folder)
+            osfs.mkdir(HISTORY_DIR, 0o700, dir_fd=folder)
         except FileExistsError:
             pass
     try:
-        return os.open(HISTORY_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=folder)
+        return osfs.open(HISTORY_DIR, os.O_RDONLY | osfs.O_DIRECTORY | osfs.O_NOFOLLOW, dir_fd=folder)
     except FileNotFoundError:
         return None
 
@@ -142,17 +147,17 @@ def _read_record(folder: int, name: str, what: str) -> dict | None:
         return None
     try:
         try:
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=history)
+            fd = osfs.open(name, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK, dir_fd=history)
         except FileNotFoundError:
             return None
         except OSError as exc:
             raise HistoryError(f"{what} unusable ({exc.strerror}); ignored") from None
         with os.fdopen(fd, "rb") as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            if not stat.S_ISREG(osfs.fstat(stream.fileno()).st_mode):
                 raise HistoryError(f"{what} is not a regular file; ignored")
             data = stream.read(STATE_LIMIT + 1)
     finally:
-        os.close(history)
+        osfs.close(history)
     try:
         record = json.loads(data.decode("utf-8"))
     except (ValueError, UnicodeDecodeError, RecursionError):
@@ -205,28 +210,28 @@ def _write_record(folder: int, name: str, state: dict) -> bool:
         raise OSError("history folder missing")
     try:
         try:
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=history)
+            fd = osfs.open(name, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK, dir_fd=history)
             with os.fdopen(fd, "rb") as stream:
                 if stream.read(len(data) + 1) == data:
                     return False
         except OSError:
             pass
         temporary = f".{name}.{secrets.token_hex(6)}.tmp"
-        handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=history)
+        handle = osfs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | osfs.O_NOFOLLOW, 0o600, dir_fd=history)
         try:
             with os.fdopen(handle, "wb") as stream:
                 stream.write(data)
                 stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, name, src_dir_fd=history, dst_dir_fd=history)
-            os.fsync(history)
+                osfs.fsync(stream.fileno())
+            osfs.replace(temporary, name, src_dir_fd=history, dst_dir_fd=history)
+            osfs.fsync(history)
         finally:
             try:
-                os.unlink(temporary, dir_fd=history)
+                osfs.unlink(temporary, dir_fd=history)
             except FileNotFoundError:
                 pass
     finally:
-        os.close(history)
+        osfs.close(history)
     return True
 
 

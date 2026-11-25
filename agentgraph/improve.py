@@ -77,7 +77,7 @@ from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
 
-from . import cases, ledger, outputs, sources
+from . import cases, ledger, osfs, outputs, sources
 
 PROPOSALS = "proposals"
 STATES = ("drafted", "evaluated", "applied", "rejected", "reverted")
@@ -138,9 +138,9 @@ def _write_atomic(path: Path, data: bytes) -> None:
         with os.fdopen(fd, "wb") as stream:
             stream.write(data)
             stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(temporary, mode)
-        os.replace(temporary, path)
+            osfs.fsync(stream.fileno())
+        osfs.chmod(temporary, mode)
+        osfs.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
