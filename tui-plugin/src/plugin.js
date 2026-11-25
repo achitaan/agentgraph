@@ -1491,8 +1491,8 @@ export function createPlugin(host) {
           }),
         );
         registerCommand();
-      } catch (_) {
-        /* no panel */
+        } catch (error) {
+          report("panel registration", error);
       }
     }
 
@@ -1737,8 +1737,8 @@ export function createPlugin(host) {
             ],
           })),
         );
-      } catch (_) {
-        /* no command */
+      } catch (error) {
+        report("command registration", error);
       }
     }
 

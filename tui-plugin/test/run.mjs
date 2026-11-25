@@ -6980,11 +6980,13 @@ test("n20 scene: the step marks of a quiet or orphan node stand still, a live on
 });
 
 let failed = 0;
+let passed = 0;
 const only = process.env.TEST_ONLY ? new RegExp(process.env.TEST_ONLY) : null; // TEST_ONLY=regex runs only the tests whose name matches
 for (const t of tests) {
   if (only && !only.test(t.name)) continue;
   try {
     await t.fn();
+    passed += 1;
     console.log("ok   " + t.name);
   } catch (error) {
     failed += 1;
@@ -6994,5 +6996,5 @@ for (const t of tests) {
 }
 globalThis.setInterval = realSetInterval;
 globalThis.clearInterval = realClearInterval;
-console.log(`\n${tests.length - failed} passed, ${failed} failed`);
+console.log(`\n${passed} passed, ${failed} failed, ${tests.length - passed - failed} skipped`);
 process.exit(failed ? 1 : 0);
