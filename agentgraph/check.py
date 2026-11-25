@@ -756,6 +756,13 @@ def _examine(raw: dict, path: Path, rules: Rules, folder: int | None, write: boo
     The one place the problem list is made; `check`, `record` and the views all use it."""
     graph, issues = _graph_and_issues(raw, path, rules.flows, rules.hubs, rules.seats, rules.teams, rules.escalation)
     if os.name == "nt":
+        if folder is not None and not issues:
+            try:
+                previous = transitions.read_windows_state(path)
+                if previous is not None:
+                    issues += transitions.problems(previous, raw)
+            except transitions.HistoryError as exc:
+                issues.append(str(exc))
         return graph, issues, [], []
     issues = issues + outputs.lost_edits(graph, rules.edits)  # an edit by hand the graph no longer records
     unsaved = outputs.unsaved_edits(graph, rules.edits)  # a save stopped before the graph: a warning
@@ -769,7 +776,7 @@ def _examine(raw: dict, path: Path, rules: Rules, folder: int | None, write: boo
 
 def _examine_read_only(raw: dict, path: Path, rules: Rules) -> tuple[TaskGraph, list[str]]:
     if os.name == "nt":
-        graph, issues, _, _ = _examine(raw, path, rules, None, False)
+        graph, issues, _, _ = _examine(raw, path, rules, path.parent, False)
         return graph, issues
     folder = None
     try:
@@ -811,7 +818,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="skip the rules that compare a graph with its last passing state (and do not save one)")
     args = parser.parse_args(argv)
     if os.name == "nt":
-        _print("warning: Windows static validation only; history, edit logs and review-copy evidence are not checked.")
+        _print("warning: Windows static validation only, plus existing state history; no history is saved. Edit logs and review-copy evidence are not checked.")
     edits = None if os.name == "nt" else outputs.edit_home(args.home)
     # A missing default folder means no drawn flows; a folder named on the command line must exist,
     # so a mistyped path cannot turn the flow checks off without a word.
@@ -849,6 +856,8 @@ def main(argv: list[str] | None = None) -> int:
     drift: dict[int, list[str]] = {}  # history-free warnings (agentgraph.transitions.warnings)
     with contextlib.ExitStack() as stack:
         folder = None  # the graph folder, locked: a graph, its history record and the save are one step
+        if not args.no_history and os.name == "nt":
+            folder = graph_dir
         if not args.no_history and os.name != "nt":
             try:
                 folder = stack.enter_context(outputs._GraphFolder(graph_dir))

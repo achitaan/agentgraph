@@ -172,6 +172,31 @@ def load_state(folder: int, stem: str) -> dict | None:
     return state
 
 
+def read_windows_state(graph_path: Path) -> dict | None:
+    """Inspect an existing state record on Windows; never create or update it."""
+    from .fileio import open_regular, windows_owned_directory
+    graph_path = Path(graph_path)
+    history = graph_path.parent / HISTORY_DIR
+    try:
+        with windows_owned_directory(history) as directory:
+            with os.fdopen(open_regular(directory / (graph_path.stem + SUFFIX), os.O_RDONLY), "rb") as stream:
+                data = stream.read(STATE_LIMIT + 1)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise HistoryError(f"history of {graph_path.stem} cannot be read: {exc}") from None
+    try:
+        if len(data) > STATE_LIMIT:
+            raise ValueError("record too large")
+        state = json.loads(data.decode("utf-8"))
+        if (not isinstance(state, dict) or state.get("version") != VERSION
+                or any(not isinstance(state.get(key), dict) for key in ("nodes", "objectives", "events"))):
+            raise ValueError("invalid state")
+    except (ValueError, RecursionError):
+        raise HistoryError(f"history of {graph_path.stem} is not a readable record") from None
+    return state
+
+
 def load_flows(folder: int, stem: str) -> dict | None:
     """The flows recorded for the graph file `stem` (`check` writes them, see `flows_record`); None when there are
     none. HistoryError when the record cannot be used."""

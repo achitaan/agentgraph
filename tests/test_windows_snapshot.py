@@ -33,6 +33,29 @@ class WindowsSnapshotTests(unittest.TestCase):
             self.assertIn("PROBLEMS", result.stdout)
 
     @unittest.skipUnless(sys.platform == "win32", "native Windows smoke test")
+    def test_existing_history_is_checked_without_writing(self):
+        from agentgraph import transitions
+        from tests.test_check import valid_graph
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            graph = folder / "test-task.json"
+            raw = valid_graph()
+            history = folder / ".history"
+            history.mkdir()
+            record = history / "test-task.state"
+            original = json.dumps(transitions.state_of(raw)).encode("utf-8")
+            record.write_bytes(original)
+            raw["nodes"][0]["done_when"] = "different test criterion"
+            graph.write_text(json.dumps(raw), encoding="utf-8")
+            args = [sys.executable, "-m", "agentgraph.check", "--dir", str(folder)]
+            result = subprocess.run(args, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("done_when", result.stdout)
+            self.assertEqual(record.read_bytes(), original)
+            skipped = subprocess.run([*args, "--no-history"], capture_output=True, text=True)
+            self.assertEqual(skipped.returncode, 0, skipped.stdout + skipped.stderr)
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows smoke test")
     def test_skill_text_inspection(self):
         from agentgraph import skillfiles
         with tempfile.TemporaryDirectory() as temp:
