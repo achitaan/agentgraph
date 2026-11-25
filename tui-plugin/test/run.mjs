@@ -1084,6 +1084,26 @@ const makePanel = (extra = {}) => {
   return Object.assign({ name: "agentgraph.graph", sessionID: "ses_p", width: 80, toggleFullscreen: () => (calls.full += 1), close: () => (calls.close += 1) }, extra, { calls });
 };
 
+test("Windows panel registration never consumes prompt letters", () => {
+  const { ctx, state, panelClaim, command } = makePanelHost();
+  const plugin = P.createPlugin({
+    ...globalThis.__agentgraphStub, os: { ...os, platform: () => "win32" },
+    fs, path, spawn, env: process.env,
+    createElement: (tag) => ({ tag, props: {}, children: [] }),
+    insert: () => {}, setProp: () => {},
+  });
+  const stop = plugin.setup(ctx);
+  try {
+    command().run();
+    panelClaim().render(makePanel());
+    command().run();
+    assert.equal(state.layers.length, 1);
+    assert.ok(state.layers.flatMap((layer) => layer.commands).every((cmd) => !cmd.bind));
+  } finally {
+    stop();
+  }
+});
+
 test("panel: the command is registered with id, title, slash name and alias", () => {
   const { ctx, state, command } = makePanelHost();
   const stop = tui.setup(ctx);

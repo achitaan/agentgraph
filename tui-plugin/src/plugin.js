@@ -792,7 +792,10 @@ export function createPlugin(host) {
     const [chatOpen, setChatOpen] = host.createSignal(false);
     const [chatTick, setChatTick] = host.createSignal(0);
     const chatView = { scroll: 0, session: null, total: null, max: 0, rows: 0 };
-    const hasKeys = () => !!(ctx.keymap && has(ctx.keymap.layer));
+    // Native Windows hosts can retain panel key layers after input returns to
+    // the prompt. Until panel-scoped bindings are verified there, never
+    // register those layers: even disabled bindings can consume typing.
+    const hasKeys = () => host.os?.platform?.() !== "win32" && !!(ctx.keymap && has(ctx.keymap.layer));
     const squash = (text) => cleanChat(text).replace(/\s+/g, " ").trim();
     // messages sent from here that the feed does not show yet, as the pending items they will be
     const pendingExtras = (state, session, feed) => {
@@ -1502,7 +1505,7 @@ export function createPlugin(host) {
     // harmless); addViewKey() adds the `g` layer once the panel's size is known, since only then is there an orbit
     // to switch to.
     function panelKeys(panel) {
-      if (!ctx.keymap || typeof ctx.keymap.layer !== "function") return { remove() {}, addViewKey() {}, sized() {} };
+      if (!hasKeys()) return { remove() {}, addViewKey() {}, sized() {} };
       const ours = () => {
         try {
           return panel.name === PANEL_NAME;
