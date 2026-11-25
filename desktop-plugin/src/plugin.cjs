@@ -1680,7 +1680,9 @@ function renderPanel(ctx, solid, props) {
   // The page shows a control only for an action it is given: send and stop only where the host has the call.
   const demoMode = ctx.options && ctx.options.demo === true;
   const hostHas = (name) => typeof sessionClient()?.[name] === "function";
-  const actions = demoMode ? { chat } : { flow, skills, roster, skillfile, team, output, run, chat, side, setup, spend, improve, loops };
+  // Windows can display live sessions, but the toolkit editors require POSIX.
+  const windows = typeof navigator !== "undefined" && /^Win/i.test(navigator.platform || "");
+  const actions = demoMode || windows ? { chat } : { flow, skills, roster, skillfile, team, output, run, chat, side, setup, spend, improve, loops };
   if (!demoMode && hostHas("prompt")) actions.send = send;
   if (!demoMode && hostHas("interrupt")) actions.stop = stop;
 

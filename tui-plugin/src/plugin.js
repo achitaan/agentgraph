@@ -553,7 +553,7 @@ export function createPlugin(host) {
         const asked = generation;
         return Promise.all([
           runner.snapshot({ session, directory: directory() }).catch((error) => errorDocument(errorMessage(error))),
-          loopRunner.list(directory()).catch(() => []),
+          host.os?.platform?.() === "win32" ? Promise.resolve([]) : loopRunner.list(directory()).catch(() => []),
         ])
           .then(([doc, loops]) => {
             if (doc && typeof doc === "object" && !doc.error && loops.length) doc.loops = loops;
@@ -776,7 +776,7 @@ export function createPlugin(host) {
     const canStop = () => !!(ctx.client && ctx.client.session && has(ctx.client.session.interrupt) && ctx.ui && ctx.ui.dialog && has(ctx.ui.dialog.confirm));
     const canMessage = () => !!(ctx.client && ctx.client.session && has(ctx.client.session.prompt) && ctx.ui && ctx.ui.dialog && has(ctx.ui.dialog.prompt));
     const canAsk = () => !!(ctx.ui && ctx.ui.dialog && has(ctx.ui.dialog.prompt));
-    const canRun = canMessage; // the goal's prompt and the send are the calls `m` uses; the chooser is optional
+    const canRun = () => host.os?.platform?.() !== "win32" && canMessage(); // toolkit flow commands require POSIX
     let runBusy = false; // a path is being run: from `r` until it was sent or given up
     const [runShown, setRunShown] = host.createSignal(true); // the key line's `r run`: hidden while runBusy
     const setRunBusy = (busy) => {

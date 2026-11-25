@@ -115,6 +115,8 @@ Keys in the live view: `1` agents, `2` tasks, `3` loops, `4` events, `5` issues,
 
 ## Limits
 
+- **Native Windows:** the Desktop and TUI plugins support the live session viewer (roster, activity, session chat and totals) and demo snapshots with Python 3.11+. Task-graph file reads, custom structure and toolkit editor commands still require POSIX filesystem semantics. The live snapshot marks this session-only mode as `read_only` and reports a warning; no Unix file protection is emulated or dropped.
+
 - **Nothing here enforces the protocol.** The orchestrator is a model following prompts. `check` catches a malformed or inconsistent graph file; it cannot stop the orchestrator from skipping a step.
 - **Live status comes from OpenCode's SQLite database**, opened read-only with a one-second timeout. A read-only reader still takes a normal shared lock while it reads. OpenCode documents session read endpoints that could replace this; that has not been tried.
 - **Session matching.** The view shows the session named in the newest graph file. Without one it looks for a session started in the project directory, and if none matches it shows the most recent session anywhere, with a warning on screen. `--session ID` picks one explicitly.
