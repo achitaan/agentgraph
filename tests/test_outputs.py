@@ -22,6 +22,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agentgraph import agentfiles, check, contract, handedits, outputs, server
+from tests.launch import LAUNCHER, bare_env, home_env
 from tests.winskip import needs_symlinks, posix_only
 from agentgraph.snapshot_json import snapshot_document
 from agentgraph.sources import build_snapshot, load_graphs
@@ -474,8 +475,8 @@ class SharedGraph(Base):
 
 class Surfaces(Base):
     def command(self, *args, stdin=""):
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.root), "PYTHONIOENCODING": "utf-8"}
-        done = subprocess.run([str(ROOT / "bin" / "agentgraph"), "output", *args], input=stdin, env=env,
+        env = bare_env(PATH=os.environ.get("PATH", "/usr/bin:/bin"), PYTHONIOENCODING="utf-8", **home_env(self.root))
+        done = subprocess.run([*LAUNCHER, "output", *args], input=stdin, env=env,
                               capture_output=True, text=True, timeout=60)
         last = [line for line in done.stdout.splitlines() if line.strip()]
         return done.returncode, json.loads(last[-1]) if last else done.stderr
@@ -559,8 +560,8 @@ class DesktopPath(Base):
 
     def test_the_snapshot_rev_is_the_one_the_desktop_write_checks(self):
         home = self.root  # the project is inside HOME, where graph discovery looks
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home), "PYTHONPATH": str(ROOT),
-               "PYTHONIOENCODING": "utf-8", "AGENTGRAPH_HOME": str(self.home)}
+        env = bare_env(PATH=os.environ.get("PATH", "/usr/bin:/bin"), PYTHONPATH=str(ROOT), PYTHONIOENCODING="utf-8",
+                       AGENTGRAPH_HOME=str(self.home), **home_env(home))
 
         def run(*args, cwd, stdin=""):
             done = subprocess.run([sys.executable, "-P", "-m", *args], cwd=cwd, env=env, input=stdin,

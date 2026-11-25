@@ -50,7 +50,8 @@ class Tokenize(unittest.TestCase):
         self.assertEqual(both, f"{portable.TOKEN}/x {portable.TOKEN}/y")
 
     def test_render_escapes_for_json(self):
-        d = '/a "b"/opencode'
+        # render makes the target absolute: a drive-less POSIX path would gain a drive on Windows, so use its own kind
+        d = r"C:\a b\opencode" if os.name == "nt" else '/a "b"/opencode'
         out = portable.render(json.dumps({"k": portable.TOKEN + "/x"}), d, True)
         self.assertEqual(json.loads(out), {"k": d + "/x"})
         self.assertEqual(portable.render(f"{portable.TOKEN}/x", d, False), d + "/x")
@@ -179,7 +180,7 @@ class Links(unittest.TestCase):
         names = portable.folder_names(str(Path(base) / "link"))
         self.assertEqual(names, [str(Path(base) / "link"), str(real)])
         f = Path(base) / "f.md"
-        f.write_text(f"{base}/link/x {real}/y\n", encoding="utf-8")
+        f.write_text(f"{Path(base) / 'link'}/x {real}/y\n", encoding="utf-8", newline="\n")
         self.assertTrue(portable.tokenize_file(f, names))
         self.assertEqual(f.read_text(encoding="utf-8"), f"{portable.TOKEN}/x {portable.TOKEN}/y\n")
         self.assertFalse(portable.tokenize_file(f, names))

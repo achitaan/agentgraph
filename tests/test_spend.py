@@ -17,6 +17,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from types import SimpleNamespace
 
 from agentgraph import demo, server, skillset, spend
+from tests.launch import LAUNCHER
 from tests.winskip import WINDOWS, needs_symlinks
 from agentgraph.snapshot_json import live_document
 
@@ -216,11 +217,11 @@ class Commands(Scratch):
             self.assertEqual(oct((self.project / ".opencode" / "spend.json").stat().st_mode & 0o777), "0o600")
 
     def test_launcher(self):
-        done = subprocess.run([str(ROOT / "bin" / "agentgraph"), "spend", "limit", "12", "--dir", str(self.project)],
+        done = subprocess.run([*LAUNCHER, "spend", "limit", "12", "--dir", str(self.project)],
                               capture_output=True, text=True)
         self.assertEqual((done.returncode, done.stderr), (0, ""), done.stdout)
         self.assertEqual(self.kept()["limit"], 12.0)
-        done = subprocess.run([str(ROOT / "bin" / "agentgraph"), "spend", "limit", "0", "--dir", str(self.project)],
+        done = subprocess.run([*LAUNCHER, "spend", "limit", "0", "--dir", str(self.project)],
                               capture_output=True, text=True)
         self.assertEqual(done.returncode, 1)
 

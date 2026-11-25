@@ -112,7 +112,8 @@ class Ledger(unittest.TestCase):
     def test_record_uses_shared_capped_listing_and_refuses_symlinks(self):
         for i in range(203):
             path = self.write_graph(f"task-{i:03}")
-            os.utime(path, ns=(1_000_000_000 + i, 1_000_000_000 + i))
+            stamp = (1_000_000_000 + i) * 10**9  # whole seconds: a Windows file time has 100 ns steps
+            os.utime(path, ns=(stamp, stamp))
         target = self.project / "target.txt"
         target.write_text(json.dumps(graph("symlink-target")), encoding="utf-8", newline="\n")
         link = self.directory / "link.json"
@@ -128,7 +129,8 @@ class Ledger(unittest.TestCase):
 
     def test_record_rejects_foreign_owned_graph_directory(self):
         self.write_graph("foreign")
-        with patch("agentgraph.sources.osfs.getuid", return_value=osfs.getuid() + 1):
+        with (patch("agentgraph.sources.osfs.getuid", return_value=osfs.getuid() + 1),
+              patch("agentgraph.sources.fileio.owned_by_me", return_value=False)):  # Windows asks the owner SID
             result, output, errors = self.record()
         self.assertEqual(result, 2, output + errors)
         self.assertIn("not owned", output + errors)

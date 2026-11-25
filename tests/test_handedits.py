@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from agentgraph import agentfiles, handedits, ledger
+from tests.launch import LAUNCHER
 from tests.winskip import needs_symlinks
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -59,7 +60,7 @@ class Scratch(unittest.TestCase):
 
     def cli(self, *args, **kwargs):
         env = {**os.environ, "AGENTGRAPH_HOME": str(self.home)}
-        return subprocess.run([str(ROOT / "bin" / "agentgraph"), *args], capture_output=True, text=True, env=env,
+        return subprocess.run([*LAUNCHER, *args], capture_output=True, text=True, env=env,
                               cwd=str(self.root), **kwargs)
 
 

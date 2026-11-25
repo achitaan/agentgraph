@@ -37,7 +37,7 @@ def make_structure(root: Path) -> Path:
 
 
 def tree(root: Path) -> dict:
-    return {str(path.relative_to(root)): (path.read_bytes() if path.is_file() else "dir")
+    return {path.relative_to(root).as_posix(): (path.read_bytes() if path.is_file() else "dir")
             for path in sorted(root.rglob("*"))}
 
 

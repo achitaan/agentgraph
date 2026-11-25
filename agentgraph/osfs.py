@@ -86,6 +86,12 @@ def is_link(info):
     return False
 
 
+def _strerror(code):
+    """The text of an error code; Windows has none for its ELOOP (WSAELOOP), so it gets one."""
+    text = os.strerror(code)
+    return "Too many levels of symbolic links" if code == errno.ELOOP and text.startswith("Unknown error") else text
+
+
 def unsafe_name(name):
     """Whether a file name means something else on Windows: a drive or a data stream (`:`), a wildcard, a control
     character, a trailing dot or space, or a device name (`NUL`, `COM1`...) with or without an extension."""
@@ -334,8 +340,8 @@ class _Portable:
             if dir_fd >= _TOKEN_BASE:
                 raise OSError(errno.EBADF, "the folder handle is closed")
             return path, dir_fd
-        if (_NT and unsafe_name(os.path.basename(path)) and os.path.basename(path) not in (".", "..")
-                and not os.path.isabs(path)):
+        last = path.replace("\\", "/").rsplit("/", 1)[-1]  # not os.path.basename: ntpath reads `a:b` as a drive and `b`
+        if _NT and unsafe_name(last) and last not in (".", "..") and not os.path.isabs(path):
             raise OSError(errno.EINVAL, "a name Windows would read as something else", path)
         return os.path.join(self._where(dir_fd), path), None
 
@@ -376,7 +382,7 @@ class _Portable:
         folder = _Folder(real, _identity(info))
         after = os.lstat(real)
         if nofollow and is_link(after):
-            raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), path)
+            raise OSError(errno.ELOOP, _strerror(errno.ELOOP), path)
         if folder.ident is not None and _identity(after) != folder.ident:
             raise OSError(getattr(errno, "ESTALE", errno.EIO), "the folder changed while it was opened", path)
         with self._guard:
@@ -391,15 +397,17 @@ class _Portable:
         wants_dir = bool(flags & O_DIRECTORY)
         nofollow = bool(flags & O_NOFOLLOW)
         creating = bool(flags & os.O_CREAT and flags & os.O_EXCL)  # an existing link is then EEXIST, as on POSIX
-        if nofollow and not creating:
+        if nofollow:
             try:
                 before = os.lstat(full, dir_fd=real_dir)
             except FileNotFoundError:
                 pass  # the open reports it, or makes it
             else:
                 if is_link(before):
+                    if creating:  # Windows would create the file the link points to: refuse before it does
+                        raise FileExistsError(errno.EEXIST, "File exists", full)
                     code = errno.ENOTDIR if wants_dir else errno.ELOOP
-                    raise OSError(code, os.strerror(code), full)
+                    raise OSError(code, _strerror(code), full)
         if wants_dir:
             if real_dir is not None:
                 return os.open(full, flags, mode, dir_fd=real_dir)
@@ -409,7 +417,7 @@ class _Portable:
             try:
                 after = os.lstat(full, dir_fd=real_dir)
                 if is_link(after) or not os.path.samestat(os.fstat(fd), after):
-                    raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), full)
+                    raise OSError(errno.ELOOP, _strerror(errno.ELOOP), full)
             except BaseException:
                 os.close(fd)
                 raise
