@@ -1,0 +1,5 @@
+# Only what must stay byte-stable; the rest of the repository is left as it is.
+*.sh text eol=lf
+bin/agentgraph text eol=lf
+*.cmd text eol=crlf
+desktop-plugin/gui-experimental.cjs text eol=lf

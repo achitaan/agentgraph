@@ -682,7 +682,7 @@ function createSkillRunner(deps) {
 
 const chars = (text) => Array.from(text).length;
 const freeText = (value, limit) => typeof value === "string" && !value.includes("\0") && chars(value) <= limit;
-const recordPath = (value) => typeof value === "string" && value.startsWith("/") && value.length <= RECORD_MAX_CHARS
+const recordPath = (value) => typeof value === "string" && (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value)) && value.length <= RECORD_MAX_CHARS
   && !value.includes("\0") && !/[\r\n]/.test(value);
 
 // One change at a time, in the order asked; the demo changes nothing. Never rejects: failures become { error }.
@@ -1091,18 +1091,36 @@ function nonEmptyString(value) {
   return typeof value === "string" && value.trim() !== "";
 }
 
+// Native Windows has no `python3`. Ask `py -3`, then `python`, for a Python 3.11 or newer and use the executable path it
+// prints: the real python.exe, so a kill ends Python itself and not just the `py` launcher in front of it. Without
+// an answer, plain "python" (the error text then tells the user to set options.python).
+const WINDOWS_PYTHON_PROBE = "import sys; sys.exit(1) if sys.version_info < (3, 11) else print(sys.executable)";
+function windowsPython(execFileSync) {
+  for (const [file, lead] of [["py", ["-3"]], ["python", []]]) {
+    try {
+      const out = String(execFileSync(file, [...lead, "-c", WINDOWS_PYTHON_PROBE],
+        { encoding: "utf8", timeout: 5000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }));
+      const line = out.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean).pop();
+      if (line) return line;
+    } catch (_) {}
+  }
+  return "python";
+}
+
 function main(ctx) {
   const childProcess = require("node:child_process");
   const fs = require("node:fs");
   const os = require("node:os");
   const path = require("node:path");
   const options = isPlainObject(ctx.options) ? ctx.options : {};
-  const expandHome = (value) => (value === "~" || value.startsWith("~/") ? path.join(os.homedir(), value.slice(1)) : value);
+  const expandHome = (value) => (value === "~" || value.startsWith("~/") || (path.sep === "\\" && value.startsWith("~\\"))
+    ? path.join(os.homedir(), value.slice(1)) : value);
 
   const home = nonEmptyString(options.home)
     ? path.resolve(expandHome(options.home.trim()))
     : path.join(os.homedir(), ".config", "opencode", "orchestration");
-  const python = nonEmptyString(options.python) ? expandHome(options.python.trim()) : "python3";
+  const python = nonEmptyString(options.python) ? expandHome(options.python.trim())
+    : process.platform === "win32" ? windowsPython(childProcess.execFileSync) : "python3";
 
   const runner = createSnapshotRunner({
     execFile: childProcess.execFile,
@@ -1680,9 +1698,7 @@ function renderPanel(ctx, solid, props) {
   // The page shows a control only for an action it is given: send and stop only where the host has the call.
   const demoMode = ctx.options && ctx.options.demo === true;
   const hostHas = (name) => typeof sessionClient()?.[name] === "function";
-  // Windows can display live sessions, but the toolkit editors require POSIX.
-  const windows = typeof navigator !== "undefined" && /^Win/i.test(navigator.platform || "");
-  const actions = demoMode || windows ? { chat } : { flow, skills, roster, skillfile, team, output, run, chat, side, setup, spend, improve, loops };
+  const actions = demoMode ? { chat } : { flow, skills, roster, skillfile, team, output, run, chat, side, setup, spend, improve, loops };
   if (!demoMode && hostHas("prompt")) actions.send = send;
   if (!demoMode && hostHas("interrupt")) actions.stop = stop;
 

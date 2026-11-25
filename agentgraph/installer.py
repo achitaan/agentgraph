@@ -39,6 +39,9 @@ NEW_SUFFIX = ".toolkit-new"
 PRESET_FILE = "oh-my-opencode-slim.json"
 RESTORABLE = ("-pre-toolkit.", "-pre-restore.")
 SKIP_NAMES = {".DS_Store", "__pycache__"}
+# The commands the toolkit installs: the same list as toolkit_commands in commands/.toolkit.sh (a test compares them).
+# install.sh passes it as --commands; installcli.py (install.cmd) uses it directly.
+TOOLKIT_COMMANDS = ("agent-skills", "flow", "flows", "graph-check", "learn", "note", "spend")
 _MISSING = object()
 
 

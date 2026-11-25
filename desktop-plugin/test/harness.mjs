@@ -254,10 +254,10 @@ function resolveDefault(exportsValue) {
   return Object.prototype.hasOwnProperty.call(exportsValue, "default") ? exportsValue.default : exportsValue;
 }
 
-function loadMain(code, spawnLog, { timeoutMs } = {}) {
+function loadMain(code, spawnLog, { timeoutMs, execFileSync } = {}) {
   const gui = guiStub("main");
   const unexpected = [];
-  const countingChildProcess = Object.assign({}, childProcess, {
+  const countingChildProcess = Object.assign({}, childProcess, execFileSync ? { execFileSync } : {}, {
     execFile(file, args, options, callback) {
       const entry = { file, args, cwd: options.cwd, timeout: options.timeout, stdin: "" };
       spawnLog.push(entry);
@@ -3750,6 +3750,47 @@ await check("labels: the chip goes below the sun, above when that covers fewer p
   three.forEach((p) => assert.ok(!ldisc(side.box, p), "no planet under the chip"));
   // a planet behind the sun counts as much as one in front: the chip hides it either way
   assert.equal(LABELS.placeChip(chip, [{ cx: 300, cy: 400, r: 20, z: -5 }], { now: 0 }).side, "above");
+});
+
+await check("native Windows: the default Python is found with py -3, then python, as a real python.exe path; elsewhere python3", async () => {
+  const definition = resolveDefault(mainLoad.module.exports);
+  const caller = { window: 1, signal: new AbortController().signal };
+  const original = Object.getOwnPropertyDescriptor(process, "platform");
+  const pythonUsed = async (platform, execFileSync) => {
+    Object.defineProperty(process, "platform", { value: platform, configurable: true });
+    try {
+      const log = [];
+      const loaded = loadMain(CODE, log, { execFileSync });
+      const m = mainContext({ home: ORCHESTRATION });
+      resolveDefault(loaded.module.exports).main(m.ctx);
+      await m.provided[0].impl.snapshot({ directory: ORCHESTRATION, session: "" }, caller);
+      return log[0].file;
+    } finally {
+      Object.defineProperty(process, "platform", original);
+    }
+  };
+  const asked = [];
+  const found = (file, args) => {
+    asked.push([file, ...args.slice(0, 1)]);
+    if (file === "py") return "C:\\Python312\\python.exe\r\n";
+    throw new Error("not reached");
+  };
+  assert.equal(await pythonUsed("win32", found), "C:\\Python312\\python.exe");
+  assert.deepEqual(asked, [["py", "-3"]]);
+  const second = [];
+  const old = (file, args) => {
+    second.push(file);
+    if (file === "py") { const error = new Error("old"); error.status = 1; throw error; }
+    return "D:\\Tools\\python.exe\n";
+  };
+  assert.equal(await pythonUsed("win32", old), "D:\\Tools\\python.exe");
+  assert.deepEqual(second, ["py", "python"]);
+  const none = () => { throw Object.assign(new Error("none"), { code: "ENOENT" }); };
+  assert.equal(await pythonUsed("win32", none), "python");
+  const never = () => { throw new Error("must not probe off Windows"); };
+  assert.equal(await pythonUsed("linux", never), "python3");
+  assert.equal(await pythonUsed("darwin", never), "python3");
+  assert.equal(process.platform, original.value);
 });
 
 await check("the harness replaces an existing temporary bundle before reading it", () => {

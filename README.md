@@ -24,6 +24,17 @@ sh install.sh             # backs up anything it replaces
 
 Then follow [config/PLUGINS.md](config/PLUGINS.md) to turn the visualizer on. It needs the `oh-my-opencode-slim` plugin and Python 3.11 or newer.
 
+On native Windows (cmd or PowerShell), with [Git](https://git-scm.com/) and Python 3.11 or newer from python.org (the `py` launcher or `python` on the PATH):
+
+```bat
+git clone https://github.com/achitaan/opencode-agentgraph "%USERPROFILE%\.config\opencode\orchestration"
+cd /d "%USERPROFILE%\.config\opencode\orchestration"
+install.cmd --dry-run
+install.cmd
+```
+
+In PowerShell write `cd "$HOME\.config\opencode\orchestration"` and `.\install.cmd`. `install.cmd` takes the same options as `install.sh` and puts the files in `%OPENCODE_CONFIG_DIR%`, else `%USERPROFILE%\.config\opencode`. To start the viewer or any command, run `bin\agentgraph.cmd` where `bin/agentgraph` is written below. `AGENTGRAPH_PYTHON` (a full path) picks a particular Python. `sync.sh` is the maintainer's copy tool; it is optional and Unix-only.
+
 ### Updating
 
 ```sh
@@ -31,6 +42,8 @@ git pull
 sh install.sh --dry-run   # what would change
 sh install.sh             # files you never changed are updated; files you changed are kept
 ```
+
+On Windows: `git pull`, then `install.cmd --dry-run` and `install.cmd`.
 
 Your chosen preset, models, added agents, prompts and skills survive an update. Where you and the toolkit both
 changed a file, yours stays and the toolkit's version is written beside it as `<name>.toolkit-new`. Everything
@@ -57,6 +70,8 @@ Run everything through the launcher, from the project you are working in:
 ~/.config/opencode/orchestration/bin/agentgraph --demo     # live view on sample data
 ~/.config/opencode/orchestration/bin/agentgraph serve      # the graph as a web page: http://127.0.0.1:4747/
 ```
+
+On native Windows, use `bin\agentgraph.cmd` in that folder for `bin/agentgraph`: `%USERPROFILE%\.config\opencode\orchestration\bin\agentgraph.cmd serve`.
 
 The web page is the clean view: one network of your agents that you can pan, zoom and drag, with the lines following the current task's handoffs and review loops, and details on click. Open its address in a browser, or in the OpenCode Desktop Review pane. `desktop-plugin/` holds the same view as a native OpenCode Desktop side panel.
 
@@ -115,7 +130,7 @@ Keys in the live view: `1` agents, `2` tasks, `3` loops, `4` events, `5` issues,
 
 ## Limits
 
-- **Native Windows:** the Desktop and TUI plugins support the live session viewer (roster, activity, session chat and totals), custom structure, flow listing and demo snapshots with Python 3.11+. Task-graph file reads and toolkit editor commands still require POSIX filesystem semantics. The live snapshot marks this mode as `read_only` and reports a warning; no Unix file protection is emulated or dropped.
+- **Native Windows:** everything runs on Windows 10 and 11 with Python 3.11 or newer (found as `py -3`, then `python`), without WSL: the viewer, the web page, the checker and the editors, the loops, the OpenCode Desktop and terminal plugins, and the slash commands. Install with `install.cmd` and start with `bin\agentgraph.cmd` (see Install). Git for Windows is only needed to clone. The two plugins find Python themselves; set the plugin option `python` to choose one. Mac-only: the benchmark sandbox (`agentgraph bench`), which relies on macOS tools. The test workflow (`.github/workflows/tests.yml`) runs the whole suite on Windows and macOS; if something does not start on your machine, open an issue with the command and its output.
 
 - **Nothing here enforces the protocol.** The orchestrator is a model following prompts. `check` catches a malformed or inconsistent graph file; it cannot stop the orchestrator from skipping a step.
 - **Live status comes from OpenCode's SQLite database**, opened read-only with a one-second timeout. A read-only reader still takes a normal shared lock while it reads. OpenCode documents session read endpoints that could replace this; that has not been tried.
