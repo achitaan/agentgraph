@@ -742,7 +742,7 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
         from . import setups
         setups.annotate(document)
         document["read_only"] = True
-        document["warnings"].append("Windows: read-only viewer; task graphs and toolkit editors require POSIX.")
+        document["warnings"].append("Windows: read-only task graph viewer; toolkit editors and full graph validation require POSIX.")
         document["skills"] = skills_document()
         from . import skillfiles
         skillfiles.annotate(document)

@@ -62,17 +62,40 @@ class WindowsSnapshotTests(unittest.TestCase):
         self.assertFalse(doc["roster"]["editable"])
         self.assertTrue(any("Windows" in warning for warning in doc["warnings"]))
 
-    def test_graph_reads_fail_closed(self):
+    @unittest.skipUnless(sys.platform == "win32", "native Windows smoke test")
+    def test_graph_reads_and_bounds(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
             graph = folder / "task.json"
-            graph.write_text("{}", encoding="utf-8")
-            with patch.object(sources, "WINDOWS", True):
-                with self.assertRaisesRegex(OSError, "not supported on Windows"):
-                    sources.read_graph_text(graph)
-                graphs, warnings = sources.load_graphs(folder)
-                self.assertEqual(graphs, [])
-                self.assertTrue(any("not supported on Windows" in warning for warning in warnings))
+            graph.write_text('{"task":"example","nodes":[]}', encoding="utf-8")
+            self.assertEqual(json.loads(sources.read_graph_text(graph))["task"], "example")
+            graphs, warnings = sources.load_graphs(folder)
+            self.assertEqual([g.task for g in graphs], ["example"])
+            self.assertEqual(warnings, [])
+            graph.write_bytes(b"x" * (sources.MAX_GRAPH_BYTES + 1))
+            with self.assertRaisesRegex(OSError, "exceeds"):
+                sources.read_graph_text(graph)
+            with self.assertRaises(OSError):
+                sources.graph_files(graph)
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows junction test")
+    def test_graph_directory_junction_refused(self):
+        import os
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            target.mkdir()
+            (target / "task.json").write_text('{"task":"example"}', encoding="utf-8")
+            link = root / "junction"
+            subprocess.run(["cmd.exe", "/c", "mklink", "/J", str(link), str(target)],
+                           capture_output=True, check=True)
+            try:
+                with self.assertRaises(OSError):
+                    sources.read_graph_text(link / "task.json")
+                with self.assertRaises(OSError):
+                    sources.graph_files(link)
+            finally:
+                os.rmdir(link)
 
     @unittest.skipUnless(sys.platform == "win32", "native Windows smoke test")
     def test_flow_listing(self):

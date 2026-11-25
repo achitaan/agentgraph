@@ -13,11 +13,13 @@ import re
 import sqlite3
 import stat
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from .contract import Agent, Event, Node, Objective, Session, Snapshot, TaskGraph, POOL, group_of
 from .contract import Artifact, ArtifactInput
 from .contract import GRAPH_LIMITS, MAX_NODE_LIST
+from .fileio import open_regular, windows_owned_directory
 
 CONFIG_DIR = Path.home() / ".config" / "opencode"
 DB_PATH = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
@@ -188,9 +190,14 @@ def _load_roster(config_dir: Path, *, config_path: Path | None = None,
 
 def read_graph_text(path: Path) -> str:
     """Read one bounded regular graph file without following its symlink."""
-    if WINDOWS:
-        raise OSError("secure task graph reads are not supported on Windows")
     path = Path(path)
+    if WINDOWS:
+        with windows_owned_directory(path.parent) as directory:
+            with os.fdopen(open_regular(directory / path.name, os.O_RDONLY), "rb") as stream:
+                data = stream.read(MAX_GRAPH_BYTES + 1)
+            if len(data) > MAX_GRAPH_BYTES:
+                raise OSError(f"graph exceeds {MAX_GRAPH_BYTES} byte limit")
+            return data.decode("utf-8")
     root = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
@@ -214,11 +221,7 @@ def read_graph_text(path: Path) -> str:
 def graph_files(directory: Path) -> tuple[list[Path], list[str]]:
     """Select at most 200 graphs, newest by mtime, without following file links."""
     directory = Path(directory)
-    if WINDOWS:
-        if not directory.exists():
-            return [], []
-        raise OSError("secure task graph reads are not supported on Windows")
-    if directory.stat().st_uid != os.getuid():
+    if not WINDOWS and directory.stat().st_uid != os.getuid():
         raise PermissionError(f"graph directory {directory} is not owned by the current user")
     warnings = []
     count = 0
@@ -237,7 +240,8 @@ def graph_files(directory: Path) -> tuple[list[Path], list[str]]:
                 count += 1
                 yield (-modified, entry.name, Path(entry.path))
 
-    newest = heapq.nsmallest(MAX_GRAPH_FILES, entries())
+    with windows_owned_directory(directory) if WINDOWS else nullcontext():
+        newest = heapq.nsmallest(MAX_GRAPH_FILES, entries())
     if count > MAX_GRAPH_FILES:
         warnings.append(f"graph: skipped {count - MAX_GRAPH_FILES} older graph files in {directory} "
                         f"(limit {MAX_GRAPH_FILES}, newest by mtime first)")
@@ -474,9 +478,8 @@ def find_graph_dir(start: Path, warnings: list[str] | None = None) -> Path | Non
             info = candidate.stat()
             if stat.S_ISDIR(info.st_mode):
                 if WINDOWS:
-                    if warnings is not None:
-                        warnings.append("graph: secure task graph reads are not supported on Windows")
-                    return None
+                    with windows_owned_directory(candidate):
+                        return candidate
                 if info.st_uid == os.getuid():
                     return candidate
                 if warnings is not None:

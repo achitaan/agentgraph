@@ -115,7 +115,7 @@ Keys in the live view: `1` agents, `2` tasks, `3` loops, `4` events, `5` issues,
 
 ## Limits
 
-- **Native Windows:** the Desktop and TUI plugins support the live session viewer (roster, activity, session chat and totals), custom structure, flow listing and demo snapshots with Python 3.11+. Task-graph file reads and toolkit editor commands still require POSIX filesystem semantics. The live snapshot marks this mode as `read_only` and reports a warning; no Unix file protection is emulated or dropped.
+- **Native Windows:** the Desktop and TUI plugins support the live session viewer (roster, activity, session chat and totals), custom structure, flow listing, read-only task graphs and demo snapshots with Python 3.11+. Task-graph reads check directory ownership with Windows SIDs and reject directory reparse points. Graph editing and full validation still require POSIX. The live snapshot marks this mode as `read_only` and reports a warning.
 
 - **Nothing here enforces the protocol.** The orchestrator is a model following prompts. `check` catches a malformed or inconsistent graph file; it cannot stop the orchestrator from skipping a step.
 - **Live status comes from OpenCode's SQLite database**, opened read-only with a one-second timeout. A read-only reader still takes a normal shared lock while it reads. OpenCode documents session read endpoints that could replace this; that has not been tried.
