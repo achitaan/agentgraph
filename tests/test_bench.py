@@ -21,7 +21,7 @@ from tests.winskip import WINDOWS, needs_symlinks
 if not WINDOWS:
     CHECK_ENV = 'echo "${HOME#*/temp/}|${OPENCODE_CONFIG_DIR-unset}|${P4_DB##*/}|${AGENTGRAPH_HOME-unset}|${MADE_UP_KEY-unset}"'
 elif HAS_SH:
-    CHECK_ENV = (r"""h=$(echo "$HOME" | tr '\\' /); h=${h%/home}; d=$(echo "$P4_DB" | tr '\\' /); """
+    CHECK_ENV = (r"""h=$(printf %s "$HOME" | tr -c 'A-Za-z0-9_.-' /); h=${h%/home}; d=$(printf %s "$P4_DB" | tr -c 'A-Za-z0-9_.-' /); """
                  r"""echo "${h##*/}/home|${OPENCODE_CONFIG_DIR-unset}|${d##*/}|${AGENTGRAPH_HOME-unset}|${MADE_UP_KEY-unset}""" + '"')
 else:
     CHECK_ENV = python_command(

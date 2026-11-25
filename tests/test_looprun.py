@@ -560,7 +560,7 @@ class RecordTests(Base):
     def test_the_work_folder_is_where_the_agent_and_the_check_run(self):
         work = self.tmp / "elsewhere"
         work.mkdir()
-        self.save(check=sh_or("test -f marker && exit 0 || exit 1", "if exist marker (exit 0) else (exit 1)"), attempts=1)
+        self.save(check=sh_or("test -f marker && exit 0 || exit 1", "import os, sys; sys.exit(0 if os.path.exists('marker') else 1)"), attempts=1)
         (work / "marker").write_text("x")
         run, record, ex = self.go(workdir=work)
         self.assertEqual(record["status"], "passed")

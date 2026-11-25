@@ -108,6 +108,14 @@ class Base(unittest.TestCase):
         self.assertTrue(self.runs(), done)
         return thread, done
 
+    def logs(self, run):
+        """What the controller and the driver wrote, for a failure message."""
+        parts = []
+        for name in ("node.log", "run.log"):
+            with contextlib.suppress(OSError):
+                parts.append(f"{name}: " + (run / name).read_bytes().decode("utf-8", "replace")[-1500:])
+        return "\n".join(parts) + f"\nheld={looprun._held(run)}"
+
     def runs(self):
         folder = looprun.loops_folder(self.project)
         return sorted(p for p in folder.iterdir() if p.is_dir()) if folder.is_dir() else []
@@ -387,14 +395,6 @@ class KilledController(Base):
         self.run_folder = run
         return run
 
-    def logs(self, run):
-        """What the controller and the driver wrote, for a failure message."""
-        parts = []
-        for name in ("node.log", "run.log"):
-            with contextlib.suppress(OSError):
-                parts.append(f"{name}: " + (run / name).read_bytes().decode("utf-8", "replace")[-1500:])
-        return "\n".join(parts) + f"\nheld={looprun._held(run)}"
-
     def test_a_detached_run_that_is_killed_is_reported_as_it_is(self):
         run = self.start_detached()
         first = noderun.status(TASK, "n1", self.directory)
@@ -434,7 +434,7 @@ class Detached(Base):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = noderun.main(["wait", "--task", TASK, "--node", "n1", "--dir", str(self.directory), "--timeout", "60"])
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 0, out.getvalue() + self.logs(self.runs()[0]))
         self.assertTrue(out.getvalue().startswith("passed-check attempts=3 cost=$0.3000"), out.getvalue())
         self.assertEqual(len(out.getvalue().splitlines()), 1)
         self.assertEqual(self.node()["status"], "returned")
@@ -1200,7 +1200,7 @@ class SecondController(Base):
         self.assertIn("no longer belongs to this run", text)
         self.assertIn("asked to stop", text)
         run_id, line, _ = self.run_node([{}, {}, {}])  # and now it is final: a new run is allowed
-        self.assertEqual(self.node()["status"], "returned")
+        self.assertEqual(self.node()["status"], "returned", {k: v for k, v in self.node().items() if k in ("attempts", "spent", "evidence", "note", "budget")})
 
     def test_a_queued_run_that_a_controller_may_still_take_blocks_a_new_one(self):
         folder = looprun.loops_folder(self.project) / "20261121-000000-abcd"
