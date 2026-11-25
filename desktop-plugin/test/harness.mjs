@@ -273,6 +273,10 @@ function resolveDefault(exportsValue) {
   return Object.prototype.hasOwnProperty.call(exportsValue, "default") ? exportsValue.default : exportsValue;
 }
 
+// Fake interpreters that run through node (see chatPython): FAKE_VIA_NODE is on for native Windows, or anywhere with
+// HARNESS_FAKE_NODE=1; FAKE_PROGRAMS maps the path handed to the plugin to the Node program that stands in for it.
+const FAKE_VIA_NODE = process.platform === "win32" || process.env.HARNESS_FAKE_NODE === "1";
+const FAKE_PROGRAMS = new Map();
 function loadMain(code, spawnLog, { timeoutMs, execFileSync } = {}) {
   const gui = guiStub("main");
   const unexpected = [];
@@ -281,7 +285,8 @@ function loadMain(code, spawnLog, { timeoutMs, execFileSync } = {}) {
       const entry = { file, args, cwd: options.cwd, timeout: options.timeout, stdin: "" };
       spawnLog.push(entry);
       // Exercise Node's real timeout and kill without waiting the full production timeout.
-      const child = childProcess.execFile(file, args, timeoutMs === undefined ? options : { ...options, timeout: timeoutMs }, callback);
+      const program = FAKE_PROGRAMS.get(file);
+      const child = childProcess.execFile(program ? process.execPath : file, program ? [program, ...args] : args, timeoutMs === undefined ? options : { ...options, timeout: timeoutMs }, callback);
       // Record what the plugin sends on stdin (the flow instruction), without changing it.
       if (child && child.stdin) {
         const end = child.stdin.end.bind(child.stdin);
@@ -2363,8 +2368,74 @@ await check("the planted-secret test through the bridge: a scratch HOME whose se
 
 const FEED = { session: "ses_a", agent: "impl-openai", busy: true, items: [{ kind: "text", time: 1, text: "<b>hi</b>" }, { kind: "tool", time: 2, name: "read", status: "running" }], truncated: false, more: false, warning: null };
 
+// A fake interpreter for the chat tests, given as the little shell script it would be on macOS and Linux (`printf`,
+// `echo`, `cat > /dev/null`, `exit N`, with `;` or a newline between them). Native Windows has no sh and cannot start an
+// extensionless script (nor, safely, a .cmd file), so there the same script is translated to a small Node program and
+// loadMain's execFile runs it through node itself while still logging the path the plugin was given. Setting
+// HARNESS_FAKE_NODE=1 does the same anywhere, which is how the translation is tested on a Mac.
+
+// The shell subset above as steps: { say, fd }, { drain } or { exit }. Anything else throws, so a new kind of fake
+// fails loudly instead of doing nothing.
+function shellSteps(script) {
+  const steps = [];
+  let words = [];
+  let redirect = 1;
+  let current = null;
+  const endWord = () => { if (current !== null) { words.push(current); current = null; } };
+  const endStatement = () => {
+    endWord();
+    const [command, ...rest] = words;
+    words = [];
+    const fd = redirect;
+    redirect = 1;
+    if (command === undefined) return;
+    if (command === "printf") {
+      if (rest[0] !== "%s\\n") throw new Error(`fake shell: printf format ${rest[0]}`);
+      for (const text of rest.slice(1)) steps.push({ say: text, fd });
+    } else if (command === "echo") steps.push({ say: rest.join(" "), fd });
+    else if (command === "cat" && rest.length === 0 && fd === "null") steps.push({ drain: true });
+    else if (command === "exit") steps.push({ exit: Number(rest[0] ?? 0) });
+    else throw new Error(`fake shell: ${command} ${rest.join(" ")}`);
+  };
+  for (let i = 0; i < script.length; i += 1) {
+    const c = script[i];
+    if (c === "'") {
+      const end = script.indexOf("'", i + 1);
+      current = (current ?? "") + script.slice(i + 1, end);
+      i = end;
+    } else if (c === '"') {
+      current = current ?? "";
+      for (i += 1; script[i] !== '"'; i += 1) current += script[i] === "\\" && '"\\'.includes(script[i + 1]) ? script[(i += 1)] : script[i];
+    } else if (c === ">") {
+      endWord();
+      const target = script.slice(i + 1).match(/^(&2|\s*\/dev\/null)/)[0];
+      redirect = target === "&2" ? 2 : "null";
+      i += target.length;
+    } else if (c === ";" || c === "\n") endStatement();
+    else if (c === " " || c === "\t") endWord();
+    else current = (current ?? "") + c;
+  }
+  endStatement();
+  return steps;
+}
+
+const FAKE_RUNNER = `const fs = require("fs");
+for (const step of STEPS_HERE) {
+  if (step.say !== undefined) fs.writeSync(step.fd, step.say + "\\n");
+  else if (step.drain) { try { fs.readFileSync(0); } catch (_) {} }
+  else process.exit(step.exit);
+}
+`;
+
 function chatPython(name, script) {
   const python = path.join(TMP, name);
+  if (FAKE_VIA_NODE) {
+    const program = python + ".js";
+    fs.writeFileSync(program, FAKE_RUNNER.replace("STEPS_HERE", JSON.stringify(shellSteps(script).map((step) => ({ ...step, fd: step.fd === 2 ? 2 : 1 })))));
+    fs.writeFileSync(python, "a stand-in: loadMain's execFile runs the .js next to it through node\n");
+    FAKE_PROGRAMS.set(python, program);
+    return python;
+  }
   fs.writeFileSync(python, `#!/bin/sh\n${script}\n`, { mode: 0o700 });
   return python;
 }
