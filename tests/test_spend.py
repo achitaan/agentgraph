@@ -17,9 +17,10 @@ from contextlib import redirect_stderr, redirect_stdout
 from types import SimpleNamespace
 
 from agentgraph import demo, server, skillset, spend
+from tests.winskip import WINDOWS, needs_symlinks
 from agentgraph.snapshot_json import live_document
 
-SCRATCH = Path("/private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode/spend-tests")
+SCRATCH = Path(tempfile.gettempdir()).resolve() / "agentgraph-spend-tests"
 ROOT = Path(__file__).resolve().parent.parent
 MARKER = "MARKER-5d1e-never-shown"
 SCHEMA = (
@@ -56,7 +57,7 @@ class Scratch(unittest.TestCase):
         self.db = Path(directory.name) / "opencode.db"
 
     def kept(self):
-        return json.loads((self.project / ".opencode" / "spend.json").read_text())
+        return json.loads((self.project / ".opencode" / "spend.json").read_text(encoding="utf-8"))
 
     def make_db(self, sessions, messages, schema=SCHEMA):
         conn = sqlite3.connect(self.db)
@@ -107,7 +108,7 @@ class Huge(Scratch):
         (self.project / ".opencode").mkdir()
         target = self.project / ".opencode" / "spend.json"
         for text in ('{"version": 1, "limit": 1%s, "warn": 5}' % ("0" * 399), '{"version": 1, "limit": 50, "warn": 1%s}' % ("0" * 399)):
-            target.write_text(text)
+            target.write_text(text, encoding="utf-8", newline="\n")
             with self.assertRaises(spend.SpendError):
                 spend._read(self.project)
             code, out, err = run("show", "--dir", str(self.project), "--db", str(self.db), "--json")
@@ -175,7 +176,7 @@ class Commands(Scratch):
     def test_damaged_file_is_not_echoed_and_can_be_replaced(self):
         folder = self.project / ".opencode"
         folder.mkdir()
-        (folder / "spend.json").write_text(MARKER)
+        (folder / "spend.json").write_text(MARKER, encoding="utf-8", newline="\n")
         code, out, err = run("show", "--dir", str(self.project), "--db", str(self.db))
         self.assertEqual(code, 0)  # the figures are still told; the damaged limit is read as none
         self.assertNotIn(MARKER, out + err)
@@ -186,11 +187,12 @@ class Commands(Scratch):
         self.assertEqual((answer["changed"], answer["previous"]), (True, {"limit": None, "warn": None}))
         self.assertEqual(self.kept()["limit"], 10.0)
 
+    @needs_symlinks
     def test_symlinks_are_refused(self):
         folder = self.project / ".opencode"
         folder.mkdir()
         target = self.project / "elsewhere"
-        target.write_text("keep")
+        target.write_text("keep", encoding="utf-8", newline="\n")
         (folder / "spend.json").symlink_to(target)
         with self.assertRaises(spend.SpendError):
             spend.show(self.project)
@@ -199,18 +201,19 @@ class Commands(Scratch):
         other.mkdir()
         project = self.project.parent / "linked"
         project.mkdir()
-        (project / ".opencode").symlink_to(other)
+        (project / ".opencode").symlink_to(other, target_is_directory=True)
         code, _, err = run("limit", "9", "--dir", str(project))
         self.assertEqual(code, 1)
         self.assertIn("plain folder", err)
         self.assertEqual(list(other.iterdir()), [])
-        self.assertEqual(target.read_text(), "keep")
+        self.assertEqual(target.read_text(encoding="utf-8"), "keep")
 
     def test_a_write_leaves_only_the_file_and_its_lock(self):
         run("limit", "5", "--dir", str(self.project))
         run("limit", "6", "--dir", str(self.project))
         self.assertEqual(sorted(p.name for p in (self.project / ".opencode").iterdir()), ["spend.json", "spend.lock"])
-        self.assertEqual(oct((self.project / ".opencode" / "spend.json").stat().st_mode & 0o777), "0o600")
+        if not WINDOWS:  # a Windows file has no owner-only mode bits
+            self.assertEqual(oct((self.project / ".opencode" / "spend.json").stat().st_mode & 0o777), "0o600")
 
     def test_launcher(self):
         done = subprocess.run([str(ROOT / "bin" / "agentgraph"), "spend", "limit", "12", "--dir", str(self.project)],
@@ -387,7 +390,7 @@ class Endpoint(Served):
 
     def test_a_stored_huge_integer_keeps_the_snapshot_well_behaved(self):
         (self.project / ".opencode").mkdir(exist_ok=True)
-        (self.project / ".opencode" / "spend.json").write_text('{"version": 1, "limit": 1%s, "warn": 5}' % ("0" * 399))
+        (self.project / ".opencode" / "spend.json").write_text('{"version": 1, "limit": 1%s, "warn": 5}' % ("0" * 399), encoding="utf-8", newline="\n")
         body = self.snapshot()
         self.assertIsNone(body["spend"]["limit"])
 
@@ -436,7 +439,7 @@ class Snapshot(Served):
 
     def test_damaged_file_reads_as_no_limit(self):
         (self.project / ".opencode").mkdir()
-        (self.project / ".opencode" / "spend.json").write_text(MARKER)
+        (self.project / ".opencode" / "spend.json").write_text(MARKER, encoding="utf-8", newline="\n")
         status, raw, _ = self.call(b"", method="GET", path="/api/snapshot")
         self.assertEqual(status, 200)
         self.assertNotIn(MARKER, json.dumps(raw))

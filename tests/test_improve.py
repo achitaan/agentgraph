@@ -9,6 +9,7 @@ import unittest.mock
 from pathlib import Path
 
 from agentgraph import cases, improve, ledger
+from tests.winskip import needs_symlinks
 
 
 def sha(data: bytes) -> str:
@@ -37,7 +38,7 @@ class Base(unittest.TestCase):
         self.file.write_bytes(self.original)
         self.newfile = self.tmp / "new.md"
         self.newtext = "You are the designer.\nBe briefer.\n"
-        self.newfile.write_text(self.newtext)
+        self.newfile.write_text(self.newtext, encoding="utf-8", newline="\n")
 
     def propose(self, **kw):
         return improve.propose(self.home, self.root, "Shorter designer", "Designer talks too much",
@@ -70,7 +71,7 @@ class DigestTests(Base):
         from agentgraph import snapshot_json
         self.home = self.tmp / "memory"  # where the snapshot looks for the active ledger
         record = self.propose()
-        (self.home / "feedback.jsonl").write_text(json.dumps({"time": 1.0, "text": "n", "agent": "a", "task": "t"}) + "\n")
+        (self.home / "feedback.jsonl").write_text(json.dumps({"time": 1.0, "text": "n", "agent": "a", "task": "t"}) + "\n", encoding="utf-8", newline="\n")
         learning = snapshot_json.learning_document(self.tmp, config_path=self.tmp / "none.json")
         self.assertEqual([(item["id"], item["state"]) for item in learning["proposals"]], [(record["id"], "drafted")])
 
@@ -78,7 +79,7 @@ class DigestTests(Base):
 class CycleTests(Base):
     def test_propose_records_base_hash_and_state(self):
         record = self.propose(cases_=["abc123"], notes=["1795000000"])
-        saved = json.loads((self.home / "proposals" / f"{record['id']}.json").read_text())
+        saved = json.loads((self.home / "proposals" / f"{record['id']}.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["state"], "drafted")
         self.assertEqual(saved["changes"], [{"path": self.rel, "base_sha256": sha(self.original), "new_text": self.newtext}])
         self.assertEqual(saved["evidence"]["cases"], ["abc123"])
@@ -111,11 +112,11 @@ class CycleTests(Base):
         self.assertEqual((backup / self.rel).read_bytes(), self.original)
         self.assertEqual(application["files"], [{"path": self.rel, "before_sha256": sha(self.original),
                                                  "after_sha256": sha(self.newtext.encode())}])
-        rows = [json.loads(line) for line in (self.home / "improvements.jsonl").read_text().splitlines()]
+        rows = [json.loads(line) for line in (self.home / "improvements.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["file"], [self.rel])
         self.assertIn(record["id"], rows[0]["summary"])
-        self.assertEqual(json.loads((self.home / "proposals" / f"{record['id']}.json").read_text())
+        self.assertEqual(json.loads((self.home / "proposals" / f"{record['id']}.json").read_text(encoding="utf-8"))
                          ["applications"][-1]["ledger_time"], rows[0]["time"])
         self.assertEqual(ledger._read(self.home / "improvements.jsonl", ledger._valid_improvement)[0][1]["file"], [self.rel])
 
@@ -250,7 +251,7 @@ class CycleTests(Base):
         record = improve.propose(self.home, self.root, "New skill", "needed", [(rel, "# new\n")])
         self.assertIsNone(record["changes"][0]["base_sha256"])
         self.approve(record)
-        self.assertEqual((self.root / rel).read_text(), "# new\n")
+        self.assertEqual((self.root / rel).read_text(encoding="utf-8"), "# new\n")
         improve.revert(self.home, self.root, record["id"])
         self.assertFalse((self.root / rel).exists())
         self.assertFalse((self.root / "skills").exists())  # the folders it made are gone too
@@ -271,11 +272,12 @@ class CycleTests(Base):
 
 
 class PathTests(Base):
+    @needs_symlinks
     def test_unsafe_and_non_prompt_paths_are_refused(self):
         outside = self.tmp / "outside.md"
-        outside.write_text("x")
+        outside.write_text("x", encoding="utf-8", newline="\n")
         (self.root / "skills").mkdir()
-        os.symlink(self.tmp, self.root / "skills" / "escape")
+        os.symlink(self.tmp, self.root / "skills" / "escape", target_is_directory=True)
         os.symlink(outside, self.root / "agents-link.md")
         os.symlink(outside, self.root / "skills" / "link.md")
         bad = ["../outside.md", "skills/../../outside.md", "/etc/hosts.md", str(outside), "skills//x.md", "skills/./x.md",
@@ -286,12 +288,12 @@ class PathTests(Base):
             with self.subTest(path=path):
                 with self.assertRaises(improve.ImproveError):
                     improve.propose(self.home, self.root, "t", "w", [(path, "text\n")])
-        self.assertEqual(outside.read_text(), "x")
+        self.assertEqual(outside.read_text(encoding="utf-8"), "x")
         self.assertFalse((self.home / "proposals").exists())
 
     def test_a_json_target_through_the_command_is_refused(self):
         source = self.tmp / "x.json"
-        source.write_text("{}")
+        source.write_text("{}", encoding="utf-8", newline="\n")
         code, _, err = self.cli("propose", "--title", "t", "--why", "w", "--change", f"oh-my-opencode-slim.json={source}")
         self.assertEqual(code, 1)
         self.assertIn("not a prompt file", err)
@@ -300,6 +302,7 @@ class PathTests(Base):
         for path in ("AGENTS.md", "agents/mine.md", "skills/a/SKILL.md", "oh-my-opencode-slim/fast/x_append.md"):
             self.assertEqual(improve.safe_path(self.root, path), self.root / path)
 
+    @needs_symlinks
     def test_a_symlink_swapped_in_after_drafting_is_refused_at_approval(self):
         record = self.propose()
         target = self.tmp / "elsewhere.md"
@@ -343,8 +346,8 @@ class FaultTests(Base):
     def test_a_text_that_cannot_be_encoded_is_refused_before_anything_is_written(self):
         record = self.two()
         path = improve._path(self.home, record["id"])
-        path.write_text(path.read_text().replace("new agents\\n", "\\ud800").replace('"new agents\n"', '"\\ud800"'))
-        self.assertIn("ud800", path.read_text())
+        path.write_text(path.read_text(encoding="utf-8").replace("new agents\\n", "\\ud800").replace('"new agents\n"', '"\\ud800"'), encoding="utf-8", newline="\n")
+        self.assertIn("ud800", path.read_text(encoding="utf-8"))
         with self.assertRaises(improve.ImproveError):
             self.approve(record)
         self.untouched()
@@ -414,9 +417,9 @@ class FaultTests(Base):
         record = self.propose()
         self.approve(record)
         path = improve._path(self.home, record["id"])
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         edit(data["applications"][-1])
-        path.write_text(json.dumps(data))
+        path.write_text(json.dumps(data), encoding="utf-8", newline="\n")
         return record
 
     def test_a_created_folder_outside_the_root_is_not_removed_on_revert(self):
@@ -437,11 +440,12 @@ class FaultTests(Base):
             improve.revert(self.home, self.root, record["id"])
         self.assertEqual(self.file.read_bytes(), self.newtext.encode())
 
+    @needs_symlinks
     def test_a_symlinked_backups_folder_is_refused(self):
         record = self.propose()
         elsewhere = self.tmp / "elsewhere"
         elsewhere.mkdir()
-        os.symlink(elsewhere, self.root / "backups")
+        os.symlink(elsewhere, self.root / "backups", target_is_directory=True)
         with self.assertRaisesRegex(improve.ImproveError, "symlink"):
             self.approve(record)
         self.assertEqual(list(elsewhere.iterdir()), [])
@@ -543,7 +547,7 @@ class EvaluationTests(Base):
         rows = [{"scenario": "s1", "label": "lab", "rep": 1, "check": {"passed": True}, "cost": 0.1, "turns": 4},
                 {"scenario": "s1", "label": "lab", "rep": 2, "check": {"passed": False}, "cost": 0.3, "turns": 9},
                 {"scenario": "probe", "label": "lab", "rep": 1}]
-        (results / "lab.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+        (results / "lab.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8", newline="\n")
         code, out, _ = self.cli("import-bench", self.record["id"], "--phase", "after", "--label", "lab", "--results", str(results))
         self.assertEqual(code, 0, out)
         self.cli("import-bench", self.record["id"], "--phase", "after", "--label", "lab", "--results", str(results))
@@ -623,7 +627,7 @@ class LedgerRowTests(Base):
     """Every change has a ledger row: approve (with the recorded results), revert, and `note` for the rest."""
 
     def rows(self):
-        return [json.loads(line) for line in (self.home / "improvements.jsonl").read_text().splitlines()]
+        return [json.loads(line) for line in (self.home / "improvements.jsonl").read_text(encoding="utf-8").splitlines()]
 
     def test_approve_fills_the_metric_from_the_recorded_results(self):
         record = self.propose()
@@ -684,9 +688,10 @@ class LedgerRowTests(Base):
             self.cli("note", "--kind", "nope", "--title", "t", "--why", "w", "--by-user", "ok")
         self.assertFalse((self.home / "improvements.jsonl").exists())
 
+    @needs_symlinks
     def test_note_refuses_a_file_that_leaves_the_root_through_a_link(self):
         outside = self.tmp / "outside.txt"
-        outside.write_text("secret")
+        outside.write_text("secret", encoding="utf-8", newline="\n")
         (self.root / "link.txt").symlink_to(outside)
         code, _, err = self.cli("note", "--kind", "other", "--title", "t", "--why", "w", "--by-user", "ok", "--files", "link.txt")
         self.assertEqual(code, 1)
@@ -727,7 +732,7 @@ class LedgerRowTests(Base):
                  "source": "commit 1e6d700"},
                 {"kind": "settings", "title": "Cache", "why": "long pauses", "metric_before": None, "metric_after": None, "when": 1795110955.16,
                  "source": "COSTS.md"}]
-        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8", newline="\n")
         self.assertEqual(self.cli("note", "--from-file", str(path))[0], 1)  # no approval anywhere
         code, out, err = self.cli("note", "--from-file", str(path), "--by-user", "yes in chat")
         self.assertEqual(code, 0, err)
@@ -743,14 +748,14 @@ class LedgerRowTests(Base):
 
     def test_a_backfill_row_without_a_time_is_refused(self):
         path = self.tmp / "notime.jsonl"
-        path.write_text(json.dumps({"kind": "other", "title": "ok", "why": "w"}) + "\n")
+        path.write_text(json.dumps({"kind": "other", "title": "ok", "why": "w"}) + "\n", encoding="utf-8", newline="\n")
         code, _, err = self.cli("note", "--from-file", str(path), "--by-user", "yes")
         self.assertEqual(code, 1)
         self.assertIn("needs `when`", err)
 
     def test_a_bad_row_in_a_backfill_file_records_nothing(self):
         path = self.tmp / "bad.jsonl"
-        path.write_text(json.dumps({"kind": "other", "title": "ok", "why": "w", "when": 5}) + "\n" + json.dumps({"kind": "bogus", "title": "t", "why": "w"}) + "\n")
+        path.write_text(json.dumps({"kind": "other", "title": "ok", "why": "w", "when": 5}) + "\n" + json.dumps({"kind": "bogus", "title": "t", "why": "w"}) + "\n", encoding="utf-8", newline="\n")
         code, _, err = self.cli("note", "--from-file", str(path), "--by-user", "yes")
         self.assertEqual(code, 1)
         self.assertIn("line 2", err)
@@ -778,7 +783,7 @@ class CostCriterionTests(Base):
         results.mkdir()
         row = {"scenario": "s1", "rep": 1, "check": {"passed": True}, "cost": 0.1, "turns": 4,
                "tokens": {"input": 10, "cache_read": 100, "cache_write": 8, "output": 2, "reasoning": 0}}
-        (results / "lab.jsonl").write_text(json.dumps(row) + "\n" + json.dumps({**row, "rep": 2, "tokens": None}) + "\n")
+        (results / "lab.jsonl").write_text(json.dumps(row) + "\n" + json.dumps({**row, "rep": 2, "tokens": None}) + "\n", encoding="utf-8", newline="\n")
         improve.import_bench(self.home, record["id"], "after", "lab", results)
         after = improve._load(self.home, record["id"])["evaluation"]["after"]
         self.assertEqual(after[0]["weighted"], 10 + 10 + 10 + 10)

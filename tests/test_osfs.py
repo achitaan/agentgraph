@@ -17,6 +17,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 from agentgraph import osfs
+from tests.winskip import WINDOWS, needs_symlinks, posix_only
+
+try:
+    import fcntl  # the stand-in msvcrt below is built on it
+except ImportError:  # native Windows
+    fcntl = None
 
 ROOT = Path(__file__).resolve().parent.parent
 RDONLY_NOFOLLOW = os.O_RDONLY | osfs.O_NOFOLLOW
@@ -95,8 +101,9 @@ class Both:
 
     # -- no-follow
 
+    @needs_symlinks
     def test_a_symlink_to_a_file_is_refused_with_eloop(self):
-        (self.root / "real.txt").write_text("x")
+        (self.root / "real.txt").write_text("x", encoding="utf-8", newline="\n")
         os.symlink(self.root / "real.txt", self.root / "link.txt")
         with self.assertRaises(OSError) as raised:
             self.backend.open(self.root / "link.txt", RDONLY_NOFOLLOW)
@@ -104,23 +111,25 @@ class Both:
         fd = self.backend.open(self.root / "link.txt", os.O_RDONLY)  # followed when no-follow is not asked for
         self.backend.close(fd)
 
+    @needs_symlinks
     def test_a_symlink_to_a_folder_is_refused_when_opening_a_folder(self):
         self.folder("real")
-        os.symlink(self.root / "real", self.root / "link")
+        os.symlink(self.root / "real", self.root / "link", target_is_directory=True)
         with self.assertRaises(NotADirectoryError) as raised:
             self.backend.open(self.root / "link", DIR_NOFOLLOW)
         self.assertEqual(raised.exception.errno, errno.ENOTDIR)
         self.backend.close(self.backend.open(self.root / "link", os.O_RDONLY | osfs.O_DIRECTORY))
 
+    @needs_symlinks
     def test_a_symlink_directory_component_is_refused_through_a_handle(self):
         real = self.folder("real")
         (real / "inner").mkdir()
-        os.symlink(real / "inner", self.root / "swapped")
+        os.symlink(real / "inner", self.root / "swapped", target_is_directory=True)
         root = self.backend.open(self.root, os.O_RDONLY | osfs.O_DIRECTORY)
         try:
             with self.assertRaises(NotADirectoryError):
                 self.backend.open("swapped", DIR_NOFOLLOW, dir_fd=root)
-            (real / "f").write_text("x")
+            (real / "f").write_text("x", encoding="utf-8", newline="\n")
             os.symlink(real / "f", self.root / "flink")
             with self.assertRaises(OSError) as raised:
                 self.backend.open("flink", RDONLY_NOFOLLOW, dir_fd=root)
@@ -128,6 +137,7 @@ class Both:
         finally:
             self.backend.close(root)
 
+    @needs_symlinks
     def test_creating_over_a_symlink_is_eexist(self):
         os.symlink(self.root / "nowhere", self.root / "dangling")
         with self.assertRaises(FileExistsError):
@@ -139,7 +149,7 @@ class Both:
             self.backend.open(self.root / "absent", RDONLY_NOFOLLOW)
         with self.assertRaises(FileNotFoundError):
             self.backend.open(self.root / "absent", DIR_NOFOLLOW)
-        (self.root / "file").write_text("x")
+        (self.root / "file").write_text("x", encoding="utf-8", newline="\n")
         with self.assertRaises(NotADirectoryError):
             self.backend.open(self.root / "file", DIR_NOFOLLOW)
 
@@ -361,10 +371,12 @@ class Both:
             self.backend.close(fd)
 
     def test_owner_and_mode_calls(self):
-        self.assertEqual(self.backend.getuid(), os.getuid())
-        self.assertEqual(self.backend.geteuid(), os.geteuid())
+        self.assertEqual(self.backend.getuid(), os.getuid() if hasattr(os, "getuid") else 0)
+        self.assertEqual(self.backend.geteuid(), os.geteuid() if hasattr(os, "geteuid") else 0)
+        if WINDOWS:
+            return  # no POSIX mode bits to set or read there (see the portable test of chmod)
         path = self.root / "m"
-        path.write_text("x")
+        path.write_text("x", encoding="utf-8", newline="\n")
         self.backend.chmod(path, 0o640)
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
         fd = self.backend.open(path, os.O_RDWR)
@@ -414,14 +426,14 @@ class PortableBackendTests(Both, unittest.TestCase):
             seen.append(flags)
             return real(path, flags, *rest, **kwargs)
 
-        (self.root / "f").write_text("x")
+        (self.root / "f").write_text("x", encoding="utf-8", newline="\n")
         with mock.patch.object(osfs.os, "open", record):
             os.close(self.backend.open(self.root / "f", RDONLY_NOFOLLOW))
         self.assertTrue(seen and not any(flags & osfs.O_NOFOLLOW for flags in seen))
 
     def test_a_link_swapped_in_after_the_open_is_refused_and_the_descriptor_closed(self):
-        (self.root / "a").write_text("a")
-        (self.root / "b").write_text("b")
+        (self.root / "a").write_text("a", encoding="utf-8", newline="\n")
+        (self.root / "b").write_text("b", encoding="utf-8", newline="\n")
         real = os.lstat
         calls = []
 
@@ -455,7 +467,7 @@ class PortableBackendTests(Both, unittest.TestCase):
                          [False, True, False, True, True])
 
     def test_a_reparse_point_is_refused_like_a_symlink(self):
-        (self.root / "f").write_text("x")
+        (self.root / "f").write_text("x", encoding="utf-8", newline="\n")
         real = os.lstat
 
         def reparse(path, **kwargs):
@@ -470,8 +482,8 @@ class PortableBackendTests(Both, unittest.TestCase):
         self.assertEqual(raised.exception.errno, errno.ELOOP)
 
     def test_replace_retries_on_permission_error_a_bounded_number_of_times(self):
-        (self.root / "src").write_text("new")
-        (self.root / "dst").write_text("old")
+        (self.root / "src").write_text("new", encoding="utf-8", newline="\n")
+        (self.root / "dst").write_text("old", encoding="utf-8", newline="\n")
         real = os.replace
         calls = []
 
@@ -484,22 +496,22 @@ class PortableBackendTests(Both, unittest.TestCase):
         with mock.patch.object(osfs.os, "replace", busy), mock.patch.object(osfs, "_RETRY_DELAYS", (0, 0, 0, 0, 0)):
             self.backend.replace(self.root / "src", self.root / "dst")
         self.assertEqual(len(calls), 4)
-        self.assertEqual((self.root / "dst").read_text(), "new")
+        self.assertEqual((self.root / "dst").read_text(encoding="utf-8"), "new")
         calls.clear()
 
         def forever(*args, **kwargs):
             calls.append(1)
             raise PermissionError(errno.EACCES, "in use")
 
-        (self.root / "src").write_text("again")
+        (self.root / "src").write_text("again", encoding="utf-8", newline="\n")
         with mock.patch.object(osfs.os, "replace", forever), mock.patch.object(osfs, "_RETRY_DELAYS", (0, 0, 0)):
             with self.assertRaises(PermissionError):
                 self.backend.replace(self.root / "src", self.root / "dst")
         self.assertEqual(len(calls), 4)  # the tries, and one last that raises
-        self.assertEqual((self.root / "dst").read_text(), "new")
+        self.assertEqual((self.root / "dst").read_text(encoding="utf-8"), "new")
 
     def test_unlink_retries_too_but_other_errors_do_not(self):
-        (self.root / "f").write_text("x")
+        (self.root / "f").write_text("x", encoding="utf-8", newline="\n")
         real = os.unlink
         calls = []
 
@@ -525,9 +537,10 @@ class PortableBackendTests(Both, unittest.TestCase):
                 self.backend.link(self.root / "src", self.root / "dst")
         self.assertEqual((self.root / "src").read_bytes(), b"a\r\nb\x1a")
 
+    @posix_only  # reads the POSIX mode bits back
     def test_on_windows_chmod_and_fchmod_change_nothing(self):
         path = self.root / "m"
-        path.write_text("x")
+        path.write_text("x", encoding="utf-8", newline="\n")
         path.chmod(0o640)
         with mock.patch.object(osfs, "_NT", True):
             self.backend.chmod(path, 0o444)
@@ -568,6 +581,7 @@ class PortableBackendTests(Both, unittest.TestCase):
                                                           "com10", "2026-11-25-skill-files")))
 
 
+@unittest.skipIf(fcntl is None, "the stand-in msvcrt is built on fcntl")
 class FakeMsvcrtTests(PortableBackendTests):
     """The portable backend again, locking through the msvcrt code path (stand-in module, see the module note)."""
     mode = "fake"
@@ -597,6 +611,8 @@ class FakeMsvcrtTests(PortableBackendTests):
         calls = []
 
         def busy_then_free(fd, mode, nbytes):
+            if mode == self.fake.LK_UNLCK:  # the probe for "do I hold it already": somebody else does, so it fails
+                raise OSError(errno.EACCES, "not locked by this handle")
             calls.append(1)
             if len(calls) < 6:
                 raise OSError(errno.EACCES, "locked")
@@ -613,6 +629,195 @@ class FakeMsvcrtTests(PortableBackendTests):
                 self.backend.lock(fd, block=False)
         finally:
             self.backend.close(fd)
+
+
+def install_windows_like_msvcrt():
+    """A stand-in that refuses what Windows refuses: a byte lock is refused to anyone while held, the handle that holds it
+    included, and only the holder can unlock. `forget(fd)` is what closing a handle does there: it frees its lock."""
+    owners = {}  # (device, inode) -> the descriptor that holds the byte lock
+
+    def locking(fd, mode, nbytes):
+        info = os.fstat(fd)
+        key = (info.st_dev, info.st_ino)
+        locking.seen.append(mode)
+        if mode == 0:
+            if owners.get(key) != fd:
+                raise OSError(errno.EACCES, "not locked by this handle")
+            del owners[key]
+        elif key in owners:
+            raise OSError(errno.EACCES, "locked")
+        else:
+            owners[key] = fd
+
+    def forget(fd):
+        for key in [key for key, holder in owners.items() if holder == fd]:
+            del owners[key]
+
+    locking.seen = []
+    fake = SimpleNamespace(locking=locking, LK_NBLCK=2, LK_UNLCK=0, forget=forget, owners=owners)
+    osfs._msvcrt = fake
+    return fake
+
+
+class RepeatLockTests(unittest.TestCase):
+    """A repeat lock on a descriptor that holds the byte lock must not wait forever (Windows refuses it to the holder)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(setattr, osfs, "_msvcrt", osfs._msvcrt)
+        self.fake = install_windows_like_msvcrt()
+        self.path = Path(self._tmp.name) / "data"
+        self.backend = osfs.PORTABLE
+
+    def within(self, seconds, call):
+        done = []
+        worker = threading.Thread(target=lambda: done.append(call()), daemon=True)
+        worker.start()
+        worker.join(seconds)
+        self.assertFalse(worker.is_alive(), "the lock waited forever")
+        return done
+
+    def test_a_repeat_lock_on_the_holding_descriptor_returns_and_the_lock_stays_held(self):
+        fd = self.backend.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        other = self.backend.open(self.path, os.O_RDWR, 0o600)
+        try:
+            self.backend.lock(fd)
+            self.within(5, lambda: self.backend.lock(fd))
+            self.within(5, lambda: self.backend.lock(fd, block=False))
+            with self.assertRaises(BlockingIOError):  # another descriptor of the file is still shut out
+                self.backend.lock(other, block=False)
+            self.backend.unlock(fd)
+            self.backend.lock(other, block=False)
+        finally:
+            self.backend.close(fd)
+            self.backend.close(other)
+
+    def test_a_descriptor_closed_without_an_unlock_leaves_nothing_that_skips_a_later_lock(self):
+        fd = self.backend.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        self.backend.lock(fd)
+        os.close(fd)
+        self.fake.forget(fd)  # closing a handle frees its lock
+        again = self.backend.open(self.path, os.O_RDWR, 0o600)  # often the same descriptor number
+        try:
+            self.backend.lock(again)
+            self.assertEqual(list(self.fake.owners.values()), [again])  # really locked, not skipped
+            other = self.backend.open(self.path, os.O_RDWR, 0o600)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    self.backend.lock(other, block=False)
+            finally:
+                self.backend.close(other)
+        finally:
+            self.backend.close(again)
+
+    def test_a_folder_handle_locked_twice_is_one_lock(self):
+        handle = self.backend.open(self.path.parent, os.O_RDONLY | osfs.O_DIRECTORY)
+        lock_dir = Path(self._tmp.name) / "locks"
+        try:
+            with mock.patch.dict(os.environ, {"AGENTGRAPH_LOCKDIR": str(lock_dir)}):
+                self.backend.lock(handle)
+                self.within(5, lambda: self.backend.lock(handle))
+                self.backend.unlock(handle)
+        finally:
+            self.backend.close(handle)
+
+
+class LockFolderTests(unittest.TestCase):
+    """Where the folder locks live: the same place for every process of the user, whatever TEMP or TMP says."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve()
+
+    def where(self, env, nt):
+        clean = {key: value for key, value in os.environ.items()
+                 if key not in ("AGENTGRAPH_LOCKDIR", "LOCALAPPDATA", "XDG_RUNTIME_DIR", "HOME", "USERPROFILE")}
+        with mock.patch.dict(os.environ, {**clean, **env}, clear=True), mock.patch.object(osfs, "_NT", nt):
+            return Path(osfs._lock_folder())
+
+    def test_the_override_wins_everywhere(self):
+        for nt in (True, False):
+            self.assertEqual(self.where({"AGENTGRAPH_LOCKDIR": str(self.root / "mine")}, nt), self.root / "mine")
+            self.assertTrue((self.root / "mine").is_dir())
+
+    def test_on_windows_it_is_under_localappdata_whatever_temp_says(self):
+        for temp in ("a", "b"):
+            env = {"LOCALAPPDATA": str(self.root / "local"), "TEMP": str(self.root / temp), "TMP": str(self.root / temp)}
+            self.assertEqual(self.where(env, True), self.root / "local" / "agentgraph" / "locks")
+        self.assertFalse((self.root / "a").exists())
+
+    def test_on_windows_without_localappdata_it_falls_back_to_the_home_folder_then_temp(self):
+        home = self.root / "home"
+        home.mkdir()
+        found = self.where({"HOME": str(home), "USERPROFILE": str(home)}, True)
+        self.assertEqual(found, home / "agentgraph" / "locks")
+        with mock.patch.object(os.path, "expanduser", return_value="~"), \
+                mock.patch.object(osfs.tempfile, "gettempdir", return_value=str(self.root)):
+            self.assertEqual(self.where({}, True), self.root / "agentgraph" / "locks")
+
+    @unittest.skipUnless(hasattr(os, "getuid"), "needs os.getuid")
+    def test_elsewhere_it_is_private_to_the_user(self):
+        runtime = self.root / "run"
+        runtime.mkdir()
+        found = self.where({"XDG_RUNTIME_DIR": str(runtime)}, False)
+        self.assertEqual(found, runtime / "agentgraph-locks")
+        self.assertEqual(stat.S_IMODE(found.stat().st_mode), 0o700)
+        with mock.patch.object(osfs.tempfile, "gettempdir", return_value=str(self.root)):
+            found = self.where({}, False)
+        self.assertEqual(found, self.root / ("agentgraph-locks-%d" % os.getuid()))
+
+    @unittest.skipUnless(hasattr(os, "getuid") and hasattr(os, "symlink"), "needs POSIX ownership and symlinks")
+    def test_a_folder_somebody_else_made_first_is_refused(self):
+        with mock.patch.object(osfs.tempfile, "gettempdir", return_value=str(self.root)):
+            name = "agentgraph-locks-%d" % os.getuid()
+            (self.root / name).mkdir(mode=0o777)
+            (self.root / name).chmod(0o777)
+            with self.assertRaises(PermissionError):  # open to others
+                self.where({}, False)
+            (self.root / name).chmod(0o700)
+            with mock.patch.object(os, "getuid", return_value=os.getuid() + 1):  # owned by somebody else
+                with self.assertRaises(PermissionError):
+                    self.where({}, False)
+            (self.root / name).rmdir()
+            (self.root / "elsewhere").mkdir()
+            os.symlink(self.root / "elsewhere", self.root / name, target_is_directory=True)
+            with self.assertRaises(PermissionError):  # a link
+                self.where({}, False)
+
+
+class FolderHandleCheckTests(unittest.TestCase):
+    """A folder opened without following links is checked again after the real path is found."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve()
+        (self.root / "folder").mkdir()
+        self.backend = osfs.PORTABLE
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "needs symlinks")
+    def test_a_link_put_in_the_place_after_the_path_was_resolved_is_refused(self):
+        try:
+            os.symlink(self.root / "folder", self.root / "link", target_is_directory=True)
+        except OSError:
+            self.skipTest("needs permission to create symlinks")
+        with mock.patch.object(osfs.os.path, "realpath", return_value=str(self.root / "link")):
+            with self.assertRaises(OSError) as raised:
+                self.backend.open(self.root / "folder", os.O_RDONLY | osfs.O_DIRECTORY | osfs.O_NOFOLLOW)
+        self.assertEqual(raised.exception.errno, errno.ELOOP)
+
+    def test_a_different_folder_at_the_resolved_path_is_stale(self):
+        (self.root / "other").mkdir()
+        with mock.patch.object(osfs.os.path, "realpath", return_value=str(self.root / "other")):
+            with self.assertRaises(OSError) as raised:
+                self.backend.open(self.root / "folder", os.O_RDONLY | osfs.O_DIRECTORY)
+        self.assertEqual(raised.exception.errno, getattr(errno, "ESTALE", errno.EIO))
+
+    def test_the_plain_case_still_opens(self):
+        handle = self.backend.open(self.root / "folder", os.O_RDONLY | osfs.O_DIRECTORY | osfs.O_NOFOLLOW)
+        self.backend.close(handle)
 
 
 class SelectionTests(unittest.TestCase):

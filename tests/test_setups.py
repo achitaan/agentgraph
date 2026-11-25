@@ -19,9 +19,10 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 from agentgraph import agentfiles, demo, flowcommands, server, setups, skillset
+from tests.winskip import needs_symlinks, posix_only
 from agentgraph.snapshot_json import snapshot_document
 
-SCRATCH = Path("/private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode/setups-tests")
+SCRATCH = Path(tempfile.gettempdir()).resolve() / "agentgraph-setups-tests"
 ROOT = Path(__file__).resolve().parent.parent
 REAL = (skillset.CONFIG, skillset.MAP)
 REAL_FOLDERS = (agentfiles.AGENTS_DIR, flowcommands.COMMANDS_DIR, setups.SETUPS, skillset.BACKUPS)
@@ -138,7 +139,7 @@ class PresetTest(Scratch):
         self.assertEqual((shown["override"], shown["effective"], shown["preset"]), ("env", "cheap", "normal"))
         (self.project / ".opencode").mkdir()
         (self.project / ".opencode" / "oh-my-opencode-slim.jsonc").write_text(
-            '{\n // comment\n "preset": "fast", "secret": "do-not-print",\n}\n')
+            '{\n // comment\n "preset": "fast", "secret": "do-not-print",\n}\n', encoding="utf-8", newline="\n")
         shown = setups.show_preset(**self.calls())
         self.assertEqual((shown["override"], shown["effective"]), ("project", "fast"))
         self.assertNotIn("do-not-print", json.dumps(shown))
@@ -193,7 +194,7 @@ class PresetTest(Scratch):
             self.switch("fast", env={"OH_MY_OPENCODE_SLIM_PRESET": "cheap"})
         self.assertIn("environment variable", str(raised.exception))
         (self.project / ".opencode").mkdir()
-        (self.project / ".opencode" / "oh-my-opencode-slim.json").write_text('{"preset": "cheap"}')
+        (self.project / ".opencode" / "oh-my-opencode-slim.json").write_text('{"preset": "cheap"}', encoding="utf-8", newline="\n")
         with self.assertRaises(setups.SetupError) as raised:
             self.switch("fast")
         self.assertIn("project config", str(raised.exception))
@@ -257,7 +258,7 @@ class SetupTest(Scratch):
         saved = setups.save("work", **self.paths)
         self.assertEqual((saved["name"], saved["preset"], saved["replaced"]), ("work", "normal", False))
         folder = self.setups / "work"
-        manifest = json.loads((folder / "manifest.json").read_text())
+        manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
         keys = sorted(entry["key"] for entry in manifest["files"])
         self.assertEqual(keys, ["agents/helper.md", "commands/ship.md", "map", "preset", "structure/30-build/helper.md",
                                 "structure/flows/ship.md"])
@@ -272,14 +273,14 @@ class SetupTest(Scratch):
         self.assertEqual((shown["name"], shown["preset"], shown["files"]), ("work", "normal", 6))
         self.assertEqual(shown["counts"], saved["counts"])
         self.assertNotIn("Do one thing", json.dumps(shown) + json.dumps(listed))
-        self.assertNotIn("hand written", (folder / "manifest.json").read_text())
+        self.assertNotIn("hand written", (folder / "manifest.json").read_text(encoding="utf-8"))
         removed = setups.remove("work", **self.paths)
         self.assertFalse(folder.exists())
         self.assertEqual(setups.list_setups(**self.paths), [])
         with self.assertRaises(setups.SetupError):
             setups.show_setup("work", **self.paths)
         setups.undo(removed["record"], **self.paths)
-        self.assertEqual(json.loads((folder / "manifest.json").read_text())["name"], "work")
+        self.assertEqual(json.loads((folder / "manifest.json").read_text(encoding="utf-8"))["name"], "work")
         self.assertEqual([item["name"] for item in setups.list_setups(**self.paths)], ["work"])
 
     def test_hand_written_files_are_never_read(self):
@@ -387,6 +388,7 @@ class SetupTest(Scratch):
         self.assertFalse((self.agents / "helper.md").exists())
         self.assertEqual((self.commands / "ship.md").read_bytes(), COMMAND_FILE + b"more\n")
 
+    @posix_only
     def test_restore_keeps_modes(self):
         os.chmod(self.agents / "helper.md", 0o600)
         setups.save("a", **self.paths)
@@ -406,15 +408,15 @@ class SetupTest(Scratch):
         victim = folder / "files" / "structure" / "flows" / "ship.md"
 
         def manifest_edit(change):
-            manifest = json.loads((folder / "manifest.json").read_text())
+            manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
             change(manifest)
-            (folder / "manifest.json").write_text(json.dumps(manifest))
+            (folder / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8", newline="\n")
 
         damages = {
             "flipped": lambda: victim.write_bytes(victim.read_bytes() + b"x"),
             "missing": victim.unlink,
             "extra file": lambda: (folder / "files" / "agents" / "stray.md").write_bytes(b"x"),
-            "manifest": lambda: (folder / "manifest.json").write_text("{not json"),
+            "manifest": lambda: (folder / "manifest.json").write_text("{not json", encoding="utf-8", newline="\n"),
             "no preset": lambda: manifest_edit(lambda m: m.update(files=[e for e in m["files"] if e["key"] != "preset"])),
             "traversal": lambda: manifest_edit(lambda m: m["files"].append(
                 {"key": "../../evil", "sha256": "0" * 64, "size": 0, "mode": 0o644})),
@@ -505,6 +507,7 @@ class SetupTest(Scratch):
         self.assertEqual(len(setups.list_setups(**self.paths)), 1)
         setups.remove("a", expect=rev, **self.paths)
 
+    @needs_symlinks
     def test_symlinked_managed_files_are_refused_not_followed(self):
         outside = self.root / "outside.md"
         outside.write_bytes(AGENT_FILE)
@@ -734,7 +737,7 @@ class Route(Served):
         with patch.dict(os.environ, {"OH_MY_OPENCODE_SLIM_PRESET": "cheap"}):
             self.refused({"op": "preset-switch", "name": "fast"}, "environment variable")
         (self.project / ".opencode").mkdir()
-        (self.project / ".opencode" / "oh-my-opencode-slim.json").write_text('{"preset": "cheap"}')
+        (self.project / ".opencode" / "oh-my-opencode-slim.json").write_text('{"preset": "cheap"}', encoding="utf-8", newline="\n")
         with patch.dict(os.environ, {"OH_MY_OPENCODE_SLIM_PRESET": ""}):
             self.refused({"op": "preset-switch", "name": "fast"}, "project config")
 

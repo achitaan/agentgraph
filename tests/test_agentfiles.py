@@ -13,10 +13,11 @@ import unittest
 from unittest.mock import patch
 
 from agentgraph import agentfiles, roster, skillset, teams
+from tests.winskip import needs_symlinks, posix_only
 from agentgraph import structure as structure_module
 from agentgraph.snapshot_json import skills_document
 
-SCRATCH = Path("/private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode/agentfiles")
+SCRATCH = Path(tempfile.gettempdir()).resolve() / "agentgraph-agentfiles"
 ROOT = Path(__file__).resolve().parent.parent
 REAL_AGENTS = agentfiles.AGENTS_DIR
 FIRST = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in (skillset.CONFIG, skillset.MAP)}
@@ -59,7 +60,7 @@ class Base(unittest.TestCase):
         self.skills = self.root / "skills"
         for name in ("code-assurance", "engineering-delivery"):
             (self.skills / name).mkdir(parents=True)
-            (self.skills / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {name} skill\n---\nBody\n")
+            (self.skills / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {name} skill\n---\nBody\n", encoding="utf-8", newline="\n")
         self.structure = self.root / "structure"
         shutil.copytree(ROOT / "structure", self.structure)
         shutil.copyfile(skillset.CONFIG, self.config)
@@ -170,7 +171,7 @@ class Add(Base):
         obj = json.loads(self.config.read_bytes())
         for preset in obj["presets"].values():
             preset.pop("verifier", None)
-        self.config.write_text(json.dumps(obj, indent=2))
+        self.config.write_text(json.dumps(obj, indent=2), encoding="utf-8", newline="\n")
         self.refused("model is required", self.add, "plain")
         self.refused("model is required", self.add, "plain", template="blank", description="Plain.", prompt="Work.")
         result = self.add("plain", model="anthropic/claude-sonnet-5-5", description="Plain.", prompt="Work.",
@@ -178,8 +179,8 @@ class Add(Base):
         self.assertEqual(result["permission"], "read-only")
 
     def test_bad_and_taken_names_are_refused_before_anything_is_written(self):
-        (self.agents / "mine.md").write_text("---\ndescription: mine\n---\nBody\n")
-        (self.agents / "architect.md.disabled").write_text("x")
+        (self.agents / "mine.md").write_text("---\ndescription: mine\n---\nBody\n", encoding="utf-8", newline="\n")
+        (self.agents / "architect.md.disabled").write_text("x", encoding="utf-8", newline="\n")
         for name, pattern in (("Bad", "invalid agent name"), ("-x", "invalid agent name"),
                               ("orchestrator", "built-in"), ("councillor-x", "council"), ("build", "reserved"),
                               ("agents", "plugin reads"), ("impl-claude", "already exists"),
@@ -216,18 +217,19 @@ class Add(Base):
         def appear(fd, name):
             calls.append(name)
             if name == "checker.md" and len(calls) == 2:
-                (self.agents / "checker.md").write_text("theirs")
+                (self.agents / "checker.md").write_text("theirs", encoding="utf-8", newline="\n")
             return real(fd, name)
 
         with patch.object(agentfiles, "_read_at", side_effect=appear):
             with self.assertRaises(skillset.SkillsetError):
                 agentfiles.create("checker", description="d", model="a/b", permissions=agentfiles.WRITER, text="t",
                                   agents_dir=self.agents)
-        self.assertEqual((self.agents / "checker.md").read_text(), "theirs")
+        self.assertEqual((self.agents / "checker.md").read_text(encoding="utf-8"), "theirs")
 
+    @needs_symlinks
     def test_a_symlinked_agents_folder_is_refused(self):
         link = self.root / "linked"
-        link.symlink_to(self.agents)
+        link.symlink_to(self.agents, target_is_directory=True)
         with self.assertRaisesRegex(skillset.SkillsetError, "not a plain folder"):
             agentfiles.create("checker", description="d", model="a/b", permissions=agentfiles.WRITER, text="t",
                               agents_dir=link)
@@ -272,7 +274,7 @@ class Text(Base):
         self.assertTrue(self.file().endswith(b"edit\n"))
 
     def test_hand_written_and_unknown_agents_are_refused(self):
-        (self.agents / "mine.md").write_text("---\ndescription: mine\n---\nBody\n")
+        (self.agents / "mine.md").write_text("---\ndescription: mine\n---\nBody\n", encoding="utf-8", newline="\n")
         self.refused("written by hand", roster.text_agent, "mine", "x", agents_dir=self.agents, backups=self.backups)
         self.refused("no agent file", roster.read_agent, "ghost", agents_dir=self.agents)
         self.refused("instruction is required", roster.text_agent, "mine", "  ", agents_dir=self.agents,
@@ -284,8 +286,8 @@ class Text(Base):
         for record in ("/etc/passwd", str(self.root / "x.json"), done["record"].replace("text-", "texts-")):
             self.refused("invalid undo record", roster.restore_agent, record, **self.paths)
         path = Path(done["record"])
-        data = json.loads(path.read_text())
-        path.write_text(json.dumps({**data, "agent": "other"}))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        path.write_text(json.dumps({**data, "agent": "other"}), encoding="utf-8", newline="\n")
         self.refused("invalid undo record", roster.restore_agent, done["record"], **self.paths)
 
 
@@ -308,7 +310,7 @@ class Skills(Base):
             skillset.add("checker", "nope", **options)
 
     def test_a_hand_written_agents_skills_are_read_only(self):
-        (self.agents / "mine.md").write_text("---\ndescription: mine\nmodel: a/b\n---\nBody\n")
+        (self.agents / "mine.md").write_text("---\ndescription: mine\nmodel: a/b\n---\nBody\n", encoding="utf-8", newline="\n")
         shown = skillset.show("mine", config=self.config, agents_dir=self.agents)
         self.assertFalse(shown["editable"])
         self.assertIn("written by hand", shown["reason"])
@@ -349,12 +351,12 @@ class RemoveRestore(Base):
         obj = json.loads(self.config.read_bytes())
         original = self.config.read_bytes()
         obj["presets"][obj["preset"]]["checker"] = {"model": "a/b"}
-        self.config.write_text(json.dumps(obj, indent=2))
+        self.config.write_text(json.dumps(obj, indent=2), encoding="utf-8", newline="\n")
         self.refused("already exists|taken", roster.restore_agent, record, **self.paths)
         self.config.write_bytes(original)
         obj = json.loads(original)
         obj["presets"][obj["preset"]]["orchestrator"]["displayName"] = "@Checker"
-        self.config.write_text(json.dumps(obj, indent=2))
+        self.config.write_text(json.dumps(obj, indent=2), encoding="utf-8", newline="\n")
         self.refused("display name|displayName|taken", roster.restore_agent, record, **self.paths)
         self.config.write_bytes(original)
         roster.restore_agent(record, **self.paths)
@@ -371,7 +373,7 @@ class RemoveRestore(Base):
         self.assertEqual(list(self.backups.rglob("record.json")), [])
 
     def test_a_hand_written_agent_cannot_be_removed(self):
-        (self.agents / "mine.md").write_text("---\ndescription: mine\nmodel: a/b\n---\nBody\n")
+        (self.agents / "mine.md").write_text("---\ndescription: mine\nmodel: a/b\n---\nBody\n", encoding="utf-8", newline="\n")
         self.refused("written by hand", roster.remove_agent, "mine", **self.paths)
 
     def test_full_round_trip_ends_where_it_started(self):
@@ -391,7 +393,7 @@ class RemoveRestore(Base):
 class Snapshot(Base):
     def test_annotate_marks_added_and_hand_written_agents(self):
         self.add(template="verifier")
-        (self.agents / "mine.md").write_text("---\ndescription: mine\nmodel: a/b\n---\nBody\n")
+        (self.agents / "mine.md").write_text("---\ndescription: mine\nmodel: a/b\n---\nBody\n", encoding="utf-8", newline="\n")
         document = {"agents": [{"name": "checker"}, {"name": "mine"}, {"name": "impl-claude"},
                                {"name": "orchestrator"}]}
         roster.annotate(document, config=self.config, map_path=self.map, agents_dir=self.agents)
@@ -429,8 +431,8 @@ class SkillDelete(Base):
         self.assertIn(b'resource: "zz-new"', self.file("beta"))
 
     def test_delete_is_refused_while_a_hand_written_agent_file_names_the_skill(self):
-        (self.agents / "mine.md").write_text(HAND_HOLDS)
-        (self.agents / "other.md").write_text("---\ndescription: other\nmodel: a/b\n---\nzz-new in the body only\n")
+        (self.agents / "mine.md").write_text(HAND_HOLDS, encoding="utf-8", newline="\n")
+        (self.agents / "other.md").write_text("---\ndescription: other\nmodel: a/b\n---\nzz-new in the body only\n", encoding="utf-8", newline="\n")
         with self.assertRaisesRegex(skillset.SkillsetError, r"still used by agents: mine;"):
             self.skillfiles.delete("zz-new", **self.where)
         self.assertTrue((self.skills / "zz-new" / "SKILL.md").is_file())
@@ -443,7 +445,7 @@ class SkillDelete(Base):
         self.assertRegex(" ".join(done["warnings"]), r"\bbeta\b[^.]* every skill and will no longer have zz-new")
 
     def test_the_skill_command_passes_the_agents_folder(self):
-        (self.agents / "mine.md").write_text(HAND_HOLDS)
+        (self.agents / "mine.md").write_text(HAND_HOLDS, encoding="utf-8", newline="\n")
         out = io.StringIO()
         with redirect_stdout(out):
             code = self.skillfiles.main(["skill", "delete", "zz-new", "--skills", str(self.skills), "--backups",
@@ -457,7 +459,7 @@ class SkillDelete(Base):
 class AgentList(Base):
     def test_agent_list_shows_preset_added_and_hand_written_agents_saying_which_is_which(self):
         self.add(template="verifier")
-        (self.agents / "mine.md").write_text("---\ndescription: mine\nmodel: a/b\n---\nBody\n")
+        (self.agents / "mine.md").write_text("---\ndescription: mine\nmodel: a/b\n---\nBody\n", encoding="utf-8", newline="\n")
         out = io.StringIO()
         with redirect_stdout(out):
             self.assertEqual(roster.main(["agent", "list", "--config", str(self.config), "--agents", str(self.agents),
@@ -528,6 +530,7 @@ class HandChanged(Base):
 
 
 class FailedRemove(Base):
+    @posix_only
     def test_a_failed_remove_leaves_no_empty_record_folder(self):
         self.add(template="verifier")
         before = self.snapshot()
@@ -818,7 +821,7 @@ class CraftedText(Base):
     def test_a_copied_model_that_opencode_would_not_read_is_refused(self):
         obj = json.loads(self.config.read_bytes())
         obj["presets"][obj["preset"]]["impl-claude"]["model"] = 'anthropic/claude "x"'
-        self.config.write_text(json.dumps(obj, indent=2) + "\n")
+        self.config.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8", newline="\n")
         self.start = self.snapshot()
         self.refused("model must be provider/model", self.add, "copy", copy_of="impl-claude")
 
@@ -889,14 +892,14 @@ class Records(Base):
                 roster.remove_agent("checker", **self.paths)
         records = list(self.backups.rglob("remove-checker-*/record.json"))
         self.assertEqual(len(records), 1)
-        data = json.loads(records[0].read_text())
+        data = json.loads(records[0].read_text(encoding="utf-8"))
         self.assertTrue(any(item["folder"] == "flows" for item in data["structure"]))
 
     def test_a_forged_remove_record_is_refused(self):
         self.add(template="verifier")
         record = roster.remove_agent("checker", **self.paths)["record"]
         path = Path(record)
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         wide = agentfiles.unb64(data["file"], "file").replace(
             b'permissions:\n  - action: "*"\n    resource: "*"\n    effect: deny\n',
             b'permissions:\n  - action: "*"\n    resource: "*"\n    effect: allow\n', 1)
@@ -907,9 +910,9 @@ class Records(Base):
                        {**data, "structure": [{"folder": "30-build", "name": "reviewer.md",
                                                "before": agentfiles.b64(b"x"), "after": None}]}):
             with self.subTest(keys=sorted(k for k in forged if forged[k] != data.get(k))):
-                path.write_text(json.dumps(forged))
+                path.write_text(json.dumps(forged), encoding="utf-8", newline="\n")
                 self.refused("invalid undo record", roster.restore_agent, record, **self.paths)
-        path.write_text(json.dumps(data))
+        path.write_text(json.dumps(data), encoding="utf-8", newline="\n")
         roster.restore_agent(record, **self.paths)
 
 

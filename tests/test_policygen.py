@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agentgraph import policygen
+from tests.winskip import needs_symlinks
 
 HEAD = "title\nintro\n"
 
@@ -110,7 +111,7 @@ class CommandTests(unittest.TestCase):
         self.given = files(fast="first\nA\nB\nX\nD\nlast\n", normal="first\nA\nB\nC\nD\nlast\nextra\n")
         self.write(self.live, self.given)
         self.source = self.tmp / "src.md"
-        self.source.write_text(policygen.split(self.given))
+        self.source.write_text(policygen.split(self.given), encoding="utf-8", newline="\n")
 
     def write(self, root, given):
         for name, data in given.items():
@@ -120,7 +121,7 @@ class CommandTests(unittest.TestCase):
     def test_split_command_then_build_command(self):
         target = self.tmp / "new" / "src.md"
         self.assertEqual(run("split", "--from", str(self.live), "--to", str(target))[0], 0)
-        self.assertEqual(target.read_text(), self.source.read_text())
+        self.assertEqual(target.read_text(encoding="utf-8"), self.source.read_text(encoding="utf-8"))
         out = self.tmp / "out"
         self.assertEqual(run("--source", str(target), "build", "--out", str(out))[0], 0)
         for name, data in self.given.items():
@@ -152,7 +153,7 @@ class CommandTests(unittest.TestCase):
 
     def test_build_never_writes_outside_out(self):
         evil = self.tmp / "evil.md"
-        evil.write_text("<!-- presets: ../x -->\nhi\n")
+        evil.write_text("<!-- presets: ../x -->\nhi\n", encoding="utf-8", newline="\n")
         code, _, err = run("--source", str(evil), "build", "--out", str(self.tmp / "out"))
         self.assertEqual(code, 2)
         self.assertIn("line 1", err)
@@ -162,11 +163,12 @@ class CommandTests(unittest.TestCase):
         with self.assertRaises(policygen.PolicyError):
             policygen.write({"a/b": b"x"}, self.tmp / "out")
 
+    @needs_symlinks
     def test_build_refuses_a_symlinked_preset_folder_leading_outside(self):
         out, elsewhere = self.tmp / "out", self.tmp / "elsewhere"
         out.mkdir()
         elsewhere.mkdir()
-        (out / "fast").symlink_to(elsewhere)
+        (out / "fast").symlink_to(elsewhere, target_is_directory=True)
         with self.assertRaises(policygen.PolicyError):
             policygen.write(policygen.build_source(self.source), out)
         self.assertEqual(list(elsewhere.iterdir()), [])

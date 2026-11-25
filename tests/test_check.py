@@ -10,7 +10,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from agentgraph import osfs
 from agentgraph.check import file_problems, main
+from tests.winskip import needs_fifo, needs_symlinks
 
 
 def valid_graph():
@@ -44,7 +46,7 @@ class Check(unittest.TestCase):
         self.directory = Path(temporary.name)
 
     def write_graph(self, data, filename="test-task.json"):
-        (self.directory / filename).write_text(json.dumps(data))
+        (self.directory / filename).write_text(json.dumps(data), encoding="utf-8", newline="\n")
 
     def invoke(self, *args):
         output = io.StringIO()
@@ -90,6 +92,7 @@ class Check(unittest.TestCase):
             "graph has 201 objectives; the limit is 200",
         ])
 
+    @needs_symlinks
     def test_symlink_and_oversized_graphs_are_unreadable(self):
         from agentgraph.check import read_graph
 
@@ -97,7 +100,7 @@ class Check(unittest.TestCase):
         link = self.directory / "linked.json"
         for size in (0, 2 * 1024 * 1024):
             with self.subTest(size=size):
-                target.write_text(json.dumps(valid_graph()) + " " * size)
+                target.write_text(json.dumps(valid_graph()) + " " * size, encoding="utf-8", newline="\n")
                 link.symlink_to(target)
                 try:
                     graph, problems = read_graph(link)
@@ -113,6 +116,7 @@ class Check(unittest.TestCase):
         self.assertEqual(result, 2, output)
         self.assertIn("2097152", output)
 
+    @needs_fifo
     def test_fifo_graph_is_unreadable_without_blocking(self):
         os.mkfifo(self.directory / "pipe.json")
         try:
@@ -129,7 +133,7 @@ class Check(unittest.TestCase):
             data = valid_graph()
             data["task"] = f"task-{i:03}"
             path = self.directory / f"{i:03}.json"
-            path.write_text(json.dumps(data))
+            path.write_text(json.dumps(data), encoding="utf-8", newline="\n")
             os.utime(path, ns=(1_000_000_000 + i, 1_000_000_000 + i))
         result, output = self.run_check()
         self.assertEqual(result, 2, output)
@@ -146,7 +150,7 @@ class Check(unittest.TestCase):
         (project / ".opencode/graph").mkdir(parents=True)
         with (patch("agentgraph.sources.Path.home", return_value=home),
               patch("agentgraph.check.Path.cwd", return_value=project),
-              patch("agentgraph.sources.os.getuid", return_value=os.getuid() + 1)):
+              patch("agentgraph.sources.osfs.getuid", return_value=osfs.getuid() + 1)):
             result, output = self.invoke()
         self.assertEqual(result, 2, output)
         self.assertIn("owned", output)
@@ -209,7 +213,7 @@ class Check(unittest.TestCase):
         for contents in (None, "{malformed", "[]"):
             with self.subTest(contents=contents):
                 if contents is not None:
-                    path.write_text(contents)
+                    path.write_text(contents, encoding="utf-8", newline="\n")
                 graph, problems = read_graph(path)
                 self.assertIsNone(graph)
                 self.assertEqual(len(problems), 1)
@@ -253,7 +257,7 @@ class Check(unittest.TestCase):
         self.assertIn("n1 has unknown status 'unknown-status'", output)
 
     def test_malformed_json(self):
-        (self.directory / "bad.json").write_text("{invalid json")
+        (self.directory / "bad.json").write_text("{invalid json", encoding="utf-8", newline="\n")
         result, output = self.run_check()
         self.assertEqual(result, 2)
         self.assertTrue(output.splitlines()[0].startswith("UNREADABLE"), output)
@@ -368,7 +372,7 @@ class Check(unittest.TestCase):
                 data["events"] = [{"event": "declared", "node": "", "time": 1}]
                 record = data if location is None else data[location][0]
                 record[field] = "NUMBER"
-                (self.directory / "test-task.json").write_text(json.dumps(data).replace('"NUMBER"', "1e999"))
+                (self.directory / "test-task.json").write_text(json.dumps(data).replace('"NUMBER"', "1e999"), encoding="utf-8", newline="\n")
                 result, output = self.run_check()
                 self.assertEqual(result, 1, output)
                 self.assertIn(f"{label} {field}", output)
@@ -522,7 +526,7 @@ class Check(unittest.TestCase):
     def test_deep_malformed_json_does_not_raise(self):
         # Decoders have different depth limits; the missing bracket ensures
         # this input is unreadable even if the decoder can handle the depth.
-        (self.directory / "bad.json").write_text("[" * 5000 + "0" + "]" * 4999)
+        (self.directory / "bad.json").write_text("[" * 5000 + "0" + "]" * 4999, encoding="utf-8", newline="\n")
         result, output = self.run_check()
         self.assertEqual(result, 2)
         self.assertIn("UNREADABLE", output)
@@ -582,7 +586,7 @@ class NodeFields(unittest.TestCase):
         self.directory.mkdir(parents=True)
 
     def write_graph(self, data):
-        (self.directory / "test-task.json").write_text(json.dumps(data))
+        (self.directory / "test-task.json").write_text(json.dumps(data), encoding="utf-8", newline="\n")
 
     def run_check(self, *args):
         output = io.StringIO()
@@ -703,7 +707,7 @@ class NodeFields(unittest.TestCase):
         run = "20260101-000000-abcd"
         folder = self.project / ".opencode" / "loops" / run
         folder.mkdir(parents=True)
-        (folder / "run.json").write_text(json.dumps({"status": "passed", "run": run}))
+        (folder / "run.json").write_text(json.dumps({"status": "passed", "run": run}), encoding="utf-8", newline="\n")
         data = self.running_graph(attempts=4, loop_run=run)
         data["status"] = "running"
         data["nodes"][0]["status"] = "returned"
@@ -712,7 +716,7 @@ class NodeFields(unittest.TestCase):
         result, output = self.run_check()
         self.assertEqual(result, 0, output)
         self.assertNotIn("stall candidate", output)
-        (folder / "run.json").write_text(json.dumps({"status": "failed", "run": run}))
+        (folder / "run.json").write_text(json.dumps({"status": "failed", "run": run}), encoding="utf-8", newline="\n")
         result, output = self.run_check()
         self.assertIn("stall candidate", output)
 
@@ -720,7 +724,7 @@ class NodeFields(unittest.TestCase):
         run = "20260101-000000-abcd"
         folder = self.project / ".opencode" / "loops" / run
         folder.mkdir(parents=True)
-        (folder / "run.json").write_text(json.dumps({"status": "paused", "run": run}))
+        (folder / "run.json").write_text(json.dumps({"status": "paused", "run": run}), encoding="utf-8", newline="\n")
         self.write_graph(self.running_graph(loop_run=run))
         result, output = self.run_check()
         self.assertEqual(result, 0, output)
@@ -814,7 +818,7 @@ class EndToEnd(unittest.TestCase):
         self.directory.mkdir(parents=True)
 
     def write_graph(self, data):
-        (self.directory / "test-task.json").write_text(json.dumps(data))
+        (self.directory / "test-task.json").write_text(json.dumps(data), encoding="utf-8", newline="\n")
 
     def run_check(self, *args):
         output = io.StringIO()

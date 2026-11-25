@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from agentgraph import agentfiles, handedits, ledger
+from tests.winskip import needs_symlinks
 
 ROOT = Path(__file__).resolve().parent.parent
 NOW = 1_800_000_000.0
@@ -34,7 +35,7 @@ class Scratch(unittest.TestCase):
         entry = {"time": NOW - days_ago * DAY, "id": f"e{self.clock:011d}", "task": task, "graph": "g", "node": "n1",
                  "agent": agent, "artifact": "a", "from_revision": 1, "revision": 2, "path": "p", "chars_before": 5,
                  "chars_after": 9, "lines_added": added, "lines_removed": removed, "undone": undone, **(extra or {})}
-        with (self.home / "edits.jsonl").open("a", encoding="utf-8") as stream:
+        with (self.home / "edits.jsonl").open("a", encoding="utf-8", newline="\n") as stream:
             stream.write(json.dumps(entry) + "\n")
 
     def plant(self, agent, task_days):
@@ -76,7 +77,7 @@ class OutputEdits(Scratch):
     def test_missing_files_are_zero_and_bad_lines_are_skipped(self):
         found = handedits.measure(self.home / "nowhere", NOW, backups=self.backups / "no", agents_dir=self.agents)
         self.assertEqual((found["outputs"], found["instructions"]), ({}, {}))
-        with (self.home / "edits.jsonl").open("a") as stream:
+        with (self.home / "edits.jsonl").open("a", encoding="utf-8", newline="\n") as stream:
             stream.write("not json\n[1]\n{\"time\": \"x\"}\n")
         self.edit("impl-openai", "t1")
         found = handedits.measure(self.home, NOW, backups=self.backups, agents_dir=self.agents)
@@ -198,12 +199,13 @@ class InstructionEdits(Scratch):
         done = {"time": NOW - 1 * DAY, "file": "agents/checker.md", "summary": "s", "signals": []}
         self.assertFalse(self.signal([done])["due"])
 
+    @needs_symlinks
     def test_forged_or_foreign_records_are_ignored(self):
         self.new_agent()
         for days in (1, 2, 3):
             self.rewrite("checker", f"t{days}\n", days_ago=days)
         folder = next(next(self.backups.iterdir()).iterdir())
-        (folder / "record.json").write_text("[]")
+        (folder / "record.json").write_text("[]", encoding="utf-8", newline="\n")
         os.symlink(folder / "record.json", folder.parent / "text-other-0123456789ab")
         self.assertEqual(handedits.measure(self.home, NOW, backups=self.backups)["instructions"].get(
             "checker", {}).get("edits", 0), 2)
@@ -242,9 +244,9 @@ class Reports(Scratch):
                                   ("explorer", "t2", 2)):
             entry = {"time": now - days * DAY, "id": "x", "task": task, "agent": agent, "lines_added": 1,
                      "lines_removed": 0, "undone": False}
-            with self.home.joinpath("edits.jsonl").open("a") as stream:
+            with self.home.joinpath("edits.jsonl").open("a", encoding="utf-8", newline="\n") as stream:
                 stream.write(json.dumps(entry) + "\n")
-        with self.home.joinpath("edits.jsonl").open("a") as stream:
+        with self.home.joinpath("edits.jsonl").open("a", encoding="utf-8", newline="\n") as stream:
             stream.write(json.dumps({"time": now - DAY, "id": "u", "task": "t2", "agent": "impl-openai",
                                      "undone": True}) + "\n")
         run = self.cli("signals", "--home", str(self.home), "--no-cost")
@@ -270,7 +272,7 @@ class Reports(Scratch):
         now = time.time()
         self.home.joinpath("edits.jsonl").write_text("".join(json.dumps(
             {"time": now - days * DAY, "task": task, "agent": "impl-openai", "undone": False,
-             "lines_added": 1, "lines_removed": 0}) + "\n" for task, days in (("t1", 1), ("t2", 2))))
+             "lines_added": 1, "lines_removed": 0}) + "\n" for task, days in (("t1", 1), ("t2", 2))), encoding="utf-8", newline="\n")
         with contextlib.redirect_stdout(out):
             ledger.main(["record", *options])
         self.assertNotIn("hand edits", out.getvalue())
@@ -325,7 +327,7 @@ class Review9HostileNames(Scratch):
         self.assertNotIn("Ignore", json.dumps(report))
 
     def test_minor1_log_lines_without_an_agent_or_task_do_not_crash_a_reader(self):
-        with (self.home / "edits.jsonl").open("a", encoding="utf-8") as stream:
+        with (self.home / "edits.jsonl").open("a", encoding="utf-8", newline="\n") as stream:
             for item in ({"time": NOW - DAY, "task": "t1", "undone": False},
                          {"time": NOW - DAY, "agent": "impl-openai", "undone": False},
                          {"time": NOW - DAY, "agent": ["x"], "task": {"a": 1}, "undone": False}):

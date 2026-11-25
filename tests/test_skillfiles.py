@@ -12,9 +12,10 @@ import unittest
 from unittest.mock import patch
 
 from agentgraph import skillfiles as sf
+from tests.winskip import needs_fifo, needs_symlinks, posix_only
 from agentgraph import skillset
 
-SCRATCH = Path("/private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode/skillfiles")
+SCRATCH = Path(tempfile.gettempdir()).resolve() / "agentgraph-skillfiles"
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -30,7 +31,7 @@ class SkillfilesTest(unittest.TestCase):
         self.config = self.root / "preset.json"
         self.config.write_text(json.dumps({"preset": "one", "presets": {
             "one": {"worker": {"model": "test/model", "skills": []}},
-            "two": {"other": {"model": "test/model", "skills": []}}}}), encoding="utf-8")
+            "two": {"other": {"model": "test/model", "skills": []}}}}), encoding="utf-8", newline="\n")
         self.options = {"skills": self.skills}
         self.edit_options = self.options | {"backups": self.backups}
         self.delete_options = self.edit_options | {"config": self.config}
@@ -72,6 +73,7 @@ class SkillfilesTest(unittest.TestCase):
         self.assertTrue(Path(result["record"]).is_file())
         self.assertEqual(self.tree(), before)
 
+    @posix_only
     def test_delete_restore_round_trip_with_modes(self):
         before = self.tree()
         self.path.chmod(0o640)
@@ -107,6 +109,7 @@ class SkillfilesTest(unittest.TestCase):
         self.assertEqual(self.path.stat().st_mtime_ns, old.st_mtime_ns)
         self.assertFalse(self.backups.exists())
 
+    @posix_only
     def test_crlf_and_mode_preserved_and_each_previous_version_backed_up(self):
         self.path.write_bytes(self.original.replace(b"\n", b"\r\n"))
         self.path.chmod(0o600)
@@ -126,7 +129,7 @@ class SkillfilesTest(unittest.TestCase):
                               ('"Snow \\u96ea: # yes"', "Snow 雪: # yes"),
                               ("Plain text # comment", "Plain text")):
             with self.subTest(raw=raw):
-                self.path.write_text(f"---\nname: example\ndescription: {raw}\nextra: 'keep ''this'''\n---\nbody", encoding="utf-8")
+                self.path.write_text(f"---\nname: example\ndescription: {raw}\nextra: 'keep ''this'''\n---\nbody", encoding="utf-8", newline="\n")
                 self.assertEqual(sf.read("example", **self.options)["frontmatter"]["description"], expected)
                 sf.write("example", description="An editor's \"text\"", **self.edit_options)
                 self.assertEqual(sf.read("example", **self.options)["frontmatter"]["description"], "An editor's \"text\"")
@@ -136,10 +139,10 @@ class SkillfilesTest(unittest.TestCase):
         for indicator in (">", "|", ">-", "|-", ">+", "|+"):
             with self.subTest(indicator=indicator):
                 raw = f"---\nname: example\ndescription: {indicator}\n  first line\n  second line\nlicense: MIT\n---\nbody\n"
-                self.path.write_text(raw, encoding="utf-8")
+                self.path.write_text(raw, encoding="utf-8", newline="\n")
                 self.assertEqual(sf.read("example", **self.options)["frontmatter"]["description"], "first line second line")
                 sf.write("example", body="new", **self.edit_options)
-                self.assertEqual(self.path.read_text().split("---")[1], raw.split("---")[1])
+                self.assertEqual(self.path.read_text(encoding="utf-8").split("---")[1], raw.split("---")[1])
                 sf.write("example", description="simple now", **self.edit_options)
                 self.assertEqual(sf.read("example", **self.options)["frontmatter"]["description"], "simple now")
                 self.assertIn(b"license: MIT\n", self.path.read_bytes())
@@ -207,6 +210,7 @@ class SkillfilesTest(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), self.original)
         self.assertFalse(self.backups.exists())
 
+    @needs_symlinks
     def test_existing_id_including_dangling_symlink_refused(self):
         with self.assertRaisesRegex(skillset.SkillsetError, "already exists"):
             sf.create("example", "d", "b", **self.options)
@@ -233,6 +237,7 @@ class SkillfilesTest(unittest.TestCase):
                     self.assertEqual(self.path.read_bytes(), raw)
         self.assertFalse(self.backups.exists())
 
+    @needs_symlinks
     def test_refuse_symlinked_skill_folder_file_and_ancillary_file(self):
         target = self.root / "outside"
         target.mkdir()
@@ -254,6 +259,7 @@ class SkillfilesTest(unittest.TestCase):
             sf.delete("example", **self.delete_options)
         self.assertEqual((target / "SKILL.md").read_bytes(), self.original)
 
+    @needs_symlinks
     def test_refuse_symlinked_root_and_backup_component(self):
         link = self.root / "link"
         link.symlink_to(self.skills, target_is_directory=True)
@@ -268,6 +274,7 @@ class SkillfilesTest(unittest.TestCase):
         self.assertEqual(list(outside.iterdir()), [])
         self.assertEqual(self.path.read_bytes(), self.original)
 
+    @needs_fifo
     def test_fifo_refused_without_blocking(self):
         self.path.unlink()
         os.mkfifo(self.path)
@@ -283,7 +290,7 @@ class SkillfilesTest(unittest.TestCase):
         obj = json.loads(self.config.read_bytes())
         obj["presets"]["one"]["worker"]["skills"] = ["*"]
         obj["presets"]["two"]["other"]["skills"] = ["example"]
-        self.config.write_text(json.dumps(obj), encoding="utf-8")
+        self.config.write_text(json.dumps(obj), encoding="utf-8", newline="\n")
         original_config = self.config.read_bytes()
         with self.assertRaisesRegex(skillset.SkillsetError, "other, worker"):
             sf.delete("example", **self.delete_options)
@@ -293,6 +300,7 @@ class SkillfilesTest(unittest.TestCase):
         self.assertEqual(self.config.read_bytes(), original_config)
         sf.restore(result["record"], **self.edit_options)
 
+    @needs_symlinks
     def test_unreadable_or_symlinked_config_refuses_even_force(self):
         for raw in (b"\xff", b"{}", b'{"preset":"x","presets":{},"presets":{}}'):
             self.config.write_bytes(raw)
@@ -316,13 +324,14 @@ class SkillfilesTest(unittest.TestCase):
         with self.assertRaises(skillset.SkillsetError):
             sf.restore(record, **self.edit_options)
 
+    @needs_symlinks
     def test_restore_refuses_forged_or_foreign_records_and_symlinks(self):
         record = Path(sf.delete("example", **self.delete_options)["record"])
         original = record.read_bytes()
         for value in ({"version": 1, "id": "../escape", "skills": str(self.skills)},
                       {"version": 1, "id": "example", "skills": str(self.root)},
                       [], {"id": "example"}):
-            record.write_text(json.dumps(value), encoding="utf-8")
+            record.write_text(json.dumps(value), encoding="utf-8", newline="\n")
             with self.assertRaises(skillset.SkillsetError):
                 sf.restore(record, **self.edit_options)
         record.write_bytes(original)
@@ -406,7 +415,7 @@ class SkillfilesTest(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(json.loads(out)["body"], "stdin body")
         text_file = self.root / "text.md"
-        text_file.write_text("file body", encoding="utf-8")
+        text_file.write_text("file body", encoding="utf-8", newline="\n")
         self.assertEqual(self.cli("write", "new", "--text-file", str(text_file))[0], 0)
         code, out, err = self.cli("delete", "new", "--json")
         self.assertEqual((code, err), (0, ""))
@@ -432,7 +441,7 @@ class SkillfilesTest(unittest.TestCase):
         command = [sys.executable, "-m", "agentgraph.skillfiles", "--skills", str(self.skills),
                    "--backups", str(self.backups), "--json", "write", "example"]
         text = self.root / "body.md"
-        text.write_text("concurrent body", encoding="utf-8")
+        text.write_text("concurrent body", encoding="utf-8", newline="\n")
         one = subprocess.Popen([*command, "--description", "concurrent description"], cwd=ROOT, env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         two = subprocess.Popen([*command, "--text-file", str(text)], cwd=ROOT, env=env,

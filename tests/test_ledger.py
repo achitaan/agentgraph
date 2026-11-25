@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agentgraph import ledger, osfs
+from tests.winskip import needs_symlinks
 
 
 def node(node_id="n1", **overrides):
@@ -41,7 +42,7 @@ class Ledger(unittest.TestCase):
 
     def write_graph(self, task, **overrides):
         path = self.directory / f"{task}.json"
-        path.write_text(json.dumps(graph(task, **overrides)))
+        path.write_text(json.dumps(graph(task, **overrides)), encoding="utf-8", newline="\n")
         return path
 
     def cli(self, *args, now=100.0, env_home=False):
@@ -64,7 +65,7 @@ class Ledger(unittest.TestCase):
         return json.loads(output)
 
     def records(self, filename):
-        return [json.loads(line) for line in (self.home / filename).read_text().splitlines()]
+        return [json.loads(line) for line in (self.home / filename).read_text(encoding="utf-8").splitlines()]
 
     def test_record_upserts_by_absolute_path_and_keeps_summary(self):
         first = self.write_graph(
@@ -107,12 +108,13 @@ class Ledger(unittest.TestCase):
         self.assertEqual(by_task["first"]["recorded"], 200)
         self.assertEqual(by_task["second"]["recorded"], 100)
 
+    @needs_symlinks
     def test_record_uses_shared_capped_listing_and_refuses_symlinks(self):
         for i in range(203):
             path = self.write_graph(f"task-{i:03}")
             os.utime(path, ns=(1_000_000_000 + i, 1_000_000_000 + i))
         target = self.project / "target.txt"
-        target.write_text(json.dumps(graph("symlink-target")))
+        target.write_text(json.dumps(graph("symlink-target")), encoding="utf-8", newline="\n")
         link = self.directory / "link.json"
         link.symlink_to(target)
         with patch.object(ledger.sources, "graph_files", wraps=ledger.sources.graph_files) as listing:
@@ -126,7 +128,7 @@ class Ledger(unittest.TestCase):
 
     def test_record_rejects_foreign_owned_graph_directory(self):
         self.write_graph("foreign")
-        with patch("agentgraph.sources.os.getuid", return_value=os.getuid() + 1):
+        with patch("agentgraph.sources.osfs.getuid", return_value=osfs.getuid() + 1):
             result, output, errors = self.record()
         self.assertEqual(result, 2, output + errors)
         self.assertIn("not owned", output + errors)
@@ -138,9 +140,9 @@ class Ledger(unittest.TestCase):
         self.write_graph("reused", created=3, updated=4)
         self.assertEqual(self.record(now=4)[0], 0)
         path = self.write_graph("reused", status="running", updated=51)
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         del data["created"]
-        path.write_text(json.dumps(data))
+        path.write_text(json.dumps(data), encoding="utf-8", newline="\n")
         os.utime(path, (50, 50))
         self.assertEqual(self.record("--task", "reused", "--abandoned", now=52)[0], 0)
         self.write_graph("reused", status="blocked", created=0, updated=61)
@@ -206,7 +208,7 @@ class Ledger(unittest.TestCase):
         runs = self.home / "runs.jsonl"
         legacy, = self.records("runs.jsonl")
         del legacy["outcome"]
-        runs.write_text(json.dumps(legacy) + "\n")
+        runs.write_text(json.dumps(legacy) + "\n", encoding="utf-8", newline="\n")
         self.cli("improved", "--file", "fixer.md", "--summary", "Applied", now=10)
         self.assertIsNone(self.report()["trend"]["before"]["abandoned_rate"])
         self.write_graph("known", status="running")
@@ -227,7 +229,7 @@ class Ledger(unittest.TestCase):
             self.assertRegex(output, rf"not recorded {task}: [1-9]\d* problems \(run agentgraph check\)")
         self.assertIn("  - ", output)
         self.assertEqual([run["task"] for run in self.records("runs.jsonl")], ["good"])
-        (self.directory / "bad.json").write_text("{bad json")
+        (self.directory / "bad.json").write_text("{bad json", encoding="utf-8", newline="\n")
         self.assertEqual(self.record()[0], 2)
 
     def test_record_saves_the_validated_snapshot_with_one_open(self):
@@ -244,7 +246,7 @@ class Ledger(unittest.TestCase):
         def read_then_replace(p, *args):
             result = read_graph(p, *args)
             replacement = p.with_suffix(".new")
-            replacement.write_text(json.dumps(graph("changing", lessons=["wrong snapshot"], nodes=[])))
+            replacement.write_text(json.dumps(graph("changing", lessons=["wrong snapshot"], nodes=[])), encoding="utf-8", newline="\n")
             replacement.replace(p)
             return result
 
@@ -253,7 +255,7 @@ class Ledger(unittest.TestCase):
             self.assertEqual(self.record()[0], 0)
         self.assertEqual(reads, [path])
         self.assertEqual(self.records("runs.jsonl")[0]["lessons"], ["valid snapshot"])
-        self.assertEqual(json.loads(path.read_text())["lessons"], ["wrong snapshot"])
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["lessons"], ["wrong snapshot"])
 
     def test_passed_run_needs_stable_created_even_if_validator_returns_no_problems(self):
         path = self.write_graph("no-identity")
@@ -271,7 +273,7 @@ class Ledger(unittest.TestCase):
             raw = graph("no-identity", created=created)
             if created is None:
                 del raw["created"]
-            path.write_text(json.dumps(raw))
+            path.write_text(json.dumps(raw), encoding="utf-8", newline="\n")
             self.assertEqual(self.record()[0], 1)
 
     def test_changed_snapshot_with_equal_updated_becomes_pending_again(self):
@@ -331,7 +333,7 @@ class Ledger(unittest.TestCase):
 
     def test_record_still_writes_readable_graph_when_any_is_unreadable(self):
         self.write_graph("good")
-        (self.directory / "bad.json").write_text("{unreadable")
+        (self.directory / "bad.json").write_text("{unreadable", encoding="utf-8", newline="\n")
         result, output, errors = self.record("--task", "good")
         self.assertEqual(result, 2, errors)
         self.assertIn("UNREADABLE", output)
@@ -543,12 +545,12 @@ class Ledger(unittest.TestCase):
         self.assertIsNone(snapshot["watermark"])
         self.cli("feedback", "between report and improvement", now=8)
         prompt_file = self.project / "fixer.md"
-        prompt_file.write_text("original prompt")
+        prompt_file.write_text("original prompt", encoding="utf-8", newline="\n")
         status, _, errors = self.cli("improved", "--file", str(prompt_file), "--summary", "Record a prompt change",
                                      "--signal", "old lesson", "--signal", "feedback", "--metric", "first pass",
                                      "--seen-until", str(snapshot["generated"]), now=10)
         self.assertEqual(status, 0, errors)
-        self.assertEqual(prompt_file.read_text(), "original prompt")
+        self.assertEqual(prompt_file.read_text(encoding="utf-8"), "original prompt")
         self.cli("improved", "--file", "older.md", "--summary", "Older", now=3)
         at_cutoff = self.report()
         self.assertEqual(at_cutoff["watermark"], 7)
@@ -649,7 +651,7 @@ class Ledger(unittest.TestCase):
         self.write_graph("first")
         other = self.project / "other" / ".opencode" / "graph"
         other.mkdir(parents=True)
-        (other / "second.json").write_text(json.dumps(graph("second", created=3, updated=4)))
+        (other / "second.json").write_text(json.dumps(graph("second", created=3, updated=4)), encoding="utf-8", newline="\n")
         self.home.mkdir()
         prefix = [sys.executable, "-B", "-m", "agentgraph.ledger", "--home", str(self.home)]
         commands = [prefix + ["record", "--dir", str(directory), "--db", str(self.db)]
@@ -733,14 +735,14 @@ class Ledger(unittest.TestCase):
         env = {key: value for key, value in os.environ.items() if key != "AGENTGRAPH_HOME"}
         with patch.dict(os.environ, env, clear=True), patch("agentgraph.snapshot_json.ledger_home", return_value=resolved):
             self.assertEqual(self.cli("feedback", "preset", env_home=True)[0], 0)  # no --home, no $AGENTGRAPH_HOME
-            self.assertEqual([json.loads(line)["text"] for line in (resolved / "feedback.jsonl").read_text().splitlines()], ["preset"])
+            self.assertEqual([json.loads(line)["text"] for line in (resolved / "feedback.jsonl").read_text(encoding="utf-8").splitlines()], ["preset"])
             self.assertFalse(self.home.exists())
             self.assertEqual(self.cli("feedback", "flag")[0], 0)  # --home still wins
             self.assertEqual([item["text"] for item in self.records("feedback.jsonl")], ["flag"])
             with patch.dict(os.environ, {"AGENTGRAPH_HOME": str(self.project / "env")}):
                 self.assertEqual(self.cli("feedback", "env", env_home=True)[0], 0)
             self.assertTrue((self.project / "env" / "feedback.jsonl").exists())
-            self.assertEqual(len((resolved / "feedback.jsonl").read_text().splitlines()), 1)
+            self.assertEqual(len((resolved / "feedback.jsonl").read_text(encoding="utf-8").splitlines()), 1)
 
     def test_home_flag_overrides_environment(self):
         env_directory = self.project / "env-ledger"
@@ -765,7 +767,7 @@ class Ledger(unittest.TestCase):
         (period,) = with_db["cost"]["periods"]
         self.assertEqual((period["turns"], period["chats"], period["since"]), (2, 1, None))
         self.assertTrue(log.exists())      # the command noted the settings
-        self.assertEqual(len(log.read_text().splitlines()), 1)
+        self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1)
         self.assertEqual(self.report("--cost-db", str(chats), "--no-cost").get("cost", "absent"), "absent")
         self.assertIsNone(self.report("--cost-db", str(self.project / "missing.db"))["cost"])
         self.assertIsNone(ledger.signals(self.home, 100.0, cost_db=self.project / "missing.db")["cost"])
@@ -787,14 +789,14 @@ class Ledger(unittest.TestCase):
         self.assertTrue(later.startswith(original))
 
         marks = self.project / "marks.json"
-        marks.write_text(json.dumps({first: "one task", "unknown": "covered"}))
+        marks.write_text(json.dumps({first: "one task", "unknown": "covered"}), encoding="utf-8", newline="\n")
         code, _, errors = self.cli("improved", "--handled-file", str(marks))
         self.assertEqual(code, 2)
         self.assertIn("unknown feedback id", errors)
         self.assertEqual(self.report()["pending"]["feedback"], 3)
         self.assertFalse((self.home / "feedback-handled.jsonl").exists())
 
-        marks.write_text(json.dumps({first: "covered: rule already exists"}))
+        marks.write_text(json.dumps({first: "covered: rule already exists"}), encoding="utf-8", newline="\n")
         self.assertEqual(self.cli("improved", "--handled-file", str(marks), now=20)[0], 0)
         self.assertEqual(self.report()["pending"]["feedback"], 2)
         self.assertNotIn("id", self.report()["feedback"][0])
@@ -802,7 +804,7 @@ class Ledger(unittest.TestCase):
         self.assertEqual(self.report("--all", "--feedback-ids")["feedback"][0]["id"], first)
         self.assertIsNone(self.report()["last_improvement"])
         stored = (self.home / "feedback-handled.jsonl").read_bytes()
-        marks.write_text(json.dumps({first: "rejected"}))
+        marks.write_text(json.dumps({first: "rejected"}), encoding="utf-8", newline="\n")
         self.assertEqual(self.cli("improved", "--handled-file", str(marks), now=30)[0], 0)
         self.assertEqual(self.records("feedback-handled.jsonl"), [
             {"time": 20, "handled": {first: "covered: rule already exists"}},
@@ -820,7 +822,7 @@ class Ledger(unittest.TestCase):
         self.assertEqual(self.report()["watermark"], 3)
         marked = self.report("--feedback-ids")["feedback"][0]["id"]
         marks = self.project / "marks.json"
-        marks.write_text(json.dumps({marked: "applied"}))
+        marks.write_text(json.dumps({marked: "applied"}), encoding="utf-8", newline="\n")
         self.assertEqual(self.cli("improved", "--handled-file", str(marks), now=8)[0], 0)
         self.assertEqual(self.cli("improved", *common, "--keep-watermark", now=9)[0], 0)
         report = self.report()
@@ -843,7 +845,7 @@ class Ledger(unittest.TestCase):
 
     def test_unknown_feedback_id_leaves_missing_and_legacy_homes_untouched(self):
         marks = self.project / "marks.json"
-        marks.write_text('{"unknown":"covered"}')
+        marks.write_text('{"unknown":"covered"}', encoding="utf-8", newline="\n")
         for legacy in (False, True):
             with self.subTest(legacy_home=legacy):
                 self.home = self.project / f"ledger-{legacy}"
@@ -862,7 +864,7 @@ class Ledger(unittest.TestCase):
 
     def test_signals_no_cost_does_not_read_config_or_write_settings(self):
         config = self.project / "scratch-config.json"
-        config.write_text('{"compaction": {"buffer": 12345}}')
+        config.write_text('{"compaction": {"buffer": 12345}}', encoding="utf-8", newline="\n")
         log = self.project / "scratch-settings.jsonl"
         options = ("--config", str(config), "--settings-log", str(log))
         with patch.object(ledger.cost, "read_settings", wraps=ledger.cost.read_settings) as read_settings:
@@ -912,12 +914,12 @@ class Ledger(unittest.TestCase):
         self.assertEqual(self.report(*opts)["messages"], expected)
         self.assertEqual(self.report(*opts)["messages"], expected)
         marks = self.project / "marks.json"
-        marks.write_text(json.dumps({"msg:typed": "not a note"}))
+        marks.write_text(json.dumps({"msg:typed": "not a note"}), encoding="utf-8", newline="\n")
         self.assertEqual(self.cli("improved", "--handled-file", str(marks), "--db", str(self.db))[0], 0)
         self.assertEqual(self.report(*opts)["messages"], expected[:1])
         self.assertEqual(self.report(*opts)["watermark"], 110)
         # Do not accept a non-user or nonexistent ID, or write a partial mark.
-        marks.write_text(json.dumps({"msg:display": "covered", "msg:tool": "covered", "msg:missing": "covered"}))
+        marks.write_text(json.dumps({"msg:display": "covered", "msg:tool": "covered", "msg:missing": "covered"}), encoding="utf-8", newline="\n")
         code, _, errors = self.cli("improved", "--handled-file", str(marks), "--db", str(self.db))
         self.assertEqual(code, 2)
         self.assertIn("unknown feedback id", errors)
@@ -935,7 +937,7 @@ class Ledger(unittest.TestCase):
         self.assertEqual(report["messages_left_out"], 161)
         marks = self.project / "marks.json"
         marks.write_text(json.dumps({"handled": {m["id"]: "not a note" for m in report["messages"]},
-                                     "messages_through": report["messages_through"], "keep_backlog": True}))
+                                     "messages_through": report["messages_through"], "keep_backlog": True}), encoding="utf-8", newline="\n")
         self.assertEqual(self.cli("improved", "--handled-file", str(marks), "--db", str(self.db))[0], 0)
         self.assertEqual(self.records("feedback-handled.jsonl")[-1]["messages_through"], 100000)
         self.assertEqual(self.report(*opts)["messages"][0]["id"], "msg:160")
@@ -955,7 +957,7 @@ class Ledger(unittest.TestCase):
         self.assertEqual([m["id"] for m in report["messages"]], ["msg:defer", "msg:old"])
         marks = self.project / "marks.json"
         marks.write_text(json.dumps({"handled": {}, "messages_through": report["messages_through"],
-                                     "keep_messages": ["msg:defer"]}))
+                                     "keep_messages": ["msg:defer"]}), encoding="utf-8", newline="\n")
         self.assertEqual(self.cli("improved", "--handled-file", str(marks), "--db", str(self.db), now=4)[0], 0)
         report = self.report(*opts, now=4)
         self.assertEqual([m["id"] for m in report["messages"]], ["msg:new", "msg:defer"])
@@ -1006,14 +1008,14 @@ class ChangeRowTests(Ledger):
     def test_changed_appends_valid_rows_all_or_none_and_refuses_a_duplicate(self):
         built = ledger.changed(self.home, [self.row(), self.row(when=50.0, summary="Earlier")])
         self.assertEqual(len(built), 2)
-        lines = (self.home / "improvements.jsonl").read_text().splitlines()
+        lines = (self.home / "improvements.jsonl").read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 2)
         stored = [json.loads(line) for line in lines]
         self.assertTrue(all(item["keep_watermark"] for item in stored))
         self.assertEqual(stored[0]["files_sha256"], {"opencode.json": "ab" * 32})
         with self.assertRaises(ValueError):
             ledger.changed(self.home, [self.row(summary="New one"), self.row()])  # the second is already there
-        self.assertEqual(len((self.home / "improvements.jsonl").read_text().splitlines()), 2)  # none of the pair was written
+        self.assertEqual(len((self.home / "improvements.jsonl").read_text(encoding="utf-8").splitlines()), 2)  # none of the pair was written
         with self.assertRaises(ValueError):
             ledger.changed(self.home, [self.row(summary="Twice"), self.row(summary="Twice")])
 

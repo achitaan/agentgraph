@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agentgraph import agentfiles, check, server, snapshot_json, structure
+from tests.winskip import needs_symlinks, posix_only
 from agentgraph.demo import demo_snapshot
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -90,20 +91,21 @@ class Loader(unittest.TestCase):
     def test_a_teams_folder_is_never_a_group_of_agents(self):
         # Teams are kept in `teams/` (see agentgraph.teams); they are not wired in here, only kept out of the groups.
         (self.root / "teams").mkdir()
-        (self.root / "teams" / "builders.md").write_text("lead: council\nmembers: impl-openai, designer\n\nBuild.\n")
+        (self.root / "teams" / "builders.md").write_text("lead: council\nmembers: impl-openai, designer\n\nBuild.\n", encoding="utf-8", newline="\n")
         shape = snapshot_json.load_structure(self.root)
         self.assertNotIn("teams", shape["groups"])
         self.assertNotIn("builders", shape["group_of"])
         self.assertEqual(shape["warnings"], [])
 
+    @needs_symlinks
     def test_unreadable_or_invalid_flows_warn_and_never_fail(self):
         write_flow(self.root, "ghost", "path: impl-openai -> ghost\n\nText.\n")
         write_flow(self.root, "middle", "path: impl-openai -> orchestrator -> verifier\n\nText.\n")
         write_flow(self.root, "nopath", "Just text.\n")
         write_flow(self.root, "latin", b"path: impl-openai -> verifier\n\nCaf\xe9\n")
         write_flow(self.root, "good", "path: impl-openai -> verifier\n\nText.\n")
-        (self.root / "flows" / "notes.txt").write_text("path: a -> b\n")
-        (self.root / "flows" / "Bad Name.md").write_text("path: impl-openai -> verifier\n")
+        (self.root / "flows" / "notes.txt").write_text("path: a -> b\n", encoding="utf-8", newline="\n")
+        (self.root / "flows" / "Bad Name.md").write_text("path: impl-openai -> verifier\n", encoding="utf-8", newline="\n")
         os.symlink(self.root / "flows" / "good.md", self.root / "flows" / "linked.md")
         shape = snapshot_json.load_structure(self.root)
         self.assertEqual([flow["id"] for flow in shape["flows"]], ["good"])
@@ -134,7 +136,7 @@ class Loader(unittest.TestCase):
         self.assertIn("structure: 202 flow files, more than the 200 read; ignored: f200, f201", shape["warnings"])
 
     def test_checked_by_is_no_longer_a_setting(self):
-        (self.root / "20-build/designer.md").write_text("checked_by: reviewer\n\nDesigns things.\n")
+        (self.root / "20-build/designer.md").write_text("checked_by: reviewer\n\nDesigns things.\n", encoding="utf-8", newline="\n")
         shape = snapshot_json.load_structure(self.root)
         self.assertEqual(shape["about"]["designer"], "checked_by: reviewer Designs things.")
         self.assertNotIn("checked_by", snapshot_json.SETTING_KEYS)
@@ -142,7 +144,7 @@ class Loader(unittest.TestCase):
     def test_snapshot_carries_flows_and_no_default_loops(self):
         write_flow(self.root, "impl-openai-verifier-impl-openai", f"path: impl-openai -> verifier -> impl-openai\n\n{LOOP}\n")
         # `checks: all` is no longer a setting: it connects nothing and is read as the start of the description.
-        (self.root / "30-verify/reviewer.md").write_text("checks: all\n\nReviews.\n")
+        (self.root / "30-verify/reviewer.md").write_text("checks: all\n\nReviews.\n", encoding="utf-8", newline="\n")
         doc = snapshot_json.snapshot_document(demo_snapshot(1000), "demo", structure=snapshot_json.load_structure(self.root))
         self.assertEqual(sorted(doc["structure"]), ["flows", "source", "teams"])
         self.assertEqual(doc["structure"]["flows"], [{"id": "impl-openai-verifier-impl-openai", "path": ["impl-openai", "verifier", "impl-openai"],
@@ -226,7 +228,7 @@ class Command(unittest.TestCase):
         self.assertEqual(out, "added flow impl-openai-verifier-impl-openai: impl-openai → verifier → impl-openai\n"
                               "    verifier checks impl-openai's work. If it does not pass, send verifier's findings back "
                               "to impl-openai and repeat until it passes.\n")
-        self.assertEqual((self.root / "flows/impl-openai-verifier-impl-openai.md").read_text(),
+        self.assertEqual((self.root / "flows/impl-openai-verifier-impl-openai.md").read_text(encoding="utf-8"),
                          "path: impl-openai -> verifier -> impl-openai\n\nverifier checks impl-openai's work. If it does not pass, "
                          "send verifier's findings back to impl-openai and repeat until it passes.\n")
         code, out, _ = self.run_cli("flow", "add", "researcher", "impl-claude", "reviewer", "--json")
@@ -248,7 +250,7 @@ class Command(unittest.TestCase):
     def test_text_from_a_file_and_text_that_looks_like_settings(self):
         text = "path: impl-openai -> ghost\nchecks: all\n\n\nKeep blank lines.\n\tAnd tabs."
         source = self.root.parent / f"{self.root.name}-text.txt"
-        source.write_text(text)
+        source.write_text(text, encoding="utf-8", newline="\n")
         self.addCleanup(source.unlink)
         code, out, _ = self.run_cli("flow", "add", "impl-openai", "reviewer", "--text-file", str(source), "--json")
         flow = json.loads(out)["flow"]
@@ -276,7 +278,7 @@ class Command(unittest.TestCase):
                 self.assertEqual(self.flows()[0]["text"], "Mine.")
                 code, out, _ = self.run_cli("flow", "text", flow["id"], "--text-file", "-", "--json", stdin=blank)
                 self.assertEqual((code, json.loads(out)["flow"]["text"], self.flows()[0]["text"]), (0, generated, generated))
-                self.assertEqual((self.root / "flows" / f"{flow['id']}.md").read_text(),
+                self.assertEqual((self.root / "flows" / f"{flow['id']}.md").read_text(encoding="utf-8"),
                                  f"path: impl-openai -> reviewer\n\n{generated}\n")
 
     def test_a_loop_on_itself_once_per_agent(self):
@@ -364,7 +366,7 @@ class Command(unittest.TestCase):
     def test_ids_are_looked_up_never_used_as_paths(self):
         self.run_cli("flow", "add", "impl-openai", "reviewer")
         outside = self.root / "outside.md"
-        outside.write_text("path: impl-openai -> reviewer\n\nOutside.\n")
+        outside.write_text("path: impl-openai -> reviewer\n\nOutside.\n", encoding="utf-8", newline="\n")
         before = tree(self.root)
         for flow_id in ("ghost", "../outside", "../00-hub/orchestrator", "impl-openai-reviewer/../impl-openai-reviewer",
                         "/etc/passwd", "IMPL-OPENAI-REVIEWER", "impl-openai-reviewer.md", ""):
@@ -378,11 +380,12 @@ class Command(unittest.TestCase):
             self.assertEqual(structure.main(["flow", "remove", "ghost", "--structure", str(self.root / "missing")]), 1)
         self.assertIn("no structure folder", err.getvalue())
 
+    @needs_symlinks
     def test_symlinks_and_odd_entries_are_refused(self):
         self.run_cli("flow", "add", "impl-openai", "reviewer")
         flow = self.root / "flows/impl-openai-reviewer.md"
         target = self.root.parent / f"{self.root.name}-target.md"
-        target.write_text("path: impl-openai -> reviewer\n\nElsewhere.\n")
+        target.write_text("path: impl-openai -> reviewer\n\nElsewhere.\n", encoding="utf-8", newline="\n")
         self.addCleanup(target.unlink)
         flow.unlink()
         flow.symlink_to(target)
@@ -391,7 +394,7 @@ class Command(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("not a regular file", err)
         self.assertTrue(flow.is_symlink())
-        self.assertEqual(target.read_text(), "path: impl-openai -> reviewer\n\nElsewhere.\n")
+        self.assertEqual(target.read_text(encoding="utf-8"), "path: impl-openai -> reviewer\n\nElsewhere.\n")
         # A symlinked flows folder, or a file named flows, is never written through.
         flow.unlink()
         (self.root / "flows").rmdir()
@@ -402,11 +405,11 @@ class Command(unittest.TestCase):
         self.assertIn("not a plain folder", err)
         self.assertEqual(list(elsewhere.iterdir()), [])
         (self.root / "flows").unlink()
-        (self.root / "flows").write_text("a file")
+        (self.root / "flows").write_text("a file", encoding="utf-8", newline="\n")
         code, _, err = self.run_cli("flow", "add", "impl-openai", "reviewer")
         self.assertEqual(code, 1)
         self.assertIn("not a plain folder", err)
-        self.assertEqual((self.root / "flows").read_text(), "a file")
+        self.assertEqual((self.root / "flows").read_text(encoding="utf-8"), "a file")
 
     def test_a_failed_write_leaves_the_old_file_and_no_temporary_file(self):
         self.run_cli("flow", "add", "impl-openai", "reviewer", "--text-file", "-", stdin="Old.")
@@ -447,6 +450,7 @@ class Command(unittest.TestCase):
         self.assertEqual(len(self.flows()), 9)
         self.assertEqual([name for name in os.listdir(self.root / "flows") if not name.endswith(".md")], [])
 
+    @posix_only
     def test_shell_entry_point_round_trip_never_runs_git(self):
         script = ROOT / "bin" / "agentgraph"
 
@@ -461,7 +465,7 @@ class Command(unittest.TestCase):
         self.assertEqual(json.loads(run("flows", "--json"))["flows"][0]["text"], "Edited\non two lines.")
         run("flow", "remove", "impl-openai-verifier-impl-openai")
         self.assertEqual(tree(self.root), self.before)
-        self.assertNotIn("git", (ROOT / "agentgraph" / "structure.py").read_text().replace("agentgraph", ""))
+        self.assertNotIn("git", (ROOT / "agentgraph" / "structure.py").read_text(encoding="utf-8").replace("agentgraph", ""))
 
 
 def graph(nodes):
@@ -487,7 +491,7 @@ class Enforcement(unittest.TestCase):
         structure.add_flow(list(names), None, self.root)
 
     def run_check(self, nodes, structure_dir=None):
-        (self.graphs / "flows.json").write_text(json.dumps(graph(nodes)))
+        (self.graphs / "flows.json").write_text(json.dumps(graph(nodes)), encoding="utf-8", newline="\n")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             # One file name holds unrelated graphs in turn: none may be held to the history of another.
@@ -612,7 +616,7 @@ class Enforcement(unittest.TestCase):
         self.assertIn("  impl-openai → impl-openai  [impl-openai-impl-openai]\n      " + SELF.replace("A", "impl-openai", 1), out)
 
     def test_a_named_structure_folder_must_exist_but_a_missing_default_is_silent(self):
-        (self.graphs / "flows.json").write_text(json.dumps(graph([node("n12", "implement", "impl-openai")])))
+        (self.graphs / "flows.json").write_text(json.dumps(graph([node("n12", "implement", "impl-openai")])), encoding="utf-8", newline="\n")
         for missing in (self.root / "mistyped", self.graphs):
             with self.subTest(folder=missing):
                 out = io.StringIO()
@@ -730,7 +734,7 @@ class Satisfiable(unittest.TestCase):
         # A seat starts a council flow too, and `agentgraph check` reads the seats from the structure folder.
         structure.add_flow(["council", "reviewer"], None, self.root)
         graphs = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        (graphs / "flows.json").write_text(json.dumps(graph(nodes + [node("s1", "decision", "councillor-a")])))
+        (graphs / "flows.json").write_text(json.dumps(graph(nodes + [node("s1", "decision", "councillor-a")])), encoding="utf-8", newline="\n")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = check.main(["--dir", str(graphs), "--structure", str(self.root)])
@@ -777,7 +781,7 @@ class EveryPair(unittest.TestCase):
         self.assertEqual(tree(self.root), self.before)
 
     def check(self, nodes):
-        (self.graphs / "flows.json").write_text(json.dumps(graph(nodes)))
+        (self.graphs / "flows.json").write_text(json.dumps(graph(nodes)), encoding="utf-8", newline="\n")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = check.main(["--dir", str(self.graphs), "--structure", str(self.root)])
@@ -817,7 +821,7 @@ class EveryPair(unittest.TestCase):
         # carries no flows and no default loops.
         for path in sorted(self.root.rglob("*.md")):
             if path.name != "README.md":
-                self.assertFalse(any(line.strip().lower().startswith("checks:") for line in path.read_text().splitlines()), path)
+                self.assertFalse(any(line.strip().lower().startswith("checks:") for line in path.read_text(encoding="utf-8").splitlines()), path)
         doc = snapshot_json.snapshot_document(demo_snapshot(1000), "demo", structure=self.shape)
         self.assertEqual(doc["structure"], {"source": "folder", "flows": [], "teams": []})
         self.assertEqual(self.shape["warnings"], [])
@@ -1043,7 +1047,7 @@ class RecordedFlows(unittest.TestCase):
         return graph([node("i1", "implement", "impl-openai", attempts=1, session="ses_i"), gate("g1", "verifier", ["i1"], ["i1"])])
 
     def check(self, raw, *extra):
-        (self.graphs / "flows.json").write_text(json.dumps(raw))
+        (self.graphs / "flows.json").write_text(json.dumps(raw), encoding="utf-8", newline="\n")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = check.main(["--dir", str(self.graphs), "--structure", str(self.root), "--home", str(self.home), *extra])
@@ -1051,7 +1055,7 @@ class RecordedFlows(unittest.TestCase):
 
     def recorded(self):
         self.assertEqual(self.check(self.lane())[0], 0)
-        self.assertEqual(json.loads((self.graphs / ".history" / "flows.flows").read_text())["nodes"],
+        self.assertEqual(json.loads((self.graphs / ".history" / "flows.flows").read_text(encoding="utf-8"))["nodes"],
                          {"i1": ["impl-openai-verifier-impl-openai"]})
 
     def bypass(self, **changes):
@@ -1063,7 +1067,7 @@ class RecordedFlows(unittest.TestCase):
         self.recorded()
         raw = graph([node("n1", "implement", "impl-claude")])
         self.assertEqual(self.check(raw)[0], 0)
-        self.assertEqual(sorted(json.loads((self.graphs / ".history" / "flows.flows").read_text())["nodes"]), ["i1"])
+        self.assertEqual(sorted(json.loads((self.graphs / ".history" / "flows.flows").read_text(encoding="utf-8"))["nodes"]), ["i1"])
 
     def test_retyping_the_node_does_not_release_the_flow(self):
         self.recorded()
@@ -1114,7 +1118,7 @@ class RecordedFlows(unittest.TestCase):
         code, out = self.check(raw)
         self.assertEqual(code, 0, out)
         self.assertEqual(self.check(raw)[0], 0)
-        record = json.loads((self.graphs / ".history" / "flows.flows").read_text())
+        record = json.loads((self.graphs / ".history" / "flows.flows").read_text(encoding="utf-8"))
         self.assertEqual((record["nodes"], record["released"]), ({}, {"i1": ["impl-openai-verifier-impl-openai"]}))
 
     def test_an_amendment_that_does_not_name_the_node_and_the_flow_releases_nothing(self):
@@ -1135,10 +1139,10 @@ class RecordedFlows(unittest.TestCase):
         shutil.rmtree(self.root)
         with patch.object(snapshot_json, "STRUCTURE_DIR", self.root):
             out = io.StringIO()
-            (self.graphs / "flows.json").write_text(json.dumps(self.bypass(type="check")))
+            (self.graphs / "flows.json").write_text(json.dumps(self.bypass(type="check")), encoding="utf-8", newline="\n")
             with contextlib.redirect_stdout(out):
                 check.main(["--dir", str(self.graphs), "--home", str(self.home)])
-        self.assertEqual(json.loads((self.graphs / ".history" / "flows.flows").read_text())["nodes"],
+        self.assertEqual(json.loads((self.graphs / ".history" / "flows.flows").read_text(encoding="utf-8"))["nodes"],
                          {"i1": ["impl-openai-verifier-impl-openai"]})
 
     def test_no_history_means_no_recorded_flows(self):
@@ -1155,7 +1159,7 @@ class RecordedFlows(unittest.TestCase):
         raw["nodes"][0].update(status="passed", evidence="ok")
         raw["nodes"][1].update(status="passed", evidence="ok", verdict="confirmed")
         self.assertEqual(self.check(raw)[0], 0)
-        record = json.loads((self.graphs / ".history" / "flows.flows").read_text())
+        record = json.loads((self.graphs / ".history" / "flows.flows").read_text(encoding="utf-8"))
         self.assertEqual(record["nodes"], {"i1": ["impl-openai-verifier-impl-openai"]})
 
 
@@ -1179,7 +1183,7 @@ class OneProblemList(unittest.TestCase):
         return code, [line.strip()[2:] for line in out.getvalue().splitlines() if line.startswith("            - ")]
 
     def write(self, nodes, **extra):
-        self.path.write_text(json.dumps({**graph(nodes), "task": "flows", **extra}))
+        self.path.write_text(json.dumps({**graph(nodes), "task": "flows", **extra}), encoding="utf-8", newline="\n")
 
     def test_all_problems_are_what_check_prints_and_write_nothing(self):
         self.write([node("i1", "implement", "impl-openai")])
@@ -1202,9 +1206,9 @@ class OneProblemList(unittest.TestCase):
     def test_all_problems_of_a_passing_graph_are_empty_and_unreadable_graphs_have_none(self):
         self.write([node("i1", "implement", "impl-openai"), gate("g1", "verifier", ["i1"], ["i1"])])
         self.assertEqual(check.all_problems(self.path, self.rules()), [])
-        self.path.write_text("{bad")
+        self.path.write_text("{bad", encoding="utf-8", newline="\n")
         self.assertIsNone(check.all_problems(self.path, self.rules()))
-        self.path.write_text("[]")
+        self.path.write_text("[]", encoding="utf-8", newline="\n")
         self.assertIsNone(check.all_problems(self.path, self.rules()))
 
     def test_the_snapshot_problems_are_the_check_problems(self):
@@ -1213,7 +1217,7 @@ class OneProblemList(unittest.TestCase):
         shape = snapshot_json.load_structure(self.root)
         with patch.object(snapshot_json, "load_structure", return_value=shape), \
                 patch("agentgraph.outputs.edit_home", return_value=self.home):
-            snapshot_graph = check.graph_from_raw(json.loads(self.path.read_text()), self.path)
+            snapshot_graph = check.graph_from_raw(json.loads(self.path.read_text(encoding="utf-8")), self.path)
             self.assertEqual(snapshot_json._problems(snapshot_graph, shape), found)
             self.write([node("i1", "implement", "impl-openai"), gate("g1", "verifier", ["i1"], ["i1"])])
             self.assertEqual(snapshot_json._problems(snapshot_graph, shape), [])
@@ -1224,10 +1228,10 @@ class OneProblemList(unittest.TestCase):
         self.write([node("i1", "implement", "impl-openai", status="passed", evidence="ok", attempts=1, session="s"),
                     gate("g1", "verifier", ["i1"], ["i1"])], status="running")
         self.assertEqual(self.printed()[0], 0)
-        raw = json.loads(self.path.read_text())
+        raw = json.loads(self.path.read_text(encoding="utf-8"))
         raw["nodes"] = [raw["nodes"][0]]
         raw["status"] = "passed"
-        self.path.write_text(json.dumps(raw))
+        self.path.write_text(json.dumps(raw), encoding="utf-8", newline="\n")
         code, problems = self.printed()
         self.assertEqual(code, 1)
         result = ledger.record(self.home, 100.0, self.graphs, rules=self.rules())
@@ -1238,7 +1242,7 @@ class OneProblemList(unittest.TestCase):
                                                 "evidence": "ok", "verdict": "confirmed", "attempts": 1, "session": "s3"}]
         raw["events"] = [{"time": 3, "node": "g1", "event": "dispatched", "note": ""},
                          {"time": 4, "node": "g1", "event": "evaluated", "note": ""}]
-        self.path.write_text(json.dumps(raw))
+        self.path.write_text(json.dumps(raw), encoding="utf-8", newline="\n")
         self.assertEqual(self.printed(), (0, []))
         result = ledger.record(self.home, 100.0, self.graphs, rules=self.rules())
         self.assertEqual((result.code, [run["task"] for run in result.runs]), (0, ["flows"]))
@@ -1278,7 +1282,7 @@ class SavedLoops(unittest.TestCase):
         self.assertEqual(self.looprun.settings_path(self.root, self.flow["id"]).read_bytes(), saved)
 
     def test_a_flow_that_no_longer_loops_keeps_its_loop_and_is_not_runnable(self):
-        (self.root / "flows" / f"{self.flow['id']}.md").write_text("path: impl-openai -> reviewer\n\nEdited by hand.\n")
+        (self.root / "flows" / f"{self.flow['id']}.md").write_text("path: impl-openai -> reviewer\n\nEdited by hand.\n", encoding="utf-8", newline="\n")
         entry, = self.listing()["loops"]
         self.assertEqual((entry["runnable"], entry["settings"] is not None, entry["problem"]), (False, True, ""))
         self.assertTrue(self.looprun.settings_path(self.root, self.flow["id"]).is_file())

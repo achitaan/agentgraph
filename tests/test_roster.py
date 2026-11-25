@@ -13,10 +13,11 @@ import unittest
 from unittest.mock import patch
 
 from agentgraph import roster, skillset
+from tests.winskip import needs_symlinks, posix_only
 from agentgraph.snapshot_json import skills_document
 
 
-SCRATCH = Path("/private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode/roster")
+SCRATCH = Path(tempfile.gettempdir()).resolve() / "agentgraph-roster"
 ROOT = Path(__file__).resolve().parent.parent
 CATALOGUE = [entry["name"] for entry in skills_document()]
 SKILLS = [name for name in ("code-assurance", "engineering-delivery") if name in CATALOGUE] or CATALOGUE[:2]
@@ -89,7 +90,7 @@ class RosterTest(unittest.TestCase):
             row = {r["name"]: r for r in rows}["scout"]
             self.assertEqual((row["kind"], row["off"], row["remove"]), ("custom", False, "delete"))
         self.assertIn("schema", result)
-        self.assertIn("scout", self.map.read_text())
+        self.assertIn("scout", self.map.read_text(encoding="utf-8"))
         roster.remove("scout", **self.paths)
         self.assertEqual(self.files(), self.original)
 
@@ -147,7 +148,7 @@ class RosterTest(unittest.TestCase):
     def test_refuse_disabled_name(self):
         data = self.data()
         data["disabled_agents"].append("scout")
-        self.config.write_text(json.dumps(data, indent=2) + "\n")
+        self.config.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
         self.original = self.files()
         self.refused("disabled_agents", self.agent)
 
@@ -160,7 +161,7 @@ class RosterTest(unittest.TestCase):
         schema = roster._find_schema()
         if schema is None:
             self.skipTest("the plugin's schema file is not installed")
-        agent = roster._agent_schema(json.loads(schema.read_text()))
+        agent = roster._agent_schema(json.loads(schema.read_text(encoding="utf-8")))
         good = self.data()["presets"]["normal"]["verifier"]
         self.assertEqual(roster._problems(good, agent), [])
         self.assertTrue(roster._problems({**good, "permission": {"bash": "maybe"}}, agent))
@@ -182,10 +183,10 @@ class RosterTest(unittest.TestCase):
                 result = roster.remove(name, **self.paths)
                 self.assertEqual(result["action"], "deleted")
                 self.assertTrue(all(name not in agents for agents in self.data()["presets"].values()))
-                self.assertNotIn(f"| `{name}` |", self.map.read_text())
+                self.assertNotIn(f"| `{name}` |", self.map.read_text(encoding="utf-8"))
                 self.in_step()
                 saved = Path(result["record_path"])
-                self.assertEqual(json.loads(saved.read_text()), result["record"])
+                self.assertEqual(json.loads(saved.read_text(encoding="utf-8")), result["record"])
                 self.assertEqual([c["preset"] for c in result["record"]["presets"]], list(self.data()["presets"]))
                 roster.restore(saved, **self.paths)
                 self.assertEqual(self.files(), self.original)
@@ -244,7 +245,7 @@ class RosterTest(unittest.TestCase):
     def test_built_in_without_disabled_list_creates_and_removes_the_key(self):
         data = self.data()
         del data["disabled_agents"]
-        self.config.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        self.config.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
         self.original = self.files()
         result = roster.remove("oracle", **self.paths)
         self.assertEqual(self.data()["disabled_agents"], ["oracle"])
@@ -256,7 +257,7 @@ class RosterTest(unittest.TestCase):
         text = self.original[0].decode()
         start = text.index('"disabled_agents": [')
         end = text.index("]", start) + 1
-        self.config.write_text(text[:start] + '"disabled_agents": []' + text[end:])
+        self.config.write_text(text[:start] + '"disabled_agents": []' + text[end:], encoding="utf-8", newline="\n")
         self.original = self.files()
         result = roster.remove("designer", **self.paths)
         self.assertEqual(self.data()["disabled_agents"], ["designer"])
@@ -327,7 +328,7 @@ class RosterTest(unittest.TestCase):
         roster.restore(record, **self.paths)
         self.assertEqual(self.files(), self.original)
         compact = json.dumps(self.data(), ensure_ascii=False)
-        self.config.write_text(compact)
+        self.config.write_text(compact, encoding="utf-8", newline="\n")
         self.original = self.files()
         self.agent("tiny")
         self.assertEqual(self.data()["presets"]["normal"]["tiny"]["skills"], [SKILLS[0]])
@@ -338,13 +339,14 @@ class RosterTest(unittest.TestCase):
         self.assertEqual(self.files(), self.original)
 
     def test_tab_indented_file(self):
-        self.config.write_text(json.dumps(self.data(), indent="\t", ensure_ascii=False) + "\n")
+        self.config.write_text(json.dumps(self.data(), indent="\t", ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
         self.original = self.files()
         self.agent()
-        self.assertIn('\n\t\t\t"scout": {\n\t\t\t\t"model"', self.config.read_text())
+        self.assertIn('\n\t\t\t"scout": {\n\t\t\t\t"model"', self.config.read_text(encoding="utf-8"))
         roster.remove("scout", **self.paths)
         self.assertEqual(self.files(), self.original)
 
+    @needs_symlinks
     def test_refuse_symlink_and_special_files(self):
         target = self.root / "real.json"
         self.config.rename(target)
@@ -361,13 +363,14 @@ class RosterTest(unittest.TestCase):
         self.refused("regular file", self.agent)
 
     def test_refuse_bad_config(self):
-        self.config.write_text('{"preset": "x", "presets": {}}')
+        self.config.write_text('{"preset": "x", "presets": {}}', encoding="utf-8", newline="\n")
         self.original = self.files()
         self.refused("config shape", self.agent)
-        self.config.write_text("{")
+        self.config.write_text("{", encoding="utf-8", newline="\n")
         self.original = self.files()
         self.refused("not parseable", roster.remove, "reviewer")
 
+    @posix_only
     def test_backup_once_per_day_and_modes_kept(self):
         self.config.chmod(0o640)
         first = Path(self.agent()["backup"])
@@ -409,7 +412,7 @@ class RosterTest(unittest.TestCase):
                    "--map", str(self.map), "--backups", str(self.backups), "add"]
         env = os.environ | {"PYTHONPATH": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1"}
         prompt = self.root / "p.txt"
-        prompt.write_text("Do the work.\n")
+        prompt.write_text("Do the work.\n", encoding="utf-8", newline="\n")
         spec = ["--model", "x/y", "--description", "d", "--prompt-file", str(prompt), "--json"]
         with subprocess.Popen([*command, "one", *spec], cwd=ROOT, env=env, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE) as one:
@@ -474,8 +477,8 @@ class RosterTest(unittest.TestCase):
             self.assertIn(name, roster.HOST_AGENTS)
 
     def test_a_name_that_is_an_agent_file_is_refused_and_a_free_one_is_not(self):
-        (self.agents / "scribe.md").write_text("---\nmodel: a/b\n---\n")
-        (self.agents / "other.md.disabled").write_text("x")
+        (self.agents / "scribe.md").write_text("---\nmodel: a/b\n---\n", encoding="utf-8", newline="\n")
+        (self.agents / "other.md.disabled").write_text("x", encoding="utf-8", newline="\n")
         self.refused("agent file", self.agent, "scribe")
         self.agent("other")
         self.agent("scout")
@@ -492,11 +495,11 @@ class RosterTest(unittest.TestCase):
         # OpenCode reads its legacy `agent/` folder and the `agent` map of opencode.json alongside `agents/`.
         obj = self.data()
         obj["presets"][obj["preset"]]["orchestrator"]["displayName"] = "@Boss"
-        self.config.write_text(json.dumps(obj, indent=2) + "\n")
+        self.config.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8", newline="\n")
         self.original = self.files()
         (self.root / "agent").mkdir()
-        (self.root / "agent" / "legacy.md").write_text("---\nmodel: a/b\n---\n")
-        (self.root / "opencode.json").write_text(json.dumps({"agent": {"helper": {}, "x": {"displayName": "Shown"}}}))
+        (self.root / "agent" / "legacy.md").write_text("---\nmodel: a/b\n---\n", encoding="utf-8", newline="\n")
+        (self.root / "opencode.json").write_text(json.dumps({"agent": {"helper": {}, "x": {"displayName": "Shown"}}}), encoding="utf-8", newline="\n")
         structure = self.root / "structure"
         for name, pattern in (("boss", "display name"), ("legacy", "agent folder"), ("helper", "opencode.json"),
                               ("shown", "opencode.json")):
@@ -506,16 +509,16 @@ class RosterTest(unittest.TestCase):
                              agents_dir=self.agents, structure=structure)
         self.assertFalse(structure.exists())
         (self.root / "opencode.json").unlink()
-        (self.root / "opencode.jsonc").write_text('{\n  // mine\n  "agent": {"jhelper": {},},\n}\n')
+        (self.root / "opencode.jsonc").write_text('{\n  // mine\n  "agent": {"jhelper": {},},\n}\n', encoding="utf-8", newline="\n")
         self.refused("opencode.json", self.agent, "jhelper")
-        (self.root / "opencode.jsonc").write_text("{ not json")
+        (self.root / "opencode.jsonc").write_text("{ not json", encoding="utf-8", newline="\n")
         self.refused("cannot read opencode.jsonc", self.agent, "free")
         (self.root / "opencode.jsonc").unlink()
         self.agent("free")
 
     def test_unsafe_names_are_refused_before_anything_is_written_and_never_a_traceback(self):
         text = self.original[0].decode().replace('"verifier"', '"a/b"')
-        self.config.write_text(text)
+        self.config.write_text(text, encoding="utf-8", newline="\n")
         self.map.write_bytes(self.original[1].replace(b"| `verifier` |", b"| `a/b` |"))
         self.original = self.files()
         self.in_step()
@@ -555,7 +558,7 @@ class RosterTest(unittest.TestCase):
         code, text, err = self.cli("show")
         self.assertIn("built-in:", text)
         prompt = self.root / "prompt.md"
-        prompt.write_text("Look carefully.\n")
+        prompt.write_text("Look carefully.\n", encoding="utf-8", newline="\n")
         spec = ["--model", "a/b", "--description", "A looker.", "--skills", f"{SKILLS[0]},{SKILLS[1]}",
                 "--read-only", "--presets", "normal,fast"]
         code, out, err = self.cli("add", "looker", *spec, "--prompt-file", str(prompt), "--json")

@@ -11,6 +11,7 @@ import unittest.mock
 from pathlib import Path
 
 from agentgraph import agentfiles, teams
+from tests.winskip import needs_symlinks
 from agentgraph.structure import StructureError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -159,7 +160,7 @@ class FileLimit(Base):
         folder = self.root / "teams"
         folder.mkdir()
         for index in range(teams.TEAM_FILES_LIMIT):
-            (folder / f"junk-{index:03d}.md").write_text("nothing readable here\n")
+            (folder / f"junk-{index:03d}.md").write_text("nothing readable here\n", encoding="utf-8", newline="\n")
         self.assertEqual(teams.teams(self.root), [])
         message = self.refused(teams.add, "reviewer", ["impl-openai"], None, self.root)
         self.assertIn(f"{teams.TEAM_FILES_LIMIT} team files", message)
@@ -227,21 +228,22 @@ class Refusals(Base):
         # its own current members are not in the way of a change
         teams.set_members("reviewer", ["impl-openai", "impl-claude"], self.root)
 
+    @needs_symlinks
     def test_a_symlinked_teams_folder_or_file_is_refused_and_nothing_is_followed(self):
         other = self.root.parent / (self.root.name + "-elsewhere")
         other.mkdir()
         self.addCleanup(lambda: [p.unlink() for p in other.iterdir()] or other.rmdir())
-        os.symlink(other, self.root / "teams")
+        os.symlink(other, self.root / "teams", target_is_directory=True)
         self.assertEqual(teams.teams(self.root), [])
         self.assertIn("not a plain folder", self.refused(teams.add, "reviewer", ["designer"], structure_dir=self.root))
         self.assertEqual(list(other.iterdir()), [])
         os.unlink(self.root / "teams")
         teams.add("reviewer", ["designer"], structure_dir=self.root)
-        (other / "elsewhere.md").write_text("lead: verifier\nmembers: designer\n\nx\n")
+        (other / "elsewhere.md").write_text("lead: verifier\nmembers: designer\n\nx\n", encoding="utf-8", newline="\n")
         os.symlink(other / "elsewhere.md", self.root / "teams" / "linked.md")
         self.assertEqual([t["id"] for t in teams.teams(self.root)], ["reviewer"])
         self.assertIn("not a regular file", self.refused(teams.set_text, "linked", "changed", self.root))
-        self.assertEqual((other / "elsewhere.md").read_text(), "lead: verifier\nmembers: designer\n\nx\n")
+        self.assertEqual((other / "elsewhere.md").read_text(encoding="utf-8"), "lead: verifier\nmembers: designer\n\nx\n")
 
     def test_no_structure_folder(self):
         missing = self.root / "nowhere"
@@ -437,7 +439,7 @@ class Command(Base):
         self.assertIn("    impl-openai and impl-claude report to reviewer. reviewer reconciles", out)
         text = self.root.parent / (self.root.name + ".txt")
         self.addCleanup(lambda: text.unlink() if text.exists() else None)
-        text.write_text("Mine, from a file.")
+        text.write_text("Mine, from a file.", encoding="utf-8", newline="\n")
         self.assertEqual(self.run_main("text", "reviewer", "--text-file", str(text))[0], 0)
         self.assertEqual(self.run_main("text", "reviewer", "--text-file", "-", stdin="From stdin.")[0], 0)
         self.assertIn("From stdin.", self.run_main("list")[1])

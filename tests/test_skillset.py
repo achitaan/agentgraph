@@ -13,10 +13,11 @@ import unittest
 from unittest.mock import patch
 
 from agentgraph import skillset
+from tests.winskip import needs_fifo, needs_symlinks, posix_only
 from agentgraph.snapshot_json import skills_document
 
 
-SCRATCH = Path("/private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode/skillset")
+SCRATCH = Path(tempfile.gettempdir()).resolve() / "agentgraph-skillset"
 ROOT = Path(__file__).resolve().parent.parent
 CATALOGUE = [entry["name"] for entry in skills_document()]
 TRIAL = "simplify" if "simplify" in CATALOGUE else "clone-any-website"
@@ -89,7 +90,7 @@ class SkillsetTest(unittest.TestCase):
         before = self.data()
         skipped = next(iter(before["presets"]))
         del before["presets"][skipped]["impl-openai"]
-        self.config.write_text(json.dumps(before), encoding="utf-8")
+        self.config.write_text(json.dumps(before), encoding="utf-8", newline="\n")
         result = self.change(skillset.add, "impl-openai", TRIAL)
         expected = json.loads(json.dumps(before))
         for preset, agents in expected["presets"].items():
@@ -104,7 +105,7 @@ class SkillsetTest(unittest.TestCase):
         self.assertEqual(result["skills"], self.arrays("impl-openai")[self.preset])
         self.assertEqual(result["differing_presets"], selected)
         self.assertEqual([p for p, values in self.arrays("impl-openai").items() if TRIAL in values], selected)
-        self.assertIn(f"`{selected[0]}`, `{selected[1]}`: ", self.map.read_text())
+        self.assertIn(f"`{selected[0]}`, `{selected[1]}`: ", self.map.read_text(encoding="utf-8"))
         self.change(skillset.remove, "impl-openai", TRIAL, presets=selected)
         self.assertEqual(self.files(), self.original)
 
@@ -203,7 +204,7 @@ class SkillsetTest(unittest.TestCase):
         self.assertEqual(self.profiles.read_bytes(), skillset.PROFILES.read_bytes())
 
     def test_profile_wildcard_remove_warns(self):
-        self.profiles.write_text("- `orchestrator`: `code-assurance`\n", encoding="utf-8")
+        self.profiles.write_text("- `orchestrator`: `code-assurance`\n", encoding="utf-8", newline="\n")
         result = self.change(skillset.remove, "orchestrator", "code-assurance")
         self.assertIn("orchestrator profile still names code-assurance", result["warnings"][0])
 
@@ -214,7 +215,7 @@ class SkillsetTest(unittest.TestCase):
     def test_refuse_agent_absent_from_selected(self):
         obj = self.data()
         del obj["presets"][self.preset]["impl-openai"]
-        self.config.write_text(json.dumps(obj), encoding="utf-8")
+        self.config.write_text(json.dumps(obj), encoding="utf-8", newline="\n")
         before = self.files()
         self.assert_refused("not in any selected preset", skillset.add, "impl-openai", TRIAL, presets=[self.preset])
         self.assertEqual(self.files(), before)
@@ -236,6 +237,7 @@ class SkillsetTest(unittest.TestCase):
                 self.assert_refused("invalid preset name", skillset.add, "impl-openai", TRIAL, presets=[name])
         self.assertEqual(self.files(), self.original)
 
+    @needs_symlinks
     def test_refuse_symlink_config(self):
         moved = self.config.rename(self.root / "target")
         self.config.symlink_to(moved)
@@ -243,6 +245,7 @@ class SkillsetTest(unittest.TestCase):
         self.assertTrue(self.config.is_symlink())
         self.assertEqual(moved.read_bytes(), self.original[0])
 
+    @needs_fifo
     def test_refuse_fifo_config_without_waiting(self):
         bad = self.root / "fifo"
         os.mkfifo(bad)
@@ -262,9 +265,9 @@ class SkillsetTest(unittest.TestCase):
     def test_refuse_bad_shapes(self):
         for raw in ("[]", '{"preset":"fast","presets":[]}', '{"preset":"fast","presets":{"fast":[]}}',
                     '{"preset":"fast","presets":{"fast":{"impl-openai":{"model":"x","skills":[0]}}}}'):
-            self.config.write_text(raw, encoding="utf-8")
+            self.config.write_text(raw, encoding="utf-8", newline="\n")
             self.assert_refused("config shape", skillset.add, "impl-openai", TRIAL)
-            self.assertEqual(self.config.read_text(), raw)
+            self.assertEqual(self.config.read_text(encoding="utf-8"), raw)
 
     def test_refuse_mismatching_map(self):
         self.map.write_bytes(self.original[1].replace(b"| `council` | none |", b"| `council` | all |"))
@@ -291,6 +294,7 @@ class SkillsetTest(unittest.TestCase):
             self.assert_refused("proof failed", skillset.add, "impl-openai", TRIAL)
         self.assertEqual(self.files(), self.original)
 
+    @posix_only
     def test_backup_once_and_modes_kept(self):
         self.config.chmod(0o640)
         self.map.chmod(0o600)

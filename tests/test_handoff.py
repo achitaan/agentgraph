@@ -47,7 +47,7 @@ class Base(unittest.TestCase):
     def notes(self, text=NOTES, age=0):
         path = handoff.notes_path(SID, self.work)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        path.write_text(text, encoding="utf-8", newline="\n")
         if age:
             old = time.time() - age
             os.utime(path, (old, old))
@@ -58,7 +58,7 @@ class Base(unittest.TestCase):
         folder.mkdir(parents=True, exist_ok=True)
         base = {"id": "n3", "type": "implement", "agent": "impl-openai", "goal": "Add the limiter", "done_when": "tests pass", "scope": ["src/"],
                 "status": "running", "attempts": 1, "evidence": "ran tests: 3 failed", "session": SID}
-        (folder / "limiter.json").write_text(json.dumps({"task": "limiter", "goal": "whole", "nodes": [{**base, **node}]}))
+        (folder / "limiter.json").write_text(json.dumps({"task": "limiter", "goal": "whole", "nodes": [{**base, **node}]}), encoding="utf-8", newline="\n")
 
     def build(self, *extra):
         return run_main(["build", "--session", SID, "--dir", str(self.work), "--db", str(self.db), *extra])
@@ -87,7 +87,7 @@ class PathAndCheck(Base):
 
     def test_notes_dir_rule_is_the_same_for_build_and_check(self):
         (self.work / "src").mkdir()
-        (self.work / "src" / f"{SID}.md").write_text("NOTES IN SRC")
+        (self.work / "src" / f"{SID}.md").write_text("NOTES IN SRC", encoding="utf-8", newline="\n")
         code, out, err = self.build("--notes-dir", "src")
         self.assertEqual(code, 3, "the notes in src/ are not read")
         self.assertIn("--notes-dir", err)
@@ -158,7 +158,7 @@ class Build(Base):
         env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
         for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "x"]):
             subprocess.run(["git", "-C", str(self.work), *args], check=True, env=env, capture_output=True)
-        (self.work / "a.py").write_text("print('FILE-BODY-9911')\n")
+        (self.work / "a.py").write_text("print('FILE-BODY-9911')\n", encoding="utf-8", newline="\n")
         self.notes()
         code, out, _ = self.build()
         self.assertIn("- a.py", out)
@@ -170,7 +170,7 @@ class Build(Base):
             self.skipTest("git missing")
         subprocess.run(["git", "-C", str(self.work), "init", "-q"], check=True, capture_output=True)
         self.notes()
-        (handoff.notes_folder(self.work) / ".gitignore").write_text("*\n")      # what the plugin puts there
+        (handoff.notes_folder(self.work) / ".gitignore").write_text("*\n", encoding="utf-8", newline="\n")      # what the plugin puts there
         self.assertIn("(none)", self.build()[1].split("## Notes written")[0])     # the notes are neither listed nor shown by git
         self.graph(scope=[])
         self.assertIn("- .opencode/", self.build()[1].split("## Notes written")[0])  # but other work under .opencode/ is
@@ -206,7 +206,7 @@ class Build(Base):
         code, text = handoff.build("ses_nomessages", self.work, db_path=self.db)
         self.assertEqual((code, text), (3, ""))  # no notes of its own
         path = handoff.notes_path("ses_nomessages", self.work)
-        path.write_text("notes")
+        path.write_text("notes", encoding="utf-8", newline="\n")
         self.assertEqual(handoff.build("ses_nomessages", self.work, db_path=self.db), (4, ""))
 
     def test_default_database_follows_xdg_data_home(self):
@@ -311,7 +311,7 @@ class Log(Base):
     def write_log(self, rows):
         path = handoff.log_path(self.tmp / "home")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(json.dumps(r) for r in rows) + "\nnot json\n")
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\nnot json\n", encoding="utf-8", newline="\n")
 
     def test_empty(self):
         code, out, _ = run_main(["log", "--home", str(self.tmp / "home")])
@@ -379,10 +379,10 @@ class Leads(Base):
         for folder, name, extra in (("00-hub", "orchestrator", ""), ("10-council", "council", "seats: councillor-\n\n"), ("30-build", "impl-openai", ""),
                                     ("40-verify", "reviewer", "")):
             (root / folder).mkdir(parents=True, exist_ok=True)
-            (root / folder / f"{name}.md").write_text(extra + f"{name} does things.\n")
+            (root / folder / f"{name}.md").write_text(extra + f"{name} does things.\n", encoding="utf-8", newline="\n")
         if teams:
             (root / "teams").mkdir()
-            (root / "teams" / "review-team.md").write_text("lead: reviewer\nmembers: impl-openai\n\nimpl-openai reports to reviewer.\n")
+            (root / "teams" / "review-team.md").write_text("lead: reviewer\nmembers: impl-openai\n\nimpl-openai reports to reviewer.\n", encoding="utf-8", newline="\n")
         return root
 
     def test_leads_are_the_hubs_the_council_and_the_team_leads(self):
@@ -478,8 +478,8 @@ class ChatBuild(Base):
 
     def test_task_graphs_list_the_nodes_that_are_not_passed(self):
         folder = self.work / ".opencode" / "graph"; folder.mkdir(parents=True)
-        (folder / "alpha.json").write_text(json.dumps({"task": "alpha", "nodes": [{"id": "a1", "status": "passed"}, {"id": "a2", "status": "running"}, {"id": "a3", "status": "failed"}]}))
-        (folder / "beta.json").write_text(json.dumps({"task": "beta", "nodes": [{"id": "b1", "status": "passed"}]}))
+        (folder / "alpha.json").write_text(json.dumps({"task": "alpha", "nodes": [{"id": "a1", "status": "passed"}, {"id": "a2", "status": "running"}, {"id": "a3", "status": "failed"}]}), encoding="utf-8", newline="\n")
+        (folder / "beta.json").write_text(json.dumps({"task": "beta", "nodes": [{"id": "b1", "status": "passed"}]}), encoding="utf-8", newline="\n")
         code, out, _ = self.build("--chat")
         section = out[out.index("## Task graphs in the project"):]
         self.assertIn("alpha: 1 of 3 nodes passed; not passed: a2 (running), a3 (failed)", section)
@@ -663,7 +663,7 @@ class RealLayout(unittest.TestCase):
 
     def test_the_second_summary_carries_the_typing_once_and_no_earlier_summary_or_instruction_text(self):
         self.layout(time.time() * 1000 - 1000)
-        path = handoff.notes_path(SID, self.work); path.parent.mkdir(parents=True, exist_ok=True); path.write_text(CHAT_NOTES, encoding="utf-8")
+        path = handoff.notes_path(SID, self.work); path.parent.mkdir(parents=True, exist_ok=True); path.write_text(CHAT_NOTES, encoding="utf-8", newline="\n")
         code, out, err = self.build()
         self.assertEqual(code, 0, err)
         self.assertEqual(out.count("# Handoff summary"), 1, "no earlier summary inside this one")
@@ -680,7 +680,7 @@ class RealLayout(unittest.TestCase):
     # ---- second re-read (x1 review r2): the last ask, a report stored during the notes step, `late` by the tag's rule; all on the real layout ----
 
     def notes_at(self, ms):
-        path = handoff.notes_path(SID, self.work); path.parent.mkdir(parents=True, exist_ok=True); path.write_text(CHAT_NOTES, encoding="utf-8")
+        path = handoff.notes_path(SID, self.work); path.parent.mkdir(parents=True, exist_ok=True); path.write_text(CHAT_NOTES, encoding="utf-8", newline="\n")
         os.utime(path, (ms / 1000, ms / 1000))
 
     def ask(self, ms):
@@ -790,7 +790,7 @@ class RealLayout(unittest.TestCase):
     def test_a_user_row_that_holds_a_summary_is_not_quoted_as_typing(self):
         self.layout(time.time() * 1000 - 1000)
         self.row("user", {"text": "# Handoff summary (main chat)\n\nstored as a user row by some other version", "time": {"created": 1}}); self.db_conn.commit()
-        path = handoff.notes_path(SID, self.work); path.parent.mkdir(parents=True, exist_ok=True); path.write_text(CHAT_NOTES, encoding="utf-8")
+        path = handoff.notes_path(SID, self.work); path.parent.mkdir(parents=True, exist_ok=True); path.write_text(CHAT_NOTES, encoding="utf-8", newline="\n")
         code, out, _ = self.build()
         self.assertNotIn("stored as a user row", out); self.assertEqual(out.count("# Handoff summary"), 1)
 

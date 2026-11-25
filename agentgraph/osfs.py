@@ -255,10 +255,43 @@ class _Folder:
         self.path, self.ident, self.lock_fd = path, ident, None
 
 
-def _lock_folder():
-    root = os.environ.get("AGENTGRAPH_LOCKDIR") or os.path.join(tempfile.gettempdir(), "agentgraph-locks")
+def _private_folder(root):
+    """Make `root` (a folder only this user may use) and check it is what it should be: a real folder, not a link,
+    owned by this user and closed to everyone else. A folder somebody else made first in a shared place is refused."""
     os.makedirs(root, mode=0o700, exist_ok=True)
+    info = os.lstat(root)
+    if is_link(info) or not _stat.S_ISDIR(info.st_mode):
+        raise PermissionError(errno.EACCES, "the lock folder is not a plain folder", root)
+    owner = getattr(os, "getuid", None)
+    if owner is not None and (info.st_uid != owner() or info.st_mode & 0o077):
+        raise PermissionError(errno.EACCES, "the lock folder belongs to somebody else or is open to others", root)
     return root
+
+
+def _lock_folder():
+    """Where a folder's lock file lives. Every process of this user must find the same place, whatever TEMP or TMP
+    it was given (the review copy runs commands with both changed): AGENTGRAPH_LOCKDIR when set; on Windows
+    %LOCALAPPDATA%\\agentgraph\\locks (else the home folder, else the temp folder); elsewhere (the portable backend
+    forced for tests) the user's runtime folder, else a folder named for the user id in the temp folder, which is
+    checked to be this user's own and private."""
+    root = os.environ.get("AGENTGRAPH_LOCKDIR")
+    if root:
+        os.makedirs(root, mode=0o700, exist_ok=True)
+        return root
+    if _NT:
+        base = os.environ.get("LOCALAPPDATA")
+        if not base:
+            home = os.path.expanduser("~")
+            base = home if home and home != "~" else tempfile.gettempdir()
+        root = os.path.join(base, "agentgraph", "locks")
+        os.makedirs(root, exist_ok=True)  # a Windows profile folder is already private to its user
+        return root
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime and os.path.isabs(runtime) and os.path.isdir(runtime):
+        return _private_folder(os.path.join(runtime, "agentgraph-locks"))
+    owner = getattr(os, "getuid", None)
+    name = "agentgraph-locks-%d" % owner() if owner is not None else "agentgraph-locks"
+    return _private_folder(os.path.join(tempfile.gettempdir(), name))
 
 
 class _Portable:
@@ -331,13 +364,20 @@ class _Portable:
             self._table[token] = _Folder(folder.path, folder.ident)
         return token
 
-    def _new_handle(self, path):
+    def _new_handle(self, path, nofollow=False):
+        """A handle for the folder at `path`: its real path (links resolved) and identity, checked twice: the
+        folder the path led to must be the folder at the real path (else ESTALE), and with `nofollow` the real path
+        must not be a link or junction now (ELOOP; a link put in the place after the resolving is caught here).
+        The folder is not held open: a later swap is caught by the same check on every operation, not prevented."""
         info = os.stat(path)
         if not _stat.S_ISDIR(info.st_mode):
             raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), path)
         real = os.path.realpath(path)
         folder = _Folder(real, _identity(info))
-        if folder.ident is not None and _identity(os.stat(real)) != folder.ident:
+        after = os.lstat(real)
+        if nofollow and is_link(after):
+            raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), path)
+        if folder.ident is not None and _identity(after) != folder.ident:
             raise OSError(getattr(errno, "ESTALE", errno.EIO), "the folder changed while it was opened", path)
         with self._guard:
             token = next(self._numbers)
@@ -363,7 +403,7 @@ class _Portable:
         if wants_dir:
             if real_dir is not None:
                 return os.open(full, flags, mode, dir_fd=real_dir)
-            return self._new_handle(full)
+            return self._new_handle(full, nofollow)
         fd = os.open(full, (flags & ~(O_NOFOLLOW | O_DIRECTORY)) | O_BINARY, mode, dir_fd=real_dir)
         if nofollow:
             try:
@@ -530,6 +570,8 @@ class _Portable:
                     _win_try_lock(fd)
                     return
                 except OSError as exc:
+                    if self._holds(fd):
+                        return  # a repeat on the descriptor that holds it: flock accepts it, so does this
                     if not block:
                         raise BlockingIOError(errno.EAGAIN, "the lock is held by another process") from exc
                     time.sleep(delay)  # LK_LOCK would give up after about ten seconds; flock never does
@@ -537,6 +579,22 @@ class _Portable:
         if fcntl is None:
             raise OSError(errno.ENOSYS, "this system has no file locks")
         _posix_lock(fd, shared=shared, block=block)
+
+    def _holds(self, fd):
+        """Whether this very descriptor holds the byte lock already (a Windows lock is refused even to the handle
+        that holds it, which would make a repeat wait forever). Only the holder can unlock it, so a successful
+        unlock proves it; the lock is taken again at once. If another process wins that instant, the repeat waits
+        its turn like a first lock. Nothing is remembered, so a descriptor closed without an unlock leaves no stale
+        entry to skip a later real lock."""
+        try:
+            _win_unlock(fd)
+        except OSError:
+            return False
+        try:
+            _win_try_lock(fd)
+        except OSError:
+            return False
+        return True
 
     def _unlock_file(self, fd):
         if _msvcrt is not None:
