@@ -196,8 +196,11 @@ def stop_family(proc: subprocess.Popen, *, windows=None, runner=None, listing=No
         for force in (False, True):
             try:
                 kill_group(proc.pid, force, windows=True, runner=runner)
-            except (ProcessLookupError, PermissionError):
+            except ProcessLookupError:
                 pass
+            except PermissionError:
+                if not force:
+                    continue  # taskkill refused the polite step (a console program only ends by force): waiting two seconds would change nothing
             try:
                 proc.wait(timeout=2)
                 return

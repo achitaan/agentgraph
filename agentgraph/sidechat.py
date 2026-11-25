@@ -904,7 +904,7 @@ def _read_proposal(path, label: str) -> str:
     if len(data) > PROPOSAL_LIMIT:
         raise SidechatError(f"{label} is larger than {PROPOSAL_LIMIT} bytes")
     try:
-        return data.decode("utf-8")
+        return data.decode("utf-8").replace("\r\n", "\n")  # a file checked out or saved on Windows may end its lines with CRLF
     except UnicodeDecodeError:
         raise SidechatError(f"{label} is not UTF-8 text") from None
 

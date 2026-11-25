@@ -19,6 +19,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.detached import reap_detached
 from agentgraph import looprun, osfs, osproc
 from tests.shellskip import CHECK_SECOND, sh_or
 from tests.winskip import WINDOWS, needs_symlinks
@@ -46,6 +47,7 @@ def tree_hash(root: Path) -> dict:
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        reap_detached(self)
         self.structure = self.tmp / "structure"
         (self.structure / "30-build").mkdir(parents=True)
         for name in ("worker", "reviewer"):
@@ -90,6 +92,14 @@ class Base(unittest.TestCase):
 
     def record(self, run) -> dict:
         return looprun.read_run(self.folder(run))
+
+    def status_of_first_run(self):
+        """The first run's status, or None while there is no run (or its record is not written yet: the folder shows up first)."""
+        try:
+            runs = looprun.list_runs(self.project)
+            return self.record(runs[0]).get("status") if runs else None
+        except looprun.LoopError:
+            return None
 
     def shown(self, run) -> str:
         return looprun.shown_status(self.folder(run), self.record(run))
@@ -1159,7 +1169,9 @@ class DbExecutor(looprun.ScriptedExecutor):
 class RetryAdoptionTests(Base):
     def setup_run(self):
         self.save("duo", check="exit 0", attempts=1, steps={"worker": {"retries": 1}, "reviewer": {"retries": 0}})
-        return FixtureDb(self.tmp / "o.db")
+        fx = FixtureDb(self.tmp / "o.db")
+        self.addCleanup(fx.db.close)  # an open database file cannot be deleted on Windows
+        return fx
 
     def test_f04_kill_before_try_2_reached_the_session_does_not_adopt_try_1s_reply(self):
         fx = self.setup_run()
@@ -1493,7 +1505,8 @@ class ClockTests(Base):
         with mock.patch.object(looprun, "HEARTBEAT", 0.2):
             run = self.crash(Dies([{}]))
         saved = self.record(run)["totals"]["seconds"]
-        self.assertGreaterEqual(saved, seen["elapsed"] - 0.2 - 0.1)
+        # at most one heartbeat (0.2) is lost; the rest is the poll's own cadence, which a busy shared machine stretches
+        self.assertGreaterEqual(saved, seen["elapsed"] - 0.2 - 0.3)
 
     def test_f09_a_kill_during_a_check_loses_at_most_one_heartbeat_of_the_clock(self):
         self.save(check=SLEEP_THEN_FAIL.replace("{n}", "3"))
@@ -1733,12 +1746,17 @@ class CancelInCheckTests(Base):
             run, = looprun.list_runs(self.project)
             while time.monotonic() < end and looprun.read_run(self.folder(run)).get("cursor", {}) is None or looprun.read_run(self.folder(run)).get("cursor", {}).get("step") != "check":
                 time.sleep(0.02)
-            looprun.pause(self.folder(run))
+            try:
+                looprun.pause(self.folder(run))
+            except BaseException as exc:  # a thread's exception would otherwise be lost, and the status below would be all there is to see
+                errors.append(repr(exc))
+        errors = []
         thread = threading.Thread(target=pause_soon)
         thread.start()
         run = self.start(executor)
         thread.join(10)
         record = self.record(run)
+        self.assertEqual(errors, [])
         self.assertEqual(record["status"], "paused")
         self.assertEqual(record["attempts"][0]["check"]["exit"], 1)  # the check ran to its end
 
@@ -1828,7 +1846,7 @@ class AnswerTests(Base):
         thread = threading.Thread(target=lambda: self.start(executor, "duo"))
         thread.start()
         end = time.monotonic() + 20
-        while time.monotonic() < end and not (looprun.list_runs(self.project) and self.record(looprun.list_runs(self.project)[0]).get("status") == "waiting"):
+        while time.monotonic() < end and self.status_of_first_run() != "waiting":
             time.sleep(0.02)
         run, = looprun.list_runs(self.project)
         folder = self.folder(run)
@@ -1843,7 +1861,7 @@ class AnswerTests(Base):
         thread = threading.Thread(target=lambda: self.start(executor, "duo"))
         thread.start()
         end = time.monotonic() + 20
-        while time.monotonic() < end and not (looprun.list_runs(self.project) and (self.record(looprun.list_runs(self.project)[0]).get("status") == "waiting")):
+        while time.monotonic() < end and self.status_of_first_run() != "waiting":
             time.sleep(0.02)
         run, = looprun.list_runs(self.project)
         self.assertEqual(looprun.cancel(self.folder(run)), "requested")

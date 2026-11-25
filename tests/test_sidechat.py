@@ -19,6 +19,7 @@ from unittest import mock
 
 from agentgraph import chatfeed, osproc, server, sidechat, snapshot_json
 from agentgraph.demo import DEMO_SIDE, demo_chat, demo_sidechat, demo_snapshot
+from tests.launch import LAUNCHER
 from tests.winskip import WINDOWS, needs_symlinks
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -453,10 +454,10 @@ class RunTests(Case):
 
     def test_ask_never_writes_outside_the_project_state_folder(self):
         before = {str(p.relative_to(self.dir)): p.read_bytes() for p in self.dir.rglob("*")
-                  if p.is_file() and ".opencode/sidechat" not in str(p) and p.name != "calls.jsonl"}
+                  if p.is_file() and ".opencode/sidechat" not in p.as_posix() and p.name != "calls.jsonl"}
         self.ask()
         after = {str(p.relative_to(self.dir)): p.read_bytes() for p in self.dir.rglob("*")
-                 if p.is_file() and ".opencode/sidechat" not in str(p) and p.name != "calls.jsonl"}
+                 if p.is_file() and ".opencode/sidechat" not in p.as_posix() and p.name != "calls.jsonl"}
         self.assertEqual(before, after)
 
 
@@ -742,7 +743,7 @@ class DemoTests(Case):
         env = {**os.environ, "OPENCODE_CLI": "/nonexistent/opencode-cli"}
         for args, key in ((["ask", "--main", MAIN, "--text-file", "-"], "answer"), (["status"], "installed"),
                           (["brief", "--main", MAIN], "sections")):
-            run = subprocess.run([str(ROOT / "bin/agentgraph"), "sidechat", *args, "--demo", "--json"], cwd=self.dir,
+            run = subprocess.run([*LAUNCHER, "sidechat", *args, "--demo", "--json"], cwd=self.dir,
                                  input="hi", capture_output=True, text=True, env=env, timeout=60)
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertIn(key, json.loads(run.stdout))

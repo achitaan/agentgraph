@@ -818,7 +818,9 @@ class TerminalCleanup(unittest.TestCase):
         pending = []
 
         def interrupted_emit(text, timeout=1.0):
-            os.kill(os.getpid(), signal.SIGINT)  # a second Ctrl-C while restoring
+            # a second Ctrl-C while restoring, sent to this thread: the kernel may hand a process-wide signal to any thread that does not
+            # block it, and then it is not pending here (and, delivered there, it interrupts the test)
+            signal.pthread_kill(threading.get_ident(), signal.SIGINT)
             pending.append(signal.SIGINT in signal.sigpending())
             return True
 

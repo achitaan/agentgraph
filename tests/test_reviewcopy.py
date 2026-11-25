@@ -17,10 +17,11 @@ from unittest import mock
 
 from agentgraph import __main__ as entry
 from agentgraph import check, reviewcopy
-from tests.shellskip import FALSE, TRUE, needs_sh, sh_or, sleep_command
+from tests.shellskip import FALSE, TRUE, needs_sh, python_command, sh_or, sleep_command
 from tests.winskip import WINDOWS, needs_fifo, needs_symlinks, needs_uid, posix_only
 
 TASK = "demo"
+PY = '"' + sys.executable.replace(chr(92), '/') + '"'
 HAVE_GIT = shutil.which("git") is not None
 
 
@@ -158,8 +159,11 @@ class TheCopy(Base):
     def test_a_write_by_absolute_path_is_detected_and_fails_the_run(self):
         self.files(a="1")
         self.git_init("a")
-        self.write(graph(check=f"echo leaked > '{self.project}/leak.txt'; echo edited >> '{self.project}/a'; "
-                               "echo relative > ../../../project/leak2.txt"))  # copy -> scratch -> TMPDIR -> the folder beside it
+        where = self.project.as_posix()
+        self.write(graph(check=sh_or(f"echo leaked > '{where}/leak.txt'; echo edited >> '{where}/a'; "
+                                     "echo relative > ../../../project/leak2.txt",  # copy -> scratch -> TMPDIR -> the folder beside it
+                                     f"open('{where}/leak.txt', 'w').write('leaked'); open('{where}/a', 'a').write('edited'); "
+                                     "open('../../../project/leak2.txt', 'w').write('relative')")))
         code, line = self.run_it()
         self.assertEqual(code, 1, line)
         self.assertIn("PROJECT CHANGED (3 files: a, leak.txt, leak2.txt)", line)
@@ -259,7 +263,9 @@ class TheEnvironment(Base):
         for kept in ("PATH=", "HOME=", "LANG=C", "LC_CTYPE=C", "TMPDIR="):
             self.assertIn(kept, text)
         self.assertNotIn("EDITOR=", text)
-        self.assertIn(f"TMPDIR={self.temp}", text)  # a private folder below the temp folder, not the project
+        msys = "/" + self.temp.as_posix().replace(":", "", 1).lower() if WINDOWS else None  # Git's sh shows C:\x as /c/x
+        self.assertTrue(any(f"TMPDIR={form}" in text for form in (str(self.temp), self.temp.as_posix(), msys) if form),
+                        text)  # a private folder below the temp folder, not the project
         self.assertEqual(self.result()[0]["environment"], sorted(self.result()[0]["environment"]))
         self.assertFalse(any("KEY" in name or "TOKEN" in name for name in self.result()[0]["environment"]))
 
@@ -363,7 +369,7 @@ class TheResult(Base):
     @needs_sh
     def test_the_commands_changed_in_the_graph_meanwhile_are_noted(self):
         self.files(a="1\n")
-        self.write(graph(check=f"python3 - <<'EOF'\nimport json\np='{self.path}'\nd=json.load(open(p))\nd['nodes'][0]['e2e']='true'\njson.dump(d,open(p,'w'))\nEOF",
+        self.write(graph(check=f"{PY} - <<'EOF'\nimport json\np='{self.path.as_posix()}'\nd=json.load(open(p))\nd['nodes'][0]['e2e']='true'\njson.dump(d,open(p,'w'))\nEOF",
                          e2e="exit 1"))
         code, line = self.run_it()
         self.assertEqual(code, 1)
@@ -382,7 +388,7 @@ class NonGit(Base):
         self.assertEqual(code, 0, line)
         copy = Path(line.rsplit("copy ", 1)[1])
         self.addCleanup(shutil.rmtree, copy.parent, True)
-        found = sorted(str(p.relative_to(copy)) for p in copy.rglob("*") if p.is_file())
+        found = sorted(p.relative_to(copy).as_posix() for p in copy.rglob("*") if p.is_file())
         self.assertEqual(found, [".opencode/graph/demo.json", "a", "sub/b"])
 
     def test_a_project_over_the_file_cap_is_refused_with_a_clear_message(self):
@@ -762,7 +768,7 @@ class Watched(Base):
     def test_a_same_size_rewrite_with_the_old_time_put_back_is_seen(self):
         self.files(a="x\n")
         self.git_init("a")
-        command = (f"python3 -c \"import os;p='{self.project}/a';st=os.stat(p);open(p,'w').write('y\\n');"
+        command = (f"{PY} -c \"import os;p='{self.project.as_posix()}/a';st=os.stat(p);open(p,'w').write('y\\n');"
                    "os.utime(p,ns=(st.st_atime_ns,st.st_mtime_ns))\"")
         code, line, result = self.run_and_read(command)
         self.assertEqual(code, 1, line)
@@ -801,7 +807,7 @@ class Watched(Base):
     def test_a_graph_write_while_it_runs_raises_no_alarm(self):
         self.files(a="1\n")
         self.git_init()
-        command = (f"python3 -c \"import json;p='{self.path}';d=json.load(open(p));d['updated']+=5;json.dump(d,open(p,'w'))\"")
+        command = (f"{PY} -c \"import json;p='{self.path.as_posix()}';d=json.load(open(p));d['updated']+=5;json.dump(d,open(p,'w'))\"")
         code, line, result = self.run_and_read(command)
         self.assertEqual(code, 0, line)
         self.assertTrue(result["project_unchanged"])
@@ -1004,7 +1010,9 @@ class Late(Base):
         real = reviewcopy._record
 
         def record_and_get_signalled(*args, **kwargs):
-            os.kill(os.getpid(), signal.SIGTERM)  # arrives now, is held until the node is written
+            # arrives now, is held until the node is written; sent to this thread, because a signal for the whole process may go to a
+            # thread that does not block it (another test's leftover thread), and then nothing holds it
+            signal.pthread_kill(threading.get_ident(), signal.SIGTERM)
             return real(*args, **kwargs)
         old = signal.getsignal(signal.SIGTERM)
         self.addCleanup(signal.signal, signal.SIGTERM, old)

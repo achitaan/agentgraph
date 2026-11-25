@@ -181,10 +181,10 @@ def _walk_files(project: Path) -> list[str]:
     total = 0
     for folder, dirs, names in os.walk(project):
         rel = os.path.relpath(folder, project)
-        dirs[:] = sorted(d for d in dirs if d not in SKIP and not _left_out(os.path.normpath(os.path.join(rel, d)))
+        dirs[:] = sorted(d for d in dirs if d not in SKIP and not _left_out(_posix(os.path.normpath(os.path.join(rel, d))))
                          and not os.path.exists(os.path.join(folder, d, "pyvenv.cfg")))
         for name in names + [d for d in dirs if os.path.islink(os.path.join(folder, d))]:
-            path = os.path.normpath(os.path.join(rel, name))
+            path = _posix(os.path.normpath(os.path.join(rel, name)))
             found.append(path)
             try:
                 total += os.lstat(project / path).st_size
@@ -192,6 +192,11 @@ def _walk_files(project: Path) -> list[str]:
                 pass
             _caps(len(found), total)
     return found
+
+
+def _posix(path: str) -> str:
+    """A relative path written with `/`, as git lists it and as the results and the tests name it (Windows walks with `\\`)."""
+    return path.replace(os.sep, "/") if os.sep != "/" else path
 
 
 def _left_out(rel: str) -> bool:
@@ -240,7 +245,7 @@ def _extras(project: Path) -> list[str]:
     found: list[str] = []
 
     def key(path) -> str:
-        return os.path.relpath(path, project) if _inside(os.path.realpath(path), str(project)) else str(path)
+        return _posix(os.path.relpath(path, project)) if _inside(os.path.realpath(path), str(project)) else str(path)
 
     def walk(rel) -> None:
         for folder, dirs, names in os.walk(project / rel):

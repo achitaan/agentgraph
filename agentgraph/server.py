@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import signal
+import socket
 import stat
 import sys
 import time
@@ -811,7 +812,21 @@ def make_server(
 
         do_HEAD = do_GET
 
-    return ThreadingHTTPServer((_HOST, port), Handler)
+    return _Server((_HOST, port), Handler)
+
+
+class _Server(ThreadingHTTPServer):
+    """The server socket. On Windows SO_REUSEADDR lets a second server bind a port that is already in use (the opposite of what it
+    means on POSIX), so there the port is taken exclusively and a second `serve` on it fails with an error."""
+
+    if os.name == "nt":
+        allow_reuse_address = False
+
+        def server_bind(self):
+            exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+            if exclusive is not None:
+                self.socket.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+            super().server_bind()
 
 
 def _interrupt(signum, frame):

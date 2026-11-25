@@ -15,7 +15,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.launch import LAUNCHER, bare_env
+from tests.launch import LAUNCHER, bare_env, home_env
 from agentgraph import chatfeed, server, snapshot_json
 from agentgraph.demo import demo_activity, demo_chat, demo_snapshot
 
@@ -451,7 +451,7 @@ class Digest(Case):
         self.db.session("ses_a", agent="explorer")
         self.db.assistant("ses_a", [said("hello there"), tool("grep")])
         base = [sys.executable, "-P", "-m", "agentgraph.chatfeed", "--session", "ses_a", "--db", str(self.db.path)]
-        env = bare_env(PYTHONPATH=str(ROOT))
+        env = bare_env(PYTHONPATH=str(ROOT), **home_env(self.dir))
         text = subprocess.run(base, capture_output=True, text=True, env=env, cwd=self.dir)
         self.assertEqual(text.returncode, 0, text.stderr)
         self.assertIn("[says] hello there\n[tool] grep (completed)", text.stdout)
@@ -467,7 +467,7 @@ class Digest(Case):
         self.db.user("ses_a", "what now?" + sidechat.SEPARATOR + "\nBRIEF-MARKER the graph")
         self.db.assistant("ses_a", [reasoning("private thought"), said("this")])
         base = [sys.executable, "-P", "-m", "agentgraph.chatfeed", "--session", "ses_a", "--json", "--db", str(self.db.path)]
-        env = bare_env(PYTHONPATH=str(ROOT))
+        env = bare_env(PYTHONPATH=str(ROOT), **home_env(self.dir))
         plain = subprocess.run(base, capture_output=True, text=True, env=env, cwd=self.dir)
         self.assertIn("BRIEF-MARKER", plain.stdout)  # without --side the feed is the raw one
         side = subprocess.run([*base, "--side"], capture_output=True, text=True, env=env, cwd=self.dir)

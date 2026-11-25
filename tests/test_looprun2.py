@@ -13,6 +13,7 @@ import time
 import unittest
 from pathlib import Path
 
+from tests.detached import reap_detached
 from agentgraph import looprun
 from tests.shellskip import sh_or
 from tests.winskip import needs_symlinks
@@ -24,6 +25,7 @@ FAIL = "The header line is missing.\nVERDICT: FAIL"
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        reap_detached(self)
         self.structure = self.tmp / "structure"
         (self.structure / "30-build").mkdir(parents=True)
         for name in ("worker", "reviewer", "verifier", "hard"):
@@ -493,7 +495,7 @@ class ArtifactTests(Base):
             for name, content in files_by_call.get(calls["n"], {}).items():
                 path = Path(call["cwd"]) / name
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(content)
+                path.write_bytes(content.encode())  # the bytes as given: Windows would turn \n into \r\n and the sizes below would be off
         return hook
 
     def test_e9_artifacts_are_copied_per_attempt_and_a_missing_one_sends_the_worker_back(self):

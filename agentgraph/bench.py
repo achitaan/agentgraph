@@ -158,14 +158,28 @@ def _skip(name: str, relative: Path) -> bool:
     return False
 
 
+def _path_forms(path: Path) -> list[str]:
+    """How a path appears in text: as is, as a JSON string (Windows backslashes doubled) and with forward slashes."""
+    text = str(path)
+    forms = [text]
+    for form in (json.dumps(text)[1:-1], text.replace("\\", "/")):
+        if form not in forms:
+            forms.append(form)
+    return forms
+
+
 def _path_pattern(live: Path) -> re.Pattern:
     """The absolute path of the live config folder. `~/.config/opencode` is left alone: a scratch HOME resolves it."""
-    return re.compile(re.escape(str(live)) + r"(?![\w-])")
+    forms = sorted(_path_forms(live), key=len, reverse=True)
+    return re.compile("(?:" + "|".join(re.escape(form) for form in forms) + r")(?![\w-])")
 
 
 def rewrite_text(text: str, live: Path, config: Path) -> str:
-    """The text with the absolute path of the live config folder pointing at the scratch folder."""
-    return _path_pattern(live).sub(lambda _m: str(config), text)
+    """The text with the absolute path of the live config folder pointing at the scratch folder (each way of writing the path
+    is replaced by the same way of writing the scratch path)."""
+    live_forms, config_forms = _path_forms(live), _path_forms(config)
+    swap = dict(zip(live_forms, config_forms))
+    return _path_pattern(live).sub(lambda m: swap.get(m.group(0), str(config)), text)
 
 
 def _copy_tree(source: Path, target: Path, live: Path, config: Path, relative: Path = Path()) -> int:
@@ -673,11 +687,27 @@ def run_check(scenario: dict, work: Path, env: dict, db_path: Path | None = None
         except subprocess.TimeoutExpired:
             return {"passed": False, "detail": "check timed out"}
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        _rmtree(work)
         osfs.rename(saved, work)
-        shutil.rmtree(aside, ignore_errors=True)
+        _rmtree(aside)
     lines = [ln.strip() for ln in (done.stdout + "\n" + done.stderr).splitlines() if ln.strip()]
     return {"passed": done.returncode == 0, "detail": (lines[-1] if lines else f"exit {done.returncode}")[:160]}
+
+
+def _rmtree(path) -> None:
+    """Delete a folder and ignore what cannot be deleted. On Windows a read-only file (git writes its objects that way) blocks the
+    delete, so the write bit is set and the delete tried again."""
+    def fix(function, target, *_error):
+        try:
+            if osproc.is_windows():
+                os.chmod(target, stat.S_IWRITE | stat.S_IREAD)
+            function(target)
+        except OSError:
+            pass
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=fix)
+    else:
+        shutil.rmtree(path, onerror=fix)
 
 
 # ---- running the host ----
@@ -913,7 +943,7 @@ def one_rep(*, scenario: dict | None, agent: str, prompt: str, label: str, rep: 
             row["cost"], row["cost_sessions"] = round(tree["cost"], 6), round(tree["cost_sessions"], 6)
         return _mask_row(row)
     except BaseException:
-        shutil.rmtree(work, ignore_errors=True)
+        _rmtree(work)
         raise
 
 
@@ -927,7 +957,7 @@ def save_row(row: dict, results: Path | None = None, keep_work: bool = False) ->
         return append_row(row, results)
     finally:
         if work and not keep_work:
-            shutil.rmtree(work, ignore_errors=True)
+            _rmtree(work)
 
 
 def append_row(row: dict, results: Path | None = None) -> Path:

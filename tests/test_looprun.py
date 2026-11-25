@@ -14,6 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.detached import reap_detached
 from agentgraph import looprun, osfs
 from tests.shellskip import CHECK_SECOND, sh_or, sleep_command
 from tests.test_looprun3 import LockHolder
@@ -26,6 +27,7 @@ def tree_hash(root: Path) -> dict:
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        reap_detached(self)
         self.structure = self.tmp / "structure"
         (self.structure / "30-build").mkdir(parents=True)
         (self.structure / "30-build" / "worker.md").write_text("Does the work.\n")

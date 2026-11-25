@@ -308,7 +308,7 @@ class RefusalTests(Base):
                                                   "HOME": "/real", "KEEP": "1"})
         self.assertEqual(env["HOME"], str(Path(info["dir"]) / "home"))
         self.assertEqual(env["XDG_CONFIG_HOME"], str(Path(info["dir"]) / "home" / ".config"))
-        self.assertTrue(env["AGENTGRAPH_HOME"].endswith("opencode/orchestration/memory"))
+        self.assertEqual(Path(env["AGENTGRAPH_HOME"]).parts[-3:], ("opencode", "orchestration", "memory"))
         self.assertEqual((env["OPENCODE_CONFIG_CONTENT"], env["KEEP"]), ("{}", "1"))
         self.assertNotIn("OPENCODE_CONFIG_DIR", env)
         self.assertNotIn("OPENCODE_CONFIG", env)
@@ -317,11 +317,11 @@ class RefusalTests(Base):
         scratch = bench.open_scratch(self.scratch()["dir"], live=self.live)
         env = bench.run_env(scratch, Path("/w"), {
             "OLDPWD": f"{bench.HERE}/somewhere", "PWD": str(self.live / "orchestration"), "TOOL_DIR": f"{self.live}/bin",
-            "PATH": f"/usr/bin:{bench.HERE}/bin:{self.live}/orchestration/bin:/bin", "OPENCODE_CONFIG_CONTENT": f'{{"x": "{self.live}"}}',
+            "PATH": os.pathsep.join(["/usr/bin", f"{bench.HERE}/bin", f"{self.live}/orchestration/bin", "/bin"]), "OPENCODE_CONFIG_CONTENT": f'{{"x": "{self.live}"}}',
             "KEEP": "/usr/local/x", "TERM": "xterm"}, live=self.live)
         for gone in ("OLDPWD", "TOOL_DIR"):
             self.assertNotIn(gone, env)
-        self.assertEqual(env["PATH"], "/usr/bin:/bin")                     # a PATH loses only the entries that point there
+        self.assertEqual(env["PATH"], os.pathsep.join(["/usr/bin", "/bin"]))                    # a PATH loses only the entries that point there
         self.assertEqual(env["PWD"], "/w")                                 # set again for the run
         self.assertEqual((env["KEEP"], env["TERM"]), ("/usr/local/x", "xterm"))
         self.assertIn("OPENCODE_CONFIG_CONTENT", env)
@@ -638,8 +638,8 @@ class RunTests(Base):
     def test_the_sandbox_profile_denies_reading_and_writing_the_named_folders_only(self):
         profile = bench.sandbox_profile([self.base / "r one"], [self.base / 'w"two'])
         self.assertTrue(profile.startswith("(version 1)\n(allow default)\n"))
-        self.assertIn('(deny file-read* (subpath "%s"))' % (self.base / "r one"), profile)
-        self.assertIn('(deny file-write* (subpath "%s"))' % str(self.base / 'w"two').replace('"', '\\"'), profile)
+        self.assertIn('(deny file-read* (subpath "%s"))' % str(self.base / "r one").replace("\\", "\\\\"), profile)
+        self.assertIn('(deny file-write* (subpath "%s"))' % str(self.base / 'w"two').replace("\\", "\\\\").replace('"', '\\"'), profile)
         self.assertEqual(profile.count("(deny file-write*"), len({str(self.base / 'w"two'), os.path.realpath(self.base / 'w"two')}))
         reads, writes = bench.protected_paths(self.live)
         self.assertIn(bench.HERE / "bench" / "scenarios", reads)

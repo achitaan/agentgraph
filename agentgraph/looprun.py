@@ -1140,18 +1140,27 @@ def run_dir(project, run_id: str) -> Path:
     return loops_folder(project) / run_id
 
 
+def _read_json(path: Path, what: str, folder) -> dict:
+    """The JSON file, read. On Windows a file that is being replaced at that moment cannot be opened for an instant (PermissionError), so
+    that is tried again a few times before the record is called unreadable."""
+    for attempt in range(25):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except PermissionError:
+            if attempt == 24 or os.name != "nt":
+                break
+            time.sleep(0.01 + 0.004 * attempt)
+        except (OSError, ValueError):
+            break
+    raise LoopError(f"no readable {what} in {folder}") from None
+
+
 def read_run(folder) -> dict:
-    try:
-        return json.loads((Path(folder) / "run.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        raise LoopError(f"no readable run record in {folder}") from None
+    return _read_json(Path(folder) / "run.json", "run record", folder)
 
 
 def read_definition(folder) -> dict:
-    try:
-        return json.loads((Path(folder) / "definition.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        raise LoopError(f"no readable definition in {folder}") from None
+    return _read_json(Path(folder) / "definition.json", "definition", folder)
 
 
 def _json(data) -> bytes:
@@ -1163,7 +1172,7 @@ def steps_hash(steps) -> str:
 
 
 def _event(folder: Path, **fields) -> None:
-    with open(folder / "events.jsonl", "a", encoding="utf-8") as stream:
+    with open(folder / "events.jsonl", "a", encoding="utf-8", newline="") as stream:
         stream.write(json.dumps({"time": round(time.time(), 3), **fields}, sort_keys=True) + "\n")
 
 
@@ -1963,7 +1972,7 @@ class Controller:
             limit = self.timing.timeout(limit)
         if entry is None:
             message_file = (f"message.t{attempt_try}.md" if attempt_try > 1 else "message.md") if role == "work" else f"{stem}.message.md"
-            (folder / message_file).write_text(message, encoding="utf-8")
+            (folder / message_file).write_bytes(message.encode("utf-8"))
             entry = {"step": step["id"], "kind": "agent", "role": role, "agent": agent, "session": session, "fresh": step.get("session") == "fresh", "try": attempt_try,
                      "seconds": None, "cost": None, "tokens": None, "sessions": None, "exit": None, "outcome": None, "route": None,
                      "message": f"attempt-{n}/{message_file}", "reply": None, "verdict": None, "findings": None, "error": None}
@@ -2000,7 +2009,7 @@ class Controller:
             self.roots[session] = int(result["sessions"])
         text = result.get("text") or ""
         reply_file = f"attempt-{n}/{stem}.reply.md"
-        (self.folder / reply_file).write_text(text, encoding="utf-8")
+        (self.folder / reply_file).write_bytes(text.encode("utf-8"))
         entry.update(seconds=round(result.get("seconds") or 0, 2), cost=result.get("cost"), tokens=result.get("tokens"), sessions=result.get("sessions"),
                      exit=result.get("exit"), error=result.get("error"), reply=reply_file)
         if self.timing is not None:
@@ -2014,7 +2023,7 @@ class Controller:
             entry["verdict"] = outcome
             if outcome == "fail":
                 entry["findings"] = f"attempt-{n}/{stem}.findings.md"
-                (self.folder / entry["findings"]).write_text(findings + "\n", encoding="utf-8")
+                (self.folder / entry["findings"]).write_bytes((findings + "\n").encode("utf-8"))
         entry["outcome"] = outcome
         if role == "work":
             self.attempt["agent"] = {"session": session, "exit": result.get("exit"), "outcome": outcome, "seconds": entry["seconds"], "cost": entry["cost"],

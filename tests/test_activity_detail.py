@@ -17,6 +17,7 @@ from agentgraph import chatfeed, snapshot_json
 from agentgraph.demo import demo_activity, demo_snapshot
 from agentgraph.sources import build_snapshot
 
+from tests.launch import LAUNCHER
 from tests.test_chatfeed import MARKER, T0, Case, reasoning as reasoning_part, said as said_part
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -604,7 +605,7 @@ class Demo(unittest.TestCase):
         return {a["name"]: a for a in json.loads(done.stdout)["agents"]}
 
     def test_the_agent_command_has_no_target_or_recent_unless_asked(self):
-        agents = self.run_cli(str(ROOT / "bin" / "agentgraph"), "snapshot", "--demo")
+        agents = self.run_cli(*LAUNCHER, "snapshot", "--demo")
         hub = agents["orchestrator"]["activity"]
         self.assertEqual(hub["zone"], "spawn")
         self.assertNotIn("target", hub)
@@ -612,7 +613,7 @@ class Demo(unittest.TestCase):
         for name in ("impl-claude", "designer", "explorer"):  # the opt-out covers every agent's target
             self.assertNotIn("target", agents[name]["activity"])
             self.assertNotIn("recent", agents[name]["activity"])
-        agents = self.run_cli(str(ROOT / "bin" / "agentgraph"), "snapshot", "--demo", "--activity-detail")
+        agents = self.run_cli(*LAUNCHER, "snapshot", "--demo", "--activity-detail")
         self.assertEqual(len(agents["orchestrator"]["activity"]["recent"]), 5)
         self.assertEqual(agents["impl-claude"]["activity"]["target"], "npm test -- middleware")
         self.assertNotIn("recent", agents["impl-claude"]["activity"])

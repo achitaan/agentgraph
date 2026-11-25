@@ -15,9 +15,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.detached import reap_detached
 from agentgraph import __main__ as entry
 from agentgraph import check, looprun, noderun, osproc
-from tests.shellskip import FALSE, TRUE, needs_sh, sh_or, sleep_command
+from tests.shellskip import FALSE, HAS_SH, TRUE, needs_sh, sh_or, sleep_command
 from tests.winskip import posix_only
 
 # fails twice, passes on the third call: the counter lives in the project, outside what a scripted worker touches
@@ -48,6 +49,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.enterContext(mock.patch.object(noderun, "POLL", 0.1))  # the node is kept current every tenth of a second
         self.project = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        reap_detached(self)
         self.directory = self.project / ".opencode" / "graph"
         self.directory.mkdir(parents=True)
         self.path = self.directory / f"{TASK}.json"
@@ -377,12 +379,23 @@ class KilledController(Base):
                 if pid:
                     osproc.kill_group(pid, force=True)
         self.addCleanup(cleanup)
-        self.assertTrue(self.wait_until(lambda: looprun.read_run(run).get("status") == "running" and looprun.read_run(run).get("pid")))
+        self.assertTrue(self.wait_until(lambda: looprun.read_run(run).get("status") == "running" and looprun.read_run(run).get("pid")),
+                        self.logs(run))
+        self.run_folder = run
         return run
+
+    def logs(self, run):
+        """What the controller and the driver wrote, for a failure message."""
+        parts = []
+        for name in ("node.log", "run.log"):
+            with contextlib.suppress(OSError):
+                parts.append(f"{name}: " + (run / name).read_bytes().decode("utf-8", "replace")[-1500:])
+        return "\n".join(parts) + f"\nheld={looprun._held(run)}"
 
     def test_a_detached_run_that_is_killed_is_reported_as_it_is(self):
         run = self.start_detached()
-        self.assertTrue(noderun.status(TASK, "n1", self.directory).startswith("running "))
+        first = noderun.status(TASK, "n1", self.directory)
+        self.assertTrue(first.startswith("running "), first + "\n" + self.logs(run))
         osproc.kill_group(looprun.read_run(run)["pid"], force=True)
         self.assertTrue(self.wait_until(lambda: not looprun._held(run)))
         line = noderun.status(TASK, "n1", self.directory)
@@ -797,7 +810,7 @@ class FlagNoise(Base):
         self.write(graph(scope=["tests/"]))
         (self.project / "tests").mkdir()
         (self.project / "tests" / "test_old.py").write_text("x\n")
-        line, text = self.flagged([{}], self.write_files("tests/test_new.py"), check="ls tests/ && true", attempts=1)
+        line, text = self.flagged([{}], self.write_files("tests/test_new.py"), check=LS_TESTS, attempts=1)
         self.assertTrue(line.startswith("passed-check-flagged "), line)  # in the node's scope, but the check runs it: a weaker test is possible
         self.assertIn("a file the check command names changed during the run: tests/test_new.py", text)
 
@@ -807,6 +820,11 @@ class FlagNoise(Base):
         (self.project / "script.sh").write_text("x\n")
         self.assertEqual(noderun._watched("pytest tests/ -q && sh script.sh; echo .", self.project), ["tests/", "script.sh"])
         self.assertEqual(noderun._touched(["tests/a/b.py", "testsx/a.py", "script.sh", "other.txt"], ["tests/", "script.sh"]), ["tests/a/b.py", "script.sh"])
+
+
+# commands that name a project path and succeed; cmd has no `ls`, `cat` or `true`, so there `echo` names the path
+LS_TESTS = "ls tests/ && true" if HAS_SH else "echo tests/ && exit 0"
+CAT_IGNORED = "cat ignored.cfg && true" if HAS_SH else "echo ignored.cfg && exit 0"
 
 
 def have_git():
@@ -852,7 +870,7 @@ class FlagIgnoredFiles(Base):
 
     def run_in_named_folder(self, hook):
         executor = looprun.ScriptedExecutor([{"cost": 0.01}], hook=hook)
-        run_id, line = noderun.run(TASK, "n1", directory=self.directory, check="ls tests/ && true", cost=5, attempts=1, wait=True, executor=executor)
+        run_id, line = noderun.run(TASK, "n1", directory=self.directory, check=LS_TESTS, cost=5, attempts=1, wait=True, executor=executor)
         return line, (self.project / noderun.report_path(TASK, "n1", run_id)).read_text()
 
     def test_git_ignored_files_below_a_named_folder_do_not_flag(self):
@@ -884,7 +902,7 @@ class FlagIgnoredFiles(Base):
         (self.project / ".gitignore").write_text("ignored.cfg\n")
         (self.project / "ignored.cfg").write_text("a\n")
         executor = looprun.ScriptedExecutor([{"cost": 0.01}], hook=lambda n, call: (self.project / "ignored.cfg").write_text("b\n"))
-        run_id, line = noderun.run(TASK, "n1", directory=self.directory, check="cat ignored.cfg && true", cost=5, attempts=1, wait=True, executor=executor)
+        run_id, line = noderun.run(TASK, "n1", directory=self.directory, check=CAT_IGNORED, cost=5, attempts=1, wait=True, executor=executor)
         self.assertTrue(line.startswith("passed-check-flagged "), line)  # a named file, not a file found below a folder
 
     def test_files_in_a_skip_folder_below_a_named_folder_do_not_flag(self):
@@ -903,7 +921,7 @@ class FlagIgnoredFiles(Base):
         mock_calls: list = []
         with mock.patch.object(noderun, "_snapshot", snapshot):
             executor = looprun.ScriptedExecutor([{"cost": 0.01}])
-            run_id, line = noderun.run(TASK, "n1", directory=self.directory, check="ls tests/ && true", cost=5, attempts=1, wait=True, executor=executor)
+            run_id, line = noderun.run(TASK, "n1", directory=self.directory, check=LS_TESTS, cost=5, attempts=1, wait=True, executor=executor)
         self.assertTrue(line.startswith("passed-check "), line)
 
     def test_outside_a_git_tree_the_ignore_question_is_not_asked(self):
@@ -947,7 +965,10 @@ class OldRunSettled(Base):
     def test_graph_set_after_a_kill_then_node_run_cancels_the_old_run_and_counts_its_totals(self):
         run = self.start_detached([{"cost": 0.1}, {"hang": True}])
         self.assertTrue(self.wait_until(lambda: looprun.read_run(run).get("totals", {}).get("cost") == 0.1 and looprun.read_run(run).get("pid")))
-        osproc.kill_group(looprun.read_run(run)["pid"], force=True)
+        try:
+            osproc.kill_group(looprun.read_run(run)["pid"], force=True)
+        except ProcessLookupError:
+            self.fail("the controller was gone before it was killed:\n" + KilledController.logs(self, run))
         self.assertTrue(self.wait_until(lambda: not looprun._held(run)))
         noderun.graphedit.edit(TASK, "n1", {"status": "failed", "evidence": "the orchestrator gave up on the stuck run"}, dirs=[self.directory])
         data = self.read()  # the follower had not yet written what the run did: the node does not know it
