@@ -14,8 +14,20 @@ import unittest.mock
 from pathlib import Path
 
 from agentgraph import bench, osproc
-from tests.shellskip import sh_or
+from tests.shellskip import HAS_SH, python_command, sh_or
 from tests.winskip import WINDOWS, needs_symlinks
+
+# The check that prints what its environment holds. The Windows forms read both kinds of slash (the paths there are native, with backslashes).
+if not WINDOWS:
+    CHECK_ENV = 'echo "${HOME#*/temp/}|${OPENCODE_CONFIG_DIR-unset}|${P4_DB##*/}|${AGENTGRAPH_HOME-unset}|${MADE_UP_KEY-unset}"'
+elif HAS_SH:
+    CHECK_ENV = (r"""h=$(echo "$HOME" | tr '\\' /); h=${h%/home}; d=$(echo "$P4_DB" | tr '\\' /); """
+                 r"""echo "${h##*/}/home|${OPENCODE_CONFIG_DIR-unset}|${d##*/}|${AGENTGRAPH_HOME-unset}|${MADE_UP_KEY-unset}""" + '"')
+else:
+    CHECK_ENV = python_command(
+        "import os; e = os.environ.get; "
+        "print(os.path.basename(os.path.dirname(e('HOME'))) + '/' + os.path.basename(e('HOME')) + '|' + e('OPENCODE_CONFIG_DIR', 'unset') + '|' "
+        "+ os.path.basename(e('P4_DB')) + '|' + e('AGENTGRAPH_HOME', 'unset') + '|' + e('MADE_UP_KEY', 'unset'))")
 
 SCHEMA = (
     "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, agent TEXT, title TEXT, cost REAL, time_created INT);"
@@ -322,7 +334,7 @@ class RefusalTests(Base):
         for gone in ("OLDPWD", "TOOL_DIR"):
             self.assertNotIn(gone, env)
         self.assertEqual(env["PATH"], os.pathsep.join(["/usr/bin", "/bin"]))                    # a PATH loses only the entries that point there
-        self.assertEqual(env["PWD"], "/w")                                 # set again for the run
+        self.assertEqual(env["PWD"], str(Path("/w")))                                 # set again for the run
         self.assertEqual((env["KEEP"], env["TERM"]), ("/usr/local/x", "xterm"))
         self.assertIn("OPENCODE_CONFIG_CONTENT", env)
 
@@ -544,7 +556,7 @@ class RunTests(Base):
         t2.mkdir()
         (t2 / "scenario.json").write_text(json.dumps({
             "agent": "orchestrator", "prompt": "x", "timeout": 20,
-            "check": 'echo "${HOME#*/temp/}|${OPENCODE_CONFIG_DIR-unset}|${P4_DB##*/}|${AGENTGRAPH_HOME-unset}|${MADE_UP_KEY-unset}"'}))
+            "check": CHECK_ENV}))
         self.plan([{}])
         with unittest.mock.patch.dict(os.environ, {"OPENCODE_CONFIG_DIR": "/real/config", "MADE_UP_KEY": "made-up-value"}):
             rows = bench.run_scenarios(["t2"], label="lab", config=self.scratch_dir, executable=str(self.cli), db_path=self.db,

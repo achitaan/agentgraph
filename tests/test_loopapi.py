@@ -13,10 +13,10 @@ from unittest import mock
 
 from tests.detached import reap_detached
 from agentgraph import loopapi, looprun
-from tests.shellskip import CHECK_SECOND
+from tests.shellskip import CHECK_SECOND, FALSE, TRUE
 from tests.test_looprun3 import LockHolder
 
-GOOD = {"check": {"command": "true"}, "limits": {"attempts": 3}}
+GOOD = {"check": {"command": TRUE}, "limits": {"attempts": 3}}
 
 
 class Base(unittest.TestCase):
@@ -182,7 +182,7 @@ class SaveRemoveTests(Base):
         error = self.refused(lambda: self.save({**GOOD, "extra": 1}), 400)
         self.assertEqual(error.message, message)
         self.assertIn("unknown key 'extra'", error.message)
-        self.assertIn("limits.attempts is required", self.refused(lambda: self.save({"check": {"command": "true"}}), 400).message)
+        self.assertIn("limits.attempts is required", self.refused(lambda: self.save({"check": {"command": TRUE}}), 400).message)
         self.assertIn("unknown key", self.refused(lambda: self.save({"limits": {"attempts": 2, "x": 1}}), 400).message)
         self.refused(lambda: self.save({**GOOD, "flow": "pair"}), 400)  # settings for another flow
         self.refused(lambda: self.save([1]), 400)
@@ -317,12 +317,12 @@ class Release3Tests(Base):
         self.assertEqual(set(versions[0]), {"version", "time", "sha256", "changed"})  # v8b round 2: `changed` is additive
 
     def save_loop(self, **settings):
-        looprun.save_settings(self.structure, "self", {"version": 1, "flow": "self", "limits": {"attempts": 2}, "check": {"command": "true"}, **settings})
+        looprun.save_settings(self.structure, "self", {"version": 1, "flow": "self", "limits": {"attempts": 2}, "check": {"command": TRUE}, **settings})
 
     def test_v8b2_6_each_version_lists_the_setting_paths_that_differ_from_the_loop_saved_now_sorted_and_without_values(self):
-        self.save_loop(goal="First goal.", check={"command": "true", "timeout": 60}, limits={"attempts": 2, "cost": 5})
-        self.save_loop(goal="Second goal.", check={"command": "false", "timeout": 60}, limits={"attempts": 4}, artifacts=["out.txt"])
-        self.save_loop(goal="Second goal.", check={"command": "false", "timeout": 90}, limits={"attempts": 4}, artifacts=["out.txt", "b.txt"], approval="before_pass")
+        self.save_loop(goal="First goal.", check={"command": TRUE, "timeout": 60}, limits={"attempts": 2, "cost": 5})
+        self.save_loop(goal="Second goal.", check={"command": FALSE, "timeout": 60}, limits={"attempts": 4}, artifacts=["out.txt"])
+        self.save_loop(goal="Second goal.", check={"command": FALSE, "timeout": 90}, limits={"attempts": 4}, artifacts=["out.txt", "b.txt"], approval="before_pass")
         versions = self.entry()["versions"]
         self.assertEqual(len(versions), 2)
         newest, oldest = versions
@@ -358,28 +358,28 @@ class Release3Tests(Base):
 
     def test_the_page_save_and_remove_keep_history_and_restore_needs_the_current_rev(self):
         first = loopapi.save(self.structure, "self", {"version": 1, "flow": "self", **GOOD}, "")
-        second = loopapi.save(self.structure, "self", {"version": 1, "flow": "self", "check": {"command": "false"}, "limits": {"attempts": 2}}, first["rev"])
+        second = loopapi.save(self.structure, "self", {"version": 1, "flow": "self", "check": {"command": FALSE}, "limits": {"attempts": 2}}, first["rev"])
         version = self.entry()["versions"][0]["version"]
         self.refused(lambda: loopapi.restore(self.structure, "self", version, first["rev"]), 409)  # a stale rev
         self.refused(lambda: loopapi.restore(self.structure, "self", "../../x", second["rev"]), 400)
         self.refused(lambda: loopapi.restore(self.structure, "self", "20000101T000000.000000Z-00000000", second["rev"]), 400)
         self.refused(lambda: loopapi.restore(self.structure, "self", 7, second["rev"]), 400)
         done = loopapi.restore(self.structure, "self", version, second["rev"])
-        self.assertEqual((done["rev"], done["before"]["check"]["command"], done["settings"]["check"]["command"]), (first["rev"], "false", "true"))
+        self.assertEqual((done["rev"], done["before"]["check"]["command"], done["settings"]["check"]["command"]), (first["rev"], FALSE, TRUE))
         removed = loopapi.remove(self.structure, "self", done["rev"])
         self.assertEqual(len(self.entry()["versions"]), 3)  # the first save wrote none; the replacement, the restore and the removal each kept one
-        self.assertEqual(removed["before"]["check"]["command"], "true")
+        self.assertEqual(removed["before"]["check"]["command"], TRUE)
 
     def test_a_trial_run_pins_the_given_settings_and_leaves_the_saved_loop(self):
         looprun.save_settings(self.structure, "self", {"version": 1, "flow": "self", **GOOD})
         saved = looprun.settings_path(self.structure, "self").read_bytes()
         answer = loopapi.start(self.structure, self.project, "self", "Try it.", None, executor_spec={"kind": "scripted", "attempts": [{}] * 3},
-                               settings={"check": {"command": "true"}, "limits": {"attempts": 1}})
+                               settings={"check": {"command": TRUE}, "limits": {"attempts": 1}})
         self.until_final(answer["run"])
         row = loopapi.listing(self.structure, self.project, None)["runs"][0]
         self.assertEqual((row["run"], row["trial"], row["status"], row["limit"]), (answer["run"], True, "passed", 1))
         self.assertEqual(looprun.settings_path(self.structure, "self").read_bytes(), saved)
-        self.refused(lambda: loopapi.start(self.structure, self.project, "self", "g", None, settings={"check": {"command": "true"}, "x": 1}), 400)
+        self.refused(lambda: loopapi.start(self.structure, self.project, "self", "g", None, settings={"check": {"command": TRUE}, "x": 1}), 400)
         self.refused(lambda: loopapi.start(self.structure, self.project, "self", "g", None, settings=[1]), 400)
         self.assertEqual(len(looprun.list_runs(self.project)), 1)
 
@@ -647,7 +647,7 @@ class QueuedNeverStartedTests(Base):
     """A run whose detached controller never came (round 2): what the page API shows and does."""
 
     def queued(self, age=0):
-        looprun.save_settings(self.structure, "self", {"version": 1, "flow": "self", "limits": {"attempts": 3}, "check": {"command": "true", "timeout": 20}})
+        looprun.save_settings(self.structure, "self", {"version": 1, "flow": "self", "limits": {"attempts": 3}, "check": {"command": TRUE, "timeout": 20}})
         with mock.patch.object(looprun.subprocess, "Popen"):
             run = looprun.start(self.project, "self", structure=self.structure, goal="g", executor=looprun.ScriptedExecutor([{}]))
         folder = looprun.run_dir(self.project, run)
@@ -712,8 +712,8 @@ if __name__ == "__main__":
 
 class TimedSaveTests(Base):
     """The page says what a timed loop's schedule is on every save: leaving `timing` out is refused (it would be a guess), null removes it."""
-    TIMED = {"check": {"command": "true"}, "limits": {"attempts": 3, "cost": 1, "attempt_seconds": 100}, "timing": {"kind": "interval", "every": 30, "ticks": 4}}
-    FORM = {"check": {"command": "false"}, "limits": {"attempts": 2, "cost": 1, "attempt_seconds": 100}}  # no timing key
+    TIMED = {"check": {"command": TRUE}, "limits": {"attempts": 3, "cost": 1, "attempt_seconds": 100}, "timing": {"kind": "interval", "every": 30, "ticks": 4}}
+    FORM = {"check": {"command": FALSE}, "limits": {"attempts": 2, "cost": 1, "attempt_seconds": 100}}  # no timing key
 
     def stored(self):
         return json.loads(looprun.settings_path(self.structure, "self").read_text())
@@ -743,7 +743,7 @@ class TimedSaveTests(Base):
 
     def test_undo_of_a_restore_that_made_a_loop_timed_leaves_it_untimed(self):
         """The page's Undo sends `before` with the schedule it had: for an untimed loop that is null, not nothing."""
-        plain = loopapi.save(self.structure, "self", {"check": {"command": "false"}, "limits": {"attempts": 2, "cost": 1}}, "")
+        plain = loopapi.save(self.structure, "self", {"check": {"command": FALSE}, "limits": {"attempts": 2, "cost": 1}}, "")
         timed = loopapi.save(self.structure, "self", self.TIMED, plain["rev"])
         undo = {**timed["before"], "timing": timed["before"].get("timing")}  # what the page builds
         loopapi.save(self.structure, "self", undo, timed["rev"])

@@ -767,7 +767,7 @@ class DemoTests(Case):
 def files(root: Path) -> dict:
     found = {}
     for path in sorted(Path(root).rglob("*")):
-        found[str(path.relative_to(root))] = "dir" if path.is_dir() else path.read_bytes()
+        found[path.relative_to(root).as_posix()] = "dir" if path.is_dir() else path.read_bytes()
     return found
 
 

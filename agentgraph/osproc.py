@@ -17,6 +17,7 @@ On POSIX every function makes the calls the callers made before this module exis
     kill_group(pid, force) one step of stopping a child's whole group / tree
     stop_tree(pid)         polite, wait, then force
     stop_family(proc)      stop a Popen child and everything below it
+    Job(proc)              Windows: a job object holding a child and all it starts, so one call ends them all (no-op elsewhere)
     children(pid)          pids of every descendant
     is_alive(pid)          is there a running process with this pid
     is_orphaned_leader()   a leader of its own group whose parent is gone
@@ -218,6 +219,93 @@ def stop_family(proc: subprocess.Popen, *, windows=None, runner=None, listing=No
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             continue
+
+
+PROCESS_SET_QUOTA = 0x0100
+PROCESS_TERMINATE = 0x0001
+
+
+class _JobApi:
+    """Windows only: the few kernel32 calls a job object needs (`create()`, `open(pid)`, `assign(job, process)`, `terminate(job)`, `close(handle)`)."""
+
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes
+        self._lib = lib = ctypes.WinDLL("kernel32", use_last_error=True)
+        lib.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        lib.CreateJobObjectW.restype = wintypes.HANDLE
+        lib.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        lib.OpenProcess.restype = wintypes.HANDLE
+        lib.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        lib.AssignProcessToJobObject.restype = wintypes.BOOL
+        lib.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        lib.TerminateJobObject.restype = wintypes.BOOL
+        lib.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    def create(self):
+        return self._lib.CreateJobObjectW(None, None)
+
+    def open(self, pid):
+        return self._lib.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, pid)
+
+    def assign(self, job, process):
+        return bool(self._lib.AssignProcessToJobObject(job, process))
+
+    def terminate(self, job):
+        return bool(self._lib.TerminateJobObject(job, 1))
+
+    def close(self, handle):
+        self._lib.CloseHandle(handle)
+
+
+class Job:
+    """Windows: a job object that holds one started program and every program it starts afterwards, MSYS ones too (`taskkill /T` follows parent ids
+    and loses what an MSYS shell started). `adopt(proc)` right after Popen; `terminate()` ends them all at once and says whether it could; `close()`
+    lets go of the handle (it does not end anything). Everywhere else, and where the job cannot be made, `adopt` and `terminate` do nothing and
+    `terminate()` is False, so the caller falls back to `taskkill`. `api` is for tests."""
+
+    def __init__(self, windows=None, api=None):
+        self.api, self.handle, self.adopted = None, None, False
+        if not _win(windows):
+            return
+        try:
+            self.api = api if api is not None else _JobApi()
+            self.handle = self.api.create() or None
+        except (ImportError, AttributeError, OSError):
+            self.api = self.handle = None
+
+    def adopt(self, proc) -> bool:
+        if not self.handle:
+            return False
+        process = None
+        try:
+            process = self.api.open(proc.pid)
+            if process and self.api.assign(self.handle, process):
+                self.adopted = True
+                return True
+        except OSError:
+            pass
+        finally:
+            if process:
+                self.api.close(process)
+        self.close()  # nothing is in it: there is no job to end
+        return False
+
+    def terminate(self) -> bool:
+        if not self.handle or not self.adopted:
+            return False
+        try:
+            return bool(self.api.terminate(self.handle))
+        except OSError:
+            return False
+
+    def close(self) -> None:
+        handle, self.handle = self.handle, None
+        if handle:
+            try:
+                self.api.close(handle)
+            except OSError:
+                pass
 
 
 def descendants(pid: int, table: list[Proc]) -> list[int]:

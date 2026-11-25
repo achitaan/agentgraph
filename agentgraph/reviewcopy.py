@@ -43,6 +43,7 @@ from . import check, graphedit, osfs, osproc, outputs, transitions
 from .noderun import SKIP as NODE_SKIP
 
 DEFAULT_TIMEOUT = 600
+HASH_LIMIT = 4 * 1024 * 1024  # Windows: files up to this size are compared by content too (see project_listing)
 FILE_LIMIT = 20000
 BYTE_LIMIT = 200 * 1024 * 1024
 WATCH_LIMIT = 100000  # entries of .git/hooks, .git/refs and .opencode/artifacts compared before and after
@@ -283,6 +284,13 @@ def project_listing(project: Path, files: list[str]) -> dict[str, tuple]:
         except OSError:
             continue
         found[rel] = (st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino)
+        if osproc.is_windows() and stat.S_ISREG(st.st_mode) and st.st_size <= HASH_LIMIT:
+            # there `st_ctime` is the creation time, not the change time: a same-size rewrite with the old modification time put back would
+            # not show in the numbers above, so the content is part of what is compared
+            try:
+                found[rel] += (hashlib.sha256((project / rel).read_bytes()).hexdigest(),)
+            except OSError:
+                pass
     return found
 
 
@@ -384,7 +392,9 @@ def reduced_environment(tmp: str, source=None, windows=None) -> dict[str, str]:
     return kept
 
 
-def _kill_group(pid: int) -> None:
+def _kill_group(pid: int, job=None) -> None:
+    if job is not None and job.terminate():  # Windows: everything the command started, MSYS programs too
+        return
     try:
         osproc.kill_group(pid, force=True)
     except (ProcessLookupError, PermissionError):
@@ -439,14 +449,19 @@ def run_command(command: str, cwd: Path, env: dict, timeout: float, log: Path) -
     with open(log, "wb") as out:
         proc = subprocess.Popen(argument, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                 stdout=out, stderr=subprocess.STDOUT, **osproc.group_kwargs())
+        job = osproc.Job()
+        job.adopt(proc)
         try:
-            ended = _wait(proc, timeout)
-        except BaseException:
-            _kill_group(proc.pid)
-            proc.wait()
-            raise
-        _kill_group(proc.pid)
-        code = proc.wait()
+            try:
+                ended = _wait(proc, timeout)
+            except BaseException:
+                _kill_group(proc.pid, job)
+                proc.wait()
+                raise
+            _kill_group(proc.pid, job)
+            code = proc.wait()
+        finally:
+            job.close()
     return {"command": command, "sha256": _sha(command), "exit": code if ended else None, "timed_out": not ended,
             "seconds": round(time.monotonic() - began, 2)}
 

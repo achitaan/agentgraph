@@ -1744,7 +1744,13 @@ class CancelInCheckTests(Base):
             while time.monotonic() < end and not looprun.list_runs(self.project):
                 time.sleep(0.02)
             run, = looprun.list_runs(self.project)
-            while time.monotonic() < end and looprun.read_run(self.folder(run)).get("cursor", {}) is None or looprun.read_run(self.folder(run)).get("cursor", {}).get("step") != "check":
+            while time.monotonic() < end:
+                try:
+                    cursor = looprun.read_run(self.folder(run)).get("cursor") or {}
+                except looprun.LoopError:  # the folder is listed a moment before run.json is written
+                    cursor = {}
+                if cursor.get("step") == "check":
+                    break
                 time.sleep(0.02)
             try:
                 looprun.pause(self.folder(run))

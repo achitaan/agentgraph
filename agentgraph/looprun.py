@@ -757,6 +757,8 @@ def run_check(command: str, timeout, cwd, env, out_path: Path, poll=None) -> dic
     except OSError as exc:
         out_path.write_text(f"the check could not be started: {exc}\n", encoding="utf-8")
         return {"exit": None, "timed_out": False, "cancelled": False, "seconds": 0.0, "error": str(exc), "truncated": 0}
+    job = osproc.Job()
+    job.adopt(proc)  # Windows: one call ends the check and all it started (an MSYS shell's children too)
     dropped = [0]
 
     def drain():
@@ -785,7 +787,8 @@ def run_check(command: str, timeout, cwd, env, out_path: Path, poll=None) -> dic
             cancelled = bool(poll and poll())
             if cancelled or (timeout and time.monotonic() - started > timeout):
                 timed_out = not cancelled
-                sidechat._stop(proc)
+                if not job.terminate():
+                    sidechat._stop(proc)
                 try:
                     osproc.kill_group(proc.pid, force=True)
                 except (ProcessLookupError, PermissionError):
@@ -795,6 +798,7 @@ def run_check(command: str, timeout, cwd, env, out_path: Path, poll=None) -> dic
     reader.join(5)
     if not reader.is_alive():
         proc.stdout.close()
+    job.close()
     return {"exit": None if timed_out or cancelled else code, "timed_out": timed_out, "cancelled": cancelled, "seconds": time.monotonic() - started, "error": None,
             "truncated": dropped[0]}
 
@@ -1804,7 +1808,15 @@ class Controller:
 
     def _answer_file(self, path: Path) -> dict | None:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            tries_allowed = 25 if os.name == "nt" else 1
+            for tries in range(tries_allowed):  # on Windows a file being replaced cannot be opened for a moment: not "unreadable"
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    break
+                except PermissionError:
+                    if tries == tries_allowed - 1 or not path.exists():
+                        raise
+                    time.sleep(0.02)
         except (OSError, ValueError):
             if path.exists():
                 osfs.replace(path, self.folder / f"answer-unreadable-{int(time.time())}.json")

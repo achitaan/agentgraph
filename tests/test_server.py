@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from agentgraph import server
 from agentgraph.demo import demo_snapshot
-from tests.shellskip import CHECK_SECOND
+from tests.shellskip import CHECK_SECOND, TRUE
 from tests.winskip import CAN_SYMLINK
 
 
@@ -378,7 +378,7 @@ class LoopEndpointTests(unittest.TestCase):
         self.assertIn("not a version", self.post("restore", expect=400, flow="self", version="../x", rev=rev)["error"])
         restored = self.post("restore", flow="self", version=version, rev=rev)
         self.assertEqual((restored["rev"], restored["before"]["goal"]), (first["rev"], "Second."))
-        trial = self.post("start", flow="self", goal="g", workdir=str(self.work), settings={"check": {"command": "true", "timeout": 20}, "limits": {"attempts": 1}})["run"]
+        trial = self.post("start", flow="self", goal="g", workdir=str(self.work), settings={"check": {"command": TRUE, "timeout": 20}, "limits": {"attempts": 1}})["run"]
         detail = self.settle(trial, "passed")
         row = next(r for r in self.loops()["runs"] if r["run"] == trial)
         self.assertEqual((row["trial"], row["passed_by"], row["waiting"], len(row["settings_sha256"])), (True, "check", None, 64))

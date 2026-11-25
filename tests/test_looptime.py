@@ -974,7 +974,10 @@ class SupervisorRoundTwoTests(TimedBase):
         self.assertIn("RuntimeError: boom", look["left"][first.name])
         out = io.StringIO()
         clock = FakeClock(T0 + 5)
-        clock.sleep = lambda seconds: (_ for _ in ()).throw(StopIteration)  # one look is enough: stop at the first wait
+
+        def stop_at_the_first_wait(seconds):  # one look is enough (a plain function: Python 3.11 turns a StopIteration thrown into a generator into RuntimeError)
+            raise StopIteration
+        clock.sleep = stop_at_the_first_wait
         with self.assertRaises(StopIteration):
             looptime.supervise(self.project, 30, clock, resume, out)  # an exception of a resume is caught inside the supervisor too
 

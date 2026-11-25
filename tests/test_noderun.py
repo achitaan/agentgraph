@@ -121,8 +121,11 @@ class Base(unittest.TestCase):
     def wait_until(self, test, seconds=20):
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
-            if test():
-                return True
+            try:
+                if test():
+                    return True
+            except looprun.LoopError:  # a run folder shows up a moment before its run.json is written
+                pass
             time.sleep(0.05)
         return False
 
@@ -1181,6 +1184,8 @@ class SecondController(Base):
         thread, done = self.run_in_thread([{"hang": True}])
         self.assertTrue(self.wait_until(lambda: self.node().get("loop_run")))
         (run,) = self.runs()
+        self.assertTrue(self.wait_until(lambda: looprun.shown_status(run, looprun.read_run(run)) == "running"),
+                        f"the run never showed as running: {looprun.shown_status(run, looprun.read_run(run))} held={looprun._held(run)}")
         graphedit = noderun.graphedit
         graphedit.edit(TASK, "n1", {"status": "blocked", "note": "the orchestrator took the node"}, dirs=[self.directory])
         message = self.refused(check=TRUE, cost=1)  # the node says blocked, but the run is still going

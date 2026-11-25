@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -217,6 +218,49 @@ class WindowsFormTests(unittest.TestCase):
         rows = [{"ProcessId": 2, "ParentProcessId": 1, "CommandLine": "a"}, {"ProcessId": 3, "ParentProcessId": 2, "CommandLine": None},
                 {"ProcessId": 9, "ParentProcessId": 8, "CommandLine": "z"}]
         self.assertEqual(osproc.children(1, windows=True, runner=FakeRunner(done(0, json.dumps(rows)))), [2, 3])
+
+    def test_a_job_holds_the_child_and_ends_it_in_one_call_and_is_inert_elsewhere(self):
+        class Api:
+            def __init__(self, assigns=True):
+                self.calls, self.assigns = [], assigns
+
+            def create(self):
+                self.calls.append("create")
+                return 7
+
+            def open(self, pid):
+                self.calls.append(("open", pid))
+                return 8
+
+            def assign(self, job, process):
+                self.calls.append(("assign", job, process))
+                return self.assigns
+
+            def terminate(self, job):
+                self.calls.append(("terminate", job))
+                return True
+
+            def close(self, handle):
+                self.calls.append(("close", handle))
+
+        child = types.SimpleNamespace(pid=41)
+        api = Api()
+        job = osproc.Job(windows=True, api=api)
+        self.assertFalse(job.terminate())  # nothing adopted yet
+        self.assertTrue(job.adopt(child))
+        self.assertTrue(job.terminate())
+        job.close()
+        self.assertEqual(api.calls, ["create", ("open", 41), ("assign", 7, 8), ("close", 8), ("terminate", 7), ("close", 7)])
+        refused = Api(assigns=False)
+        job = osproc.Job(windows=True, api=refused)
+        self.assertFalse(job.adopt(child))
+        self.assertFalse(job.terminate())  # no job to end: the caller uses taskkill
+        self.assertIn(("close", 7), refused.calls)
+        quiet = Api()
+        job = osproc.Job(windows=False, api=quiet)
+        self.assertFalse(job.adopt(child))
+        self.assertFalse(job.terminate())
+        self.assertEqual(quiet.calls, [])
 
     def test_is_alive_never_reaches_os_kill(self):
         class Api:

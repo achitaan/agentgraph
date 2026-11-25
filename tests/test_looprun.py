@@ -16,7 +16,7 @@ from unittest import mock
 
 from tests.detached import reap_detached
 from agentgraph import looprun, osfs
-from tests.shellskip import CHECK_SECOND, sh_or, sleep_command
+from tests.shellskip import CHECK_SECOND, HAS_SH, sh_or, sleep_command
 from tests.test_looprun3 import LockHolder
 
 
@@ -93,7 +93,7 @@ class AcceptanceTests(Base):
         self.assertFalse(ex.calls[1]["first"])
 
     def test_b_always_failing_check_never_gets_a_fourth_attempt(self):
-        self.save(check="echo still wrong; exit 1", attempts=3)
+        self.save(check="echo still wrong && exit 1", attempts=3)
         run, record, ex = self.go([{"text": "PASS: everything is done"}, {"text": "PASS"}, {"text": "I need more input from you"}, {"text": "PASS"}])
         self.assertEqual(record["status"], "failed")
         self.assertEqual(len(record["attempts"]), 3)
@@ -124,11 +124,12 @@ class AcceptanceTests(Base):
         self.assertEqual((record["status"], record["attempts"], ex.calls), ("invalid", [], []))
         self.assertIn("check", record["reason"])
 
-        self.save(check="definitely-not-a-command-xyz", attempts=2)
-        run, record, _ = self.go()
-        self.assertEqual(record["status"], "check_error")
-        self.assertEqual(len(record["attempts"]), 1)
-        self.assertEqual(record["attempts"][0]["check"]["exit"], 127)
+        if HAS_SH:  # cmd.exe says "not recognized" with exit code 1, the same as any failing check: only sh gives a missing command the code 127
+            self.save(check="definitely-not-a-command-xyz", attempts=2)
+            run, record, _ = self.go()
+            self.assertEqual(record["status"], "check_error")
+            self.assertEqual(len(record["attempts"]), 1)
+            self.assertEqual(record["attempts"][0]["check"]["exit"], 127)
 
         self.save(check="exit 0", attempts=1, attempt_seconds=0.3)
         started = time.time()
@@ -559,7 +560,7 @@ class RecordTests(Base):
     def test_the_work_folder_is_where_the_agent_and_the_check_run(self):
         work = self.tmp / "elsewhere"
         work.mkdir()
-        self.save(check="test -f marker && exit 0 || exit 1", attempts=1)
+        self.save(check=sh_or("test -f marker && exit 0 || exit 1", "if exist marker (exit 0) else (exit 1)"), attempts=1)
         (work / "marker").write_text("x")
         run, record, ex = self.go(workdir=work)
         self.assertEqual(record["status"], "passed")

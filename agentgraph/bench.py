@@ -283,9 +283,11 @@ def config_hash(config: Path, scratch: Path | None = None) -> tuple[str, int]:
     digest, files = hashlib.sha256(), _prompt_files(config)
     for path in files:
         text = path.read_bytes().decode("utf-8", "replace")
-        text = text.replace(str(config), "@CONFIG@")
+        for form in sorted(_path_forms(config), key=len, reverse=True):  # the path as it was written: native, JSON-escaped, forward slashes
+            text = text.replace(form, "@CONFIG@")
         if scratch is not None:
-            text = text.replace(str(scratch), "@SCRATCH@")
+            for form in sorted(_path_forms(scratch), key=len, reverse=True):
+                text = text.replace(form, "@SCRATCH@")
         digest.update(str(path.relative_to(config)).encode() + b"\0" + text.encode() + b"\0")
     return digest.hexdigest()[:16], len(files)
 

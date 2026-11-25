@@ -263,9 +263,9 @@ class TheEnvironment(Base):
         for kept in ("PATH=", "HOME=", "LANG=C", "LC_CTYPE=C", "TMPDIR="):
             self.assertIn(kept, text)
         self.assertNotIn("EDITOR=", text)
-        msys = "/" + self.temp.as_posix().replace(":", "", 1).lower() if WINDOWS else None  # Git's sh shows C:\x as /c/x
-        self.assertTrue(any(f"TMPDIR={form}" in text for form in (str(self.temp), self.temp.as_posix(), msys) if form),
-                        text)  # a private folder below the temp folder, not the project
+        # Git's sh shows C:\x as /c/x, and the folder it keeps its own /tmp in (the one the test set as the temp folder, TEMP there) as /tmp
+        forms = (str(self.temp), self.temp.as_posix(), "/" + self.temp.as_posix().replace(":", "", 1).lower(), "/tmp") if WINDOWS else (str(self.temp),)
+        self.assertTrue(any(f"TMPDIR={form}" in text for form in forms), text)  # a private folder below the temp folder, not the project
         self.assertEqual(self.result()[0]["environment"], sorted(self.result()[0]["environment"]))
         self.assertFalse(any("KEY" in name or "TOKEN" in name for name in self.result()[0]["environment"]))
 
@@ -512,7 +512,7 @@ class Links(Base):
         os.symlink("d/up/d/up/../../..", self.project / "q")  # each step looks fine alone; the whole way leaves the copy
         self.write(graph(check=f"echo hacked > q/pwn 2>/dev/null; test ! -e '{outside}' && test ! -L q && test -L d/up"))
         code, line = self.run_it()
-        self.assertEqual(code, 0, line)
+        self.assertEqual(code, 0, line + "\n" + self.output_of())
         self.assertFalse(outside.exists())
         self.assertGreaterEqual(self.result()[0]["symlinks_left_out"], 1)
 
