@@ -8,7 +8,6 @@ import argparse
 import base64
 from contextlib import contextmanager, nullcontext
 import copy
-import fcntl
 import hashlib
 from datetime import date
 import json
@@ -19,7 +18,7 @@ import stat
 import sys
 import unicodedata
 
-from . import agentfiles, flowcommands, names, skillset, sources
+from . import agentfiles, flowcommands, names, osfs, skillset, sources
 from . import structure as structure_module
 from . import teams as teams_module
 from .skillset import BACKUPS, CONFIG, MAP, SkillsetError
@@ -469,11 +468,11 @@ def _schema_check(obj, entries, disabled, schema_path):
 
 
 def _fsync_dir(folder):
-    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    fd = osfs.open(folder, os.O_RDONLY | osfs.O_DIRECTORY)
     try:
-        os.fsync(fd)
+        osfs.fsync(fd)
     finally:
-        os.close(fd)
+        osfs.close(fd)
 
 
 def _save_record(folder, record, mode):
@@ -483,7 +482,7 @@ def _save_record(folder, record, mode):
         path = folder / f"undo-{slug}-{number:03d}.json"
         with skillset._staged(path, body, mode) as staged:
             try:
-                os.link(staged, path)
+                osfs.link(staged, path)
             except FileExistsError:
                 continue
         _fsync_dir(folder)
@@ -820,7 +819,7 @@ def _structure_locked(root):
     """The structure folder, open and locked for one writer at a time (the same flock structure.py and teams.py
     take), or None when there is no such folder."""
     try:
-        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        fd = osfs.open(root, os.O_RDONLY | osfs.O_DIRECTORY)
     except FileNotFoundError:
         fd = None
     except OSError as exc:
@@ -829,16 +828,16 @@ def _structure_locked(root):
         yield None
         return
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        osfs.lock(fd)
         yield fd
     finally:
-        os.close(fd)
+        osfs.close(fd)
 
 
 def _read_at(folder_fd, name):
     """The bytes of a regular file in a folder, never through a symlink; None when there is no such file."""
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder_fd)
+        fd = osfs.open(name, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK, dir_fd=folder_fd)
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -852,10 +851,10 @@ def _read_at(folder_fd, name):
 def _group_folders(root_fd):
     """The group folders of the structure folder, in name order: plain folders, never `flows` or `teams`."""
     folders = []
-    for entry in sorted(os.listdir(root_fd)):
+    for entry in sorted(osfs.listdir(root_fd)):
         if entry.startswith(".") or entry in (FLOWS_FOLDER, TEAMS_FOLDER):
             continue
-        if stat.S_ISDIR(os.lstat(entry, dir_fd=root_fd).st_mode):
+        if stat.S_ISDIR(osfs.lstat(entry, dir_fd=root_fd).st_mode):
             folders.append(entry)
     return folders[:50]
 
@@ -868,7 +867,7 @@ def _open_folder(root_fd, folder, create):
     """A folder of the structure folder, opened without following a symlink; `flows` and `teams` are made when
     `create`, a group folder never is. None when it is missing and not made."""
     try:
-        return os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+        return osfs.open(folder, os.O_RDONLY | osfs.O_DIRECTORY | osfs.O_NOFOLLOW, dir_fd=root_fd)
     except FileNotFoundError:
         if not create:
             return None
@@ -876,7 +875,7 @@ def _open_folder(root_fd, folder, create):
             raise RosterError(f"the group folder {folder} is no longer in the structure folder; nothing was changed")
     except OSError as exc:
         raise RosterError(f"structure: {folder} is not a plain folder ({exc.strerror}); nothing was changed") from exc
-    os.mkdir(folder, 0o755, dir_fd=root_fd)
+    osfs.mkdir(folder, 0o755, dir_fd=root_fd)
     return _open_folder(root_fd, folder, False)
 
 
@@ -886,10 +885,10 @@ def _listing(root_fd, folder):
     if fd is None:
         return []
     try:
-        names = sorted(name for name in os.listdir(fd) if name.endswith(".md") and FLOW_ID.fullmatch(name[:-3]))
+        names = sorted(name for name in osfs.listdir(fd) if name.endswith(".md") and FLOW_ID.fullmatch(name[:-3]))
         return [(name, data) for name in names if (data := _read_at(fd, name)) is not None]
     finally:
-        os.close(fd)
+        osfs.close(fd)
 
 
 def _command_refusal(file, flow, name):
@@ -940,7 +939,7 @@ def _structure_removal(root, root_fd, name, with_file):
             try:
                 data = _read_at(fd, name + ".md")
             finally:
-                os.close(fd)
+                osfs.close(fd)
             if data is not None:
                 changes.append({"folder": folder, "name": name + ".md", "before": data, "after": None})
     return changes
@@ -958,16 +957,16 @@ def _change_file(root_fd, change, check=True):
                               "made; nothing was changed. Try again.")
         if change["after"] is None:
             try:
-                os.unlink(change["name"], dir_fd=fd)
+                osfs.unlink(change["name"], dir_fd=fd)
             except FileNotFoundError:
                 if check:
                     raise
         else:
             exists = _read_at(fd, change["name"]) is not None
             structure_module._write(fd, change["name"], change["after"], new=not exists)
-        os.fsync(fd)
+        osfs.fsync(fd)
     finally:
-        os.close(fd)
+        osfs.close(fd)
 
 
 def _tidy(root_fd, changes):
@@ -975,7 +974,7 @@ def _tidy(root_fd, changes):
     for folder in dict.fromkeys(change["folder"] for change in changes):
         if folder in (FLOWS_FOLDER, TEAMS_FOLDER):
             try:
-                os.rmdir(folder, dir_fd=root_fd)
+                osfs.rmdir(folder, dir_fd=root_fd)
             except OSError:
                 pass
 
@@ -1191,7 +1190,7 @@ def _agent_file(root_fd, name, copy_of, description):
                 if stem and stem not in found and (data := _read_at(fd, stem + ".md")) is not None:
                     found[stem] = (folder, data)
         finally:
-            os.close(fd)
+            osfs.close(fd)
     if name in found:
         raise RosterError(f"{name!r} already has a file in the structure folder ({found[name][0]}/{name}.md)")
     settings = []
@@ -1510,7 +1509,7 @@ def _structure_back(root_fd, root, removed, kept=KEPT_ADDED):
             try:
                 current = _read_at(fd, change["name"])
             finally:
-                os.close(fd)
+                osfs.close(fd)
         if current != change["before"]:
             what = "group" if change["folder"] == TEAMS_FOLDER else (
                 "flow" if change["folder"] == FLOWS_FOLDER else "structure file")
@@ -1528,10 +1527,10 @@ def _structure_agents(root_fd):
     for folder in _group_folders(root_fd):
         fd = _open_folder(root_fd, folder, False)
         try:
-            found |= {entry[:-3] for entry in os.listdir(fd) if entry.endswith(".md") and not entry.startswith(".")
+            found |= {entry[:-3] for entry in osfs.listdir(fd) if entry.endswith(".md") and not entry.startswith(".")
                       and NAME.fullmatch(entry[:-3])}
         finally:
-            os.close(fd)
+            osfs.close(fd)
     return found
 
 
@@ -1754,7 +1753,7 @@ def _rename_changes(root, root_fd, name, to):
         try:
             data, taken = _read_at(fd, name + ".md"), _read_at(fd, to + ".md")
         finally:
-            os.close(fd)
+            osfs.close(fd)
         if taken is not None:
             raise RosterError(f"{to!r} already has a file in the structure folder ({folder}/{to}.md)")
         if data is not None:
@@ -2053,7 +2052,7 @@ def _own_file(root_fd, name):
             try:
                 data = _read_at(fd, name + ".md")
             finally:
-                os.close(fd)
+                osfs.close(fd)
             if data is not None:
                 return data
     except (SkillsetError, OSError):
@@ -2078,7 +2077,7 @@ def _agent_rev(name, data, obj, map_text, own):
 
 def _structure_fd(structure):
     try:
-        return os.open(Path(structure), os.O_RDONLY | os.O_DIRECTORY)
+        return osfs.open(Path(structure), os.O_RDONLY | osfs.O_DIRECTORY)
     except OSError:
         return None
 
@@ -2093,7 +2092,7 @@ def agent_rev(name, *, config=CONFIG, map_path=MAP, agents_dir=AGENTS_DIR, struc
         return _agent_rev(name, _agent_bytes(agents_dir, name), obj, map_text, _own_file(root_fd, name))
     finally:
         if root_fd is not None:
-            os.close(root_fd)
+            osfs.close(root_fd)
 
 
 def _expect_agent(name, expect, *, data, root_fd, config, map_path, obj=None):
@@ -2187,7 +2186,7 @@ def _command_refusals(document, structure):
     except (OSError, SkillsetError):
         pass
     finally:
-        os.close(root_fd)
+        osfs.close(root_fd)
     return found
 
 
@@ -2264,7 +2263,7 @@ def annotate(document, *, config=CONFIG, map_path=MAP, agents_dir=AGENTS_DIR, st
         agent["rev"] = _agent_rev(name, _agent_bytes(agents_dir, name) if name else None, rev_obj, rev_map, own)
         agent["use_when"] = use_when_of(own)  # when the orchestrator picks it (agentgraph.routing)
     if root_fd is not None:
-        os.close(root_fd)
+        osfs.close(root_fd)
     return document
 
 

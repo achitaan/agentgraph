@@ -20,10 +20,7 @@ from __future__ import annotations
 
 import base64
 from contextlib import contextmanager
-import ctypes
-import ctypes.util
 from datetime import date
-import fcntl
 import functools
 import hashlib
 import json
@@ -34,7 +31,10 @@ import secrets
 import stat
 import unicodedata
 
-from . import names, skillset, sources
+from . import names, osfs, skillset, sources
+
+# outputs.py still reads the C library from here (an atomic exchange of two names); None when there is none (Windows)
+_LIBC = osfs._libc()
 
 AGENTS_DIR = sources.CONFIG_DIR / "agents"
 BACKUPS = skillset.BACKUPS
@@ -460,7 +460,7 @@ def _folder(agents_dir, *, create=False):
     """The agents folder, opened without following a symlink and locked for one writer at a time."""
     path = Path(os.path.abspath(agents_dir))
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fd = osfs.open(path, os.O_RDONLY | osfs.O_DIRECTORY | osfs.O_NOFOLLOW)
     except FileNotFoundError:
         if not create:
             raise AgentfilesError(f"there is no agents folder at {path}") from None
@@ -468,20 +468,20 @@ def _folder(agents_dir, *, create=False):
             os.mkdir(path, 0o755)
         except OSError as exc:
             raise AgentfilesError(f"cannot make the agents folder {path}: {exc.strerror}") from exc
-        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fd = osfs.open(path, os.O_RDONLY | osfs.O_DIRECTORY | osfs.O_NOFOLLOW)
     except OSError as exc:
         raise AgentfilesError(f"the agents folder {path} is not a plain folder ({exc.strerror})") from exc
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        osfs.lock(fd)
         yield fd
     finally:
-        os.close(fd)
+        osfs.close(fd)
 
 
 def _read_at(fd, name):
     """The bytes of a regular file in the folder (never through a symlink), or None when there is none."""
     try:
-        file = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        file = osfs.open(name, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK, dir_fd=fd)
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -501,11 +501,11 @@ def _write_at(fd, name, data, before):
     if _read_at(fd, name) != before:
         raise AgentfilesError(f"{name} changed while this change was being made; nothing was written. Try again.")
     if data is None:
-        os.unlink(name, dir_fd=fd)
-        os.fsync(fd)
+        osfs.unlink(name, dir_fd=fd)
+        osfs.fsync(fd)
         return
     temp = f".{name}.{secrets.token_hex(6)}.tmp"
-    file = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=fd)
+    file = osfs.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | osfs.O_NOFOLLOW, 0o644, dir_fd=fd)
     try:
         with os.fdopen(file, "wb") as stream:
             stream.write(data)
@@ -516,42 +516,26 @@ def _write_at(fd, name, data, before):
         if before is None:
             _rename_new(fd, temp, name)  # never over a file that appeared
         else:
-            os.rename(temp, name, src_dir_fd=fd, dst_dir_fd=fd)
+            osfs.replace(temp, name, src_dir_fd=fd, dst_dir_fd=fd)
     except FileExistsError:
         raise AgentfilesError(f"{name} appeared while this change was being made; nothing was written.") from None
     finally:
         try:
-            os.unlink(temp, dir_fd=fd)
+            osfs.unlink(temp, dir_fd=fd)
         except FileNotFoundError:
             pass
-    os.fsync(fd)
-
-
-_LIBC = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    osfs.fsync(fd)
 
 
 def _rename_new(fd, source, target):
     """Rename inside the folder, refused (FileExistsError) when `target` exists. A new agent file is never a hard
     link: OpenCode 2.3.2 on macOS did not see the later deletion of a file made with link() (the n84 proof)."""
-    exclusive = getattr(_LIBC, "renameatx_np", None)  # macOS: RENAME_EXCL
-    flag = 0x4
-    if exclusive is None:
-        exclusive, flag = getattr(_LIBC, "renameat2", None), 0x1  # Linux: RENAME_NOREPLACE
-    if exclusive is None:
-        if _read_at(fd, target) is not None:  # the folder's flock keeps out this toolkit's other writers
-            raise FileExistsError(target)
-        os.rename(source, target, src_dir_fd=fd, dst_dir_fd=fd)
-        return
-    if exclusive(fd, os.fsencode(source), fd, os.fsencode(target), flag) != 0:
-        error = ctypes.get_errno()
-        if error == 17:  # EEXIST
-            raise FileExistsError(target)
-        raise OSError(error, os.strerror(error), target)
+    osfs.rename_new(source, target, src_dir_fd=fd, dst_dir_fd=fd)
 
 
 def _taken(fd, name):
     """The file names in the folder that already hold this agent: `NAME.md`, `NAME.md.disabled` and the like."""
-    return sorted(entry for entry in os.listdir(fd) if entry == name + ".md" or entry.startswith(name + ".md."))
+    return sorted(entry for entry in osfs.listdir(fd) if entry == name + ".md" or entry.startswith(name + ".md."))
 
 
 def check_name(name):
@@ -568,11 +552,11 @@ def listing(agents_dir=AGENTS_DIR):
     """{name: {"added": bool, "editable": bool, "why": str}} for each `*.md` in the agents folder. Never raises."""
     found = {}
     try:
-        fd = os.open(Path(agents_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fd = osfs.open(Path(agents_dir), os.O_RDONLY | osfs.O_DIRECTORY | osfs.O_NOFOLLOW)
     except OSError:
         return found
     try:
-        for entry in sorted(os.listdir(fd))[:500]:
+        for entry in sorted(osfs.listdir(fd))[:500]:
             if not entry.endswith(".md") or entry.startswith("."):
                 continue
             name = entry[:-3]
@@ -588,7 +572,7 @@ def listing(agents_dir=AGENTS_DIR):
                 found[name] = {"added": False, "editable": False, "parsed": None,
                                "why": HAND_WRITTEN.format(name=f"{name}.md")}
     finally:
-        os.close(fd)
+        osfs.close(fd)
     return found
 
 
@@ -640,15 +624,15 @@ def holders(skill, agents_dir=AGENTS_DIR):
     held, every = [], []
     word = re.compile(r"(?<![A-Za-z0-9_.-])" + re.escape(skill) + r"(?![A-Za-z0-9_.-])")
     try:
-        fd = os.open(Path(agents_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fd = osfs.open(Path(agents_dir), os.O_RDONLY | osfs.O_DIRECTORY | osfs.O_NOFOLLOW)
     except OSError:
         return held, every
     try:
-        for entry in sorted(os.listdir(fd))[:500]:
+        for entry in sorted(osfs.listdir(fd))[:500]:
             if not entry.endswith(".md") or entry.startswith("."):
                 continue
             try:
-                file = os.open(entry, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                file = osfs.open(entry, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK, dir_fd=fd)
             except OSError:
                 continue
             with os.fdopen(file, "rb") as stream:
@@ -670,7 +654,7 @@ def holders(skill, agents_dir=AGENTS_DIR):
             if word.search(text[4:4 + end.start()] if end else text[4:]):
                 held.append(entry[:-3])
     finally:
-        os.close(fd)
+        osfs.close(fd)
     return held, every
 
 
@@ -729,8 +713,8 @@ def save_record(backups, kind, name, record):
     """Write an undo record; returns its path (the opaque record a response carries)."""
     folder = _record_folder(backups, kind, name)
     path = folder / "record.json"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+    fd = osfs.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | osfs.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
         stream.write(json.dumps(record, indent=2) + "\n")
         stream.flush()
         os.fsync(stream.fileno())
@@ -801,7 +785,7 @@ def load_record(record, backups):
         except FileNotFoundError:
             raise AgentfilesError("invalid undo record: there is no such record") from None
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = osfs.open(path, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK)
     except FileNotFoundError:
         raise AgentfilesError("invalid undo record: there is no such record") from None
     except OSError as exc:

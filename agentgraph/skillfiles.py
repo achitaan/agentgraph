@@ -14,7 +14,7 @@ import sys
 import tempfile
 import unicodedata
 
-from . import names, skillset
+from . import names, osfs, skillset
 
 SKILLS = skillset.sources.CONFIG_DIR / "skills"
 BACKUPS = skillset.BACKUPS
@@ -58,7 +58,7 @@ def _directory(path, *, create=False):
             except FileExistsError:
                 pass
         info = current.lstat()
-        if not stat.S_ISDIR(info.st_mode):
+        if not stat.S_ISDIR(info.st_mode) or osfs.is_link(info):
             raise SkillfilesError(f"directory must not be a symlink or special file: {current}")
     return path
 
@@ -226,11 +226,11 @@ def _backup_folder(backups, kind):
 
 
 def _sync(path):
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    fd = osfs.open(path, os.O_RDONLY | osfs.O_DIRECTORY | osfs.O_NOFOLLOW)
     try:
-        os.fsync(fd)
+        osfs.fsync(fd)
     finally:
-        os.close(fd)
+        osfs.close(fd)
 
 
 def create(id, description, body, *, skills=SKILLS):
@@ -248,9 +248,9 @@ def create(id, description, body, *, skills=SKILLS):
         staged = Path(tempfile.mkdtemp(prefix=".skill-new-", dir=root))
         try:
             with skillset._staged(staged / "SKILL.md", text, 0o644) as ready:
-                os.replace(ready, staged / "SKILL.md")
+                osfs.replace(ready, staged / "SKILL.md")
             _sync(staged)
-            os.rename(staged, folder)
+            osfs.rename(staged, folder)
             _sync(root)
         finally:
             if staged.exists():
@@ -375,15 +375,15 @@ def _replace_text(root, id, text, updated, mode, kind, backups):
     backup_dir = _backup_folder(backups, kind)
     backup = backup_dir / "SKILL.md"
     with skillset._staged(backup, text, mode) as staged:
-        os.replace(staged, backup)
+        osfs.replace(staged, backup)
     record = backup_dir / "record.json"
     data = {"version": 1, "op": "write", "id": id, "skills": str(root), "after": _digest(updated)}
     with skillset._staged(record, json.dumps(data) + "\n", 0o600) as staged:
-        os.replace(staged, record)
+        osfs.replace(staged, record)
     _sync(backup_dir)
     with skillset._staged(path, updated, mode) as staged:
         _unchanged(path, text)  # again, right before the replace
-        os.replace(staged, path)
+        osfs.replace(staged, path)
     _sync(path.parent)
     _prune(backup_dir, kind)
     return str(backup), str(record)
@@ -420,9 +420,9 @@ def delete(id, *, skills=SKILLS, backups=BACKUPS, config=CONFIG, force=False, wi
         record = container / "record.json"
         data = {"version": 1, "id": id, "skills": str(root)}
         with skillset._staged(record, json.dumps(data) + "\n", 0o600) as staged:
-            os.replace(staged, record)
+            osfs.replace(staged, record)
         try:
-            os.rename(root / id, container / id)
+            osfs.rename(root / id, container / id)
         except BaseException:
             record.unlink()
             container.rmdir()
@@ -461,7 +461,7 @@ def restore(record, *, skills=SKILLS, backups=BACKUPS):
         destination = root / id
         if os.path.lexists(destination):
             raise SkillfilesError(f"skill {id!r} already exists; restore refused")
-        os.rename(path.parent / id, destination)
+        osfs.rename(path.parent / id, destination)
         _sync(root)
         _sync(path.parent)
         return {"id": id, "changed": True, "record": str(path)}

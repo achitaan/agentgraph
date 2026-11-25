@@ -44,22 +44,15 @@ import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 
-try:  # POSIX; elsewhere the in-process lock is the only one
-    import fcntl
-except ImportError:  # pragma: no cover
-    fcntl = None
-
-from . import flowcommands, flowrun
-if os.name != "nt":
-    from . import agentfiles
+from . import agentfiles, flowcommands, flowrun, osfs
 from .snapshot_json import (FLOW_FILES_LIMIT, FLOW_ID, FLOW_NAME, FLOW_TEXT_LIMIT, FLOWS_FOLDER, STRUCTURE_DIR,
                             flow_fields, flow_refusal, flow_steps, hub_names, is_self_loop, ledger_home, load_structure,
                             read_flow, seat_lead)
 
 FLOW_STEPS_LIMIT = 20
 _LOCK = threading.Lock()  # one writer at a time inside a process; flock on the folder across processes
-_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_NOFOLLOW = osfs.O_NOFOLLOW
+_DIRECTORY = osfs.O_DIRECTORY
 
 
 class StructureError(Exception):
@@ -217,7 +210,7 @@ def _taken_name(shape: dict, name: str, flow_id: str | None) -> None:
 
 
 def _bytes(flows_fd: int, flow_id: str) -> bytes:
-    with os.fdopen(os.open(flow_id + ".md", os.O_RDONLY | _NOFOLLOW, dir_fd=flows_fd), "rb") as stream:
+    with os.fdopen(osfs.open(flow_id + ".md", os.O_RDONLY | _NOFOLLOW, dir_fd=flows_fd), "rb") as stream:
         return stream.read()
 
 
@@ -242,28 +235,27 @@ def _locked(root: Path):
     """The structure folder, open and locked for one writer at a time."""
     with _LOCK:
         try:
-            folder = os.open(root, os.O_RDONLY | _DIRECTORY)
+            folder = osfs.open(root, os.O_RDONLY | _DIRECTORY)
         except OSError as exc:
             raise StructureError(f"no structure folder at {root}") from exc
         try:
-            if fcntl is not None:
-                fcntl.flock(folder, fcntl.LOCK_EX)
+            osfs.lock(folder)
             yield folder
         finally:
-            os.close(folder)  # closing releases the lock
+            osfs.close(folder)  # closing releases the lock
 
 
 def _open_flows(root_fd: int, create: bool) -> int | None:
     """The `flows` folder, opened without following a symlink; None when it is missing and not created."""
     try:
-        return os.open(FLOWS_FOLDER, os.O_RDONLY | _DIRECTORY | _NOFOLLOW, dir_fd=root_fd)
+        return osfs.open(FLOWS_FOLDER, os.O_RDONLY | _DIRECTORY | _NOFOLLOW, dir_fd=root_fd)
     except FileNotFoundError:
         if not create:
             return None
     except OSError as exc:
         raise StructureError(f"{FLOWS_FOLDER} in the structure folder is not a plain folder ({exc.strerror}); "
                              "nothing was changed") from exc
-    os.mkdir(FLOWS_FOLDER, 0o755, dir_fd=root_fd)
+    osfs.mkdir(FLOWS_FOLDER, 0o755, dir_fd=root_fd)
     return _open_flows(root_fd, False)
 
 
@@ -271,11 +263,11 @@ def _files(flows_fd: int | None) -> set[str]:
     """The flow ids in the folder: names of the form `<id>.md`."""
     if flows_fd is None:
         return set()
-    return {name[:-3] for name in os.listdir(flows_fd) if name.endswith(".md") and FLOW_ID.fullmatch(name[:-3])}
+    return {name[:-3] for name in osfs.listdir(flows_fd) if name.endswith(".md") and FLOW_ID.fullmatch(name[:-3])}
 
 
 def _regular(flows_fd: int, flow_id: str) -> None:
-    info = os.lstat(flow_id + ".md", dir_fd=flows_fd)
+    info = osfs.lstat(flow_id + ".md", dir_fd=flows_fd)
     if not stat.S_ISREG(info.st_mode):
         raise StructureError(f"flow {flow_id} is not a regular file; it was left unchanged")
 
@@ -284,20 +276,20 @@ def _write(flows_fd: int, name: str, data: bytes, *, new: bool) -> None:
     """Write `data` next to `name` in the flows folder, then link it in (new: never over an existing entry)
     or rename it over the old file (which replaces the entry itself, never a symlink's target)."""
     temporary = f".{name}.{secrets.token_hex(6)}.tmp"
-    handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o644, dir_fd=flows_fd)
+    handle = osfs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o644, dir_fd=flows_fd)
     try:
         with os.fdopen(handle, "wb") as stream:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
         if new:
-            os.link(temporary, name, src_dir_fd=flows_fd, dst_dir_fd=flows_fd, follow_symlinks=False)
-            os.unlink(temporary, dir_fd=flows_fd)
+            osfs.link(temporary, name, src_dir_fd=flows_fd, dst_dir_fd=flows_fd, follow_symlinks=False)
+            osfs.unlink(temporary, dir_fd=flows_fd)
         else:
-            os.replace(temporary, name, src_dir_fd=flows_fd, dst_dir_fd=flows_fd)
+            osfs.replace(temporary, name, src_dir_fd=flows_fd, dst_dir_fd=flows_fd)
     except BaseException:
         try:
-            os.unlink(temporary, dir_fd=flows_fd)
+            osfs.unlink(temporary, dir_fd=flows_fd)
         except OSError:
             pass
         raise
@@ -372,7 +364,7 @@ def add_flow(names, text: str | None = None, directory: Path | None = None, *, n
             count = len(_files(existing))
         finally:
             if existing is not None:
-                os.close(existing)
+                osfs.close(existing)
         if count >= FLOW_FILES_LIMIT:
             raise StructureError(f"the structure folder already holds {count} flows, the most it reads is "
                                  f"{FLOW_FILES_LIMIT}; remove one first. Nothing was written")
@@ -380,7 +372,7 @@ def add_flow(names, text: str | None = None, directory: Path | None = None, *, n
             text = flow_text(path, hub_names(shape))
         flows_fd = _open_flows(root_fd, True)
         try:
-            flow_id = _new_id(path, {entry[:-3] for entry in os.listdir(flows_fd) if entry.endswith(".md")})
+            flow_id = _new_id(path, {entry[:-3] for entry in osfs.listdir(flows_fd) if entry.endswith(".md")})
             data = flow_file(path, text, name, command)
             if not command:
                 _write(flows_fd, flow_id + ".md", data, new=True)
@@ -394,10 +386,10 @@ def add_flow(names, text: str | None = None, directory: Path | None = None, *, n
                         if there is None:
                             folder.write(name, wanted, None)
                     except BaseException:
-                        os.unlink(flow_id + ".md", dir_fd=flows_fd)
+                        osfs.unlink(flow_id + ".md", dir_fd=flows_fd)
                         raise
         finally:
-            os.close(flows_fd)
+            osfs.close(flows_fd)
         return _flow(root, flow_id), notes
 
 
@@ -416,7 +408,7 @@ def _open_flow(root_fd: int, shape: dict, flow_id, expect=None):
             raise StructureError(f"flow {found} cannot be read as a flow (see the snapshot's warnings); "
                                  "it was left unchanged")
     except BaseException:
-        os.close(flows_fd)
+        osfs.close(flows_fd)
         raise
     return flows_fd, found, flow
 
@@ -451,7 +443,7 @@ def set_flow_text(flow_id, text, directory: Path | None = None, *, commands_dir:
                             _write(flows_fd, found + ".md", before, new=False)
                             raise
         finally:
-            os.close(flows_fd)
+            osfs.close(flows_fd)
         return _flow(root, found)
 
 
@@ -493,7 +485,7 @@ def set_flow_name(flow_id, name, directory: Path | None = None, *, commands_dir:
                 if old is not None:
                     folder.write(flow["command"], None, old)
         finally:
-            os.close(flows_fd)
+            osfs.close(flows_fd)
         return _flow(root, found)
 
 
@@ -538,7 +530,7 @@ def set_flow_command(flow_id, on, directory: Path | None = None, *, commands_dir
                     if old is not None:
                         folder.write(flow["command"], None, old)
         finally:
-            os.close(flows_fd)
+            osfs.close(flows_fd)
         return _flow(root, found)
 
 
@@ -593,13 +585,13 @@ def remove_flow(flow_id, directory: Path | None = None, *, commands_dir: Path | 
                     there = folder.read(command[0])
                     if there is not None and there in command[1]:
                         folder.write(command[0], None, there)
-            os.unlink(found + ".md", dir_fd=flows_fd)
-            empty = not os.listdir(flows_fd)
+            osfs.unlink(found + ".md", dir_fd=flows_fd)
+            empty = not osfs.listdir(flows_fd)
         finally:
-            os.close(flows_fd)
+            osfs.close(flows_fd)
         if empty:
             try:
-                os.rmdir(FLOWS_FOLDER, dir_fd=root_fd)
+                osfs.rmdir(FLOWS_FOLDER, dir_fd=root_fd)
             except OSError:
                 pass
         return flow
@@ -663,19 +655,19 @@ def flow_scaffold(path_ref, task, directory: Path | None = None, *, graph_dir: P
     graph_dir.mkdir(parents=True, exist_ok=True)
     target = graph_dir / f"{task}.json"
     temporary = graph_dir / f".{task}.{secrets.token_hex(6)}.tmp"
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o644)
+    fd = osfs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o644)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
             stream.write(json.dumps(graph, indent=2) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
         try:
-            os.link(temporary, target, follow_symlinks=False)  # never over a file that is there
+            osfs.link(temporary, target, follow_symlinks=False)  # never over a file that is there
         except FileExistsError:
             raise StructureError(f"{target} already exists; it was left unchanged (pick another --task)") from None
     finally:
         try:
-            os.unlink(temporary)
+            osfs.unlink(temporary)
         except OSError:
             pass
     return target, graph
@@ -810,13 +802,6 @@ def main(argv: list[str] | None = None) -> int:
         parser_.add_argument("--expect", metavar="REV", help="refuse, changing nothing, unless the flow's rev is REV "
                                                              "(the rev the caller last read)")
     args = parser.parse_args(argv)
-    if os.name == "nt" and (args.command != "flows" or args.stats):
-        message = "Windows supports listing flows only; edits and statistics require POSIX."
-        if args.json:
-            print(json.dumps({"error": message}))
-        else:
-            print(message, file=sys.stderr)
-        return 1
     action = getattr(args, "action", None)
     notes: list[str] = []
     result: dict = {}

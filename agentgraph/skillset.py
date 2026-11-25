@@ -5,7 +5,6 @@ import argparse
 import copy
 from contextlib import ExitStack, contextmanager
 from datetime import date
-import fcntl
 import hashlib
 import json
 import os
@@ -16,7 +15,7 @@ import sys
 import tempfile
 import unicodedata
 
-from . import names, paths, sources
+from . import names, osfs, paths, sources
 from .snapshot_json import skills_document
 
 CONFIG = sources.CONFIG_DIR / "oh-my-opencode-slim.json"
@@ -59,7 +58,7 @@ def _agent_name(value):
 
 def _read(path, label):
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = osfs.open(path, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK)
         with os.fdopen(fd, "rb") as handle:
             info = os.fstat(handle.fileno())
             if not stat.S_ISREG(info.st_mode):
@@ -479,12 +478,12 @@ def _locked(*paths, wrap=True):
             try:
                 directories = {}
                 for path in paths:
-                    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-                    stack.callback(os.close, fd)
-                    info = os.fstat(fd)
+                    fd = osfs.open(path.parent, os.O_RDONLY | osfs.O_DIRECTORY)
+                    stack.callback(osfs.close, fd)
+                    info = osfs.fstat(fd)
                     directories[info.st_dev, info.st_ino] = fd
                 for _, fd in sorted(directories.items()):
-                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    osfs.lock(fd)
             except OSError as exc:
                 raise SkillsetError(f"skillset file operation failed: {exc}") from exc
             yield list(directories.values())
@@ -493,12 +492,12 @@ def _locked(*paths, wrap=True):
         with ExitStack() as stack:
             directories = {}
             for path in paths:
-                fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-                stack.callback(os.close, fd)
-                info = os.fstat(fd)
+                fd = osfs.open(path.parent, os.O_RDONLY | osfs.O_DIRECTORY)
+                stack.callback(osfs.close, fd)
+                info = osfs.fstat(fd)
                 directories[info.st_dev, info.st_ino] = fd
             for _, fd in sorted(directories.items()):
-                fcntl.flock(fd, fcntl.LOCK_EX)
+                osfs.lock(fd)
             yield list(directories.values())
     except OSError as exc:
         raise SkillsetError(f"skillset file operation failed: {exc}") from exc
@@ -511,7 +510,7 @@ def _staged(path, text, mode):
         with os.fdopen(fd, "wb") as handle:
             handle.write(text if isinstance(text, bytes) else text.encode("utf-8"))
             handle.flush()
-            os.fchmod(handle.fileno(), mode)
+            osfs.fchmod(handle.fileno(), mode)
             os.fsync(handle.fileno())
         yield name
     finally:
@@ -536,14 +535,14 @@ def _link_new(folder, path, text, mode):
     """Write `text` to `path` only if nothing is there yet; return whether it did."""
     with _staged(path, text, mode) as staged:
         try:
-            os.link(staged, path)
+            osfs.link(staged, path)
         except FileExistsError:
             return False
-    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    fd = osfs.open(folder, os.O_RDONLY | osfs.O_DIRECTORY)
     try:
-        os.fsync(fd)
+        osfs.fsync(fd)
     finally:
-        os.close(fd)
+        osfs.close(fd)
     return True
 
 
@@ -593,15 +592,15 @@ def _commit(files, dir_fds, prepare):
         replaced = []
         try:
             for path, new, old in ready:
-                os.replace(new, path)
+                osfs.replace(new, path)
                 replaced.append((old, path))
             for fd in dir_fds:
-                os.fsync(fd)
+                osfs.fsync(fd)
         except BaseException:
             for old, path in reversed(replaced):
-                os.replace(old, path)
+                osfs.replace(old, path)
             for fd in dir_fds:
-                os.fsync(fd)
+                osfs.fsync(fd)
             raise
         return backup
 

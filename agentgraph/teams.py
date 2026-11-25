@@ -38,11 +38,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-try:  # POSIX; elsewhere the in-process lock is the only one
-    import fcntl
-except ImportError:  # pragma: no cover
-    fcntl = None
-
+from . import osfs
 from .snapshot_json import FLOW_ID, FLOW_TEXT_LIMIT, FLOWS_FOLDER, HEAD_BYTES, STRUCTURE_DIR, read_settings
 from .structure import StaleError, StructureError, clean_text, expect_rev
 
@@ -50,8 +46,8 @@ TEAMS_FOLDER = "teams"  # inside the structure folder: one file per team, never 
 TEAM_MEMBERS_LIMIT = 12
 TEAM_FILES_LIMIT = 200
 _LOCK = threading.Lock()  # one writer at a time inside a process; flock on the folder across processes
-_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_NOFOLLOW = osfs.O_NOFOLLOW
+_DIRECTORY = osfs.O_DIRECTORY
 
 
 class TeamError(StructureError):
@@ -294,47 +290,46 @@ def _locked(root: Path):
     """The structure folder, open and locked for one writer at a time."""
     with _LOCK:
         try:
-            folder = os.open(root, os.O_RDONLY | _DIRECTORY)
+            folder = osfs.open(root, os.O_RDONLY | _DIRECTORY)
         except OSError as exc:
             raise TeamError(f"no structure folder at {root}") from exc
         try:
-            if fcntl is not None:
-                fcntl.flock(folder, fcntl.LOCK_EX)
+            osfs.lock(folder)
             yield folder
         finally:
-            os.close(folder)  # closing releases the lock
+            osfs.close(folder)  # closing releases the lock
 
 
 def _open_teams(root_fd: int, create: bool) -> int | None:
     """The `teams` folder, opened without following a symlink; None when it is missing and not created."""
     try:
-        return os.open(TEAMS_FOLDER, os.O_RDONLY | _DIRECTORY | _NOFOLLOW, dir_fd=root_fd)
+        return osfs.open(TEAMS_FOLDER, os.O_RDONLY | _DIRECTORY | _NOFOLLOW, dir_fd=root_fd)
     except FileNotFoundError:
         if not create:
             return None
     except OSError as exc:
         raise TeamError(f"{TEAMS_FOLDER} in the structure folder is not a plain folder ({exc.strerror}); "
                         "nothing was changed") from exc
-    os.mkdir(TEAMS_FOLDER, 0o755, dir_fd=root_fd)
+    osfs.mkdir(TEAMS_FOLDER, 0o755, dir_fd=root_fd)
     return _open_teams(root_fd, False)
 
 
 def _files(teams_fd: int | None) -> set[str]:
     if teams_fd is None:
         return set()
-    return {name[:-3] for name in os.listdir(teams_fd) if name.endswith(".md") and FLOW_ID.fullmatch(name[:-3])}
+    return {name[:-3] for name in osfs.listdir(teams_fd) if name.endswith(".md") and FLOW_ID.fullmatch(name[:-3])}
 
 
 def _regular(teams_fd: int, team_id: str) -> bytes:
     """The bytes of a team's file, refused unless it is a regular file (never through a symlink)."""
-    if not stat.S_ISREG(os.lstat(team_id + ".md", dir_fd=teams_fd).st_mode):
+    if not stat.S_ISREG(osfs.lstat(team_id + ".md", dir_fd=teams_fd).st_mode):
         raise TeamError(f"team {team_id} is not a regular file; it was left unchanged")
     return _bytes(teams_fd, team_id)
 
 
 def _bytes(teams_fd: int, team_id: str) -> bytes | None:
     try:
-        handle = os.open(team_id + ".md", os.O_RDONLY | _NOFOLLOW, dir_fd=teams_fd)
+        handle = osfs.open(team_id + ".md", os.O_RDONLY | _NOFOLLOW, dir_fd=teams_fd)
     except FileNotFoundError:
         return None
     with os.fdopen(handle, "rb") as stream:
@@ -343,7 +338,7 @@ def _bytes(teams_fd: int, team_id: str) -> bytes | None:
 
 def _whole(teams_fd: int, team_id: str) -> bytes:
     """A team's file as _load reads it (all of it), for its rev."""
-    with os.fdopen(os.open(team_id + ".md", os.O_RDONLY | _NOFOLLOW, dir_fd=teams_fd), "rb") as stream:
+    with os.fdopen(osfs.open(team_id + ".md", os.O_RDONLY | _NOFOLLOW, dir_fd=teams_fd), "rb") as stream:
         return stream.read()
 
 
@@ -357,20 +352,20 @@ def _write(teams_fd: int, name: str, data: bytes, *, new: bool) -> None:
     """Write `data` next to `name` in the teams folder, then link it in (new: never over an existing entry)
     or rename it over the old file (which replaces the entry itself, never a symlink's target)."""
     temporary = f".{name}.{secrets.token_hex(6)}.tmp"
-    handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o644, dir_fd=teams_fd)
+    handle = osfs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o644, dir_fd=teams_fd)
     try:
         with os.fdopen(handle, "wb") as stream:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
         if new:
-            os.link(temporary, name, src_dir_fd=teams_fd, dst_dir_fd=teams_fd, follow_symlinks=False)
-            os.unlink(temporary, dir_fd=teams_fd)
+            osfs.link(temporary, name, src_dir_fd=teams_fd, dst_dir_fd=teams_fd, follow_symlinks=False)
+            osfs.unlink(temporary, dir_fd=teams_fd)
         else:
-            os.replace(temporary, name, src_dir_fd=teams_fd, dst_dir_fd=teams_fd)
+            osfs.replace(temporary, name, src_dir_fd=teams_fd, dst_dir_fd=teams_fd)
     except BaseException:
         try:
-            os.unlink(temporary, dir_fd=teams_fd)
+            osfs.unlink(temporary, dir_fd=teams_fd)
         except OSError:
             pass
         raise
@@ -423,10 +418,10 @@ def add(lead, members, text: str | None = None, structure_dir: Path | None = Non
             if held >= TEAM_FILES_LIMIT:
                 raise TeamError(f"the structure folder already holds {held} team files, the most it reads is "
                                 f"{TEAM_FILES_LIMIT}; remove one first. Nothing was written")
-            team_id = _new_id(lead, {name[:-3] for name in os.listdir(teams_fd) if name.endswith(".md")})
+            team_id = _new_id(lead, {name[:-3] for name in osfs.listdir(teams_fd) if name.endswith(".md")})
             _write(teams_fd, team_id + ".md", team_file(lead, members, text), new=True)
         finally:
-            os.close(teams_fd)
+            osfs.close(teams_fd)
         return _team(_load(root, shape)[0], team_id), notes
 
 
@@ -450,7 +445,7 @@ def set_text(team_id, text, structure_dir: Path | None = None, *, expect: str | 
                 _write(teams_fd, found + ".md", team_file(team["lead"], team["members"], text), new=False)
         finally:
             if teams_fd is not None:
-                os.close(teams_fd)
+                osfs.close(teams_fd)
         return _team(_load(root, shape)[0], found)
 
 
@@ -477,7 +472,7 @@ def set_members(team_id, members, structure_dir: Path | None = None, *,
                 _write(teams_fd, found + ".md", team_file(lead, members, text), new=False)
         finally:
             if teams_fd is not None:
-                os.close(teams_fd)
+                osfs.close(teams_fd)
         return _team(_load(root, shape)[0], found), notes
 
 
@@ -496,14 +491,14 @@ def remove(team_id, structure_dir: Path | None = None, *, expect: str | None = N
             expect_rev(expect, _whole(teams_fd, found), f"team {found}")
             gone = next((team for team in _load(root, shape)[0] if team["id"] == found), {"id": found})
             _unchanged(teams_fd, found, before)
-            os.unlink(found + ".md", dir_fd=teams_fd)
-            empty = not os.listdir(teams_fd)
+            osfs.unlink(found + ".md", dir_fd=teams_fd)
+            empty = not osfs.listdir(teams_fd)
         finally:
             if teams_fd is not None:
-                os.close(teams_fd)
+                osfs.close(teams_fd)
         if empty:
             try:
-                os.rmdir(TEAMS_FOLDER, dir_fd=root_fd)
+                osfs.rmdir(TEAMS_FOLDER, dir_fd=root_fd)
             except OSError:
                 pass
         return gone
