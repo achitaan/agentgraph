@@ -24,6 +24,7 @@ DB_PATH = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 MODELS_CACHE = Path.home() / ".cache" / "opencode" / "models.json"
 MAX_GRAPH_BYTES = 2 * 1024 * 1024
 MAX_GRAPH_FILES = 200
+WINDOWS = os.name == "nt"
 
 
 def pretty_model(model_id: str) -> str:
@@ -98,7 +99,7 @@ def _load_roster(config_dir: Path, *, config_path: Path | None = None,
     cfg_path = Path(config_path) if config_path is not None else config_dir / "oh-my-opencode-slim.json"
     folder = Path(agents_dir) if agents_dir is not None else config_dir / "agents"
     try:
-        config = json.loads(cfg_path.read_text())
+        config = json.loads(cfg_path.read_text(encoding="utf-8"))
         if not isinstance(config, dict):
             raise ValueError("not a JSON object")
     except Exception as exc:  # noqa: BLE001
@@ -136,7 +137,7 @@ def _load_roster(config_dir: Path, *, config_path: Path | None = None,
     reviewer_path = folder / "reviewer.md"
     if not any(agent.name == "reviewer" for agent in agents):
         try:
-            text = reviewer_path.read_text()
+            text = reviewer_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             text = None
         except Exception as exc:  # noqa: BLE001
@@ -163,7 +164,7 @@ def _load_roster(config_dir: Path, *, config_path: Path | None = None,
         if name in known:
             continue
         try:
-            text = path.read_text()
+            text = path.read_text(encoding="utf-8")
         except OSError as exc:
             warnings.append(f"roster: cannot read {path.name}: {exc}")
             continue
@@ -187,6 +188,8 @@ def _load_roster(config_dir: Path, *, config_path: Path | None = None,
 
 def read_graph_text(path: Path) -> str:
     """Read one bounded regular graph file without following its symlink."""
+    if WINDOWS:
+        raise OSError("secure task graph reads are not supported on Windows")
     path = Path(path)
     root = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -211,6 +214,10 @@ def read_graph_text(path: Path) -> str:
 def graph_files(directory: Path) -> tuple[list[Path], list[str]]:
     """Select at most 200 graphs, newest by mtime, without following file links."""
     directory = Path(directory)
+    if WINDOWS:
+        if not directory.exists():
+            return [], []
+        raise OSError("secure task graph reads are not supported on Windows")
     if directory.stat().st_uid != os.getuid():
         raise PermissionError(f"graph directory {directory} is not owned by the current user")
     warnings = []
@@ -466,6 +473,10 @@ def find_graph_dir(start: Path, warnings: list[str] | None = None) -> Path | Non
         try:
             info = candidate.stat()
             if stat.S_ISDIR(info.st_mode):
+                if WINDOWS:
+                    if warnings is not None:
+                        warnings.append("graph: secure task graph reads are not supported on Windows")
+                    return None
                 if info.st_uid == os.getuid():
                     return candidate
                 if warnings is not None:
@@ -586,7 +597,7 @@ def _positive_int(value) -> int | None:
 
 def _read_json(path: Path | None):
     try:
-        return json.loads(Path(path).read_text()) if path is not None else None
+        return json.loads(Path(path).read_text(encoding="utf-8")) if path is not None else None
     except Exception:  # noqa: BLE001
         return None
 
