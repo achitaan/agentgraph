@@ -672,7 +672,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         feed = read_chat(args.session, limit=args.limit, db_path=args.db)
     if args.side:
-        from .sidechat import side_feed  # sidechat imports this module
+        from .sideview import side_feed
         feed = side_feed(feed)
     if args.json:
         print(json.dumps(feed, allow_nan=False))

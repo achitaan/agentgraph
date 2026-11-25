@@ -13,6 +13,37 @@ from agentgraph.contract import Agent, Snapshot
 
 class WindowsSnapshotTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "win32", "native Windows smoke test")
+    def test_existing_side_chat_inspection(self):
+        import sqlite3
+        from agentgraph import sideview
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            agents = root / "agents"
+            agents.mkdir()
+            (agents / "side-chat.md").write_text("Read-only agent", encoding="utf-8")
+            state = root / ".opencode" / "sidechat"
+            state.mkdir(parents=True)
+            (state / "ses_main.json").write_text(json.dumps({
+                "main": "ses_main", "side": "ses_side", "model": "test/model"
+            }), encoding="utf-8")
+            db = root / "test.db"
+            conn = sqlite3.connect(db)
+            conn.execute("CREATE TABLE session_v2 (id TEXT, agent TEXT, cost REAL)")
+            conn.execute("INSERT INTO session_v2 VALUES ('ses_side', 'side-chat', 0.25)")
+            conn.commit()
+            conn.close()
+            shown = sideview.windows_status("ses_main", root, agents_dir=agents, db_path=db)
+            self.assertTrue(shown["installed"])
+            self.assertEqual(shown["session"], "ses_side")
+            self.assertEqual(shown["spent"], 0.25)
+            feed = sideview.side_feed({"items": [
+                {"kind": "user", "text": "Question\n\n--- brief private"},
+                {"kind": "reasoning", "text": "hidden"},
+                {"kind": "assistant", "text": "Answer"}
+            ]})
+            self.assertEqual([item["text"] for item in feed["items"]], ["Question", "Answer"])
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows smoke test")
     def test_static_graph_check(self):
         from tests.test_check import valid_graph
         with tempfile.TemporaryDirectory() as temp:

@@ -756,6 +756,8 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
             agent["skills_editable"] = False
             agent["skills_reason"] = "Skill configuration editing requires POSIX."
         document["roster"] = {"editable": False, "why": "Toolkit editors require POSIX.", "models": []}
+        from .sideview import windows_status
+        document["sidechat"] = windows_status(snapshot.root.id if snapshot.root else None, Path.cwd())
         return document
     if source == "live":
         from . import mcpview, roster, skillfiles, skillset  # each imports this module
