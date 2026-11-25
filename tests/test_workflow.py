@@ -28,7 +28,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("os: [windows-latest, macos-latest]", TEXT)
         self.assertIn('python-version: ["3.11", "3.12"]', TEXT)
         self.assertIn("fail-fast: false", TEXT)
-        self.assertIn('node-version: "20"', TEXT)
+        self.assertIn('node-version: "24"', TEXT)  # tui-plugin/test/run.mjs needs module.registerHooks (Node 22.15+)
+        self.assertIn("timeout-minutes: 60", TEXT)
         self.assertNotIn("secrets.", TEXT)
         self.assertIn("contents: read", TEXT)
 
@@ -43,7 +44,7 @@ class WorkflowTests(unittest.TestCase):
         block = step("Python tests (Windows, PowerShell)")
         self.assertIn("if: runner.os == 'Windows'", block)
         self.assertIn("shell: pwsh", block)
-        self.assertIn("python -m unittest discover -s tests -t .", block)
+        self.assertIn("python tests/ci_run.py", block)
         self.assertNotIn("bash", block)
 
     def test_a_windows_leg_runs_without_sh_on_path(self):
@@ -56,28 +57,30 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("sh is still on PATH", block)  # and the step fails if one remains
 
     def test_every_command_it_runs_exists(self):
-        commands = ["python -m unittest discover -s tests -t ."] + re.findall(r"run: (node \S+)", TEXT)
+        commands = ["python tests/ci_run.py"] + re.findall(r"run: (node \S+)", TEXT)
         self.assertEqual(commands[1:], ["node tui-plugin/test/run.mjs", "node desktop-plugin/test/harness.mjs",
                                         "node rollover-plugin/test.js", "node output-caps-plugin/test.js"])
         self.assertIn(commands[0], TEXT)
+        self.assertTrue((ROOT / "tests" / "ci_run.py").is_file())
         for command in commands[1:]:
             self.assertTrue((ROOT / command.split()[1]).is_file(), command)
 
-    def test_a_failed_python_run_lists_the_failing_tests_then_prints_the_end_of_its_log(self):
+    def test_the_python_steps_run_the_runner_with_live_output_and_a_limit(self):
         unix = step("Python tests (Unix)")
-        self.assertIn("shell: bash", unix)
-        self.assertLess(unix.index("grep -E '^(ERROR|FAIL):'"), unix.index("tail -n 150 ci-python.log"))
-        self.assertIn('exit "$code"', unix)
         windows = step("Python tests (Windows, PowerShell)")
-        self.assertIn("'^(ERROR|FAIL):'", windows)
-        self.assertLess(windows.index("'^(ERROR|FAIL):'"), windows.index("-Tail 150"))
-        self.assertIn("exit $code", windows)
+        for block in (unix, windows):
+            self.assertIn("python tests/ci_run.py", block)
+            self.assertIn("--limit 300", block)
+            self.assertIn("--logs ci-logs", block)
+            self.assertNotRegex(block, r"(?m)(>|\*>|Tee-Object)")  # no redirect: the lines show in the job log
+        self.assertIn("shell: bash", unix)
+        self.assertIn("exit $LASTEXITCODE", windows)
 
-    def test_the_log_is_uploaded_when_the_job_fails(self):
-        block = step("Keep the Python log")
-        self.assertIn("if: failure()", block)
+    def test_the_logs_are_uploaded_even_when_the_job_is_cancelled(self):
+        block = step("Keep the test logs")
+        self.assertIn("if: ${{ always() }}", block)  # always() also runs after a cancel or a time-limit stop
         self.assertIn("uses: actions/upload-artifact@v4", block)
-        self.assertIn("path: ci-python.log", block)
+        self.assertIn("path: ci-logs", block)
         self.assertIn("matrix.os", block)  # one artifact name per leg
         self.assertIn("matrix.python-version", block)
         self.assertIn("matrix.no-sh", block)
