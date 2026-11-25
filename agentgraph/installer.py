@@ -30,8 +30,9 @@ import time
 from pathlib import Path
 
 try:
-    from . import portable
+    from . import osfs, portable
 except ImportError:  # install.sh runs this file as a script
+    import osfs
     import portable
 
 MANIFEST = ".toolkit-install.json"
@@ -49,6 +50,11 @@ class InstallError(Exception):
     pass
 
 
+def _front_door() -> str:
+    """What the user types to run the installer: install.cmd on Windows, `sh install.sh` elsewhere."""
+    return "install.cmd" if os.name == "nt" else "sh install.sh"
+
+
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -57,7 +63,7 @@ def no_links(path: Path, root: Path | None = None) -> None:
     """Refuse a path with a symlink in it (the same rule as commands/.toolkit.sh). With `root` (the config
     folder, already resolved) the check stops there: the folder itself and what is above it may be links."""
     for part in (path, *path.parents):
-        if str(part) in ("", ".", "/") or part == root:
+        if str(part) in ("", ".", "/") or str(part) == part.anchor or part == root:
             break
         if part.is_symlink():
             raise InstallError(f"refusing symlink: {part}")
@@ -69,8 +75,8 @@ def atomic_write(path: Path, data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
-        os.chmod(name, stat.S_IMODE(path.stat().st_mode) if path.is_file() else 0o644)
-        os.replace(name, path)
+        osfs.chmod(name, stat.S_IMODE(path.stat().st_mode) if path.is_file() else 0o644)  # no mode bits on Windows
+        osfs.replace(name, path)
     except BaseException:
         Path(name).unlink(missing_ok=True)
         raise
@@ -90,7 +96,7 @@ def atomic_copy(src: Path, dst: Path, data: bytes | None = None) -> None:
         if data is not None:
             with open(name, "wb") as handle:
                 handle.write(data)
-        os.replace(name, dst)
+        osfs.replace(name, dst)
     except BaseException:
         Path(name).unlink(missing_ok=True)
         raise
@@ -335,7 +341,7 @@ class Installer:
             self.target.mkdir(parents=True, exist_ok=True)
             self._write_manifest(base)
             if self.backup is not None:
-                self.out(f"Replaced files are in {self.backup}. Undo with: sh install.sh --restore {self.backup.name}")
+                self.out(f"Replaced files are in {self.backup}. Undo with: {_front_door()} --restore {self.backup.name}")
             if self.changed:
                 self.out("See config/PLUGINS.md to turn the visualizer on, then reload OpenCode.")
         return 0
@@ -363,7 +369,7 @@ def list_backups(target: Path, out=print) -> int:
         return 0
     for folder in found:
         out(f"{folder.name}  ({len(_files(folder))} file(s))")
-    out("Put one back with: sh install.sh --restore <name>   (add --dry-run to look first)")
+    out(f"Put one back with: {_front_door()} --restore <name>   (add --dry-run to look first)")
     return 0
 
 
@@ -372,7 +378,7 @@ def restore(target: Path, name: str, dry: bool = False, out=print) -> int:
     root = target / "backups"
     if root.is_symlink():
         raise InstallError(f"refusing symlink: {root}")
-    folder = Path(name) if "/" in name else root / name
+    folder = Path(name) if "/" in name or os.sep in name else root / name
     if folder.is_symlink():
         raise InstallError(f"refusing symlink: {folder}")
     folder = folder.resolve() if folder.exists() else folder

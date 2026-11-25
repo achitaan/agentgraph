@@ -15,6 +15,7 @@ import stat
 import time
 from pathlib import Path
 
+from . import osfs
 from .contract import Agent, Event, Node, Objective, Session, Snapshot, TaskGraph, POOL, group_of
 from .contract import Artifact, ArtifactInput
 from .contract import GRAPH_LIMITS, MAX_NODE_LIST
@@ -24,7 +25,6 @@ DB_PATH = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 MODELS_CACHE = Path.home() / ".cache" / "opencode" / "models.json"
 MAX_GRAPH_BYTES = 2 * 1024 * 1024
 MAX_GRAPH_FILES = 200
-WINDOWS = os.name == "nt"
 
 
 def pretty_model(model_id: str) -> str:
@@ -188,14 +188,12 @@ def _load_roster(config_dir: Path, *, config_path: Path | None = None,
 
 def read_graph_text(path: Path) -> str:
     """Read one bounded regular graph file without following its symlink."""
-    if WINDOWS:
-        raise OSError("secure task graph reads are not supported on Windows")
     path = Path(path)
-    root = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    root = osfs.open(path.parent, os.O_RDONLY | osfs.O_DIRECTORY | osfs.O_NOFOLLOW)
     try:
-        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
+        fd = osfs.open(path.name, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK | osfs.O_BINARY, dir_fd=root)
         try:
-            info = os.fstat(fd)
+            info = osfs.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
                 raise OSError("not a regular file")
             if info.st_size > MAX_GRAPH_BYTES:
@@ -206,19 +204,15 @@ def read_graph_text(path: Path) -> str:
                 raise OSError(f"graph exceeds {MAX_GRAPH_BYTES} byte limit")
             return data.decode("utf-8")
         finally:
-            os.close(fd)
+            osfs.close(fd)
     finally:
-        os.close(root)
+        osfs.close(root)
 
 
 def graph_files(directory: Path) -> tuple[list[Path], list[str]]:
     """Select at most 200 graphs, newest by mtime, without following file links."""
     directory = Path(directory)
-    if WINDOWS:
-        if not directory.exists():
-            return [], []
-        raise OSError("secure task graph reads are not supported on Windows")
-    if directory.stat().st_uid != os.getuid():
+    if directory.stat().st_uid != osfs.getuid():
         raise PermissionError(f"graph directory {directory} is not owned by the current user")
     warnings = []
     count = 0
@@ -473,11 +467,7 @@ def find_graph_dir(start: Path, warnings: list[str] | None = None) -> Path | Non
         try:
             info = candidate.stat()
             if stat.S_ISDIR(info.st_mode):
-                if WINDOWS:
-                    if warnings is not None:
-                        warnings.append("graph: secure task graph reads are not supported on Windows")
-                    return None
-                if info.st_uid == os.getuid():
+                if info.st_uid == osfs.getuid():
                     return candidate
                 if warnings is not None:
                     warnings.append(f"graph: skipped {candidate}: not owned by the current user")

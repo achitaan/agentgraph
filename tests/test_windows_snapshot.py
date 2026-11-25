@@ -1,11 +1,10 @@
-"""The Windows viewer must not import the POSIX-only toolkit editors."""
+"""The Windows snapshot is the Mac snapshot: the editors, the roster and the MCP list are all there."""
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from agentgraph import snapshot_json, sources
 from agentgraph.contract import Agent, Snapshot
@@ -13,25 +12,27 @@ from agentgraph.contract import Agent, Snapshot
 
 class WindowsSnapshotTests(unittest.TestCase):
     def test_live_session_projection(self):
+        """On Windows the live document is the same as on a Mac: an editable roster and an MCP list."""
         snapshot = Snapshot(1000, roster=[Agent("orchestrator", "test/model", "", "hub")])
-        with patch.object(snapshot_json, "WINDOWS", True):
-            doc = snapshot_json.live_document(snapshot, "live")
-        self.assertTrue(doc["read_only"])
+        # No platform switch is left in the document: the same code runs on Windows (and the whole suite runs
+        # against the Windows file layer with AGENTGRAPH_OSFS=portable).
+        doc = snapshot_json.live_document(snapshot, "live")
+        self.assertNotIn("read_only", doc)
         self.assertEqual(doc["agents"][0]["name"], "orchestrator")
-        self.assertFalse(doc["roster"]["editable"])
-        self.assertTrue(any("Windows" in warning for warning in doc["warnings"]))
+        self.assertTrue(doc["roster"]["editable"])
+        self.assertIn("mcp", doc)
+        self.assertFalse(any("read-only viewer" in warning for warning in doc["warnings"]))
+        self.assertFalse(any("require POSIX" in warning for warning in doc["warnings"]))
 
-    def test_graph_reads_fail_closed(self):
+    def test_graph_reads_work(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
             graph = folder / "task.json"
             graph.write_text("{}", encoding="utf-8")
-            with patch.object(sources, "WINDOWS", True):
-                with self.assertRaisesRegex(OSError, "not supported on Windows"):
-                    sources.read_graph_text(graph)
-                graphs, warnings = sources.load_graphs(folder)
-                self.assertEqual(graphs, [])
-                self.assertTrue(any("not supported on Windows" in warning for warning in warnings))
+            self.assertEqual(sources.read_graph_text(graph), "{}")
+            files, warnings = sources.graph_files(folder)
+            self.assertEqual(files, [graph])
+            self.assertEqual(warnings, [])
 
     @unittest.skipUnless(sys.platform == "win32", "native Windows smoke test")
     def test_flow_listing(self):
@@ -69,4 +70,4 @@ class WindowsSnapshotTests(unittest.TestCase):
                 if args:
                     self.assertTrue(doc["agents"])
                 else:
-                    self.assertTrue(doc["read_only"])
+                    self.assertNotIn("read_only", doc)
