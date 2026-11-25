@@ -6,6 +6,14 @@ const os = require("node:os");
 const path = require("node:path");
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "output-caps-test-"));
+
+// Nothing here may read or write the developer's real home: the plugin's default folders land in a scratch one.
+{
+  const scratchHome = fs.mkdtempSync(path.join(os.tmpdir(), "output-caps-test-home-"));
+  process.on("exit", () => fs.rmSync(scratchHome, { recursive: true, force: true }));
+  for (const name of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"]) delete process.env[name];
+  Object.assign(process.env, { HOME: scratchHome, USERPROFILE: scratchHome, LOCALAPPDATA: path.join(scratchHome, "AppData", "Local"), APPDATA: path.join(scratchHome, "AppData", "Roaming") });
+}
 let n = 0;
 
 // A plugin copy with its own settings file and log folder, and a fake context that keeps the registered hook.

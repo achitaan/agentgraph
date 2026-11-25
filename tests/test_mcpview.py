@@ -17,7 +17,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from tests.launch import home_env
 from agentgraph import mcpview, names, server
 
-SCRATCH = Path("/private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode/mcpview-tests")
+SCRATCH = Path(tempfile.gettempdir()).resolve() / "agentgraph-tests-mcpview-tests"
 ROOT = Path(__file__).resolve().parent.parent
 MARKER = "PLANTED-SECRET-7f3a91"
 
