@@ -106,7 +106,7 @@ from contextlib import closing
 from pathlib import Path
 
 from . import cost as costmod
-from . import sidechat, sources
+from . import osproc, sidechat, sources
 
 HERE = Path(__file__).resolve().parent.parent
 BENCH_DIR = HERE / "bench"
@@ -478,6 +478,8 @@ def run_env(scratch: dict, work: Path, environ=None, live: Path | None = None) -
     env["AGENTGRAPH_HOME"] = str(scratch["config"] / "orchestration" / "memory")
     env["PWD"] = str(work)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    if osproc.is_windows():  # Windows programs read the profile folder from USERPROFILE, not HOME
+        env["USERPROFILE"] = env["HOME"]
     return env
 
 
@@ -490,7 +492,8 @@ def protected_paths(live: Path | None = None) -> tuple[list[Path], list[Path]]:
     live = Path(live) if live is not None else sources.CONFIG_DIR
     checkouts = [HERE]
     try:
-        out = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=HERE, capture_output=True, text=True, timeout=30).stdout
+        out = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=HERE, capture_output=True, text=True, timeout=30,
+                             **osproc.text_kwargs()).stdout
         checkouts += [Path(line[9:]) for line in out.splitlines() if line.startswith("worktree ")]
     except (OSError, subprocess.SubprocessError):
         pass
@@ -501,7 +504,7 @@ def protected_paths(live: Path | None = None) -> tuple[list[Path], list[Path]]:
         writes.append(checkout)
     try:
         common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=HERE, capture_output=True,
-                                text=True, timeout=30).stdout.strip()
+                                text=True, timeout=30, **osproc.text_kwargs()).stdout.strip()
         if common:
             reads.append(Path(common))
     except (OSError, subprocess.SubprocessError):
@@ -525,6 +528,14 @@ def sandbox_profile(deny_read, deny_write) -> str:
 
 def sandbox_available() -> bool:
     return sys.platform == "darwin" and os.path.isfile(SANDBOX_EXEC)
+
+
+def sandbox_note(enabled: bool = True, windows=None) -> str | None:
+    """On Windows the sandbox (a macOS `sandbox-exec` profile) cannot exist: the host runs without it, as on any system that lacks the
+    sandbox, and the rows say `"sandbox": false`. This is the line to tell the user so; None everywhere else."""
+    if enabled and (osproc.is_windows() if windows is None else windows):
+        return "bench: the sandbox is macOS-only; on Windows the host runs without it (rows say sandbox: false). Use a throwaway checkout and a scratch config."
+    return None
 
 
 def sandboxed(cmd: list[str], enabled: bool, live: Path | None = None) -> list[str]:
@@ -618,7 +629,7 @@ def run_check(scenario: dict, work: Path, env: dict, db_path: Path | None = None
     a hidden file land elsewhere). The check gets a minimal environment, not the real one: PATH, HOME (the scratch home),
     PYTHONDONTWRITEBYTECODE and, for the p4 checks that read the OpenCode database (read-only), `P4_DB`."""
     work = Path(work)
-    check_env = {"PYTHONDONTWRITEBYTECODE": "1", **{k: env[k] for k in ("PATH", "HOME") if k in env},
+    check_env = {"PYTHONDONTWRITEBYTECODE": "1", **{k: env[k] for k in ("PATH", "HOME", *osproc.base_env_names()) if k in env},
                  **({"P4_DB": str(db_path)} if db_path is not None else {})}
     hidden = scenario["dir"] / "hidden"
     aside = Path(tempfile.mkdtemp(prefix=WORK_PREFIX + "aside-", dir=work.parent))
@@ -629,8 +640,9 @@ def run_check(scenario: dict, work: Path, env: dict, db_path: Path | None = None
         if hidden.is_dir():
             shutil.copytree(hidden, work, dirs_exist_ok=True)
         try:
-            done = subprocess.run(scenario["check"], shell=True, cwd=work, capture_output=True, text=True, errors="replace",
-                                  timeout=scenario["check_timeout"], env=check_env)
+            check_args, check_shell = osproc.shell_arguments(scenario["check"])  # POSIX: the string and shell=True, as ever
+            done = subprocess.run(check_args, shell=check_shell, cwd=work, capture_output=True, text=True, errors="replace",
+                                  timeout=scenario["check_timeout"], env=check_env, **osproc.text_kwargs())
         except subprocess.TimeoutExpired:
             return {"passed": False, "detail": "check timed out"}
     finally:
@@ -646,7 +658,9 @@ def run_check(scenario: dict, work: Path, env: dict, db_path: Path | None = None
 def executable_path(executable: str | None = None) -> str:
     exe = executable or os.environ.get("OPENCODE_CLI") or sidechat.DEFAULT_BINARY
     if not os.path.isabs(exe) or not os.path.isfile(exe):
-        raise BenchError("the opencode CLI must be an absolute path to a file (set OPENCODE_CLI); it is never looked up on PATH")
+        raise BenchError("the opencode CLI must be an absolute path to a file (set OPENCODE_CLI"
+                         + ("; on Windows the full path of opencode.exe or opencode.cmd" if osproc.is_windows() else "")
+                         + "); it is never looked up on PATH")
     return exe
 
 
@@ -676,7 +690,7 @@ def _spawn(cmd: list[str], message: str, cwd: Path, env: dict, timeout: float, s
     stderr, timed_out, interrupted}."""
     started = time.time()
     proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            errors="replace", start_new_session=True, env=env)
+                            errors="replace", **osproc.group_kwargs(), **osproc.text_kwargs(), env=env)
     limit = timeout if stop_after is None else min(timeout, stop_after)
     timed_out = interrupted = False
     try:
@@ -1260,6 +1274,10 @@ def main(argv=None) -> int:
     sub.add_parser("scenarios", help="list the scenarios")
     sub.add_parser("fingerprint", help="hashes of the live config files and ledgers (to show a bench left them alone)")
     args = parser.parse_args(argv)
+    if args.command in ("run", "probe", "suite"):
+        note = sandbox_note(not args.no_sandbox)
+        if note:
+            print(note, file=sys.stderr)
     try:
         if args.command == "scratch-config":
             info = scratch_config(args.to, pin_model=None if args.pin_model == "none" else args.pin_model)

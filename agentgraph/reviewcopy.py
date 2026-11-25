@@ -39,7 +39,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import check, graphedit, outputs, transitions
+from . import check, graphedit, osproc, outputs, transitions
 from .noderun import SKIP as NODE_SKIP
 
 DEFAULT_TIMEOUT = 600
@@ -351,24 +351,31 @@ def _copy(project: Path, files: list[str], target: Path) -> tuple[str, int, int,
 
 # ---- running ----
 
-def reduced_environment(tmp: str, source=None) -> dict[str, str]:
-    """PATH, HOME, LANG, LC_* and TMPDIR; nothing named like a secret and nothing starting with OPENCODE_."""
+def reduced_environment(tmp: str, source=None, windows=None) -> dict[str, str]:
+    """PATH, HOME, LANG, LC_* and TMPDIR; nothing named like a secret and nothing starting with OPENCODE_. On Windows also the names
+    programs need to start there (`osproc.base_env_names`: SYSTEMROOT, PATHEXT, USERPROFILE, ...), and TEMP and TMP point at `tmp`."""
+    on_windows = osproc.is_windows() if windows is None else windows
     source = os.environ if source is None else source
     kept = {}
     for name, value in source.items():
         upper = name.upper()
         if upper.startswith("OPENCODE_") or any(word in upper for word in SECRET_WORDS):
             continue
-        if name in ("PATH", "HOME", "LANG") or name.startswith("LC_"):
+        if name in ("PATH", "HOME", "LANG") or name.startswith("LC_") or (on_windows and upper in osproc.base_env_names(True)):
             kept[name] = value
-    kept.setdefault("PATH", "/usr/bin:/bin")
+    if on_windows:
+        root = source.get("SYSTEMROOT") or source.get("SystemRoot") or "C:\\Windows"
+        kept.setdefault("PATH", os.pathsep.join([os.path.join(root, "System32"), root]))
+        kept["TEMP"] = kept["TMP"] = tmp
+    else:
+        kept.setdefault("PATH", "/usr/bin:/bin")
     kept["TMPDIR"] = tmp
     return kept
 
 
 def _kill_group(pid: int) -> None:
     try:
-        os.killpg(pid, signal.SIGKILL)
+        osproc.kill_group(pid, force=True)
     except (ProcessLookupError, PermissionError):
         pass
 
@@ -406,12 +413,12 @@ def _tail(path: Path) -> str:
 
 
 def run_command(command: str, cwd: Path, env: dict, timeout: float, log: Path) -> dict:
-    """Run one command under /bin/sh in `cwd`, its output (both streams) in `log`. The whole process group is killed on a timeout
+    """Run one command under /bin/sh in `cwd` (on Windows: `sh` when one is on PATH, else `cmd /d /s /c`; see `osproc.shell_command`), its output (both streams) in `log`. The whole process group is killed on a timeout
     and, when the command ends, whatever it left running. exit is None for a timeout."""
     began = time.monotonic()
     with open(log, "wb") as out:
-        proc = subprocess.Popen(["/bin/sh", "-c", command], cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=out,
-                                stderr=subprocess.STDOUT, start_new_session=True)
+        proc = subprocess.Popen(osproc.shell_command(command, posix_shell="/bin/sh"), cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                stdout=out, stderr=subprocess.STDOUT, **osproc.group_kwargs())
         try:
             ended = _wait(proc, timeout)
         except BaseException:
@@ -512,7 +519,7 @@ def _rmtree(path: Path) -> None:
 def _signals_blocked():
     """SIGTERM and SIGHUP are held back (not lost) inside the block; one that came is delivered, to the handler, when it ends."""
     try:
-        old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGHUP})
+        old = signal.pthread_sigmask(signal.SIG_BLOCK, set(osproc.term_signals()))
     except (AttributeError, ValueError):
         yield
         return
@@ -526,7 +533,7 @@ def _signals_blocked():
 def _signals_ignored():
     """Cleanup is not interrupted by a second SIGTERM or SIGHUP."""
     old = {}
-    for sig in (signal.SIGTERM, signal.SIGHUP):
+    for sig in osproc.term_signals():
         try:
             old[sig] = signal.signal(sig, signal.SIG_IGN)
         except ValueError:  # not the main thread
@@ -687,7 +694,7 @@ def main(argv: list[str] | None = None) -> int:
         print("review-copy: --timeout must be a number of seconds above 0")
         return 2
     old = {}
-    for sig in (signal.SIGTERM, signal.SIGHUP):
+    for sig in osproc.term_signals():
         try:
             old[sig] = signal.signal(sig, _stop)
         except ValueError:  # not the main thread: the caller owns the signals

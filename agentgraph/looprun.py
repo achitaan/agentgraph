@@ -80,7 +80,7 @@ import time
 from contextlib import closing, contextmanager
 from pathlib import Path
 
-from . import bench, looptime, paths, sidechat, snapshot_json, sources
+from . import bench, looptime, osproc, paths, sidechat, snapshot_json, sources
 from . import cost as costmod
 
 VERSION = 1
@@ -745,13 +745,13 @@ def admit(used: int, limits: dict, elapsed: float, cost, cancelled: bool, passin
 # ---- the check runner ----
 
 def run_check(command: str, timeout, cwd, env, out_path: Path, poll=None) -> dict:
-    """Run `sh -c command`; the whole output goes to `out_path` (capped). {exit, timed_out, cancelled, seconds, error, truncated}. `poll` is
+    """Run `command` through a shell (`sh -c`; on Windows see `osproc.shell_command`); the whole output goes to `out_path` (capped). {exit, timed_out, cancelled, seconds, error, truncated}. `poll` is
     called every quarter second; when it answers true the check's process group is killed at once and `cancelled` is true."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     try:
-        proc = subprocess.Popen(["sh", "-c", command], cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, start_new_session=True)
+        proc = subprocess.Popen(osproc.shell_command(command), cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, **osproc.group_kwargs())
     except OSError as exc:
         out_path.write_text(f"the check could not be started: {exc}\n", encoding="utf-8")
         return {"exit": None, "timed_out": False, "cancelled": False, "seconds": 0.0, "error": str(exc), "truncated": 0}
@@ -785,7 +785,7 @@ def run_check(command: str, timeout, cwd, env, out_path: Path, poll=None) -> dic
                 timed_out = not cancelled
                 sidechat._stop(proc)
                 try:
-                    os.killpg(proc.pid, signal.SIGKILL)
+                    osproc.kill_group(proc.pid, force=True)
                 except (ProcessLookupError, PermissionError):
                     pass
                 code = None
@@ -917,7 +917,7 @@ class OpenCodeExecutor:
         started = time.monotonic()
         try:
             proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                    encoding="utf-8", errors="replace", start_new_session=True, env=env)
+                                    encoding="utf-8", errors="replace", env=env, **osproc.group_kwargs())
         except OSError as exc:
             return self._result(session, "agent_error", None, started, "", error=f"the agent could not be started: {exc}")
         outcome, first_call, out, err = None, True, "", ""
@@ -960,15 +960,14 @@ class OpenCodeExecutor:
     def _alive(self, session) -> list[int] | None:
         """The pids of processes whose command line names this session (`opencode run ... --session ID`); None when they cannot be listed."""
         try:
-            out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=15, check=True).stdout
+            table = osproc.list_processes(["-axo", "pid=,command="], ("pid", "command"))
         except (OSError, subprocess.SubprocessError):
             return None
         pids = []
-        for line in out.splitlines():
-            head, _, rest = line.strip().partition(" ")
-            words = rest.split()
-            if head.isdigit() and int(head) != os.getpid() and any(a == "--session" and b == session for a, b in zip(words, words[1:])):
-                pids.append(int(head))
+        for row in table:
+            words = row.command.split()
+            if row.pid != os.getpid() and any(a == "--session" and b == session for a, b in zip(words, words[1:])):
+                pids.append(row.pid)
         return pids
 
     def mark(self, session: str) -> int | None:
@@ -2208,7 +2207,7 @@ def start(project, flow_id: str, *, structure=None, goal: str | None = None, wor
     log = open(folder / "run.log", "ab")
     try:
         proc = subprocess.Popen([sys.executable, "-P", "-m", "agentgraph.looprun", "run", "--run-dir", str(folder)], cwd=project,
-                                stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+                                stdin=subprocess.DEVNULL, stdout=log, stderr=log, **osproc.detached_kwargs(),
                                 env={**os.environ, "PYTHONPATH": str(paths.REPO)})
         threading.Thread(target=proc.wait, daemon=True).start()  # a long-lived caller (the page's server) must not collect zombies
     finally:
@@ -2304,7 +2303,7 @@ def resume(folder, choice: str | None = None, wait: bool = False, executor=None,
     log = open(folder / "run.log", "ab")
     try:
         proc = subprocess.Popen([sys.executable, "-P", "-m", "agentgraph.looprun", "run", "--run-dir", str(folder), "--resume", choice or ""],
-                                cwd=read_definition(folder)["project"], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+                                cwd=read_definition(folder)["project"], stdin=subprocess.DEVNULL, stdout=log, stderr=log, **osproc.detached_kwargs(),
                                 env={**os.environ, "PYTHONPATH": str(paths.REPO)})
         threading.Thread(target=proc.wait, daemon=True).start()
     finally:

@@ -32,6 +32,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import winconsole
 from .demo import demo_snapshot
 from .view import render, render_html
 from .viewstate import KEY_HELP, PANELS, ViewState, clamp, decode_keys, handle_key
@@ -42,6 +43,8 @@ try:  # terminal control is POSIX; the view still works without it
 except ImportError:  # pragma: no cover
     termios = None
     tty = None
+
+WINDOWS = os.name == "nt"  # the console is driven through msvcrt and ctypes there (winconsole), not termios and select
 
 FRAME_SECONDS = 0.125      # animation frame period between data reads
 FALLBACK_SIZE = (120, 40)  # used when the terminal size cannot be read
@@ -60,7 +63,7 @@ def _signals(*names: str) -> tuple:
     return tuple(getattr(signal, name) for name in names if hasattr(signal, name))
 
 
-STOP_SIGNALS = _signals("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT")  # unwind, restore, exit 0
+STOP_SIGNALS = _signals("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT", "SIGBREAK")  # unwind, restore, exit 0 (SIGBREAK: Ctrl-Break, Windows only)
 # Held while the terminal is being restored, so a signal cannot cut that short.
 # SIGTTOU too: then a viewer in the background still restores the terminal.
 HELD_SIGNALS = STOP_SIGNALS + _signals("SIGTSTP", "SIGCONT", "SIGWINCH", "SIGTTOU")
@@ -219,6 +222,18 @@ def _silence_stdout() -> None:
 def _once(args) -> int:
     # Colour only for a terminal: a redirected frame is plain text unless asked otherwise.
     color = not args.no_color and sys.stdout.isatty()
+    state = None
+    if color and WINDOWS:  # coloured output needs ANSI switched on in the console, and put back after
+        console = winconsole.load_console()
+        state = winconsole.enable_vt(console)
+    try:
+        return _once_frame(args, color)
+    finally:
+        if state is not None:
+            winconsole.restore(console, state)
+
+
+def _once_frame(args, color) -> int:
     try:
         snap, source, note = _load(args, None)
         if note:
@@ -328,10 +343,16 @@ class _Terminal:
     """Owns the terminal during live mode: cbreak input, the alternate screen,
     and the signal handlers that keep both restorable."""
 
-    def __init__(self, in_fd, out_fd, encoding: str = "utf-8"):
+    def __init__(self, in_fd, out_fd, encoding: str = "utf-8", windows=None, console=None, msvcrt=None):
         self.in_fd = in_fd      # where keys come from; None once input fails or ends
         self.out_fd = out_fd    # the terminal the frames go to
         self.encoding = encoding
+        # Windows: no termios, select or signals for the terminal. Keys are polled from msvcrt, ANSI output is switched on through
+        # the console API; `console` and `msvcrt` are the real ones unless a test passes fakes.
+        self.windows = WINDOWS if windows is None else windows
+        self.console = console
+        self.msvcrt = msvcrt
+        self.console_state = None
         # The terminal whose attributes we changed, and the attributes to put back.
         # Kept apart from in_fd: losing input must not stop the restore.
         self.tty_fd = None
@@ -356,7 +377,9 @@ class _Terminal:
                     self.previous[sig] = signal.signal(sig, handler)
                 except (OSError, ValueError):  # not on the main thread, or not settable
                     pass
-            if self.in_fd is not None and termios is not None:
+            if self.windows:
+                self._open_console()
+            elif self.in_fd is not None and termios is not None:
                 try:
                     saved = termios.tcgetattr(self.in_fd)
                 except Exception:  # not a usable terminal after all: leave it alone
@@ -367,6 +390,16 @@ class _Terminal:
         finally:
             _release(mask)
         self.write(ENTER_SCREEN)  # after the release: a signal can interrupt a stuck write
+
+    def _open_console(self) -> None:
+        """Windows: ANSI output and UTF-8 on, keys from msvcrt. Without a console API the frames are still drawn (Windows Terminal
+        has ANSI on already); without msvcrt there are no keys."""
+        self.console = self.console if self.console is not None else winconsole.load_console()
+        self.msvcrt = self.msvcrt if self.msvcrt is not None else winconsole.load_msvcrt()
+        self.console_state = winconsole.set_utf8_output(self.console, winconsole.enable_vt(self.console))
+        self.encoding = "utf-8"
+        if self.msvcrt is None:
+            self.in_fd = None
 
     def close(self) -> None:
         """Restore the terminal. Idempotent; safe to call again if interrupted."""
@@ -391,10 +424,14 @@ class _Terminal:
         try:
             self._restore_attributes()
         finally:
-            self._emit_quietly(LEAVE_SCREEN)
+            try:
+                self._emit_quietly(LEAVE_SCREEN)
+            finally:
+                if self.windows:  # after the screen is left: the escape sequences need the console mode we switched on
+                    winconsole.restore(self.console, self.console_state)
 
     def _restore_attributes(self) -> None:
-        if self.saved is None or self.tty_fd is None:
+        if self.windows or self.saved is None or self.tty_fd is None:
             return
         try:
             termios.tcsetattr(self.tty_fd, termios.TCSANOW, self.saved)
@@ -464,7 +501,10 @@ class _Terminal:
                 try:
                     written = os.write(self.out_fd, data)
                 except BlockingIOError:  # someone made the terminal non-blocking
-                    select.select([], [self.out_fd], [], FRAME_SECONDS)
+                    if self.windows:
+                        time.sleep(FRAME_SECONDS)  # select cannot wait on a console
+                    else:
+                        select.select([], [self.out_fd], [], FRAME_SECONDS)
                     continue
                 data = data[written:]
         except OSError as exc:
@@ -479,9 +519,10 @@ class _Terminal:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False
-                _, ready, _ = select.select([], [self.out_fd], [], remaining)
-                if not ready:
-                    return False
+                if not self.windows:  # select cannot wait on a console: Windows writes at once
+                    _, ready, _ = select.select([], [self.out_fd], [], remaining)
+                    if not ready:
+                        return False
                 data = data[os.write(self.out_fd, data):]
         except Exception:  # never let a failed write cut cleanup short
             return False
@@ -504,6 +545,9 @@ class _Terminal:
                 if remaining > 0:
                     time.sleep(remaining)
                 return None
+            if self.windows:
+                data = winconsole.wait_for_keys(self.msvcrt, deadline, clock=time.monotonic, sleep=time.sleep)
+                return None if data is None else decode_keys(data)
             try:
                 ready, _, _ = select.select([self.in_fd], [], [], max(0.0, remaining))
             except (OSError, ValueError, TypeError):  # input is gone: stop listening, keep drawing
@@ -656,7 +700,7 @@ def _live(args) -> int:
         sys.stdout.flush()  # frames go straight to the descriptor from here on
     except (OSError, ValueError):
         pass
-    in_fd = _stdin_fd() if termios is not None else None  # keys need POSIX terminal control
+    in_fd = _stdin_fd() if termios is not None or WINDOWS else None  # keys need POSIX terminal control, or msvcrt
     term = _Terminal(in_fd, out_fd, getattr(sys.stdout, "encoding", None) or "utf-8")
     code, lost = 0, None
     try:
@@ -678,6 +722,8 @@ def _live(args) -> int:
 
 def main(argv=None) -> int:
     given = sys.argv[1:] if argv is None else list(argv)
+    if WINDOWS:
+        winconsole.utf8_streams()  # the default code page cannot write the view's characters
     if given[:1] == ["handoff"]:  # bin/agentgraph sends the commands it does not name here
         from .handoff import main as handoff_main
         return handoff_main(given[1:])

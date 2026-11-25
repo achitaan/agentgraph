@@ -36,6 +36,8 @@ import sys
 import time
 from pathlib import Path
 
+from . import osproc
+
 KINDS = ("interval", "timebox")
 EVERY_MIN, EVERY_MAX = 10, 86400
 WATCH_ERRORS = 3  # watch errors in a row that end the run
@@ -755,7 +757,7 @@ def ensure_supervisor(project, repo) -> bool:
     log = open(folder / "supervisor.log", "ab")
     try:
         subprocess.Popen([sys.executable, "-P", "-m", "agentgraph.looprun", "supervise", "--project", str(project)], cwd=project, stdin=subprocess.DEVNULL,
-                         stdout=log, stderr=log, start_new_session=True, env={**os.environ, "PYTHONPATH": str(repo)})
+                         stdout=log, stderr=log, **osproc.detached_kwargs(), env={**os.environ, "PYTHONPATH": str(repo)})
     finally:
         log.close()
     return True
