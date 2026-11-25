@@ -744,6 +744,8 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
         document["read_only"] = True
         document["warnings"].append("Windows: read-only viewer; task graphs and toolkit editors require POSIX.")
         document["skills"] = skills_document()
+        from . import skillfiles
+        skillfiles.annotate(document)
         from . import skillset
         skillset.annotate(document)
         for agent in document["agents"]:

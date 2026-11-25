@@ -13,6 +13,23 @@ from agentgraph.contract import Agent, Snapshot
 
 class WindowsSnapshotTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "win32", "native Windows smoke test")
+    def test_skill_text_inspection(self):
+        from agentgraph import skillfiles
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "example"
+            folder.mkdir()
+            raw = "---\nname: example\ndescription: Example skill\n---\n\nRead only.\n"
+            (folder / "SKILL.md").write_bytes(raw.encode("utf-8"))
+            shown = skillfiles.show("example", skills=root)
+            self.assertEqual(shown["description"], "Example skill")
+            self.assertIn("Read only.", shown["text"])
+            self.assertFalse(shown["editable"])
+            with self.assertRaises(skillfiles.SkillfilesError):
+                skillfiles.show("../example", skills=root)
+            self.assertEqual((folder / "SKILL.md").read_bytes(), raw.encode("utf-8"))
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows smoke test")
     def test_preset_and_saved_setup_inspection(self):
         from agentgraph import setups
         with tempfile.TemporaryDirectory() as temp:

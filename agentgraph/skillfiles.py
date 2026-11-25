@@ -15,6 +15,7 @@ import tempfile
 import unicodedata
 
 from . import names, skillset
+from .revision import rev as revision
 
 SKILLS = skillset.sources.CONFIG_DIR / "skills"
 BACKUPS = skillset.BACKUPS
@@ -58,7 +59,7 @@ def _directory(path, *, create=False):
             except FileExistsError:
                 pass
         info = current.lstat()
-        if not stat.S_ISDIR(info.st_mode):
+        if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
             raise SkillfilesError(f"directory must not be a symlink or special file: {current}")
     return path
 
@@ -322,8 +323,7 @@ def _prune(backup_dir, kind):
 def _rev(text):
     """A skill's rev: the hash of its SKILL.md (agentfiles.rev; the text is the file's bytes decoded strictly, so
     the same hash). A write from a view takes it as `expect`."""
-    from . import agentfiles  # agentfiles imports skillset, as this module does
-    return agentfiles.rev(text)
+    return revision(text)
 
 
 def _expect(expect, text, id):
@@ -560,6 +560,17 @@ def _refuse_read_only(id, root):
 def show(id, *, skills=SKILLS, bundled=None):
     """{"id", "description", "text" (the body without frontmatter), "editable", "why" when not, "rev"}. A read-only
     skill is read where it lives."""
+    if os.name == "nt":
+        _id(id)
+        folder = _directory(Path(skills) / id)
+        raw, _ = skillset._read(folder / "SKILL.md", "SKILL.md")
+        try:
+            fields, text = _parse(raw)[:2]
+            description = fields["description"]
+        except SkillfilesError:
+            description, text = "", raw
+        return {"id": id, "description": description, "text": text, "editable": False,
+                "why": "Skill editing requires POSIX.", "rev": _rev(raw)}
     editable, why = access(id, skills=skills, bundled=bundled)
     if editable:
         _id(id)
@@ -589,6 +600,10 @@ def annotate(document, *, skills=SKILLS, bundled=None):
     except OSError:
         bundled = []
     for row in document.get("skills") or []:
+        if os.name == "nt":
+            row["editable"] = False
+            row["why"] = "Skill editing requires POSIX."
+            continue
         try:
             editable, why = access(row.get("name"), skills=skills, bundled=bundled)
         except (SkillfilesError, OSError, TypeError) as exc:
