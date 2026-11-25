@@ -231,7 +231,7 @@ def read_team(data: bytes) -> tuple[str, list[str], str] | None:
 
 def _team_dict(team_id: str, lead: str, members: list[str], text: str, hub: str, data: bytes) -> dict:
     """A team as read; `rev` is the hash of its file's bytes (agentfiles.rev), which a write takes as `expect`."""
-    from .agentfiles import rev  # agentfiles imports modules that import structure
+    from .revision import rev
     return {"id": team_id, "lead": lead, "members": list(members), "text": text,
             "generated": text == team_text(lead, members, hub), "rev": rev(data)}
 

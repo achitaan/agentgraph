@@ -326,7 +326,7 @@ def load_flows(root: Path, shape: dict) -> None:
     flow already has is dropped with a warning (and with it the command). Adding
     stops at FLOW_FILES_LIMIT files; files beyond it (put there by hand) are
     named in a warning, never dropped silently."""
-    from .agentfiles import rev  # agentfiles imports modules that import this one
+    from .revision import rev
     shape["flows"] = []
     shape["unreadable_flows"] = []
 
@@ -730,12 +730,12 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
     # operations. Keep the session viewer usable without weakening those checks.
     read_only = WINDOWS and source == "live"
     document = snapshot_document(snapshot, source, task, session=session,
-                                 structure=load_structure() if source == "live" and not read_only else None,
+                                 structure=load_structure() if source == "live" else None,
                                  activity=live_activity(snapshot, detail=detail) if source == "live"
                                  else demo_activity(snapshot.now, detail=detail) if source == "demo" else None)
     if read_only:
         document["read_only"] = True
-        document["warnings"].append("Windows: session viewer only; task graphs and toolkit editors require POSIX.")
+        document["warnings"].append("Windows: read-only viewer; task graphs and toolkit editors require POSIX.")
         document["skills"] = skills_document()
         document["roster"] = {"editable": False, "why": "Toolkit editors require POSIX.", "models": []}
         return document

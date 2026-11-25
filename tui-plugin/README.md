@@ -463,10 +463,10 @@ Add the folder to `plugins` in `~/.config/opencode/cli.json`:
 }
 ```
 
-Restart the TUI. Options go in the `[path, options]` form:
+Restart the TUI. In OpenCode V2, use the object form for options:
 
 ```json
-["/Users/achita.anantachina/.config/opencode/orchestration/tui-plugin", { "mode": "prepend", "intervalMs": 4000 }]
+{ "package": "/Users/achita.anantachina/.config/opencode/orchestration/tui-plugin", "options": { "mode": "prepend", "intervalMs": 4000 } }
 ```
 
 | Option       | Default                                                               | Meaning |
