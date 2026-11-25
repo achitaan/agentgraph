@@ -431,6 +431,15 @@ class Validate(unittest.TestCase):
         task.path = "project/.opencode/graph/test.json"
         self.assertEqual(validate(task), [])
 
+    def test_windows_absolute_and_relative_paths(self):
+        writer = node("n1", scope=["src/"])
+        writer.changed_paths = [r"C:\project\src\a.py", r"C:\project-other\src\a.py", r"D:\project\src\a.py"]
+        task = graph([writer])
+        task.path = r"C:\project\.opencode\graph\test.json"
+        self.assertEqual(validate(task), [
+            f"n1 changed path {path!r} outside its scope" for path in writer.changed_paths[1:]
+        ])
+
     def test_parent_scope_is_anchored_at_the_project_parent(self):
         writer = node("n1", scope=[".."])
         writer.changed_paths = ["../../outside/a", "../sibling/a"]

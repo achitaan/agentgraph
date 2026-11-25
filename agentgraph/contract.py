@@ -9,7 +9,9 @@ from __future__ import annotations
 from collections import Counter, deque
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
+import os
+import ntpath
+from pathlib import PurePosixPath, PureWindowsPath
 from posixpath import abspath, join, normpath
 
 # --- vocabulary ---------------------------------------------------------
@@ -659,7 +661,14 @@ def shape_advice(graph: TaskGraph, layers: list[list[Node]] | None = None) -> li
     return advice
 
 
-def _project_root(graph_path: str) -> PurePosixPath | None:
+def _project_root(graph_path: str) -> PurePosixPath | PureWindowsPath | None:
+    # Absolute POSIX paths remain POSIX even when inspecting a graph on Windows.
+    if ntpath.splitdrive(graph_path)[0] or (os.name == "nt" and not graph_path.startswith("/")):
+        path = PureWindowsPath(ntpath.normpath(graph_path))
+        for parent in path.parents:
+            if parent.name == ".opencode":
+                return PureWindowsPath(ntpath.abspath(parent.parent))
+        return None
     path = PurePosixPath(normpath(graph_path))
     for parent in path.parents:
         if parent.name == ".opencode":
@@ -667,9 +676,11 @@ def _project_root(graph_path: str) -> PurePosixPath | None:
     return None
 
 
-def _path_parts(value: str, project_root: PurePosixPath | None = None) -> tuple[str, ...]:
+def _path_parts(value: str, project_root: PurePosixPath | PureWindowsPath | None = None) -> tuple[str, ...]:
     # An absolute value replaces the base; a relative one must be anchored
     # before '..' can be compared correctly against other paths.
+    if isinstance(project_root, PureWindowsPath):
+        return PureWindowsPath(ntpath.normpath(ntpath.join(project_root, value.strip()))).parts
     return PurePosixPath(normpath(join(project_root or _SYNTHETIC_ROOT, value.strip()))).parts
 
 
