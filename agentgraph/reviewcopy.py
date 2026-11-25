@@ -39,7 +39,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import check, graphedit, osproc, outputs, transitions
+from . import check, graphedit, osfs, osproc, outputs, transitions
 from .noderun import SKIP as NODE_SKIP
 
 DEFAULT_TIMEOUT = 600
@@ -80,7 +80,7 @@ def _git(args: list[str], cwd: Path, timeout: float = 120):
 
 def _linked(path: Path) -> bool:
     try:
-        return stat.S_ISLNK(os.lstat(path).st_mode)
+        return osfs.is_link(osfs.lstat(path))
     except OSError:
         return False
 
@@ -93,10 +93,10 @@ def _nearest_project(start: Path) -> Path | None:
             graph = os.lstat(folder / GRAPH_FOLDER)
         except OSError:
             continue
-        if stat.S_ISLNK(opencode.st_mode) or stat.S_ISLNK(graph.st_mode):
+        if osfs.is_link(opencode) or osfs.is_link(graph):
             raise Refused(f"{folder / GRAPH_FOLDER} is (or is below) a link; review-copy does not follow it")
         if stat.S_ISDIR(graph.st_mode):
-            if graph.st_uid != os.getuid():
+            if graph.st_uid != osfs.getuid():
                 raise Refused(f"{folder / GRAPH_FOLDER} is owned by another user; review-copy does not use it")
             return folder
     return None
@@ -305,7 +305,13 @@ def _place_links(links: list[tuple[str, str]], target: Path) -> tuple[list[tuple
             skipped += 1
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
-        os.symlink(text, dest)
+        try:
+            os.symlink(text, dest)
+        except (OSError, NotImplementedError):
+            if not osproc.is_windows():
+                raise
+            skipped += 1  # Windows makes a symlink only for a user with the privilege: the link is left out, and counted as such
+            continue
         placed.append((rel, text))
     moved = True
     while moved:
@@ -437,23 +443,23 @@ def _open_result_folder(project: Path, task: str, node_id: str) -> int:
     """`.opencode/artifacts/T/N` opened from the project, made when missing, never through a link."""
     if not outputs._component(node_id):
         raise Refused(f"{node_id[:80]!r} is not a node id")
-    current = os.open(project, os.O_RDONLY | os.O_DIRECTORY)
+    current = osfs.open(project, os.O_RDONLY | osfs.O_DIRECTORY)
     try:
         for name in (".opencode", "artifacts", task, node_id):
             following = outputs._open_dir(current, name, create=True)
-            os.close(current)
+            osfs.close(current)
             current = following
     except outputs.OutputError as exc:
-        os.close(current)
+        osfs.close(current)
         raise Refused(f"the result was not written: {exc}") from None
     except BaseException:
-        os.close(current)
+        osfs.close(current)
         raise
     return current
 
 
 def _create(folder: int, name: str) -> int:
-    return os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=folder)
+    return osfs.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | osfs.O_NOFOLLOW, 0o644, dir_fd=folder)
 
 
 def _stamped(folder: int) -> tuple[str, int, int]:
@@ -468,8 +474,8 @@ def _stamped(folder: int) -> tuple[str, int, int]:
         try:
             return stamp, _create(folder, f"review-copy-{stamp}.json"), text
         except FileExistsError:
-            os.close(text)
-            os.unlink(f"review-copy-{stamp}.txt", dir_fd=folder)
+            osfs.close(text)
+            osfs.unlink(f"review-copy-{stamp}.txt", dir_fd=folder)
     raise Refused("too many review-copy results at the same second")
 
 
@@ -507,8 +513,12 @@ def _record(path: Path, node_id: str, record: dict, now: float) -> None:
 def _rmtree(path: Path) -> None:
     def fix(function, target, _error):
         try:
-            os.chmod(os.path.dirname(target), 0o700)
-            os.chmod(target, 0o700)
+            if osproc.is_windows():  # deleting fails on a read-only file there; no other mode bit means anything
+                for item in (os.path.dirname(target), target):
+                    Path(item).chmod(stat.S_IWRITE | stat.S_IREAD)
+            else:
+                osfs.chmod(os.path.dirname(target), 0o700)
+                osfs.chmod(target, 0o700)
             function(target)
         except OSError:
             pass
@@ -619,14 +629,14 @@ def review_copy(task: str, node_id: str, directory=None, timeout: float = DEFAUL
                 except BaseException:
                     for fd in (json_fd, text_fd):
                         if fd >= 0:
-                            os.close(fd)
+                            osfs.close(fd)
                     json_fd = text_fd = -1
                     for name in names:  # no half-written result is left behind
                         with contextlib.suppress(OSError):
-                            os.unlink(name, dir_fd=folder)
+                            osfs.unlink(name, dir_fd=folder)
                     raise
                 finally:
-                    os.close(folder)
+                    osfs.close(folder)
                 record = {"result": rel_json, "check_exit": results.get("check", {}).get("exit"), "e2e_exit": results.get("e2e", {}).get("exit"),
                           "tree": tree, "started": started, "at": now, "project_unchanged": unchanged}
                 for name, r in results.items():

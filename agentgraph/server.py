@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote
 
-from . import (agentfiles, chatfeed, flowcommands, flowrun, improve, loopapi, mcpview, outputs, roster, setups, sidechat,
+from . import (agentfiles, chatfeed, flowcommands, flowrun, improve, loopapi, mcpview, osfs, outputs, roster, setups, sidechat,
                skillfiles, skillset, spend, structure, teams)
 from .demo import demo_activity, demo_flows, demo_loops, demo_run, demo_setup, demo_sidechat, demo_snapshot, demo_spend
 from .snapshot_json import (ledger_home, learning_document, live_activity, load_structure, skills_document,
@@ -70,18 +70,18 @@ _TYPES = {
 def _read_static(directory: Path, filename: str) -> bytes:
     # Refuse symlinks without a check/open race. Nonblocking open also avoids
     # waiting on a named pipe; only regular files can be served.
-    root = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    root = osfs.open(directory, os.O_RDONLY | osfs.O_DIRECTORY | osfs.O_NOFOLLOW)
     try:
-        fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
+        fd = osfs.open(filename, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK, dir_fd=root)
         try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
+            if not stat.S_ISREG(osfs.fstat(fd).st_mode):
                 raise OSError("not a regular file")
             with open(fd, "rb", closefd=False) as stream:
                 return stream.read()
         finally:
-            os.close(fd)
+            osfs.close(fd)
     finally:
-        os.close(root)
+        osfs.close(root)
 
 
 def make_server(

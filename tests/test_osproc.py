@@ -5,12 +5,14 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from agentgraph import __main__ as cli
-from agentgraph import osproc, winconsole
+from agentgraph import bench, osproc, reviewcopy, sidechat, winconsole
 
 
 class FakeRunner:
@@ -418,6 +420,67 @@ class WindowsTerminalTests(unittest.TestCase):
                 term.close()
                 os.close(write_end)
                 os.close(read_end)
+
+
+class WindowsLocationsAndLinks(unittest.TestCase):
+    """Stage 2: where the CLI is on Windows, how the scratch home links folders, and what review-copy does without symlinks."""
+
+    def test_the_cli_on_path_wins_then_the_install_places(self):
+        env = {"LOCALAPPDATA": "C:\\L", "USERPROFILE": "C:\\U", "APPDATA": "C:\\A"}
+        self.assertEqual(sidechat.windows_binary(which=lambda _n: "C:\\bin\\opencode.CMD", environ=env, isfile=lambda _p: False),
+                         "C:\\bin\\opencode.CMD")
+        wanted = os.path.join("C:\\U", ".opencode", "bin", "opencode.exe")
+        self.assertEqual(sidechat.windows_binary(which=lambda _n: None, environ=env, isfile=lambda p: p == wanted), wanted)
+        self.assertIsNone(sidechat.windows_binary(which=lambda _n: None, environ=env, isfile=lambda _p: False))
+        self.assertIsNone(sidechat.windows_binary(which=lambda _n: None, environ={}, isfile=lambda _p: True))
+
+    def test_binary_prefers_the_variable_then_windows_lookup_then_the_mac_default(self):
+        found = lambda: "C:\\x\\opencode.exe"  # noqa: E731
+        self.assertEqual(sidechat.binary(windows=True, which=lambda _n: found(), environ={sidechat.ENV_BINARY: "mine"}), "mine")
+        self.assertEqual(sidechat.binary(windows=True, which=lambda _n: found(), environ={}), found())
+        self.assertEqual(sidechat.binary(windows=True, which=lambda _n: None, environ={}, isfile=lambda _p: False), sidechat.DEFAULT_BINARY)
+        self.assertEqual(sidechat.binary(windows=False, which=lambda _n: found(), environ={}), sidechat.DEFAULT_BINARY)
+
+    def test_link_folder_makes_a_symlink_where_it_can(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp) / "real"
+            real.mkdir()
+            link = Path(tmp) / "link"
+            bench.link_folder(link, real, windows=True, junction=lambda *_a: self.fail("a symlink worked"))
+            self.assertTrue(link.is_symlink())
+
+    def test_link_folder_falls_back_to_a_junction_on_windows_only(self):
+        made = []
+        with tempfile.TemporaryDirectory() as tmp:
+            real, link = Path(tmp) / "real", Path(tmp) / "link"
+            with mock.patch.object(Path, "symlink_to", side_effect=OSError("privilege not held")):
+                bench.link_folder(link, real, windows=True, junction=lambda a, b: made.append((a, b)))
+                self.assertEqual(made, [(link, real)])
+                with self.assertRaises(OSError):  # POSIX: the error is the caller's, as before
+                    bench.link_folder(link, real, windows=False, junction=lambda *_a: self.fail("not on POSIX"))
+
+    def test_link_folder_refuses_with_the_reason_when_neither_works(self):
+        def broken(*_a):
+            raise OSError("no junction either")
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(Path, "symlink_to", side_effect=OSError("privilege not held")):
+                with self.assertRaises(bench.BenchError) as caught:
+                    bench.link_folder(Path(tmp) / "l", Path(tmp) / "r", windows=True, junction=broken)
+        self.assertIn("Developer Mode", str(caught.exception))
+        self.assertIn("privilege not held", str(caught.exception))
+
+    def test_review_copy_leaves_a_link_out_when_windows_cannot_make_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "copy"
+            target.mkdir()
+            with mock.patch.object(osproc, "is_windows", return_value=True), \
+                    mock.patch.object(os, "symlink", side_effect=OSError(1314, "A required privilege is not held")):
+                placed, skipped = reviewcopy._place_links([("a/l", "../b")], target)
+            self.assertEqual((placed, skipped), ([], 1))
+            with mock.patch.object(osproc, "is_windows", return_value=False), \
+                    mock.patch.object(os, "symlink", side_effect=OSError("boom")):
+                with self.assertRaises(OSError):
+                    reviewcopy._place_links([("a/l", "../b")], target)
 
 
 if __name__ == "__main__":
