@@ -40,14 +40,13 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
 
-from . import graphedit, looprun, outputs, paths, transitions
+from . import graphedit, looprun, osproc, outputs, paths, transitions
 
 DEFAULT_ATTEMPTS = 3
 DEFAULT_ATTEMPT_SECONDS = 1800
@@ -498,7 +497,7 @@ def run(task: str, node_id: str, *, directory=None, check=None, verify=None, att
     try:
         proc = subprocess.Popen([sys.executable, "-P", "-m", "agentgraph.noderun", "drive", "--run-dir", str(folder), "--graph", str(path),
                                  "--task", task, "--node", node_id], cwd=project, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                                start_new_session=True, env={**os.environ, "PYTHONPATH": str(paths.REPO)})
+                                **osproc.detached_kwargs(), env={**os.environ, "PYTHONPATH": str(paths.REPO)})
         threading.Thread(target=proc.wait, daemon=True).start()
     finally:
         log.close()
@@ -729,7 +728,7 @@ def _ignored(project: Path, names: list[str]) -> set[str] | None:
         return set()
     try:
         done = subprocess.run(["git", "-C", str(project), "check-ignore", "-z", "--stdin"], input="\0".join(names) + "\0", capture_output=True,
-                              text=True, timeout=60)
+                              text=True, timeout=60, **osproc.text_kwargs())
     except (OSError, subprocess.SubprocessError):
         return None
     if done.returncode not in (0, 1):
@@ -1079,15 +1078,14 @@ def wait(task: str, node_id: str, directory=None, timeout: float | None = None) 
 def _processes(sessions: list[str]) -> list[tuple[int, int]]:
     """(pid, parent pid) of the processes whose command line names one of the sessions (`opencode run ... --session ID`)."""
     try:
-        out = subprocess.run(["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True, timeout=15, check=True).stdout
+        table = osproc.list_processes(["-axo", "pid=,ppid=,command="], ("pid", "ppid", "command"))
     except (OSError, subprocess.SubprocessError):
         return []
     found = []
-    for line in out.splitlines():
-        words = line.split()
-        if len(words) > 2 and words[0].isdigit() and words[1].isdigit() and int(words[0]) != os.getpid() and "run" in words[2:] and any(
-                a == "--session" and b in sessions for a, b in zip(words[2:], words[3:])):
-            found.append((int(words[0]), int(words[1])))
+    for row in table:
+        words = (row.command or "").split()
+        if row.pid != os.getpid() and "run" in words and any(a == "--session" and b in sessions for a, b in zip(words, words[1:])):
+            found.append((row.pid, row.ppid))
     return found
 
 
@@ -1097,10 +1095,7 @@ def _leftovers(sessions: list[str]) -> list[int]:
 
 def _orphan(pid: int, parent: int) -> bool:
     """A process a controller left behind: it leads its own process group (how looprun starts every child) and nobody is its parent any more."""
-    try:
-        return parent == 1 and os.getpgid(pid) == pid
-    except OSError:
-        return False
+    return osproc.is_orphaned_leader(pid, parent)
 
 
 def _kill_leftovers(sessions: list[str]) -> tuple[int, list[int]]:
@@ -1110,10 +1105,10 @@ def _kill_leftovers(sessions: list[str]) -> tuple[int, list[int]]:
     is left alone. Returns (how many were stopped, the pids that were left alone and are still running)."""
     sessions = [s for s in sessions if isinstance(s, str)]
     mine = [pid for pid, parent in _processes(sessions) if _orphan(pid, parent)]
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+    for force in (False, True):
         for pid in mine:
             try:
-                os.killpg(pid, sig)
+                osproc.kill_group(pid, force)
             except OSError:
                 continue
         deadline = time.monotonic() + 2

@@ -68,7 +68,6 @@ import os
 from pathlib import Path
 import re
 import secrets
-import signal
 import sqlite3
 import stat
 import subprocess
@@ -76,7 +75,7 @@ import sys
 import tempfile
 import time
 
-from . import agentfiles, chatfeed, outputs, skillfiles, skillset, sources
+from . import agentfiles, chatfeed, osproc, outputs, skillfiles, skillset, sources
 
 AGENT = "side-chat"
 SKILL = "side-chat"
@@ -499,10 +498,34 @@ def build_brief(question: str, snapshot, project, main: str, *, db_path, previou
 
 # --- the route ------------------------------------------------------------------------------------------------
 
-def service_executables(*, run=subprocess.run) -> list[str] | None:
+def _windows_service_executables(run, windows: bool) -> list[str] | None:
+    """The Windows form of `service_executables`: the process list comes from PowerShell (`osproc.list_processes`), and a service is a
+    process whose command line is `<absolute executable> serve --service` (a path in double quotes, or one without spaces); a
+    relative executable counts as "cannot be told"."""
+    try:
+        table = osproc.list_processes(windows=windows, runner=run, timeout=PS_TIMEOUT)
+        found = []
+        for row in table:
+            words = (row.command or "").split()
+            if words[-2:] != ["serve", "--service"]:
+                continue
+            split = osproc.split_executable(row.command)
+            if split is None or not os.path.isabs(split[0]):
+                return None
+            if split[1].split() == ["serve", "--service"]:  # started as the executable itself, not through a shell
+                found.append(split[0])
+        return found
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def service_executables(*, run=subprocess.run, windows=None) -> list[str] | None:
     """The executables of the user's own running background services (`<exe> serve --service`), as `ps` reports
-    them; [] when none runs; None when it cannot be told (a `ps` failure or timeout, an unreadable line). Fixed
-    argument lists, a short timeout, no shell, and nothing from a question, snapshot or project."""
+    them (on Windows: as PowerShell's process list reports them); [] when none runs; None when it cannot be told (a `ps`
+    failure or timeout, an unreadable line). Fixed argument lists, a short timeout, no shell, and nothing from a question,
+    snapshot or project."""
+    if osproc.is_windows() if windows is None else windows:
+        return _windows_service_executables(run, True)
     def ps(cmd):
         out = run(cmd, capture_output=True, text=True, timeout=PS_TIMEOUT, shell=False)
         if out.returncode != 0:
@@ -580,33 +603,12 @@ def command(*, model: str, side: str | None, title: str, tree: set[str], executa
 
 
 def _children(pid: int) -> list[int]:
-    out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True).stdout
-    table = {}
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) == 2 and all(part.isdigit() for part in parts):
-            table.setdefault(int(parts[1]), []).append(int(parts[0]))
-    found, stack = [], [pid]
-    while stack:
-        for child in table.get(stack.pop(), []):
-            found.append(child)
-            stack.append(child)
-    return found
+    return osproc.children(pid)
 
 
 def _stop(proc: subprocess.Popen) -> None:
     """Stop the process we started and its descendants (the standalone server is one), nothing else."""
-    family = [proc.pid, *_children(proc.pid)]
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        for pid in family:
-            try:
-                os.kill(pid, sig)
-            except (ProcessLookupError, PermissionError):
-                pass
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            continue
+    osproc.stop_family(proc, listing=_children)
 
 
 def _events(output: str) -> dict:
@@ -652,10 +654,11 @@ def _run(cmd: list[str], message: str, cwd, timeout: float) -> tuple[int | None,
     cwd = os.path.abspath(cwd)
     try:
         proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True,
-                                env={**os.environ, "PWD": str(cwd)})  # the host reads $PWD, not the process's cwd
+                                stderr=subprocess.PIPE, text=True, errors="replace", **osproc.group_kwargs(),
+                                **osproc.text_kwargs(), env={**os.environ, "PWD": str(cwd)})  # the host reads $PWD, not the process's cwd
     except OSError as exc:
-        raise SidechatError(f"cannot start {cmd[0]}: {exc.strerror}") from exc
+        hint = f" (on Windows set {ENV_BINARY} to the full path of opencode.exe or opencode.cmd)" if osproc.is_windows() else ""
+        raise SidechatError(f"cannot start {cmd[0]}: {exc.strerror}{hint}") from exc
     try:
         out, err = proc.communicate(input=message, timeout=timeout)
         code = proc.returncode
