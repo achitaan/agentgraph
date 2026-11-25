@@ -34,6 +34,28 @@ class WindowsSnapshotTests(unittest.TestCase):
                 self.assertTrue(any("not supported on Windows" in warning for warning in warnings))
 
     @unittest.skipUnless(sys.platform == "win32", "native Windows smoke test")
+    def test_flow_listing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            group = root / "01-build"
+            group.mkdir()
+            for agent in ("impl-openai", "verifier"):
+                (group / (agent + ".md")).write_text("Agent\n", encoding="utf-8")
+            flows = root / "flows"
+            flows.mkdir()
+            (flows / "test.md").write_text(
+                "path: impl-openai -> verifier\n\nCheck the result.\n", encoding="utf-8")
+            args = [sys.executable, "-m", "agentgraph.structure", "--structure", str(root)]
+            result = subprocess.run([*args, "flows", "--json"], capture_output=True, check=True)
+            doc = json.loads(result.stdout)
+            self.assertEqual(doc["flows"][0]["id"], "test")
+            self.assertEqual(doc["flows"][0]["path"], ["impl-openai", "verifier"])
+            refused = subprocess.run(
+                [*args, "flow", "remove", "test", "--json"], capture_output=True)
+            self.assertEqual(refused.returncode, 1)
+            self.assertTrue((flows / "test.md").exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows smoke test")
     def test_snapshot_commands(self):
         for args in (["--demo"], []):
             with self.subTest(args=args):

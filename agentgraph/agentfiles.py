@@ -123,18 +123,7 @@ class StaleError(AgentfilesError):
         self.rev = rev
 
 
-def rev(*parts):
-    """The `rev` of a thing stored as these parts (bytes or text; None for a part that is absent): 16 hex digits of
-    a SHA-256 over the parts, each length-prefixed, so a part moving to the next one changes it."""
-    digest = hashlib.sha256()
-    for part in parts:
-        if part is None:
-            digest.update(b"-")
-            continue
-        data = part.encode("utf-8") if isinstance(part, str) else bytes(part)
-        digest.update(b"+%d:" % len(data))
-        digest.update(data)
-    return digest.hexdigest()[:16]
+from .revision import rev
 
 
 def check_expect(expect, current, what):
