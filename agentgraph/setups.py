@@ -62,7 +62,11 @@ import shutil
 import stat
 import sys
 
-from . import agentfiles, flowcommands, names, paths, skillset
+from . import flowcommands, names, paths, skillset
+from .fileio import open_regular
+from .revision import rev as revision
+if os.name != "nt":
+    from . import agentfiles
 from .snapshot_json import STRUCTURE_DIR
 
 SETUPS = paths.resolve("setups")  # your personal folder's when there is one (agentgraph.paths)
@@ -81,6 +85,11 @@ class SetupError(skillset.SkillsetError):
     """A refused request; the message says why and nothing was changed."""
 
 
+def _require_write_support():
+    if os.name == "nt":
+        raise SetupError("Setup and preset editing requires POSIX.")
+
+
 @dataclass(frozen=True)
 class Where:
     config: Path
@@ -93,7 +102,7 @@ class Where:
 
 
 def _where(paths: dict) -> Where:
-    defaults = {"config": skillset.CONFIG, "map_path": skillset.MAP, "agents_dir": agentfiles.AGENTS_DIR,
+    defaults = {"config": skillset.CONFIG, "map_path": skillset.MAP, "agents_dir": skillset.AGENTS_DIR,
                 "structure": STRUCTURE_DIR, "commands_dir": flowcommands.COMMANDS_DIR, "setups": SETUPS,
                 "backups": skillset.BACKUPS}
     unknown = set(paths) - set(defaults)
@@ -134,7 +143,7 @@ def _path(w: Where, key: str) -> Path:
 def _read_bytes(path: Path, label: str):
     """(bytes, mode) of a regular file read without following a symlink; None when there is no such file."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = open_regular(path, os.O_RDONLY)
     except FileNotFoundError:
         return None
     except NotADirectoryError:
@@ -159,7 +168,8 @@ def _entries(folder: Path):
 
 def _is_plain_dir(path: Path) -> bool:
     try:
-        return stat.S_ISDIR(os.lstat(path).st_mode)
+        info = os.lstat(path)
+        return stat.S_ISDIR(info.st_mode) and not (getattr(info, "st_file_attributes", 0) & 0x400)
     except OSError:
         return False
 
@@ -640,6 +650,7 @@ def switch_preset(name, *, project=None, env=None, **paths) -> dict:
     """Make `name` the default preset: change only the `preset` string, in place, with a dated backup and an undo
     record (`record`; `preset restore`). Refused for an unknown name, the one already in use, and when the
     environment variable or a project config sets another preset (the change would not take effect)."""
+    _require_write_support()
     w = _where(paths)
     if not isinstance(name, str) or not name or len(name) > 100 or name.startswith("-"):
         raise SetupError("invalid preset name: a preset is named by a non-empty text, 100 characters at most, "
@@ -828,6 +839,7 @@ def undo(record, *, _only=None, **paths) -> dict:
     """Undo a change from its record (`setup restore`, `remove`, a save over a name, `preset switch`): everything it
     changed goes back byte for byte. The answer has a record that undoes this in turn. Refused (stale) when
     anything it changed was changed since."""
+    _require_write_support()
     w = _where(paths)
     kind, name, data, folder = _load_record(record, w.backups)
     if _only is not None and kind != _only:
@@ -847,6 +859,7 @@ def save(name, *, replace=False, expect=None, **paths) -> dict:
     """Save the managed set (see the module's list) as the setup `name`. A name in use is refused unless `replace`
     (the old setup is kept in the backups folder); `expect`: the rev of the setup being replaced. The answer has the
     `record` that undoes the save."""
+    _require_write_support()
     w = _where(paths)
     _setup_name(name)
     if expect is not None and not agentfiles.expect_ok(expect):
@@ -894,6 +907,8 @@ def list_setups(**paths) -> list:
     read has `"damaged"` too). Reads only the manifests."""
     w = _where(paths)
     found = []
+    if os.name == "nt" and not _is_plain_dir(w.setups):
+        return found
     for entry in _entries(w.setups)[:LIST_LIMIT * 2]:
         if len(found) >= LIST_LIMIT:
             break
@@ -905,7 +920,7 @@ def list_setups(**paths) -> list:
                 raise SetupError("it has no manifest")
             manifest, raw = read
             found.append({"name": entry, "saved": manifest["saved"], "preset": manifest["preset"],
-                          "files": len(manifest["files"]), "rev": agentfiles.rev(raw)})
+                            "files": len(manifest["files"]), "rev": revision(raw)})
         except SetupError as exc:
             found.append({"name": entry, "saved": None, "preset": None, "files": 0, "rev": None,
                           "damaged": str(exc)})
@@ -927,12 +942,15 @@ def show_setup(name, **paths) -> dict:
     return {"name": name, "saved": manifest["saved"], "preset": manifest["preset"], "files": len(entries),
             "counts": _counts(entries), "size": sum(entry.get("size", 0) for entry in entries
                                                     if isinstance(entry.get("size"), int)),
-            "keys": [entry["key"] for entry in entries], "rev": agentfiles.rev(raw)}
+            "keys": [entry["key"] for entry in entries], "rev": revision(raw)}
 
 
 def remove(name, *, expect=None, **paths) -> dict:
     """Move the setup `name` into the backups folder; the answer's `record` undoes it (`setup undo`)."""
+    _require_write_support()
     w = _where(paths)
+    if os.name == "nt" and not _is_plain_dir(w.setups):
+        raise SetupError("There is no plain saved setups folder.")
     _setup_name(name)
     if expect is not None and not agentfiles.expect_ok(expect):
         raise SetupError(agentfiles.EXPECT_TEXT)
@@ -951,6 +969,7 @@ def restore(name, *, expect=None, **paths) -> dict:
     """Put the setup `name` back: every hash is checked first (a damaged setup is refused before anything is
     written), the current state of the set is saved as an undo record, then each file is written byte for byte and
     a managed file that is not in the setup is removed. `expect`: the setup's rev."""
+    _require_write_support()
     w = _where(paths)
     _setup_name(name)
     if expect is not None and not agentfiles.expect_ok(expect):

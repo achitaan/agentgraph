@@ -739,6 +739,8 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
         from . import spend
         from .sources import DB_PATH
         spend.annotate(document, db_path=DB_PATH, root=snapshot.root, sessions=snapshot.sessions, now=snapshot.now)
+        from . import setups
+        setups.annotate(document)
         document["read_only"] = True
         document["warnings"].append("Windows: read-only viewer; task graphs and toolkit editors require POSIX.")
         document["skills"] = skills_document()

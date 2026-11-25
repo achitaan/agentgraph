@@ -12,6 +12,30 @@ from agentgraph.contract import Agent, Snapshot
 
 
 class WindowsSnapshotTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "native Windows smoke test")
+    def test_preset_and_saved_setup_inspection(self):
+        from agentgraph import setups
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "config.json"
+            original = json.dumps({"preset": "normal", "presets": {"normal": {}, "fast": {}}})
+            config.write_text(original, encoding="utf-8")
+            saved = root / "saved"
+            folder = saved / "example"
+            folder.mkdir(parents=True)
+            (folder / "manifest.json").write_text(json.dumps({
+                "version": 1, "files": [], "dirs": [], "saved": "2026-01-01",
+                "name": "example", "preset": "normal"
+            }), encoding="utf-8")
+            self.assertEqual(setups.show_preset(config=config, env={})["effective"], "normal")
+            self.assertEqual(setups.show_preset(config=config, env={
+                setups.ENV: "fast"})["effective"], "fast")
+            self.assertEqual(setups.list_setups(setups=saved)[0]["name"], "example")
+            self.assertEqual(setups.show_setup("example", setups=saved)["preset"], "normal")
+            with self.assertRaisesRegex(setups.SetupError, "requires POSIX"):
+                setups.switch_preset("fast", config=config)
+            self.assertEqual(config.read_text(encoding="utf-8"), original)
+
     def test_live_session_projection(self):
         snapshot = Snapshot(1000, roster=[Agent("orchestrator", "test/model", "", "hub")])
         with patch.object(snapshot_json, "WINDOWS", True):
