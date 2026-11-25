@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.launch import LAUNCHER, bare_env
 from agentgraph import cases, check, ledger
 from agentgraph.sources import graph_from_raw
 
@@ -40,7 +41,7 @@ class Scratch(unittest.TestCase):
 
     def write(self, task, nodes, **overrides):
         path = self.directory / f"{task}.json"
-        path.write_text(json.dumps(graph(task, nodes, **overrides)))
+        path.write_text(json.dumps(graph(task, nodes, **overrides)), encoding="utf-8")
         return path
 
     def run_main(self, module, *args, now=100.0):
@@ -62,7 +63,7 @@ class Scratch(unittest.TestCase):
 
     def stored(self):
         path = self.home / "cases.jsonl"
-        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
 
     def report(self):
         status, output, errors = self.run_main(ledger, "--home", str(self.home), "signals", "--json", "--no-cost")
@@ -197,7 +198,7 @@ class Split(Scratch):
         self.record()
         line = self.stored()[0]
         line["split"] = "tune" if cases.split_of(line["id"]) == "held-out" else "held-out"
-        (self.home / "cases.jsonl").write_text(json.dumps(line) + "\n")
+        (self.home / "cases.jsonl").write_text(json.dumps(line) + "\n", encoding="utf-8")
         self.assertEqual(cases.load(self.home)[0]["split"], cases.split_of(line["id"]))
 
 
@@ -268,12 +269,12 @@ class Commands(Scratch):
         tune = [i for i in replayable if i["split"] == "tune"]
         self.assertTrue(held and tune)
         note = self.project / "note.txt"
-        note.write_text("N" * 5000)
+        note.write_text("N" * 5000, encoding="utf-8")
         for item, outcome in ((held[0], "pass"), (tune[0], "pass")):
             self.assertEqual(self.cases("--result", item["id"], "--outcome", outcome, "--edit", "rule-1", "--note-file", str(note))[0], 0)
         self.assertEqual(self.cases("--result", held[0]["id"], "--outcome", "fail", "--edit", "rule-1")[0], 0)
         self.assertEqual(self.cases("--result", held[0]["id"], "--outcome", "pass", "--edit", "rule-2")[0], 0)
-        lines = [json.loads(line) for line in (self.home / "replays.jsonl").read_text().splitlines()]
+        lines = [json.loads(line) for line in (self.home / "replays.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertEqual(len(lines), 4)
         self.assertEqual(len(lines[0]["note"]), cases.NOTE_CHARS)
         edits = self.report()["cases"]["edits"]
@@ -297,7 +298,7 @@ class Commands(Scratch):
         with patch.object(cases, "REPLAY_LINES", 5):
             for number in range(8):
                 cases.add_trial(self.home, item["id"], "pass", f"e{number}", now=float(number))
-        kept = [json.loads(line)["edit"] for line in (self.home / "replays.jsonl").read_text().splitlines()]
+        kept = [json.loads(line)["edit"] for line in (self.home / "replays.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertEqual(kept, [f"e{n}" for n in range(3, 8)])
 
     def test_the_signals_line_counts_cases_an_agent_and_is_quiet_without_any(self):
@@ -313,7 +314,7 @@ class Commands(Scratch):
 
     def test_the_launcher_runs_the_command(self):
         self.make()
-        result = subprocess.run([str(ROOT / "bin" / "agentgraph"), "cases", "--home", str(self.home), "--json"],
+        result = subprocess.run([*LAUNCHER, "cases", "--home", str(self.home), "--json"],
                                 capture_output=True, text=True, cwd=str(self.project))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["counts"]["total"], 7)
@@ -371,7 +372,7 @@ class Hostile(Scratch):
         bad = [{**item, "agent": "Evil Agent\n"}, {**item, "id": "short"},
                {**item, "untrusted": {**item["untrusted"], "goal": "g" * 10_000}},
                {**item, "base": "not-a-commit"}, {**item, "node": "n 1"}]
-        (self.home / "cases.jsonl").write_text("\n".join(json.dumps(b) for b in bad) + "\n{broken\n")
+        (self.home / "cases.jsonl").write_text("\n".join(json.dumps(b) for b in bad) + "\n{broken\n", encoding="utf-8")
         self.assertEqual(cases.load(self.home), [])
         self.assertEqual(self.report()["cases"]["total"], 0)
 
@@ -395,7 +396,7 @@ class CheckAcceptsBase(Scratch):
     def test_the_command_exits_nonzero_for_it(self):
         self.write("t", [node("n1", base="main")])
         result = subprocess.run([sys.executable, "-P", "-m", "agentgraph.check", "--dir", str(self.directory)],
-                                capture_output=True, text=True, cwd=str(ROOT), env={"PYTHONPATH": str(ROOT), "PATH": "/usr/bin:/bin"})
+                                capture_output=True, text=True, cwd=str(ROOT), env=bare_env(PYTHONPATH=str(ROOT)))
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("base must be a commit id", result.stdout)
 

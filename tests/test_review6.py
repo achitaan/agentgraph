@@ -335,7 +335,7 @@ class EarlierCommandFiles(Scratch):
         flow = structure.add_flow(PATHS[name], TEXT, self.root, name=name, command=True,
                                   commands_dir=self.commands)[0]
         self.assertEqual(flow["id"], flow_id)
-        (self.commands / f"{name}.md").write_text("".join(data))
+        (self.commands / f"{name}.md").write_text("".join(data), encoding="utf-8")
         return flow
 
     def current(self, name, **change):
@@ -444,7 +444,7 @@ class CommandBody(Scratch):
         loop = self.add_loop()
         flow = structure.add_flow(["researcher", "impl-openai"], None, self.root, name="ship", command=True,
                                   commands_dir=self.commands)[0]
-        body = (self.commands / "ship.md").read_text().replace("\n", " ")
+        body = (self.commands / "ship.md").read_text(encoding="utf-8").replace("\n", " ")
         self.assertIn("Every other drawn path applies too, to each node of its first agent.", body)
         self.assertIn("To see which apply now and which nodes must be check nodes, run `agentgraph flow prompt "
                       "--name ship --goal-file -` with the goal on standard input.", body)

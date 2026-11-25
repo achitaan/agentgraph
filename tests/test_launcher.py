@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def parse_launcher():
     """(commands, home) from bin/agentgraph: command -> (module, shifted, extra args)."""
-    text = (ROOT / "bin" / "agentgraph").read_text()
+    text = (ROOT / "bin" / "agentgraph").read_text(encoding="utf-8")
     body = text[text.index('case "$1" in'):]
     table = {}
     default = None
@@ -119,6 +119,19 @@ class WindowsFilesTests(unittest.TestCase):
         self.assertLess(text.index("py -3 -c"), text.index("python -c"))
         self.assertIn("AGENTGRAPH_PYTHON", text)
 
+    def test_a_given_python_has_its_quotes_stripped_and_gets_the_same_version_check(self):
+        text = self.read("bin", "_python.cmd")
+        lines = text.split("\r\n")
+        self.assertIn('%AGENTGRAPH_PYTHON:"=%', text)
+        given = [i for i, line in enumerate(lines) if "AGENTGRAPH_CHOSEN%\" -c" in line]
+        self.assertEqual(len(given), 1)
+        self.assertIn("(3, 11)", lines[given[0]])
+        # the answer is only set when that check passes, and is quoted exactly once
+        self.assertIn('if not errorlevel 1 set "AGENTGRAPH_PY="%AGENTGRAPH_CHOSEN%""', lines[given[0] + 1])
+        # a Python that is too old leaves AGENTGRAPH_PY empty (the launcher then prints its message), never falls through
+        self.assertTrue(any(line.strip() == "exit /b 0" for line in lines[given[0] + 2:lines.index(":probe")]))
+        self.assertEqual(text.count("(3, 11)"), 3)
+
     def test_install_cmd_runs_the_installer_front_door(self):
         text = self.read("install.cmd")
         self.assertIn("-P -m agentgraph.installcli %*", text)
@@ -134,7 +147,7 @@ class WindowsFilesTests(unittest.TestCase):
 
 class InstallListTests(unittest.TestCase):
     def test_the_python_list_is_the_one_install_sh_uses(self):
-        text = (ROOT / "commands" / ".toolkit.sh").read_text()
+        text = (ROOT / "commands" / ".toolkit.sh").read_text(encoding="utf-8")
         body = re.search(r"toolkit_commands\(\) \{\n\s+printf '%s\\n' (.*)\n\}", text).group(1)
         self.assertEqual(tuple(body.split()), installer.TOOLKIT_COMMANDS)
 

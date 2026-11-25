@@ -62,7 +62,7 @@ class UnreadableFlows(Scratch):
         flow = self.strand("design-it-2")
         other = structure.add_flow(["impl-openai", "reviewer"], None, self.root)[0]
         (self.root / "flows" / f"{other['id']}.md").write_text(
-            "path: impl-openai -> reviewer\nname: design-it-2\n\nReview.\n")
+            "path: impl-openai -> reviewer\nname: design-it-2\n\nReview.\n", encoding="utf-8")
         before = (self.commands / "design-it-2.md").read_bytes()
         structure.remove_flow(flow["id"], self.root, commands_dir=self.commands)
         self.assertEqual((self.commands / "design-it-2.md").read_bytes(), before)
@@ -149,7 +149,7 @@ class StatsShapes(unittest.TestCase):
 
     def write(self, name, raw):
         path = self.graphs / f"{name}.json"
-        path.write_text(json.dumps(raw))
+        path.write_text(json.dumps(raw), encoding="utf-8")
         return path
 
     def stats(self, paths):
@@ -271,7 +271,7 @@ class Names(unittest.TestCase):
         self.assertIn(names.AGENT_PATTERN, agentfiles.RECORD_PATH.pattern)
         for module in ("agentfiles", "roster", "skillset", "skillfiles", "structure", "snapshot_json", "teams",
                        "server", "flowcommands"):
-            source = (ROOT / "agentgraph" / f"{module}.py").read_text()
+            source = (ROOT / "agentgraph" / f"{module}.py").read_text(encoding="utf-8")
             for pattern in (names.AGENT_PATTERN, names.SKILL_PATTERN, names.FLOW_ID_PATTERN, names.FLOW_NAME_PATTERN):
                 with self.subTest(module=module, pattern=pattern):
                     self.assertNotIn(pattern, source)
@@ -301,13 +301,13 @@ class Names(unittest.TestCase):
                     self.assertTrue(names.valid("skill", folder.name), folder.name)
 
     def test_the_plugin_and_the_terminal_panel_read_the_same_patterns(self):
-        plugin = (ROOT / "desktop-plugin" / "src" / "plugin.cjs").read_text()
+        plugin = (ROOT / "desktop-plugin" / "src" / "plugin.cjs").read_text(encoding="utf-8")
         for constant, pattern in names.PLUGIN_CONSTANTS.items():
             found = re.search(rf"^const {constant} = /(.*)/;", plugin, re.M)
             self.assertIsNotNone(found, constant)
             self.assertEqual(found.group(1), f"^{pattern}$", constant)
         for name in ("runner.js", "render.js"):
-            panel = (ROOT / "tui-plugin" / "src" / name).read_text()
+            panel = (ROOT / "tui-plugin" / "src" / name).read_text(encoding="utf-8")
             found = re.search(r"^(?:export )?const FLOW_ID = /(.*)/;", panel, re.M)
             self.assertIsNotNone(found, name)
             self.assertEqual(found.group(1), f"^{names.FLOW_ID_PATTERN}$", name)

@@ -9,6 +9,7 @@ import threading
 import unittest
 from pathlib import Path
 
+from tests.launch import bare_env
 from agentgraph import graphedit, transitions
 from agentgraph.check import main as check_main
 
@@ -38,7 +39,7 @@ class Edit(unittest.TestCase):
         self.dir = Path(self.tmp.name) / ".opencode" / "graph"
         self.dir.mkdir(parents=True)
         self.file = self.dir / "t.json"
-        self.file.write_text(json.dumps(graph(), indent=2))
+        self.file.write_text(json.dumps(graph(), indent=2), encoding="utf-8")
 
     def run_cli(self, *args):
         out = io.StringIO()
@@ -47,7 +48,7 @@ class Edit(unittest.TestCase):
         return code, out.getvalue()
 
     def raw(self):
-        return json.loads(self.file.read_text())
+        return json.loads(self.file.read_text(encoding="utf-8"))
 
     def node(self, i):
         return next(n for n in self.raw()["nodes"] if n["id"] == i)
@@ -178,7 +179,7 @@ class Edit(unittest.TestCase):
 
     def test_evidence_file_and_stalled(self):
         evidence = Path(self.tmp.name) / "evidence.txt"
-        evidence.write_text("long evidence\n")
+        evidence.write_text("long evidence\n", encoding="utf-8")
         self.assertEqual(self.run_cli("set", "t", "n1", "--evidence-file", str(evidence), "--stalled", "true",
                                       "--note", "same output twice")[0], 0)
         self.assertEqual(self.node("n1")["evidence"], "long evidence")
@@ -193,7 +194,7 @@ class Edit(unittest.TestCase):
     def test_pre_existing_problems_do_not_block_an_unrelated_edit_and_the_history_is_not_saved(self):
         raw = graph()
         raw["nodes"][0].update(status="passed", evidence="")  # already invalid: passed without evidence
-        self.file.write_text(json.dumps(raw))
+        self.file.write_text(json.dumps(raw), encoding="utf-8")
         code, out = self.run_cli("set", "t", "n2", "--note", "unrelated")
         self.assertEqual(code, 0, out)
         self.assertFalse((self.dir / ".history" / "t.state").exists())
@@ -202,7 +203,7 @@ class Edit(unittest.TestCase):
         self.dispatch_pass("n1")
         raw = self.raw()
         raw["nodes"][0]["attempts"] = 0  # a hand edit lowered the attempts after the last state
-        self.file.write_text(json.dumps(raw))
+        self.file.write_text(json.dumps(raw), encoding="utf-8")
         code, out = self.run_cli("set", "t", "n1", "--note", "touch")
         self.assertEqual(code, 0, out)  # already broken before this write: not added by it
         code, out = self.check()
@@ -212,7 +213,7 @@ class Edit(unittest.TestCase):
     def test_runs_as_a_module(self):
         result = subprocess.run([sys.executable, "-P", "-m", "agentgraph.graphedit", "set", "t", "n1", "--note", "hi",
                                  "--dir", str(self.dir)], cwd=ORCH, capture_output=True, text=True,
-                                env={"PYTHONPATH": str(ORCH), "PATH": "/usr/bin:/bin"})
+                                env=bare_env(PYTHONPATH=str(ORCH)))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("n1: pending", result.stdout)
 

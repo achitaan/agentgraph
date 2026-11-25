@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 import unittest
 
+from tests.launch import home_env
+from tests.winskip import needs_symlinks
 from agentgraph import portable
 from tests.test_install import InstallCase, PRESET, SLIM, read_json, write_json
 
@@ -54,6 +56,7 @@ class Tokenize(unittest.TestCase):
         self.assertEqual(portable.render(f"{portable.TOKEN}/x", d, False), d + "/x")
 
 
+@unittest.skipUnless(shutil.which("sh") and shutil.which("rsync"), "sync.sh and install.sh need sh and rsync (Unix-only tools)")
 class RoundTrip(InstallCase):
     LIVE_NAME = "live config"  # a space in the folder name
 
@@ -81,12 +84,12 @@ class RoundTrip(InstallCase):
             bash[RULE.format(str(self.live) + "-old")] = "allow"  # a longer folder name: not ours
         write_json(self.live / PRESET, data)
         self.prompt = self.live / SLIM / "reviewer_append.md"
-        text = self.prompt.read_text()
-        self.prompt.write_text(text.rstrip("\n") + "\n\n" + LINE.format(self.live) + LINE.format(str(self.live) + "-old"))
+        text = self.prompt.read_text(encoding="utf-8")
+        self.prompt.write_text(text.rstrip("\n") + "\n\n" + LINE.format(self.live) + LINE.format(str(self.live) + "-old"), encoding="utf-8")
         self.live_preset_bytes = (self.live / PRESET).read_bytes()
 
     def run_sh(self, script, config_dir, check=True):
-        env = {**os.environ, "HOME": str(self.home), "OPENCODE_CONFIG_DIR": str(config_dir)}
+        env = {**os.environ, **home_env(self.home), "OPENCODE_CONFIG_DIR": str(config_dir)}
         proc = subprocess.run(["sh", str(self.kit / script)], env=env, capture_output=True, text=True)
         if check:
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
@@ -110,10 +113,10 @@ class RoundTrip(InstallCase):
             self.assertIn(RULE.format(str(self.live) + "-old"), bash)  # the longer name is untouched
         self.assertNotIn(str(self.live).encode() + b"/", mirrored.replace(str(self.live).encode() + b"-old", b""))
         self.assertEqual(mirrored.replace(portable.TOKEN.encode(), str(self.live).encode()), self.live_preset_bytes)
-        text = (self.mirror() / SLIM / "reviewer_append.md").read_text()
+        text = (self.mirror() / SLIM / "reviewer_append.md").read_text(encoding="utf-8")
         self.assertIn(LINE.format(portable.TOKEN), text)
         self.assertIn(LINE.format(str(self.live) + "-old"), text)
-        self.assertEqual(text.replace(portable.TOKEN, str(self.live)), self.prompt.read_text())
+        self.assertEqual(text.replace(portable.TOKEN, str(self.live)), self.prompt.read_text(encoding="utf-8"))
 
     def test_a_second_sync_changes_nothing(self):
         before = tree_bytes(self.mirror())
@@ -127,7 +130,7 @@ class RoundTrip(InstallCase):
         data = read_json(self.scratch / PRESET)
         for preset in data["presets"].values():
             self.assertIn(RULE.format(self.scratch), preset["reviewer"]["permission"]["bash"])
-        text = (self.scratch / SLIM / "reviewer_append.md").read_text()
+        text = (self.scratch / SLIM / "reviewer_append.md").read_text(encoding="utf-8")
         self.assertIn(LINE.format(self.scratch), text)
         self.assertIn(LINE.format(str(self.live) + "-old"), text)
         for rel, data in tree_bytes(self.scratch).items():
@@ -142,14 +145,14 @@ class RoundTrip(InstallCase):
     def test_a_file_the_user_kept_is_not_rewritten(self):
         self.install_scratch()
         mine = self.scratch / SLIM / "reviewer_append.md"
-        mine.write_text(mine.read_text() + "my own line\n")
+        mine.write_text(mine.read_text(encoding="utf-8") + "my own line\n", encoding="utf-8")
         kept = mine.read_bytes()
         # the toolkit moves on, so the user's file is kept and the toolkit's version goes beside it
         theirs = self.mirror() / SLIM / "reviewer_append.md"
-        theirs.write_text(theirs.read_text() + "a new toolkit line\n")
+        theirs.write_text(theirs.read_text(encoding="utf-8") + "a new toolkit line\n", encoding="utf-8")
         self.install_scratch()
         self.assertEqual(mine.read_bytes(), kept)
-        beside = mine.with_name(mine.name + ".toolkit-new").read_text()
+        beside = mine.with_name(mine.name + ".toolkit-new").read_text(encoding="utf-8")
         self.assertIn("a new toolkit line", beside)
         self.assertIn(LINE.format(self.scratch), beside)
         self.assertNotIn(portable.TOKEN, beside)
@@ -162,22 +165,23 @@ class RoundTrip(InstallCase):
         self.install_scratch()
         merged = read_json(self.scratch / PRESET)
         self.assertEqual(merged["preset"], "my-own")
-        self.assertNotIn(portable.TOKEN, (self.scratch / PRESET).read_text())
+        self.assertNotIn(portable.TOKEN, (self.scratch / PRESET).read_text(encoding="utf-8"))
 
 
 class Links(unittest.TestCase):
+    @needs_symlinks
     def test_a_folder_reached_through_a_link_is_known_by_both_paths(self):
         base = os.path.realpath(tempfile.mkdtemp(prefix="portable-test-"))
         self.addCleanup(shutil.rmtree, base, ignore_errors=True)
         real = Path(base) / "real"
         real.mkdir()
-        (Path(base) / "link").symlink_to(real)
+        (Path(base) / "link").symlink_to(real, target_is_directory=True)
         names = portable.folder_names(str(Path(base) / "link"))
         self.assertEqual(names, [str(Path(base) / "link"), str(real)])
         f = Path(base) / "f.md"
-        f.write_text(f"{base}/link/x {real}/y\n")
+        f.write_text(f"{base}/link/x {real}/y\n", encoding="utf-8")
         self.assertTrue(portable.tokenize_file(f, names))
-        self.assertEqual(f.read_text(), f"{portable.TOKEN}/x {portable.TOKEN}/y\n")
+        self.assertEqual(f.read_text(encoding="utf-8"), f"{portable.TOKEN}/x {portable.TOKEN}/y\n")
         self.assertFalse(portable.tokenize_file(f, names))
 
 

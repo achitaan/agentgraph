@@ -11,6 +11,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from tests.launch import LAUNCHER
 from agentgraph import server, skillset
 from agentgraph.snapshot_json import skills_document
 
@@ -209,7 +210,7 @@ class Launcher(Copies):
     def test_bin_agentgraph_skills_runs_skillset(self):
         skill = self.lacking("impl-openai")
         options = ["--config", str(self.config), "--map", str(self.map), "--backups", str(self.backups)]
-        run = lambda *args: subprocess.run([str(ROOT / "bin/agentgraph"), "skills", *args, *options], cwd=self.root,
+        run = lambda *args: subprocess.run([*LAUNCHER, "skills", *args, *options], cwd=self.root,
                                            capture_output=True, text=True, timeout=30, env={**os.environ})
         added = run("add", "impl-openai", skill, "--json")
         self.assertEqual(added.returncode, 0, added.stderr)

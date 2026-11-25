@@ -19,7 +19,7 @@ class Rename(Base):
         super().setUp()
         self.commands = self.root / "commands"
         self.commands.mkdir()
-        (self.commands / "mine.md").write_text("---\ndescription: mine\n---\nHand-written.\n")
+        (self.commands / "mine.md").write_text("---\ndescription: mine\n---\nHand-written.\n", encoding="utf-8")
         self.add(template="verifier")  # checker
 
     def full(self):
@@ -62,7 +62,7 @@ class Rename(Base):
         groups = {item["id"]: item for item in teams.teams(self.structure)}
         self.assertEqual(groups[led["id"]]["lead"], "auditor")
         self.assertIn("auditor", groups[member["id"]]["members"])
-        command = (self.commands / "check-loop.md").read_text()
+        command = (self.commands / "check-loop.md").read_text(encoding="utf-8")
         self.assertIn("impl-openai -> auditor -> impl-openai", command)
         self.assertNotIn("checker", command.replace(f"(flow {flow['id']})", ""))  # a flow keeps its id (file name)
         self.assertIn(flow["id"], flows)
@@ -92,7 +92,7 @@ class Rename(Base):
         self.assertEqual(self.full(), before)
 
     def test_refused_sources(self):
-        (self.agents / "mine.md").write_text("---\ndescription: mine\nmodel: a/b\n---\nBody\n")
+        (self.agents / "mine.md").write_text("---\ndescription: mine\nmodel: a/b\n---\nBody\n", encoding="utf-8")
         before = self.full()
         for name, why in (("orchestrator", "cannot be renamed"), ("council", "cannot be renamed"),
                           ("councillor", "cannot be renamed"), ("councillor-a", "cannot be renamed"),
@@ -105,7 +105,7 @@ class Rename(Base):
 
     def test_refused_new_names(self):
         self.add("other", template="verifier")
-        (self.agents / "held.md.disabled").write_text("off\n")
+        (self.agents / "held.md.disabled").write_text("off\n", encoding="utf-8")
         before = self.full()
         for to, why in (("checker", "already has that name"), ("Bad", "invalid agent name"), ("-x", "invalid agent name"),
                         ("a" * 65, "invalid agent name"), ("councillor-x", "council seats"), ("orchestrator", "built-in"),
@@ -117,7 +117,7 @@ class Rename(Base):
 
     def test_a_name_the_structure_already_uses_is_refused(self):
         group = sorted(p for p in self.structure.iterdir() if p.is_dir() and p.name not in ("flows", "teams"))[-1]
-        (group / "auditor.md").write_text("A stale file.\n")
+        (group / "auditor.md").write_text("A stale file.\n", encoding="utf-8")
         before = self.full()
         with self.assertRaisesRegex(roster.RosterError, "already has a file in the structure folder"):
             self.rename()
@@ -169,10 +169,10 @@ class Rename(Base):
 
     def test_restore_is_refused_when_the_old_name_was_taken_since(self):
         result = self.rename()
-        obj = json.loads(self.config.read_text())
+        obj = json.loads(self.config.read_text(encoding="utf-8"))
         preset = next(iter(obj["presets"]))
         obj["presets"][preset]["checker"] = {"model": "a/b"}
-        self.config.write_text(json.dumps(obj))
+        self.config.write_text(json.dumps(obj), encoding="utf-8")
         changed = self.full()
         with self.assertRaisesRegex(roster.RosterError, "old name is taken.*already exists in preset"):
             self.restore(result["record"])
@@ -198,7 +198,7 @@ class Rename(Base):
         self.tie_up()
         result = self.rename()
         record = Path(result["record"])
-        data = json.loads(record.read_text())
+        data = json.loads(record.read_text(encoding="utf-8"))
         before = self.full()
         for change in (lambda d: d.update(to="impl-claude"), lambda d: d["structure"].append(
                 {"folder": "flows", "name": "x.md", "before": None, "after": None}),
@@ -206,7 +206,7 @@ class Rename(Base):
                 lambda d: d.update(extra=1)):
             tampered = json.loads(json.dumps(data))
             change(tampered)
-            record.write_text(json.dumps(tampered))
+            record.write_text(json.dumps(tampered), encoding="utf-8")
             with self.assertRaisesRegex(roster.RosterError, "invalid undo record"):
                 self.restore(str(record))
             self.assertEqual(self.full(), before)
@@ -242,7 +242,7 @@ class RenameEndpoint(Rename):
         httpd = self.serve()
         status, body = self.call(httpd, {"op": "rename", "name": "checker", "to": "auditor"})
         self.assertEqual((status, body["agent"], body["renamed"]["commands"]), (200, "auditor", ["check-loop"]))
-        self.assertIn("auditor", (self.commands / "check-loop.md").read_text())
+        self.assertIn("auditor", (self.commands / "check-loop.md").read_text(encoding="utf-8"))
         status, _ = self.call(httpd, {"op": "restore", "record": body["record"]})
         self.assertEqual(status, 200)
         self.assertEqual(self.full(), before)

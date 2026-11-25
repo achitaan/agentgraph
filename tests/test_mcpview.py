@@ -14,6 +14,7 @@ import threading
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
+from tests.launch import home_env
 from agentgraph import mcpview, names, server
 
 SCRATCH = Path("/private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode/mcpview-tests")
@@ -36,9 +37,9 @@ class Scratch(unittest.TestCase):
 
     def write(self, config=None, opencode=None):
         if config is not None:
-            self.config.write_text(json.dumps(config))
+            self.config.write_text(json.dumps(config), encoding="utf-8")
         if opencode is not None:
-            self.opencode.write_text(json.dumps(opencode))
+            self.opencode.write_text(json.dumps(opencode), encoding="utf-8")
 
     def annotate(self, *agent_names):
         document = doc(*agent_names)
@@ -138,8 +139,8 @@ class TheRule(Scratch):
         self.assertEqual(got["councillor-alpha"], [])
 
     def test_unreadable_settings_say_nothing(self):
-        self.config.write_text("{not json " + MARKER)
-        self.opencode.write_text("[" + MARKER)
+        self.config.write_text("{not json " + MARKER, encoding="utf-8")
+        self.opencode.write_text("[" + MARKER, encoding="utf-8")
         document = self.annotate("orchestrator")
         self.assertEqual(document["mcp"], [{"name": "context7", "source": "plugin", "kind": "remote", "enabled": True,
                                             "state": "on", "reason": "", "live": False, "agents": []},
@@ -215,7 +216,7 @@ class Secrets(Scratch):
         self.addCleanup(logging.getLogger().removeHandler, handler)
         with redirect_stdout(out), redirect_stderr(err):
             self.annotate("orchestrator")
-            self.config.write_text("{" + MARKER)  # a broken plugin file: the error text must not quote it
+            self.config.write_text("{" + MARKER, encoding="utf-8")  # a broken plugin file: the error text must not quote it
             self.annotate("orchestrator")
         self.assertEqual(out.getvalue() + err.getvalue(), "")
 
@@ -257,10 +258,10 @@ class Secrets(Scratch):
         home = self.root / "home"
         config_dir = home / ".config" / "opencode"
         config_dir.mkdir(parents=True)
-        (config_dir / "oh-my-opencode-slim.json").write_text(json.dumps(plugin))
-        (config_dir / "opencode.json").write_text(json.dumps(opencode))
+        (config_dir / "oh-my-opencode-slim.json").write_text(json.dumps(plugin), encoding="utf-8")
+        (config_dir / "opencode.json").write_text(json.dumps(opencode), encoding="utf-8")
         run = subprocess.run([sys.executable, "-P", "-m", "agentgraph.snapshot_json"], cwd=ROOT, capture_output=True, text=True,
-                             env={**os.environ, "HOME": str(home), "PYTHONPATH": str(ROOT)}, timeout=60)
+                             env={**os.environ, **home_env(home), "PYTHONPATH": str(ROOT)}, timeout=60)
         self.assertNotIn(MARKER, run.stdout + run.stderr)
         document = json.loads(run.stdout)
         self.assertIn("plain-local", [row["name"] for row in document["mcp"]], run.stdout[:300] + run.stderr[:300])

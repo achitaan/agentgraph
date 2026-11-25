@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 
+from tests.launch import home_env
 from agentgraph import paths
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -19,9 +20,9 @@ class PathsCase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
         self.repo = self.base / "repo"
         (self.repo / "structure" / "01-core").mkdir(parents=True)
-        (self.repo / "structure" / "01-core" / "orchestrator.md").write_text("repo agent\n")
-        (self.repo / "SKILLS.md").write_text("repo skills\n")
-        (self.repo / "task-profiles.md").write_text("repo profiles\n")
+        (self.repo / "structure" / "01-core" / "orchestrator.md").write_text("repo agent\n", encoding="utf-8")
+        (self.repo / "SKILLS.md").write_text("repo skills\n", encoding="utf-8")
+        (self.repo / "task-profiles.md").write_text("repo profiles\n", encoding="utf-8")
         self.home = self.base / "home"
         self.home.mkdir()
         self.default = self.home / ".config" / "opencode" / "agentgraph-personal"
@@ -37,7 +38,7 @@ class PathsCase(unittest.TestCase):
                 target.mkdir(parents=True)
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text("personal\n")
+                target.write_text("personal\n", encoding="utf-8")
 
 
 class Precedence(PathsCase):
@@ -107,8 +108,8 @@ class Init(PathsCase):
     def test_copies_the_checkouts_items_and_makes_them_the_active_ones(self):
         code, lines = self.run_init()
         self.assertEqual(code, 0)
-        self.assertEqual((self.default / "SKILLS.md").read_text(), "repo skills\n")
-        self.assertEqual((self.default / "structure" / "01-core" / "orchestrator.md").read_text(), "repo agent\n")
+        self.assertEqual((self.default / "SKILLS.md").read_text(encoding="utf-8"), "repo skills\n")
+        self.assertEqual((self.default / "structure" / "01-core" / "orchestrator.md").read_text(encoding="utf-8"), "repo agent\n")
         self.assertTrue((self.default / "setups").is_dir())
         self.assertEqual(sum(line.startswith(("copied", "created")) for line in lines), 4)
         self.assertEqual(self.resolve("skills_map").source, "home")
@@ -116,18 +117,18 @@ class Init(PathsCase):
 
     def test_refuses_to_overwrite_and_keeps_the_users_edit(self):
         self.run_init()
-        (self.default / "SKILLS.md").write_text("my edit\n")
-        (self.repo / "SKILLS.md").write_text("repo skills v2\n")
+        (self.default / "SKILLS.md").write_text("my edit\n", encoding="utf-8")
+        (self.repo / "SKILLS.md").write_text("repo skills v2\n", encoding="utf-8")
         code, lines = self.run_init()
         self.assertEqual(code, 1)
-        self.assertEqual((self.default / "SKILLS.md").read_text(), "my edit\n")
+        self.assertEqual((self.default / "SKILLS.md").read_text(encoding="utf-8"), "my edit\n")
         self.assertEqual(sum(line.startswith("refused") for line in lines), 4)
 
     def test_copies_only_what_is_missing(self):
         self.personal(self.default, "SKILLS.md")
         code, lines = self.run_init()
         self.assertEqual(code, 1)
-        self.assertEqual((self.default / "SKILLS.md").read_text(), "personal\n")
+        self.assertEqual((self.default / "SKILLS.md").read_text(encoding="utf-8"), "personal\n")
         self.assertTrue((self.default / "task-profiles.md").is_file())
 
     def test_env_folder_is_created_and_filled(self):
@@ -141,7 +142,7 @@ class Init(PathsCase):
 class Cli(PathsCase):
     def run_cli(self, *args, env=None):
         full = {k: v for k, v in os.environ.items() if k != paths.ENV}
-        full.update(HOME=str(self.home), **(env or {}))
+        full.update(home_env(self.home), **(env or {}))
         return subprocess.run([sys.executable, "-m", "agentgraph.paths", *args], cwd=ROOT, env=full,
                               capture_output=True, text=True)
 
@@ -162,7 +163,7 @@ class Cli(PathsCase):
         code = ("from agentgraph import skillset, setups; "
                 "print(skillset.MAP); print(skillset.PROFILES); print(setups.SETUPS)")
         out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True,
-                             env={**os.environ, "HOME": str(self.home), paths.ENV: str(self.env_folder)})
+                             env={**os.environ, **home_env(self.home), paths.ENV: str(self.env_folder)})
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(out.stdout.split(), [str(self.env_folder / n) for n in ("SKILLS.md", "task-profiles.md", "setups")])
 

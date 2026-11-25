@@ -293,10 +293,10 @@ class CommandTests(unittest.TestCase):
         self.folder = Path(temporary.name)
         self.db = self.folder / "opencode.db"
         self.history = self.folder / "settings.jsonl"
-        self.history.write_text(json.dumps(HISTORY[0]) + "\n")
+        self.history.write_text(json.dumps(HISTORY[0]) + "\n", encoding="utf-8")
         self.log = self.folder / "out" / "cost-check.jsonl"
         self.rollovers = self.folder / "rollover.log"
-        self.rollovers.write_text("".join(json.dumps(rolled("a", NOW - 60 * n)) + "\n" for n in range(3)) + "not json\n")
+        self.rollovers.write_text("".join(json.dumps(rolled("a", NOW - 60 * n)) + "\n" for n in range(3)) + "not json\n", encoding="utf-8")
         self.make()
 
     def make(self, time_column=True):
@@ -326,13 +326,13 @@ class CommandTests(unittest.TestCase):
         self.assertIn("3. compactions: worse", lines[3])                                  # the failed one is left out; one with no cost counts as nothing
         self.assertIn("2 recently costing $2.00", lines[3])
         self.assertTrue(lines[4].startswith("4. rollovers: same (3 recently"), lines[4])
-        saved = self.log.read_text().splitlines()
+        saved = self.log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(saved), 1)
         row = json.loads(saved[0])
         self.assertEqual((row["date"], row["days"]), (costcheck.day_of(NOW), 7))
         self.assertNotIn('"line"', saved[0])
         self.run_main()
-        self.assertEqual(len(self.log.read_text().splitlines()), 2)
+        self.assertEqual(len(self.log.read_text(encoding="utf-8").splitlines()), 2)
         self.assertEqual([path.name for path in self.log.parent.iterdir()], ["cost-check.jsonl"])
 
     def test_json_output(self):
@@ -360,12 +360,12 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(costcheck.check_log_path(), self.folder / "own" / "cost-check.jsonl")
             self.assertEqual(costcheck.rollover_log_path(), self.folder / "roll" / "rollover.log")
             (self.folder / "roll").mkdir()
-            (self.folder / "roll" / "rollover.log").write_text(json.dumps(rolled("a", NOW)) + "\n")
+            (self.folder / "roll" / "rollover.log").write_text(json.dumps(rolled("a", NOW)) + "\n", encoding="utf-8")
             out = io.StringIO()
             with mock.patch("time.time", return_value=NOW), contextlib.redirect_stdout(out):
                 cost.main(["--check", "--db", str(self.db), "--settings-log", str(self.history), "--config", str(self.folder / "none.json")])
             self.assertIn("4. rollovers: same (1 recently", out.getvalue())
-            self.assertEqual(len((self.folder / "own" / "cost-check.jsonl").read_text().splitlines()), 1)
+            self.assertEqual(len((self.folder / "own" / "cost-check.jsonl").read_text(encoding="utf-8").splitlines()), 1)
 
     def test_a_database_without_the_time_column_gets_the_time_from_the_message(self):
         self.make(time_column=False)
@@ -379,7 +379,7 @@ class CommandTests(unittest.TestCase):
 
     def test_an_unwritable_log_still_prints(self):
         blocker = self.folder / "file"
-        blocker.write_text("x")
+        blocker.write_text("x", encoding="utf-8")
         self.log = blocker / "sub" / "cost-check.jsonl"
         code, text = self.run_main()
         self.assertEqual((code, len(text.splitlines())), (0, 9))

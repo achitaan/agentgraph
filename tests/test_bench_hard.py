@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 
 from agentgraph import bench
+from tests.winskip import posix_only
 
 IDS = ["h1-page-count", "h2-contact-shape", "h3-todo-flags", "h4-duration-spec"]
 SUITE = bench.BENCH_DIR / "suites" / "hard.json"
@@ -71,12 +72,14 @@ class HardTasks(unittest.TestCase):
                         with self.subTest(name=name, layer=layer, file=path.name):
                             self.assertFalse(twin.is_file() and twin.read_bytes() == path.read_bytes())
 
+    @posix_only  # the scenarios' check is `python3 -m unittest ...`; the benchmark sandbox is Mac and Linux only
     def test_untouched_fixture_fails_the_visible_check(self):
         for name in IDS:
             with self.subTest(name=name):
                 scenario, work = self.fresh(name)
                 self.assertFalse(visible(scenario, work))
 
+    @posix_only  # the scenarios' check is `python3 -m unittest ...`; the benchmark sandbox is Mac and Linux only
     def test_naive_passes_visible_and_fails_hidden(self):
         for name in IDS:
             with self.subTest(name=name):
@@ -84,6 +87,7 @@ class HardTasks(unittest.TestCase):
                 self.assertTrue(visible(scenario, work))
                 self.assertFalse(self.hidden(scenario, work)["passed"])
 
+    @posix_only  # the scenarios' check is `python3 -m unittest ...`; the benchmark sandbox is Mac and Linux only
     def test_reference_passes_visible_and_hidden(self):
         for name in IDS:
             with self.subTest(name=name):

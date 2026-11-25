@@ -47,7 +47,7 @@ class Scratch(unittest.TestCase):
 
     def write(self, task="t", nodes=None, events=None, **extra):
         path = self.directory / f"{task}.json"
-        path.write_text(json.dumps(graph(task, nodes if nodes is not None else [worker(), gate()], events, **extra)))
+        path.write_text(json.dumps(graph(task, nodes if nodes is not None else [worker(), gate()], events, **extra)), encoding="utf-8")
         return path
 
     def run_main(self, *args, now=NOW):
@@ -76,7 +76,7 @@ class Scratch(unittest.TestCase):
 
     def edit(self, task="t", node="w", offset=1.0, undone=False):
         self.home.mkdir(parents=True, exist_ok=True)
-        with (self.home / "edits.jsonl").open("a") as stream:
+        with (self.home / "edits.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps({"time": PASS_AT + offset, "id": "e" * 12, "task": task, "graph": "g", "node": node,
                                      "agent": "impl-openai", "lines_added": 1, "lines_removed": 0, "undone": undone}) + "\n")
 
@@ -84,7 +84,7 @@ class Scratch(unittest.TestCase):
         ledger.feedback(self.home, PASS_AT + offset, "it missed a thing", agent=agent, task=task)
 
     def row(self):
-        return [json.loads(line) for line in (self.home / "runs.jsonl").read_text().splitlines()][0]
+        return [json.loads(line) for line in (self.home / "runs.jsonl").read_text(encoding="utf-8").splitlines()][0]
 
 
 class Counting(Scratch):
@@ -158,7 +158,7 @@ class Counting(Scratch):
         self.write()
         self.record()
         self.home.mkdir(parents=True, exist_ok=True)
-        with (self.home / "edits.jsonl").open("a") as stream:
+        with (self.home / "edits.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps({"time": PASS_AT + 5, "id": "a" * 12, "task": "t", "node": "w", "agent": "x",
                                      "lines_added": None, "lines_removed": None, "undone": False}) + "\n")
         self.assertEqual(self.verifier()["overturned"], 0)
@@ -234,7 +234,7 @@ class Window(Scratch):
         for task in tasks:
             path = self.directory / f"{task}.json"
             path.write_text(json.dumps(graph(task, [worker(), gate()], [event("g", "evaluated", offset, "PASS"),
-                                                                       event("w", "retried", offset + 10)])))
+                                                                       event("w", "retried", offset + 10)])), encoding="utf-8")
         self.record()
 
     def test_due_needs_two_overturned_in_two_tasks(self):
@@ -308,12 +308,12 @@ class Safety(Scratch):
     def test_stored_entries_are_checked_again_on_read(self):
         self.write()
         self.record()
-        rows = [json.loads(line) for line in (self.home / "runs.jsonl").read_text().splitlines()]
+        rows = [json.loads(line) for line in (self.home / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
         rows[0]["verifier"]["list"] = [{"node": "g\nevil", "time": 1, "covers": ["w"], "sent_back": True, "run_again": True},
                                        {"node": "g", "time": "x", "covers": ["w"], "sent_back": True, "run_again": True},
                                        {"node": "g", "time": 1, "covers": ["w\n"], "sent_back": True, "run_again": True},
                                        {"node": "g", "time": 1, "covers": ["w"], "sent_back": "yes", "run_again": True}, 5]
-        (self.home / "runs.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+        (self.home / "runs.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
         self.assertEqual(self.verifier()["passes"], 0)
 
     def test_the_other_signals_keep_their_keys(self):

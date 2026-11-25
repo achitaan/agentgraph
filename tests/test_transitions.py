@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentgraph import outputs, transitions
+from agentgraph import osfs, outputs, transitions
 from agentgraph.check import main
 from agentgraph.sources import graph_files
 
@@ -251,7 +251,7 @@ class Warnings(unittest.TestCase):
             self.assertTrue(any("does not exist" in w for w in found), found)
             self.assertTrue(any("session ses_2 is used by" in w for w in found), found)
             (graph_dir.parent / "artifacts" / "t" / "n1" / "r1").mkdir(parents=True)
-            (graph_dir.parent / "artifacts" / "t" / "n1" / "r1" / "handoff.md").write_text("x")
+            (graph_dir.parent / "artifacts" / "t" / "n1" / "r1" / "handoff.md").write_text("x", encoding="utf-8")
             self.assertFalse(any("n1 artifact" in w for w in transitions.warnings(raw, graph_dir / "t.json")))
             stall = transitions.warnings(running, graph_dir / "t.json")
             self.assertTrue(any("n2 has 3 attempts" in w and "stall candidate" in w for w in stall), stall)
@@ -271,7 +271,7 @@ class Record(unittest.TestCase):
 
     def test_save_load_and_listing(self):
         with tempfile.TemporaryDirectory() as folder:
-            fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+            fd = osfs.open(folder, os.O_RDONLY | osfs.O_DIRECTORY)
             try:
                 self.assertIsNone(transitions.load_state(fd, "t"))
                 state = transitions.state_of(base())
@@ -279,22 +279,22 @@ class Record(unittest.TestCase):
                 self.assertFalse(transitions.save_state(fd, "t", state))  # same bytes: not rewritten
                 self.assertEqual(transitions.load_state(fd, "t"), json.loads(json.dumps(state)))
             finally:
-                os.close(fd)
+                osfs.close(fd)
             self.assertEqual(sorted(os.listdir(Path(folder) / ".history")), ["t.state"])
-            (Path(folder) / "t.json").write_text("{}")
+            (Path(folder) / "t.json").write_text("{}", encoding="utf-8")
             files, _ = graph_files(Path(folder))
             self.assertEqual([p.name for p in files], ["t.json"])  # the history is never taken for a graph
 
     def test_an_unreadable_record_is_a_warning_not_a_crash(self):
         with tempfile.TemporaryDirectory() as folder:
             (Path(folder) / ".history").mkdir()
-            (Path(folder) / ".history" / "t.state").write_text("not json")
-            fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+            (Path(folder) / ".history" / "t.state").write_text("not json", encoding="utf-8")
+            fd = osfs.open(folder, os.O_RDONLY | osfs.O_DIRECTORY)
             try:
                 with self.assertRaises(transitions.HistoryError):
                     transitions.load_state(fd, "t")
             finally:
-                os.close(fd)
+                osfs.close(fd)
 
 
 class CheckEndToEnd(unittest.TestCase):
@@ -310,7 +310,7 @@ class CheckEndToEnd(unittest.TestCase):
         (self.structure / "agents").mkdir()
 
     def write(self, raw):
-        (self.graph_dir / "t.json").write_text(json.dumps(raw, indent=1))
+        (self.graph_dir / "t.json").write_text(json.dumps(raw, indent=1), encoding="utf-8")
 
     def check(self, *extra):
         out = io.StringIO()
@@ -372,17 +372,17 @@ class CheckEndToEnd(unittest.TestCase):
     def test_corrupt_history_is_ignored_with_a_warning_and_replaced(self):
         self.write(base())
         (self.graph_dir / ".history").mkdir()
-        self.state_file().write_text("{broken")
+        self.state_file().write_text("{broken", encoding="utf-8")
         code, out = self.check()
         self.assertEqual(code, 0, out)
         self.assertIn("warning:", out)
-        self.assertEqual(json.loads(self.state_file().read_text())["version"], transitions.VERSION)
+        self.assertEqual(json.loads(self.state_file().read_text(encoding="utf-8"))["version"], transitions.VERSION)
 
     def test_task_filter_does_not_touch_other_graphs_history(self):
         self.write(base())
         other = base()
         other["task"] = "other"
-        (self.graph_dir / "other.json").write_text(json.dumps(other))
+        (self.graph_dir / "other.json").write_text(json.dumps(other), encoding="utf-8")
         self.assertEqual(self.check("--task", "t")[0], 0)
         self.assertEqual(sorted(p.name for p in (self.graph_dir / ".history").iterdir()), ["t.state"])
 

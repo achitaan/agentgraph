@@ -163,7 +163,7 @@ class FailedPutBack(Undo):
                 roster.remove_agent("impl-claude", **self.paths)
         record = str(caught.exception).split("undo record ")[1].split(" keeps")[0]
         self.assertTrue(Path(record).is_file())
-        kept = json.loads(Path(record).read_text())
+        kept = json.loads(Path(record).read_text(encoding="utf-8"))
         self.assertEqual([item["name"] for item in kept["structure"]], ["impl-claude.md"])
 
     def test_a_preset_restore_whose_take_back_failed_says_which_files(self):
@@ -321,10 +321,10 @@ class RenameNameCheck(Undo):
             if not planted:
                 planted.append(True)
                 with skillset._locked(self.config, self.map):
-                    obj = json.loads(self.config.read_text())
+                    obj = json.loads(self.config.read_text(encoding="utf-8"))
                     preset = next(iter(obj["presets"]))
                     obj["presets"][preset]["yusuf"] = {"model": "openai/gpt-5"}
-                    self.config.write_text(json.dumps(obj, indent=2) + "\n")
+                    self.config.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
                 before["state"] = self.full()
             return real(root)
 

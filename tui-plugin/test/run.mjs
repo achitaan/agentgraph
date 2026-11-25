@@ -7002,8 +7002,16 @@ test("n20 scene: the step marks of a quiet or orphan node stand still, a live on
 
 let failed = 0;
 const only = process.env.TEST_ONLY ? new RegExp(process.env.TEST_ONLY) : null; // TEST_ONLY=regex runs only the tests whose name matches
+let skipped = 0;
+// Tests that write a fake interpreter as a /bin/sh script, or run a real `python3`, cannot run on native Windows.
+const NEEDS_POSIX = /fakePython\(|#!\/bin\/sh|\/bin\/sh|python3/;
 for (const t of tests) {
   if (only && !only.test(t.name)) continue;
+  if (process.platform === "win32" && !t.name.startsWith("native Windows") && NEEDS_POSIX.test(t.fn.toString())) {
+    skipped += 1;
+    console.log("skip " + t.name + " (needs a POSIX shell)");
+    continue;
+  }
   try {
     await t.fn();
     console.log("ok   " + t.name);
@@ -7015,5 +7023,5 @@ for (const t of tests) {
 }
 globalThis.setInterval = realSetInterval;
 globalThis.clearInterval = realClearInterval;
-console.log(`\n${tests.length - failed} passed, ${failed} failed`);
+console.log(`\n${tests.length - failed - skipped} passed, ${failed} failed` + (skipped ? `, ${skipped} skipped` : ""));
 process.exit(failed ? 1 : 0);

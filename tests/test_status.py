@@ -54,7 +54,7 @@ class StatusTests(unittest.TestCase):
         self.dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
         graph_dir = self.dir / ".opencode" / "graph"
         graph_dir.mkdir(parents=True)
-        (graph_dir / "fixture.json").write_text(json.dumps(GRAPH))
+        (graph_dir / "fixture.json").write_text(json.dumps(GRAPH), encoding="utf-8")
         self.graph_dir = graph_dir
         self.db = self.dir / "o.db"
         # busy: ses_busy and ses_other_busy; idle since 90s ago: ses_idle; owner idle.

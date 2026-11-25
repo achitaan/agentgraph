@@ -11,40 +11,76 @@ permissions:
 
 jobs:
   tests:
-    name: ${{ matrix.os }}
+    name: ${{ matrix.os }}, Python ${{ matrix.python-version }}${{ matrix.no-sh && ', no sh' || '' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
-    defaults:
-      run:
-        shell: bash
-    env:
-      PYTHONUTF8: "1"
+        python-version: ["3.11", "3.12"]
+        no-sh: [false]
+        include:
+          # The same suite on Windows with Git's `sh` taken off PATH, so the `cmd` fallback for check commands
+          # and the install.cmd path are what is tested, as on a Windows machine without Git for Windows.
+          - os: windows-latest
+            python-version: "3.12"
+            no-sh: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      # The Python log is kept in a file so a failure can print its last 150 lines: `gh run view --log-failed`
-      # then shows them under this step.
-      - name: Python tests
+      # Windows runs from PowerShell (pwsh) with the console's own code page: no bash, no PYTHONUTF8, so a place
+      # that only works under UTF-8 or only with a Unix shell fails here as it would for a user.
+      # The Python log is kept in a file: a failure prints the names of the failing tests first, then the last
+      # 150 lines (`gh run view --log-failed` shows them under this step), and the log is uploaded at the end.
+      - name: Python tests (Windows, PowerShell)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if ('${{ matrix.no-sh }}' -eq 'true') {
+            $kept = $env:PATH -split ';' | Where-Object { $_ -and -not (Test-Path -LiteralPath (Join-Path $_ 'sh.exe')) }
+            $env:PATH = $kept -join ';'
+            if (Get-Command sh -ErrorAction SilentlyContinue) { throw 'sh is still on PATH' }
+            Write-Output 'sh removed from PATH'
+          }
+          python -m unittest discover -s tests -t . *> ci-python.log
+          $code = $LASTEXITCODE
+          $names = @(Select-String -Path ci-python.log -Pattern '^(ERROR|FAIL):' | ForEach-Object { $_.Line })
+          $totals = @(Select-String -Path ci-python.log -Pattern '^(Ran |OK|FAILED)' | ForEach-Object { $_.Line })
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### Python tests on ${{ matrix.os }}, Python ${{ matrix.python-version }}, no sh: ${{ matrix.no-sh }}: exit $code"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $totals
+          if ($code -ne 0) {
+            Write-Output "PYTHON TESTS FAILED (exit $code). Failing tests ($($names.Count)):"
+            $names | Select-Object -First 100
+            Write-Output 'Last 150 lines of the log (-Tail 150 ci-python.log):'
+            Get-Content ci-python.log -Tail 150
+          } else {
+            Get-Content ci-python.log -Tail 5
+          }
+          exit $code
+
+      - name: Python tests (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
         run: |
           set +e
           python -m unittest discover -s tests -t . > ci-python.log 2>&1
           code=$?
           {
-            echo "### Python tests on ${{ matrix.os }}: exit $code"
+            echo "### Python tests on ${{ matrix.os }}, Python ${{ matrix.python-version }}: exit $code"
             grep -E '^(Ran |OK|FAILED)' ci-python.log || true
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$code" -ne 0 ]; then
-            echo "PYTHON TESTS FAILED (exit $code). Last 150 lines of the log:"
+            echo "PYTHON TESTS FAILED (exit $code). Failing tests:"
+            grep -E '^(ERROR|FAIL):' ci-python.log | head -n 100
+            echo "Last 150 lines of the log:"
             tail -n 150 ci-python.log
           else
             tail -n 5 ci-python.log
@@ -52,17 +88,26 @@ jobs:
           exit "$code"
 
       - name: Terminal plugin tests
-        if: always()
+        if: ${{ always() && !matrix.no-sh }}
         run: node tui-plugin/test/run.mjs
 
       - name: Desktop plugin tests
-        if: always()
+        if: ${{ always() && !matrix.no-sh }}
         run: node desktop-plugin/test/harness.mjs
 
       - name: Rollover plugin tests
-        if: always()
+        if: ${{ always() && !matrix.no-sh }}
         run: node rollover-plugin/test.js
 
       - name: Output caps plugin tests
-        if: always()
+        if: ${{ always() && !matrix.no-sh }}
         run: node output-caps-plugin/test.js
+
+      - name: Keep the Python log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-log-${{ matrix.os }}-py${{ matrix.python-version }}${{ matrix.no-sh && '-no-sh' || '' }}
+          path: ci-python.log
+          if-no-files-found: ignore
+          retention-days: 14

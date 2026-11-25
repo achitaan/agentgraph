@@ -342,7 +342,7 @@ class Hub(Case):
         self.db.assistant("ses_root", [call("read", {"path": "/p"})])
         base = self.base()
         self.assertEqual(chatfeed.hub_activity("ses_root", base, db_path=self.dir / "none.db"), base)
-        (self.dir / "bad.db").write_text("not a database")
+        (self.dir / "bad.db").write_text("not a database", encoding="utf-8")
         self.assertEqual(chatfeed.hub_activity("ses_root", base, db_path=self.dir / "bad.db"), base)
         self.assertEqual(chatfeed.hub_activity("bad id", base, db_path=self.db.path), base)
         with patch.object(chatfeed, "_call_row", side_effect=RuntimeError("x")):

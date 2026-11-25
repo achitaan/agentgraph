@@ -27,7 +27,7 @@ class TeamsInCheck(unittest.TestCase):
         self.graphs.mkdir()
 
     def run_check(self, nodes):
-        (self.graphs / "team-task.json").write_text(json.dumps(graph(nodes)))
+        (self.graphs / "team-task.json").write_text(json.dumps(graph(nodes)), encoding="utf-8")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = check.main(["--dir", str(self.graphs), "--structure", str(self.root)])
