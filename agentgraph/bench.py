@@ -106,7 +106,7 @@ from contextlib import closing
 from pathlib import Path
 
 from . import cost as costmod
-from . import osproc, sidechat, sources
+from . import osfs, osproc, sidechat, sources
 
 HERE = Path(__file__).resolve().parent.parent
 BENCH_DIR = HERE / "bench"
@@ -302,6 +302,30 @@ def _inside(path: Path, folder: Path) -> bool:
         return False
 
 
+def _make_junction(link: Path, real: Path) -> None:
+    """Windows only: a directory junction, which needs no privilege (a symlink does)."""
+    import _winapi
+    _winapi.CreateJunction(str(real), str(link))
+
+
+def link_folder(link: Path, real: Path, *, windows=None, junction=None) -> None:
+    """Make `link` a link to the folder `real`. Everywhere but Windows (and wherever symlinks work): a symlink, as ever. On Windows a
+    user without the symlink privilege gets a directory junction instead; when that fails too the scratch home cannot share the real
+    database, state and cache folders, and a copy would read and write the wrong ones, so it is refused with the reason."""
+    try:
+        link.symlink_to(real)
+        return
+    except (OSError, NotImplementedError) as exc:
+        if not (osproc.is_windows() if windows is None else windows):
+            raise
+        first = exc
+    try:
+        (junction or _make_junction)(link, real)
+    except (OSError, ImportError, AttributeError) as exc:
+        raise BenchError(f"cannot link {link} to {real}: no symlink ({first}) and no junction ({exc}); turn on Windows Developer Mode "
+                         f"(it allows symlinks without administrator rights)") from exc
+
+
 def _new_scratch(to, *, pin_model, live: Path, temp_root: Path | None, real_home: Path | None) -> tuple[Path, Path, Path]:
     """The checks both kinds of copy share, then the empty scratch folder with its links to the real database, state and
     cache folders: (dir, home, config)."""
@@ -322,7 +346,7 @@ def _new_scratch(to, *, pin_model, live: Path, temp_root: Path | None, real_home
     if not live.is_dir():
         raise BenchError(f"no live config folder at {live}")
     target.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(target, 0o700)
+    osfs.chmod(target, 0o700)
     target = target.resolve()
     home = target / "home"
     config = home / ".config" / "opencode"
@@ -332,7 +356,7 @@ def _new_scratch(to, *, pin_model, live: Path, temp_root: Path | None, real_home
                        (home / ".cache" / "opencode", real_home / ".cache" / "opencode")):
         if real.is_dir():
             link.parent.mkdir(parents=True, exist_ok=True)
-            link.symlink_to(real)
+            link_folder(link, real)
     return target, home, config
 
 
@@ -634,7 +658,7 @@ def run_check(scenario: dict, work: Path, env: dict, db_path: Path | None = None
     hidden = scenario["dir"] / "hidden"
     aside = Path(tempfile.mkdtemp(prefix=WORK_PREFIX + "aside-", dir=work.parent))
     saved = aside / "model"
-    os.rename(work, saved)
+    osfs.rename(work, saved)
     try:
         shutil.copytree(saved, work, ignore=_plain_entries_only)
         if hidden.is_dir():
@@ -647,7 +671,7 @@ def run_check(scenario: dict, work: Path, env: dict, db_path: Path | None = None
             return {"passed": False, "detail": "check timed out"}
     finally:
         shutil.rmtree(work, ignore_errors=True)
-        os.rename(saved, work)
+        osfs.rename(saved, work)
         shutil.rmtree(aside, ignore_errors=True)
     lines = [ln.strip() for ln in (done.stdout + "\n" + done.stderr).splitlines() if ln.strip()]
     return {"passed": done.returncode == 0, "detail": (lines[-1] if lines else f"exit {done.returncode}")[:160]}
@@ -656,7 +680,10 @@ def run_check(scenario: dict, work: Path, env: dict, db_path: Path | None = None
 # ---- running the host ----
 
 def executable_path(executable: str | None = None) -> str:
-    exe = executable or os.environ.get("OPENCODE_CLI") or sidechat.DEFAULT_BINARY
+    exe = executable or os.environ.get("OPENCODE_CLI")
+    if not exe and osproc.is_windows():  # the usual install places only: the policy below is that PATH is never searched
+        exe = sidechat.windows_binary(which=lambda _name: None)
+    exe = exe or sidechat.DEFAULT_BINARY
     if not os.path.isabs(exe) or not os.path.isfile(exe):
         raise BenchError("the opencode CLI must be an absolute path to a file (set OPENCODE_CLI"
                          + ("; on Windows the full path of opencode.exe or opencode.cmd" if osproc.is_windows() else "")

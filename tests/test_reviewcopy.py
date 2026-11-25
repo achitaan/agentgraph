@@ -56,7 +56,7 @@ class Base(unittest.TestCase):
         self.project.mkdir()
         self.temp = self.base / "tmp"  # where the copy goes: TMPDIR, outside the project
         self.temp.mkdir()
-        self.enterContext(mock.patch.dict(os.environ, {"TMPDIR": str(self.temp)}))
+        self.enterContext(mock.patch.dict(os.environ, {"TMPDIR": str(self.temp), "AGENTGRAPH_LOCKDIR": self.enterContext(tempfile.TemporaryDirectory())}))  # AGENTGRAPH_LOCKDIR: the portable file layer's lock folder, kept out of both
         self.enterContext(mock.patch.object(tempfile, "tempdir", None))
         self.graph_dir = self.project / ".opencode" / "graph"
         self.graph_dir.mkdir(parents=True)

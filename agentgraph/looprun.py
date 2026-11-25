@@ -63,7 +63,6 @@ from __future__ import annotations
 
 import argparse
 import calendar
-import fcntl
 import hashlib
 import json
 import os
@@ -80,7 +79,7 @@ import time
 from contextlib import closing, contextmanager
 from pathlib import Path
 
-from . import bench, looptime, osproc, paths, sidechat, snapshot_json, sources
+from . import bench, looptime, osfs, osproc, paths, sidechat, snapshot_json, sources
 from . import cost as costmod
 
 VERSION = 1
@@ -315,8 +314,8 @@ def _write_atomic(path: Path, data: bytes) -> None:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        os.chmod(temporary, 0o644)
-        os.replace(temporary, path)
+        osfs.chmod(temporary, 0o644)
+        osfs.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -332,7 +331,7 @@ class _Locked:
         try:
             self.folder.mkdir(parents=True, exist_ok=True)
             self.stream = open(self.folder / ".lock", "a+")
-            fcntl.flock(self.stream, fcntl.LOCK_EX)
+            osfs.lock(self.stream.fileno())
         except BaseException:
             _LOCK.release()
             raise
@@ -1184,16 +1183,16 @@ def _held(folder: Path) -> bool:
     if folder.is_symlink():
         return False
     try:
-        fd = os.open(folder / "lock", os.O_RDONLY | os.O_NOFOLLOW)
+        fd = osfs.open(folder / "lock", os.O_RDONLY | osfs.O_NOFOLLOW)
     except OSError:
         return False
     try:
-        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        osfs.lock(fd, shared=True, block=False)
+        osfs.unlock(fd)
     except OSError:
         return True
     finally:
-        os.close(fd)
+        osfs.close(fd)
     return False
 
 
@@ -1202,7 +1201,7 @@ def _flock(stream, wait: float | None = None) -> bool:
     end = time.monotonic() + (LOCK_WAIT if wait is None else wait)
     while True:
         try:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            osfs.lock(stream.fileno(), block=False)
             return True
         except OSError:
             if time.monotonic() >= end:
@@ -1602,7 +1601,7 @@ class Controller:
         self.began = time.monotonic() - float((self.state.get("totals") or {}).get("seconds") or 0)
         answers = self.state.get("answers") or []
         if answers and not (self.folder / answers[-1]["file"]).exists() and (self.folder / "answer.json").exists():
-            os.replace(self.folder / "answer.json", self.folder / answers[-1]["file"])  # an answer that was taken into the record but not yet filed away
+            osfs.replace(self.folder / "answer.json", self.folder / answers[-1]["file"])  # an answer that was taken into the record but not yet filed away
 
     def _reconcile(self, step, choice) -> dict:
         """For an agent step that was started and whose result is not recorded: what the executor says became of its message, or the person's
@@ -1788,7 +1787,7 @@ class Controller:
                 self.state.update(status="running", waiting=None)
                 entry["answer"] = given["answer"]
                 self.save()
-                os.replace(path, self.folder / kept)
+                osfs.replace(path, self.folder / kept)
                 return given["answer"], given.get("note", ""), kept
         except Busy:
             return None
@@ -1798,10 +1797,10 @@ class Controller:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             if path.exists():
-                os.replace(path, self.folder / f"answer-unreadable-{int(time.time())}.json")
+                osfs.replace(path, self.folder / f"answer-unreadable-{int(time.time())}.json")
             return None
         if not isinstance(data, dict) or data.get("answer") not in ANSWERS:
-            os.replace(path, self.folder / f"answer-refused-{int(time.time())}.json")
+            osfs.replace(path, self.folder / f"answer-refused-{int(time.time())}.json")
             return None
         return data
 
@@ -2403,12 +2402,12 @@ def _end_cancelled(folder: Path, state: dict, why: str | None = None) -> str:
 def _answer_lock(folder: Path, wait: float = ANSWER_WAIT, strict: bool = True):
     """The lock an answer is decided and taken under, and a waiting run is ended under: a `flock` on `answer.lock`, so a file left by a
     killed command never blocks anyone. Busy when it is still held after `wait` seconds (with `strict` False the caller goes on instead)."""
-    fd = os.open(folder / "answer.lock", os.O_CREAT | os.O_RDWR, 0o644)
+    fd = osfs.open(folder / "answer.lock", os.O_CREAT | os.O_RDWR, 0o644)
     try:
         end = time.monotonic() + wait
         while True:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                osfs.lock(fd, block=False)
                 break
             except OSError:
                 if time.monotonic() >= end:
@@ -2418,7 +2417,7 @@ def _answer_lock(folder: Path, wait: float = ANSWER_WAIT, strict: bool = True):
                 time.sleep(0.01)
         yield
     finally:
-        os.close(fd)
+        osfs.close(fd)
 
 
 def answer(folder, word: str, note: str = "") -> None:

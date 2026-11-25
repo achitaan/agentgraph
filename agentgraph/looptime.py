@@ -27,7 +27,6 @@ timed run of a project and refuses new ones until `on`.
 from __future__ import annotations
 
 import datetime
-import fcntl
 import json
 import math
 import os
@@ -36,7 +35,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import osproc
+from . import osfs, osproc
 
 KINDS = ("interval", "timebox")
 EVERY_MIN, EVERY_MAX = 10, 86400
@@ -699,16 +698,16 @@ def supervise_once(project, resume_fn) -> dict:
 
 def _supervisor_alive(project) -> bool:
     try:
-        fd = os.open(loops_folder(project) / SUPERVISOR_LOCK, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = osfs.open(loops_folder(project) / SUPERVISOR_LOCK, os.O_RDONLY | osfs.O_NOFOLLOW)
     except OSError:
         return False
     try:
-        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        osfs.lock(fd, shared=True, block=False)
+        osfs.unlock(fd)
     except OSError:
         return True
     finally:
-        os.close(fd)
+        osfs.close(fd)
     return False
 
 
@@ -726,7 +725,7 @@ def supervise(project, every: float = SUPERVISOR_EVERY, clock: Clock | None = No
     lock = open(folder / SUPERVISOR_LOCK, "a+")
     try:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            osfs.lock(lock.fileno(), block=False)
         except OSError:
             print(f"a supervisor is already running for {project}", file=out)
             return 1

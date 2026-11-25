@@ -61,13 +61,13 @@ import argparse
 import base64
 from contextlib import contextmanager
 from datetime import date
-import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -75,7 +75,7 @@ import sys
 import tempfile
 import time
 
-from . import agentfiles, chatfeed, osproc, outputs, skillfiles, skillset, sources
+from . import agentfiles, chatfeed, osfs, osproc, outputs, skillfiles, skillset, sources
 
 AGENT = "side-chat"
 SKILL = "side-chat"
@@ -113,8 +113,38 @@ class SidechatError(skillset.SkillsetError):
     """A refused request; the message says why and nothing was changed."""
 
 
-def binary() -> str:
-    return os.environ.get(ENV_BINARY) or DEFAULT_BINARY
+def windows_binary(*, which=None, environ=None, isfile=None) -> str | None:
+    """Where the OpenCode CLI is on Windows: the one on PATH (`opencode.exe`, or the `opencode.cmd` shim npm makes, found through
+    PATHEXT), else the usual install places under the user's profile; None when none is there. Used only when OPENCODE_CLI is not set."""
+    environ = os.environ if environ is None else environ
+    isfile = isfile or os.path.isfile
+    found = (which or shutil.which)("opencode")
+    if found:
+        return found
+    places = []
+    for variable, parts in (("LOCALAPPDATA", ("Programs", "OpenCode", "opencode-cli.exe")),
+                            ("LOCALAPPDATA", ("Programs", "OpenCode", "opencode.exe")),
+                            ("LOCALAPPDATA", ("OpenCode", "opencode-cli.exe")),
+                            ("USERPROFILE", (".opencode", "bin", "opencode.exe")),
+                            ("APPDATA", ("npm", "opencode.cmd")),
+                            ("USERPROFILE", ("scoop", "shims", "opencode.exe"))):
+        base = environ.get(variable)
+        if base:
+            places.append(os.path.join(base, *parts))
+    return next((place for place in places if isfile(place)), None)
+
+
+def binary(*, windows=None, which=None, environ=None, isfile=None) -> str:
+    """OPENCODE_CLI when set; on Windows the CLI found by `windows_binary`; else the macOS app's CLI (also the last fallback on Windows,
+    where starting it then fails with a message that names OPENCODE_CLI)."""
+    environ_in_use = os.environ if environ is None else environ
+    if environ_in_use.get(ENV_BINARY):
+        return environ_in_use[ENV_BINARY]
+    if osproc.is_windows() if windows is None else windows:
+        found = windows_binary(which=which, environ=environ, isfile=isfile)
+        if found:
+            return found
+    return DEFAULT_BINARY
 
 
 def _sha(text: str) -> str:
@@ -133,7 +163,7 @@ def _state_path(project, main: str) -> Path:
 
 def _plain_dir(path: Path, *, create: bool = False) -> bool:
     try:
-        return stat.S_ISDIR(os.lstat(path).st_mode)
+        return stat.S_ISDIR(osfs.lstat(path).st_mode)
     except FileNotFoundError:
         if not create:
             return False
@@ -141,7 +171,7 @@ def _plain_dir(path: Path, *, create: bool = False) -> bool:
             os.makedirs(path, 0o700, exist_ok=True)
         except OSError:
             return False
-        return stat.S_ISDIR(os.lstat(path).st_mode)
+        return stat.S_ISDIR(osfs.lstat(path).st_mode)
     except OSError:
         return False
 
@@ -152,7 +182,7 @@ def load_state(project, main) -> dict:
         return {}
     path = _state_path(project, main)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = osfs.open(path, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK)
     except OSError:
         return {}
     try:
@@ -173,10 +203,10 @@ def _save_state(project, state: dict) -> None:
         raise SidechatError(f"{folder} is not a plain folder; the side session was not remembered")
     path = _state_path(project, state["main"])
     temporary = folder / f".{path.name}.{secrets.token_hex(6)}.tmp"
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    fd = osfs.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | osfs.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
         stream.write(json.dumps(state, indent=1) + "\n")
-    os.replace(temporary, path)
+    osfs.replace(temporary, path)
 
 
 @contextmanager
@@ -185,32 +215,32 @@ def _lock(project, *, wait: bool = False):
     folder = state_dir(project)
     if not _plain_dir(folder.parent, create=True) or not _plain_dir(folder, create=True):
         raise SidechatError(f"{folder} is not a plain folder")
-    fd = os.open(folder / "lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fd = osfs.open(folder / "lock", os.O_RDWR | os.O_CREAT | osfs.O_NOFOLLOW, 0o600)
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+            osfs.lock(fd, block=wait)
         except OSError:
             raise SidechatError("another question is being answered; ask again when it has finished") from None
         yield
     finally:
-        os.close(fd)
+        osfs.close(fd)
 
 
 def is_busy(project) -> bool:
     """Whether a question is being answered now (the lock is held). Creates nothing."""
     path = state_dir(project) / "lock"
     try:
-        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+        fd = osfs.open(path, os.O_RDWR | osfs.O_NOFOLLOW)
     except OSError:
         return False
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            osfs.lock(fd, block=False)
         except OSError:
             return True
         return False
     finally:
-        os.close(fd)
+        osfs.close(fd)
 
 
 # --- what is read ---------------------------------------------------------------------------------------------
@@ -303,37 +333,36 @@ def _walk(project: Path, task: str) -> list[tuple[str, int]]:
     except (OSError, outputs.OutputError):
         return []
     found: list[tuple[str, int]] = []
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    flags = os.O_RDONLY | osfs.O_DIRECTORY | osfs.O_NOFOLLOW
 
     def go(fd: int, prefix: str, depth: int) -> None:
         try:
-            with os.scandir(fd) as entries:
-                listed = sorted(entries, key=lambda entry: entry.name)
+            listed = sorted(osfs.listdir(fd))
         except OSError:
             return
-        for entry in listed:
-            if len(found) >= FILES_LIMIT or entry.name.startswith("."):
+        for name in listed:
+            if len(found) >= FILES_LIMIT or name.startswith("."):
                 continue
             try:
-                if entry.is_symlink():
+                info = osfs.lstat(name, dir_fd=fd)
+                if osfs.is_link(info):
                     continue
-                if entry.is_file(follow_symlinks=False):
-                    info = entry.stat(follow_symlinks=False)
+                if stat.S_ISREG(info.st_mode):
                     if info.st_nlink == 1:
-                        found.append((f"{prefix}/{entry.name}", info.st_size))
-                elif entry.is_dir(follow_symlinks=False) and depth < WALK_DEPTH:
-                    child = os.open(entry.name, flags, dir_fd=fd)
+                        found.append((f"{prefix}/{name}", info.st_size))
+                elif stat.S_ISDIR(info.st_mode) and depth < WALK_DEPTH:
+                    child = osfs.open(name, flags, dir_fd=fd)
                     try:
-                        go(child, f"{prefix}/{entry.name}", depth + 1)
+                        go(child, f"{prefix}/{name}", depth + 1)
                     finally:
-                        os.close(child)
+                        osfs.close(child)
             except OSError:
                 continue
 
     try:
         go(task_fd, f".opencode/artifacts/{task}", 0)
     finally:
-        os.close(task_fd)
+        osfs.close(task_fd)
     return sorted(found)
 
 
@@ -402,11 +431,11 @@ def read_head(project: Path, task: str, path: str, cap: int = HEAD_EACH) -> str 
         try:
             stream, _ = outputs._open_file(folder, parts[-1])
         finally:
-            os.close(folder)
+            osfs.close(folder)
     except (OSError, outputs.OutputError):
         return None
     finally:
-        os.close(task_fd)
+        osfs.close(task_fd)
     if stream is None:
         return None
     with stream:
@@ -783,7 +812,7 @@ def agent_installed(agents_dir=None, project=None) -> str | None:
                           ("project", Path(project) / ".opencode" / "agents" if project is not None else None)):
         if folder is not None:
             try:
-                if stat.S_ISREG(os.lstat(Path(folder) / f"{AGENT}.md").st_mode):
+                if stat.S_ISREG(osfs.lstat(Path(folder) / f"{AGENT}.md").st_mode):
                     return where
             except OSError:
                 pass
@@ -865,7 +894,7 @@ def brief_info(question: str, *, main, project=None, db_path=None, config_dir=No
 
 def _read_proposal(path, label: str) -> str:
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = osfs.open(path, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK)
     except OSError as exc:
         raise SidechatError(f"cannot read {label} ({Path(path).name}): {exc.strerror}") from exc
     with os.fdopen(fd, "rb") as stream:
@@ -929,15 +958,15 @@ def _record(backups, op: str, data: dict) -> str:
     folder = root / f"{date.today().isoformat()}-sidechat"
     for path in (root, folder):
         try:
-            os.mkdir(path, 0o700)
+            osfs.mkdir(path, 0o700)
         except FileExistsError:
             pass
-        if not stat.S_ISDIR(os.lstat(path).st_mode):
+        if not stat.S_ISDIR(osfs.lstat(path).st_mode):
             raise SidechatError(f"{path} is not a plain folder")
     target = folder / f"{op}-{secrets.token_hex(6)}"
-    os.mkdir(target, 0o700)
+    osfs.mkdir(target, 0o700)
     path = target / "record.json"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    fd = osfs.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | osfs.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
         stream.write(json.dumps({"version": 1, "op": op, **data}, indent=2) + "\n")
         stream.flush()
@@ -1049,7 +1078,7 @@ def uninstall(*, agents_dir=None, skills_dir=None, backups=None, config=None) ->
 def setups_read(path: Path):
     """The bytes of a regular file read without following a link; None when there is none."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = osfs.open(path, os.O_RDONLY | osfs.O_NOFOLLOW | osfs.O_NONBLOCK)
     except FileNotFoundError:
         return None
     with os.fdopen(fd, "rb") as stream:
