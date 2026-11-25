@@ -81,9 +81,14 @@ def amount(value, what: str = "the limit") -> float:
     return cents
 
 
+def _is_dir(target: Path) -> bool:
+    info = os.lstat(target)
+    return stat.S_ISDIR(info.st_mode) and not osfs.is_link(info)  # a junction is a directory to S_ISDIR
+
+
 def _plain_dir(target: Path, *, create: bool = False) -> bool:
     try:
-        return stat.S_ISDIR(os.lstat(target).st_mode)
+        return _is_dir(target)
     except FileNotFoundError:
         if not create:
             return False
@@ -91,7 +96,7 @@ def _plain_dir(target: Path, *, create: bool = False) -> bool:
             os.makedirs(target, 0o700, exist_ok=True)
         except OSError:
             return False
-        return stat.S_ISDIR(os.lstat(target).st_mode)
+        return _is_dir(target)
     except OSError:
         return False
 

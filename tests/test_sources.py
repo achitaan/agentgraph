@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agentgraph import sources
-from tests.winskip import needs_fifo, needs_symlinks, needs_uid
+from tests.winskip import needs_fifo, needs_symlinks
 from agentgraph.sources import (
     build_snapshot,
     find_graph_dir,
@@ -314,6 +314,21 @@ class GraphFileSafety(unittest.TestCase):
     def setUp(self):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows junctions")
+    def test_junction_named_as_graph_is_refused(self):
+        target = self.directory / "target"
+        target.mkdir()
+        link = self.directory / "link.json"
+        subprocess.run(["cmd.exe", "/c", "mklink", "/J", str(link), str(target)],
+                       capture_output=True, check=True)
+        try:
+            graphs, warnings = load_graphs(self.directory)
+            self.assertEqual(graphs, [])
+            self.assertEqual(len(warnings), 1)
+            self.assertIn(link.name, warnings[0])
+        finally:
+            os.rmdir(link)
+
     @needs_symlinks
     def test_symlinks_to_valid_and_oversized_graphs_are_refused(self):
         for size in (0, 2 * 1024 * 1024):
@@ -378,7 +393,8 @@ class GraphFileSafety(unittest.TestCase):
         for i in range(203):
             path = self.directory / f"{i:03}.json"
             path.write_text(json.dumps({"task": str(i), "updated": 203 - i}), encoding="utf-8")
-            os.utime(path, ns=(1_000_000_000 + i, 1_000_000_000 + i))
+            # NTFS timestamps have 100 ns resolution.
+            os.utime(path, ns=(1_000_000_000 + i * 1000, 1_000_000_000 + i * 1000))
         graphs, warnings = load_graphs(self.directory)
         self.assertEqual({graph.task for graph in graphs}, {str(i) for i in range(3, 203)})
         self.assertEqual(len(warnings), 1)
@@ -412,20 +428,24 @@ class GraphDiscoverySafety(unittest.TestCase):
         trusted = self.graph_dir(self.home)
         self.assertEqual(find_graph_dir(project), trusted)
 
-    @needs_uid
+    def foreign_owner(self):
+        """The directory looks owned by somebody else: another uid on POSIX, another owner SID on Windows."""
+        if os.name == "nt":
+            return patch("agentgraph.fileio.owned_by_me", return_value=False)
+        return patch("agentgraph.sources.os.getuid", return_value=os.getuid() + 1)
+
     def test_foreign_owned_directory_is_skipped_with_warning(self):
         foreign = self.graph_dir(self.home / "project")
         warnings = []
-        with patch("agentgraph.sources.os.getuid", return_value=os.getuid() + 1):
+        with self.foreign_owner():
             self.assertIsNone(find_graph_dir(foreign.parent.parent, warnings=warnings))
         self.assertEqual(len(warnings), 1)
         self.assertIn(str(foreign), warnings[0])
         self.assertIn("owned", warnings[0])
 
-    @needs_uid
     def test_discovery_warning_reaches_snapshot(self):
         foreign = self.graph_dir(self.home / "project")
-        with (patch("agentgraph.sources.os.getuid", return_value=os.getuid() + 1),
+        with (self.foreign_owner(),
               patch("agentgraph.sources.load_roster", return_value=([], [])),
               patch("agentgraph.sources._read_checked", return_value=([], []))):
             snapshot = build_snapshot(cwd=foreign.parent.parent, now=1)
@@ -507,7 +527,10 @@ class ReadOnlyOpen(unittest.TestCase):
     def test_odd_names(self):
         from agentgraph import sources
 
-        for name in ("open#code.db", "q?x.db", "p%41.db", "A.db"):
+        names = ["open#code.db", "p%41.db", "A.db"]
+        if os.name != "nt":
+            names.append("q?x.db")  # forbidden in Windows filenames
+        for name in names:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as t:
                 d = Path(t)
                 db = d / name

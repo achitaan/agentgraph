@@ -15,7 +15,7 @@ import stat
 import time
 from pathlib import Path
 
-from . import osfs
+from . import fileio, osfs
 from .contract import Agent, Event, Node, Objective, Session, Snapshot, TaskGraph, POOL, group_of
 from .contract import Artifact, ArtifactInput
 from .contract import GRAPH_LIMITS, MAX_NODE_LIST
@@ -209,10 +209,26 @@ def read_graph_text(path: Path) -> str:
         osfs.close(root)
 
 
+def _mine(directory: Path, info) -> bool:
+    """Whether the current user owns this directory. `st_uid` says so on POSIX; on Windows it is always 0, so
+    the owner SID is asked instead (agentgraph.fileio)."""
+    if fileio.WINDOWS:
+        return fileio.owned_by_me(directory)
+    return info.st_uid == osfs.getuid()
+
+
+def _is_junction(directory: Path) -> bool:
+    """On Windows a graph directory that is a junction or symlink is refused, as a file link is: it can point
+    anywhere. POSIX has always followed a linked graph directory, and still does."""
+    return fileio.WINDOWS and osfs.is_link(os.lstat(directory))
+
+
 def graph_files(directory: Path) -> tuple[list[Path], list[str]]:
     """Select at most 200 graphs, newest by mtime, without following file links."""
     directory = Path(directory)
-    if directory.stat().st_uid != osfs.getuid():
+    if _is_junction(directory):
+        raise OSError(f"graph directory {directory} is a link; use the real folder")
+    if not _mine(directory, directory.stat()):
         raise PermissionError(f"graph directory {directory} is not owned by the current user")
     warnings = []
     count = 0
@@ -467,9 +483,12 @@ def find_graph_dir(start: Path, warnings: list[str] | None = None) -> Path | Non
         try:
             info = candidate.stat()
             if stat.S_ISDIR(info.st_mode):
-                if info.st_uid == osfs.getuid():
+                if _is_junction(candidate):
+                    if warnings is not None:
+                        warnings.append(f"graph: skipped {candidate}: a link, not a folder")
+                elif _mine(candidate, info):
                     return candidate
-                if warnings is not None:
+                elif warnings is not None:
                     warnings.append(f"graph: skipped {candidate}: not owned by the current user")
         except FileNotFoundError:
             pass

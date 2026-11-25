@@ -159,7 +159,8 @@ def _entries(folder: Path):
 
 def _is_plain_dir(path: Path) -> bool:
     try:
-        return stat.S_ISDIR(os.lstat(path).st_mode)
+        info = os.lstat(path)
+        return stat.S_ISDIR(info.st_mode) and not osfs.is_link(info)  # a junction is a directory to S_ISDIR
     except OSError:
         return False
 

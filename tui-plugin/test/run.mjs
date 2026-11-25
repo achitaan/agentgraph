@@ -1105,6 +1105,26 @@ const makePanel = (extra = {}) => {
   return Object.assign({ name: "agentgraph.graph", sessionID: "ses_p", width: 80, toggleFullscreen: () => (calls.full += 1), close: () => (calls.close += 1) }, extra, { calls });
 };
 
+test("Windows panel registration never consumes prompt letters", () => {
+  const { ctx, state, panelClaim, command } = makePanelHost();
+  const plugin = P.createPlugin({
+    ...globalThis.__agentgraphStub, os: { ...os, platform: () => "win32" },
+    fs, path, spawn, env: process.env,
+    createElement: (tag) => ({ tag, props: {}, children: [] }),
+    insert: () => {}, setProp: () => {},
+  });
+  const stop = plugin.setup(ctx);
+  try {
+    command().run();
+    panelClaim().render(makePanel());
+    command().run();
+    assert.equal(state.layers.length, 1);
+    assert.ok(state.layers.flatMap((layer) => layer.commands).every((cmd) => !cmd.bind));
+  } finally {
+    stop();
+  }
+});
+
 test("panel: the command is registered with id, title, slash name and alias", () => {
   const { ctx, state, command } = makePanelHost();
   const stop = tui.setup(ctx);
@@ -7001,6 +7021,7 @@ test("n20 scene: the step marks of a quiet or orphan node stand still, a live on
 });
 
 let failed = 0;
+let passed = 0;
 const only = process.env.TEST_ONLY ? new RegExp(process.env.TEST_ONLY) : null; // TEST_ONLY=regex runs only the tests whose name matches
 let skipped = 0;
 // Tests that write a fake interpreter as a /bin/sh script, or run a real `python3`, cannot run on native Windows.
@@ -7014,6 +7035,7 @@ for (const t of tests) {
   }
   try {
     await t.fn();
+    passed += 1;
     console.log("ok   " + t.name);
   } catch (error) {
     failed += 1;
@@ -7023,5 +7045,6 @@ for (const t of tests) {
 }
 globalThis.setInterval = realSetInterval;
 globalThis.clearInterval = realClearInterval;
-console.log(`\n${tests.length - failed - skipped} passed, ${failed} failed` + (skipped ? `, ${skipped} skipped` : ""));
+// skipped: the tests a filter left out and the ones this system cannot run
+console.log(`\n${passed} passed, ${failed} failed, ${tests.length - passed - failed} skipped`);
 process.exit(failed ? 1 : 0);

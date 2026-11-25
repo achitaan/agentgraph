@@ -4,6 +4,7 @@ Every run here happens in a child process whose home folder, config folders and 
 holding a small fixture config, so the machine's real OpenCode setup is never read (and a failure cannot print it
 into a log). The assertions look at named keys and counts only; the document itself is never put in a message."""
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -113,3 +114,131 @@ class WindowsSnapshotTests(Isolated):
                     self.assertNotIn("read_only", doc)
                     self.assertIn("editable", doc["roster"])
                     self.assertNotIn("POSIX", doc["roster"].get("why", ""))
+
+    # -- what Windows once only read, and now does fully (found and first tested on a real Windows machine) --
+
+    def test_side_chat_status_and_transcript(self):
+        import sqlite3
+        from contextlib import closing
+        from agentgraph import sidechat
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            agents = root / "agents"
+            agents.mkdir()
+            (agents / "side-chat.md").write_text("Side chat agent", encoding="utf-8")
+            state = root / ".opencode" / "sidechat"
+            state.mkdir(parents=True)
+            (state / "ses_main.json").write_text(
+                json.dumps({"main": "ses_main", "side": "ses_side", "model": "test/model"}), encoding="utf-8")
+            db = root / "test.db"
+            with closing(sqlite3.connect(db)) as conn:
+                conn.execute("CREATE TABLE session_v2 (id TEXT, agent TEXT, cost REAL)")
+                conn.execute("INSERT INTO session_v2 VALUES ('ses_side', 'side-chat', 0.25)")
+                conn.commit()
+            shown = sidechat.status(main="ses_main", project=root, agents_dir=agents, db_path=db, with_route=False)
+            self.assertTrue(shown["installed"])
+            self.assertEqual(shown["session"], "ses_side")
+            self.assertEqual(shown["model"], "test/model")
+            self.assertEqual(shown["spent"], 0.25)
+            feed = sidechat.side_feed({"items": [
+                {"kind": "user", "text": "Question\n\n--- brief private"},
+                {"kind": "reasoning", "text": "hidden"},
+                {"kind": "assistant", "text": "Answer"}]})
+            self.assertEqual([item["text"] for item in feed["items"]], ["Question", "Answer"])
+
+    def test_graph_check_runs_the_history_too(self):
+        """`check` on a folder validates the graph and keeps its history, as it does on the Mac."""
+        from tests.test_check import valid_graph
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            graph = folder / "task.json"
+            raw = valid_graph()
+            graph.write_text(json.dumps(raw), encoding="utf-8")
+            args = ["-m", "agentgraph.check", "--dir", str(folder)]
+            done = self.run_python(*args, check=False)
+            self.assertEqual(done.returncode, 0, done.stdout[-400:] + done.stderr[-400:])
+            self.assertNotIn("static validation only", done.stdout)
+            self.assertIn("1/1 objectives delivered", done.stdout)
+            self.assertTrue((folder / ".history").is_dir())
+            raw["nodes"][0]["status"] = "invalid"
+            graph.write_text(json.dumps(raw), encoding="utf-8")
+            done = self.run_python(*args, check=False)
+            self.assertEqual(done.returncode, 1)
+            self.assertIn("PROBLEMS", done.stdout)
+            # an existing history record catches a changed criterion
+            raw = valid_graph()
+            graph.write_text(json.dumps(raw), encoding="utf-8")
+            record = next((folder / ".history").iterdir())
+            self.assertTrue(record.is_file())
+            raw["nodes"][0]["done_when"] = "different test criterion"
+            graph.write_text(json.dumps(raw), encoding="utf-8")
+            done = self.run_python(*args, check=False)
+            self.assertEqual(done.returncode, 1, done.stdout[-400:])
+            self.assertIn("done_when", done.stdout)
+            self.assertEqual(self.run_python(*args, "--no-history", check=False).returncode, 0)
+
+    def test_skill_text_is_shown_and_editable(self):
+        from agentgraph import skillfiles
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(os.path.realpath(temp))  # a skills folder may not be reached through a link (macOS: /var)
+            folder = root / "example"
+            folder.mkdir()
+            raw = "---\nname: example\ndescription: Example skill\n---\n\nSome text.\n"
+            (folder / "SKILL.md").write_bytes(raw.encode("utf-8"))
+            shown = skillfiles.show("example", skills=root, bundled=())
+            self.assertEqual(shown["description"], "Example skill")
+            self.assertIn("Some text.", shown["text"])
+            self.assertTrue(shown["editable"], shown.get("why"))
+            with self.assertRaises(skillfiles.SkillfilesError):
+                skillfiles.show("../example", skills=root, bundled=())
+
+    def test_preset_and_saved_setup_inspection_and_switch(self):
+        from agentgraph import setups
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "config.json"
+            config.write_text(json.dumps({"preset": "normal", "presets": {"normal": {}, "fast": {}}}),
+                              encoding="utf-8")
+            saved = root / "saved"
+            folder = saved / "example"
+            folder.mkdir(parents=True)
+            (folder / "manifest.json").write_text(json.dumps({
+                "version": 1, "files": [], "dirs": [], "saved": "2026-01-01",
+                "name": "example", "preset": "normal"}), encoding="utf-8")
+            self.assertEqual(setups.show_preset(config=config, env={})["effective"], "normal")
+            self.assertEqual(setups.show_preset(config=config, env={setups.ENV: "fast"})["effective"], "fast")
+            self.assertEqual(setups.list_setups(setups=saved)[0]["name"], "example")
+            self.assertEqual(setups.show_setup("example", setups=saved)["preset"], "normal")
+            setups.switch_preset("fast", config=config)  # the switch is not refused for the platform
+            self.assertEqual(json.loads(config.read_text(encoding="utf-8"))["preset"], "fast")
+
+    def test_graph_reads_and_bounds(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            graph = folder / "task.json"
+            graph.write_text('{"task":"example","nodes":[]}', encoding="utf-8")
+            self.assertEqual(json.loads(sources.read_graph_text(graph))["task"], "example")
+            graphs, warnings = sources.load_graphs(folder)
+            self.assertEqual([g.task for g in graphs], ["example"])
+            self.assertEqual(warnings, [])
+            graph.write_bytes(b"x" * (sources.MAX_GRAPH_BYTES + 1))
+            with self.assertRaisesRegex(OSError, "exceeds"):
+                sources.read_graph_text(graph)
+            with self.assertRaises(OSError):
+                sources.graph_files(graph)
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows junction test")
+    def test_graph_directory_junction_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            target.mkdir()
+            (target / "task.json").write_text('{"task":"example"}', encoding="utf-8")
+            link = root / "junction"
+            subprocess.run(["cmd.exe", "/c", "mklink", "/J", str(link), str(target)],
+                           capture_output=True, check=True)
+            try:
+                with self.assertRaises(OSError):
+                    sources.graph_files(link)
+            finally:
+                os.rmdir(link)
