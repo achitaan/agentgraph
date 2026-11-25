@@ -19,6 +19,7 @@ from pathlib import Path
 
 TOKEN = "@OPENCODE_CONFIG_DIR@"
 _BEFORE = r"(?<![A-Za-z0-9_.~/-])"
+_WINDOWS_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")  # C:\... or \\server\...
 _AFTER = r"(?![A-Za-z0-9_-])(?!\.[A-Za-z0-9_])"
 
 
@@ -31,10 +32,11 @@ def _json_forms(path: str) -> list[str]:
 def _patterns(dirs: list[str], as_json: bool) -> list[str]:
     seen: list[str] = []
     for d in dirs:
-        d = d.rstrip("/") or "/"
-        for form in (_json_forms(d) if as_json else [d]):
-            if form != "/" and form not in seen:
-                seen.append(form)
+        for spelled in ((d, d.replace("\\", "/")) if _WINDOWS_PATH.match(d) else (d,)):  # also written with "/"
+            spelled = spelled.rstrip("/\\" if _WINDOWS_PATH.match(d) else "/") or "/"
+            for form in (_json_forms(spelled) if as_json else [spelled]):
+                if form != "/" and form not in seen:
+                    seen.append(form)
     return sorted(seen, key=len, reverse=True)  # the longer path first
 
 

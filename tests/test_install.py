@@ -40,7 +40,7 @@ class InstallCase(unittest.TestCase):
         self.home = self.base / "home"
         self.t = self.home / ".config" / "opencode"
         (self.kit / "agentgraph").mkdir(parents=True)
-        for name in ("install.sh", "agentgraph/installer.py", "agentgraph/portable.py"):
+        for name in ("install.sh", "agentgraph/installer.py", "agentgraph/portable.py", "agentgraph/osfs.py"):
             if (ROOT / name).exists():
                 shutil.copy2(ROOT / name, self.kit / name)
         shutil.copytree(ROOT / "commands", self.kit / "commands")
