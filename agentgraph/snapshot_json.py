@@ -734,9 +734,19 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
                                  activity=live_activity(snapshot, detail=detail) if source == "live"
                                  else demo_activity(snapshot.now, detail=detail) if source == "demo" else None)
     if read_only:
+        from . import mcpview
+        mcpview.annotate(document)
+        from . import spend
+        from .sources import DB_PATH
+        spend.annotate(document, db_path=DB_PATH, root=snapshot.root, sessions=snapshot.sessions, now=snapshot.now)
         document["read_only"] = True
         document["warnings"].append("Windows: read-only viewer; task graphs and toolkit editors require POSIX.")
         document["skills"] = skills_document()
+        from . import skillset
+        skillset.annotate(document)
+        for agent in document["agents"]:
+            agent["skills_editable"] = False
+            agent["skills_reason"] = "Skill configuration editing requires POSIX."
         document["roster"] = {"editable": False, "why": "Toolkit editors require POSIX.", "models": []}
         return document
     if source == "live":

@@ -1682,7 +1682,7 @@ function renderPanel(ctx, solid, props) {
   const hostHas = (name) => typeof sessionClient()?.[name] === "function";
   // Windows can display live sessions, but the toolkit editors require POSIX.
   const windows = typeof navigator !== "undefined" && /^Win/i.test(navigator.platform || "");
-  const actions = demoMode || windows ? { chat } : { flow, skills, roster, skillfile, team, output, run, chat, side, setup, spend, improve, loops };
+  const actions = demoMode ? { chat } : windows ? { chat, spend } : { flow, skills, roster, skillfile, team, output, run, chat, side, setup, spend, improve, loops };
   if (!demoMode && hostHas("prompt")) actions.send = send;
   if (!demoMode && hostHas("interrupt")) actions.stop = stop;
 

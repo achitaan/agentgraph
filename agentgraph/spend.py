@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-import fcntl
 import json
 import math
 import os
@@ -33,6 +32,8 @@ import sqlite3
 import stat
 import sys
 import time
+
+from .fileio import lock_exclusive, open_regular
 
 FILE = "spend.json"
 LOCK = "spend.lock"
@@ -79,7 +80,8 @@ def amount(value, what: str = "the limit") -> float:
 
 def _plain_dir(target: Path, *, create: bool = False) -> bool:
     try:
-        return stat.S_ISDIR(os.lstat(target).st_mode)
+        info = os.lstat(target)
+        return stat.S_ISDIR(info.st_mode) and not (getattr(info, "st_file_attributes", 0) & 0x400)
     except FileNotFoundError:
         if not create:
             return False
@@ -87,7 +89,7 @@ def _plain_dir(target: Path, *, create: bool = False) -> bool:
             os.makedirs(target, 0o700, exist_ok=True)
         except OSError:
             return False
-        return stat.S_ISDIR(os.lstat(target).st_mode)
+        return _plain_dir(target)
     except OSError:
         return False
 
@@ -96,8 +98,12 @@ def _read(project=None):
     """(limit, warn) kept for the project: (None, None) when there is no file. A file that is not ours (unreadable,
     not JSON, a figure that does not fit) raises SpendError without saying what it holds."""
     target = path(project)
+    if not _plain_dir(target.parent):
+        if not target.parent.exists() and not target.parent.is_symlink():
+            return None, None
+        raise SpendError(f"{target.parent} is not a plain folder")
     try:
-        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = open_regular(target, os.O_RDONLY)
     except FileNotFoundError:
         return None, None
     except OSError as exc:
@@ -125,9 +131,9 @@ def _locked(project=None):
     where = folder(project)
     if not _plain_dir(where, create=True):
         raise SpendError(f"{where} is not a plain folder")
-    fd = os.open(where / LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fd = open_regular(where / LOCK, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        lock_exclusive(fd)
         yield
     finally:
         os.close(fd)
@@ -136,7 +142,7 @@ def _locked(project=None):
 def _stage(project, limit: float, warn: float) -> None:
     target = path(project)
     temporary = target.parent / f".{FILE}.{secrets.token_hex(6)}.tmp"
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    fd = open_regular(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(json.dumps({"version": 1, "limit": limit, "warn": warn}, indent=1) + "\n")

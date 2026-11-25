@@ -5,7 +5,6 @@ import argparse
 import copy
 from contextlib import ExitStack, contextmanager
 from datetime import date
-import fcntl
 import hashlib
 import json
 import os
@@ -15,6 +14,11 @@ import stat
 import sys
 import tempfile
 import unicodedata
+
+if os.name != "nt":
+    import fcntl
+
+from .fileio import open_regular
 
 from . import names, paths, sources
 from .snapshot_json import skills_document
@@ -59,7 +63,7 @@ def _agent_name(value):
 
 def _read(path, label):
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = open_regular(path, os.O_RDONLY)
         with os.fdopen(fd, "rb") as handle:
             info = os.fstat(handle.fileno())
             if not stat.S_ISREG(info.st_mode):
@@ -172,7 +176,7 @@ def _roster(obj, config, agents_dir=None):
 def _file_agent(obj, agent, agents_dir):
     """The agents-folder entry for an agent that is not in any preset ({"added", "editable", "why", "parsed"}),
     or None."""
-    if agents_dir is None or any(agent in entries for entries in obj["presets"].values()) or agent in _seat_names(obj):
+    if os.name == "nt" or agents_dir is None or any(agent in entries for entries in obj["presets"].values()) or agent in _seat_names(obj):
         return None
     from . import agentfiles  # agentfiles imports this module
     return agentfiles.listing(agents_dir).get(agent)
@@ -470,6 +474,8 @@ def _map_edit(text, old, new, agent):
 
 @contextmanager
 def _locked(*paths, wrap=True):
+    if os.name == "nt":
+        raise SkillsetError("Skill configuration editing requires POSIX.")
     # Directory inodes remain stable when the files are replaced. Lock in
     # inode order so runs that share either file serialize without deadlocking.
     # `wrap` False: an OSError raised in the body passes through as it is (only
@@ -782,7 +788,12 @@ def main(argv=None):
     try:
         if args.op == "show":
             result = show(args.agent, **kw)
+            if os.name == "nt":
+                result["editable"] = False
+                result["reason"] = "Skill configuration editing requires POSIX."
         else:
+            if os.name == "nt":
+                raise SkillsetError("Skill configuration editing requires POSIX.")
             kw.update(map_path=args.map_path or args.root_map_path or MAP,
                       backups=args.backups or args.root_backups or BACKUPS,
                       skills_dir=args.skills_dir or args.root_skills_dir, expect=args.expect,

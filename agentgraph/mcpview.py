@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import names, skillset, sources
+from . import names, sources
 
 MAX_FILE = 1 << 20
 MAX_SERVERS = 200
@@ -133,6 +133,8 @@ def servers(config: dict | None, opencode: dict | None) -> list[dict]:
     disabled = [item for item in disabled if isinstance(item, str)] if isinstance(disabled, list) else []
     host = opencode.get("mcp") if isinstance(opencode, dict) else None
     host = host if isinstance(host, dict) else {}
+    if isinstance(host.get("servers"), dict):
+        host = host["servers"]
     found: dict[str, dict] = {}
     for name in BUILTIN_SERVERS:
         if name not in disabled and name not in host:
@@ -163,7 +165,7 @@ def mcp_document(config_path, opencode_path, agent_names) -> tuple[list[dict], d
     return rows, allowed
 
 
-def annotate(document, *, config=skillset.CONFIG, opencode=None) -> dict:
+def annotate(document, *, config=sources.CONFIG_DIR / "oh-my-opencode-slim.json", opencode=None) -> dict:
     """Add to a snapshot document, in place, `mcp` (the servers: name, source, kind, enabled, state, reason, live,
     agents) and `agents[].mcps` (the names that agent may use, or null when the plugin does not manage it).
     Reads only; never raises, and never carries anything from the settings but the names and flags above."""

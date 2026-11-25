@@ -8,6 +8,7 @@ Use `~/.config/opencode/orchestration/bin/agentgraph`:
 - `agentgraph skills remove AGENT SKILL` for `remove`.
 - `agentgraph skills all AGENT` for `all`.
 Pass names as separate quoted arguments. The invocation authorizes only the requested operation; do not infer any edits. Report the skills, the change, or the error. If changed, say it applies after OpenCode restarts.
+On native Windows PowerShell, skill listing uses `$env:PYTHONPATH = Join-Path $HOME '.config/opencode/orchestration'` followed by `py -3 -P -m agentgraph.skillset show AGENT --json`. Skill editing is not supported on Windows.
 
 Argument:
 $ARGUMENTS
