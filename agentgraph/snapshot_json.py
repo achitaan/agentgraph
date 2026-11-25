@@ -47,8 +47,12 @@ def _problems(graph: TaskGraph, structure: dict | None = None) -> list[str]:
     a graph handed in memory) gets the validator's problems only."""
     if graph.path and Path(graph.path).is_file():
         try:
-            from . import check, outputs  # check imports this module
-            found = check.all_problems(Path(graph.path), check.rules_of(structure or load_structure(), outputs.edit_home()))
+            from . import check  # check imports this module
+            if WINDOWS:
+                found = check.all_problems(Path(graph.path), check.rules_of(structure or load_structure()))
+            else:
+                from . import outputs
+                found = check.all_problems(Path(graph.path), check.rules_of(structure or load_structure(), outputs.edit_home()))
         except Exception:  # noqa: BLE001  the views never fail on a graph; fall back to the validator below
             found = None
         if found is not None:

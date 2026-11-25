@@ -13,6 +13,26 @@ from agentgraph.contract import Agent, Snapshot
 
 class WindowsSnapshotTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "win32", "native Windows smoke test")
+    def test_static_graph_check(self):
+        from tests.test_check import valid_graph
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            graph = folder / "task.json"
+            raw = valid_graph()
+            graph.write_text(json.dumps(raw), encoding="utf-8")
+            cmd = [sys.executable, "-m", "agentgraph.check", "--dir", str(folder)]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("static validation only", result.stdout)
+            self.assertIn("1/1 objectives delivered", result.stdout)
+            self.assertFalse((folder / ".history").exists())
+            raw["nodes"][0]["status"] = "invalid"
+            graph.write_text(json.dumps(raw), encoding="utf-8")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("PROBLEMS", result.stdout)
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows smoke test")
     def test_skill_text_inspection(self):
         from agentgraph import skillfiles
         with tempfile.TemporaryDirectory() as temp:
