@@ -30,6 +30,7 @@ import datetime
 import json
 import math
 import os
+import random
 import subprocess
 import sys
 import time
@@ -696,19 +697,41 @@ def supervise_once(project, resume_fn) -> dict:
     return out
 
 
+PROBE_PAUSE = (0.03, 0.09)  # seconds: the random pause before a Windows probe tries again
+
+
+def probes_collide() -> bool:
+    """Whether a shared lock is exclusive here, so two probes at the same moment see each other: only the Windows byte lock (msvcrt) is.
+    The portable backend on a system with flock (how a Mac runs the suite against it) still has shared locks that are shared."""
+    return osfs.backend_name == "portable" and getattr(osfs, "_msvcrt", None) is not None
+
+
+def lock_is_held(fd) -> bool:
+    """Whether the lock on the open file `fd` is held by someone else right now: a shared lock taken at once and given back. Where
+    shared locks really are shared (POSIX flock) two probes never see each other and this answers once. On Windows (`probes_collide`)
+    a shared lock is exclusive, so two probes at the same moment would each see the other as a holder; a "held" answer there is checked
+    once more after a short random pause, and only a lock still held then counts: a real holder keeps it, a probe has let go."""
+    for attempt in range(2):
+        try:
+            osfs.lock(fd, shared=True, block=False)
+            osfs.unlock(fd)
+            return False
+        except OSError:
+            if attempt or not probes_collide():
+                return True
+            time.sleep(random.uniform(*PROBE_PAUSE))
+    return True
+
+
 def _supervisor_alive(project) -> bool:
     try:
         fd = osfs.open(loops_folder(project) / SUPERVISOR_LOCK, os.O_RDONLY | osfs.O_NOFOLLOW)
     except OSError:
         return False
     try:
-        osfs.lock(fd, shared=True, block=False)
-        osfs.unlock(fd)
-    except OSError:
-        return True
+        return lock_is_held(fd)
     finally:
         osfs.close(fd)
-    return False
 
 
 def supervise(project, every: float = SUPERVISOR_EVERY, clock: Clock | None = None, resume_fn=None, out=None) -> int:

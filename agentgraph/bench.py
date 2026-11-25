@@ -664,7 +664,10 @@ def run_check(scenario: dict, work: Path, env: dict, db_path: Path | None = None
         if hidden.is_dir():
             shutil.copytree(hidden, work, dirs_exist_ok=True)
         try:
-            check_args, check_shell = osproc.shell_arguments(scenario["check"])  # POSIX: the string and shell=True, as ever
+            try:
+                check_args, check_shell = osproc.shell_arguments(scenario["check"])  # POSIX: the string and shell=True, as ever
+            except osproc.ShellRefused as exc:  # Windows without an sh and a check of several lines: failed, with the reason
+                return {"passed": False, "detail": str(exc)[:160]}
             done = subprocess.run(check_args, shell=check_shell, cwd=work, capture_output=True, text=True, errors="replace",
                                   timeout=scenario["check_timeout"], env=check_env, **osproc.text_kwargs())
         except subprocess.TimeoutExpired:

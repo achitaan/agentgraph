@@ -12,9 +12,9 @@ from pathlib import Path
 from unittest import mock
 
 from agentgraph import loopapi, looprun
+from tests.shellskip import CHECK_SECOND
 from tests.test_looprun3 import LockHolder
 
-CHECK_SECOND = 'n=$(cat .count 2>/dev/null || echo 0); n=$((n+1)); echo $n > .count; echo "check call $n"; [ "$n" -ge 2 ]'
 GOOD = {"check": {"command": "true"}, "limits": {"attempts": 3}}
 
 

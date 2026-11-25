@@ -745,7 +745,10 @@ def admit(used: int, limits: dict, elapsed: float, cost, cancelled: bool, passin
 
 def run_check(command: str, timeout, cwd, env, out_path: Path, poll=None) -> dict:
     """Run `command` through a shell (`sh -c`; on Windows see `osproc.shell_command`); the whole output goes to `out_path` (capped). {exit, timed_out, cancelled, seconds, error, truncated}. `poll` is
-    called every quarter second; when it answers true the check's process group is killed at once and `cancelled` is true."""
+    called every quarter second; when it answers true the check's process group is killed at once and `cancelled` is true.
+    Windows limits: `taskkill /T` follows parent ids, and once the shell has exited its children no longer point at it, so a grandchild the check
+    left behind (a server started with `&`) is not stopped there, where POSIX `killpg` stops the whole group. A multi-line command with no `sh`
+    on PATH is refused (cmd would run only its first line): it ends as a check error, the output file holds the reason, and it never passes."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     try:
@@ -1177,8 +1180,10 @@ def request_cancel(folder) -> None:
 
 def _held(folder: Path) -> bool:
     """Whether a controller holds the run's lock right now. A probe only reads: it never creates the lock file (a missing one means not held),
-    never follows a symlink and takes the lock shared and at once, so two probes never see each other and a controller that starts while
-    one is probing gets its lock within a few milliseconds (it waits `LOCK_WAIT` for it)."""
+    never follows a symlink and takes the lock shared and at once, so (where a shared lock is shared: POSIX) two probes never see each other and
+    a controller that starts while one is probing gets its lock within a few milliseconds (it waits `LOCK_WAIT` for it). On
+    Windows (the portable backend over msvcrt) a shared lock is exclusive, so a "held" answer is re-checked once after a short pause (`looptime.lock_is_held`): two
+    probes that collided have let go by then, and only a real holder is still there."""
     folder = Path(folder)
     if folder.is_symlink():
         return False
@@ -1187,13 +1192,9 @@ def _held(folder: Path) -> bool:
     except OSError:
         return False
     try:
-        osfs.lock(fd, shared=True, block=False)
-        osfs.unlock(fd)
-    except OSError:
-        return True
+        return looptime.lock_is_held(fd)
     finally:
         osfs.close(fd)
-    return False
 
 
 def _flock(stream, wait: float | None = None) -> bool:

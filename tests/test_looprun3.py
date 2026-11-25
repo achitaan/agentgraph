@@ -4,7 +4,6 @@ that dies is simulated by raising a `BaseException` inside the executor (or the 
 as a SIGKILL would leave it. The scripted executor's `reconcile` reads the answer from a file the tests write. Every test that sends
 something counts the executor's calls. No test starts OpenCode; a real compaction is not provoked."""
 import contextlib
-import fcntl
 import hashlib
 import io
 import json
@@ -20,10 +19,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agentgraph import looprun
-
-CHECK_SECOND = 'n=$(cat .count 2>/dev/null || echo 0); n=$((n+1)); echo $n > .count; echo "check call $n"; [ "$n" -ge 2 ]'
+from agentgraph import looprun, osfs, osproc
+from tests.shellskip import CHECK_SECOND, sh_or
+from tests.winskip import WINDOWS, needs_symlinks
+REPO = Path(__file__).resolve().parent.parent
 PASS = "Looks right to me.\nVERDICT: PASS"
+WRONG_HEADER = sh_or("echo wrong header; exit 1", "print('wrong header'); raise SystemExit(1)")
+SLEEP_THEN_FAIL = sh_or("sleep {n}; exit 1", "import time; time.sleep({n}); raise SystemExit(1)")
 
 
 class Kill(BaseException):
@@ -253,7 +255,7 @@ class RecoveryTests(Base):
             looprun.resume(self.folder(queued), wait=True, executor=executor)
         run = self.crash(self.executor(hook=kill_at(1)))
         lock = open(self.folder(run) / "lock", "a+")
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        osfs.lock(lock.fileno())
         try:
             self.assertEqual(self.shown(run), "running")
             with self.assertRaises(looprun.Busy) as raised:
@@ -309,12 +311,12 @@ class RecoveryTests(Base):
         self.assertEqual((len(self.record(run)["attempts"]), len(executor.calls)), (3, 4))  # 3 attempts; call 2 was sent again after the kill
 
     def test_every_message_carries_the_goal_the_criteria_and_the_last_result_so_nothing_depends_on_the_session(self):
-        self.save(check="echo wrong header; exit 1", attempts=3)
+        self.save(check=WRONG_HEADER, attempts=3)
         executor = self.executor(hook=kill_at(2), answer="not_sent")
         run = self.crash(executor, goal="Write the report with a header.")
         self.resume(run, executor)
         for call in executor.calls[1:]:
-            for needle in ("Write the report with a header.", "echo wrong header; exit 1", "exit code 1", "wrong header"):
+            for needle in ("Write the report with a header.", WRONG_HEADER, "exit code 1", "wrong header"):
                 self.assertIn(needle, call["message"])
         self.assertIn("Write the report with a header.", executor.calls[0]["message"])
 
@@ -336,7 +338,7 @@ class RecoveryTests(Base):
         else:
             self.fail(f"the controller never reached the second turn: {looprun.read_run(folder)}")
         pid = looprun.read_run(folder)["pid"]
-        os.kill(pid, signal.SIGKILL)
+        os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))  # on Windows os.kill with SIGTERM is TerminateProcess
         end = time.time() + 10
         while time.time() < end and looprun._held(folder):
             time.sleep(0.05)
@@ -406,7 +408,7 @@ class PauseCancelAnswerTests(Base):
         self.save()
         run = self.crash(self.executor(hook=kill_at(1)))
         lock = open(self.folder(run) / "lock", "a+")
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        osfs.lock(lock.fileno())
         try:
             self.assertEqual(looprun.cancel(self.folder(run)), "requested")
             self.assertTrue((self.folder(run) / "cancel").is_file())
@@ -697,6 +699,7 @@ class ProbeTests(Base):
             self.assertIn(self.cli(*argv, "--project", str(self.project))[0], (0,))
         self.assertEqual(snapshot(), before)
 
+    @needs_symlinks
     def test_f12_a_symlinked_run_folder_is_not_listed_and_not_followed(self):
         self.save()
         run = self.start(self.executor())
@@ -717,8 +720,8 @@ class LockHolder:
     """A real process that holds a file with an exclusive flock until it is closed: the lock of a live controller, as another process sees it."""
 
     def __init__(self, path, seconds=60):
-        self.proc = subprocess.Popen([sys.executable, "-c", "import fcntl,sys,time;f=open(sys.argv[1],'a+');fcntl.flock(f,fcntl.LOCK_EX);print('held',flush=True);time.sleep(float(sys.argv[2]))",
-                                      str(path), str(seconds)], stdout=subprocess.PIPE, text=True)
+        self.proc = subprocess.Popen([sys.executable, "-c", "import sys,time;from agentgraph import osfs;f=open(sys.argv[1],'a+');osfs.lock(f.fileno());print('held',flush=True);time.sleep(float(sys.argv[2]))",
+                                      str(path), str(seconds)], stdout=subprocess.PIPE, text=True, cwd=str(REPO))
         self.proc.stdout.readline()
 
     def __enter__(self):
@@ -748,7 +751,7 @@ class QueuedRunTests(Base):
         self.save()
         run = queue(self)
         lock = open(self.folder(run) / "lock", "a+")
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        osfs.lock(lock.fileno())
         try:
             self.assertEqual(looprun.cancel(self.folder(run)), "requested")
         finally:
@@ -853,7 +856,7 @@ class QueuedRunTests(Base):
         run = queue(self)
         age(self, run, 300)
         lock = open(self.folder(run) / "lock", "a+")
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        osfs.lock(lock.fileno())
         try:
             self.assertEqual(self.shown(run), "queued")
         finally:
@@ -1082,6 +1085,17 @@ class ReconcileRowsTests(unittest.TestCase):
 
 
 class AliveTests(unittest.TestCase):
+    def ps_says(self, answer):
+        """The process list as `ps` prints it (POSIX: the real call, with subprocess.run answered); on Windows the list comes from PowerShell,
+        so the same rows are handed in at the `osproc.list_processes` seam instead."""
+        if not WINDOWS:
+            if isinstance(answer, Exception):
+                return mock.patch.object(looprun.subprocess, "run", side_effect=answer)
+            return mock.patch.object(looprun.subprocess, "run", return_value=mock.Mock(stdout=answer))
+        if isinstance(answer, Exception):
+            return mock.patch.object(osproc, "list_processes", side_effect=answer)
+        return mock.patch.object(osproc, "list_processes", return_value=osproc.parse_ps(answer, ("pid", "command")))
+
     def test_alive_matches_the_session_exactly_and_never_its_own_pid(self):
         ps = "\n".join([
             "  111 /bin/opencode run --standalone --format json --agent w --session ses_abc",
@@ -1091,11 +1105,11 @@ class AliveTests(unittest.TestCase):
             "  444 /bin/opencode run --standalone --session ses_xyz",
             "  not-a-pid line --session ses_abc"])
         executor = object.__new__(looprun.OpenCodeExecutor)
-        with mock.patch.object(looprun.subprocess, "run", return_value=mock.Mock(stdout=ps)):
+        with self.ps_says(ps):
             self.assertEqual(executor._alive("ses_abc"), [111, 333])
             self.assertEqual(executor._alive("ses_abcdef"), [222])
             self.assertEqual(executor._alive("ses_none"), [])
-        with mock.patch.object(looprun.subprocess, "run", side_effect=OSError("no ps")):
+        with self.ps_says(OSError("no ps")):
             self.assertIsNone(executor._alive("ses_abc"))
 
 
@@ -1482,7 +1496,7 @@ class ClockTests(Base):
         self.assertGreaterEqual(saved, seen["elapsed"] - 0.2 - 0.1)
 
     def test_f09_a_kill_during_a_check_loses_at_most_one_heartbeat_of_the_clock(self):
-        self.save(check="sleep 3; exit 1")
+        self.save(check=SLEEP_THEN_FAIL.replace("{n}", "3"))
         clock = {}
         original = looprun.Controller.poll
 
@@ -1680,7 +1694,9 @@ class CancelWhilePausingTests(Base):
 
 class CancelInCheckTests(Base):
     def test_f10_cancel_during_a_check_stops_its_process_group_and_ends_cancelled(self):
-        self.save(check=f"echo $$ > {self.tmp}/pid; sleep 60; exit 1")
+        where = self.tmp.as_posix()
+        self.save(check=sh_or(f"echo $$ > {where}/pid; sleep 60; exit 1",
+                              f"import os, time; open('{where}/pid', 'w').write(str(os.getpid())); time.sleep(60)"))
         executor = self.executor()
         box = {}
 
@@ -1704,11 +1720,10 @@ class CancelInCheckTests(Base):
         self.assertEqual(self.record(run)["status"], "cancelled")
         pid = int((self.tmp / "pid").read_text())
         time.sleep(0.2)
-        with self.assertRaises(ProcessLookupError):
-            os.kill(pid, 0)
+        self.assertFalse(osproc.is_alive(pid))
 
     def test_f10_a_pause_during_a_check_lets_it_finish(self):
-        self.save(check="sleep 1; exit 1")
+        self.save(check=SLEEP_THEN_FAIL.replace("{n}", "1"))
         executor = self.executor()
 
         def pause_soon():
@@ -1752,7 +1767,7 @@ class AnswerTests(Base):
         folder = self.folder(run)
         box = {}
         lock = open(folder / "answer.lock", "a+")
-        fcntl.flock(lock, fcntl.LOCK_EX)  # the controller is in the middle of leaving the waiting state
+        osfs.lock(lock.fileno())  # the controller is in the middle of leaving the waiting state
 
         def answer():
             try:

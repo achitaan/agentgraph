@@ -19,6 +19,7 @@ from agentgraph.contract import TaskGraph
 import tests.test_agentfiles as agentfile_tests
 import tests.test_structure as structure_tests
 from tests.test_structure import make_structure, tree, write_flow
+from tests.winskip import needs_symlinks
 
 ROOT = Path(__file__).resolve().parent.parent
 LOOP_ID = "impl-openai-verifier-impl-openai"
@@ -378,12 +379,13 @@ class Command(Scratch):
         structure.set_flow_command(flow["id"], False, self.root, commands_dir=self.commands)
         self.assertEqual(self.command_file("check-loop").read_text(), "theirs\n")
 
+    @needs_symlinks
     def test_symlinks_are_not_followed(self):
         flow = self.add_loop(name="check-loop")
         target = self.temporary / "elsewhere"
         target.mkdir()
         linked = self.temporary / "linked"
-        linked.symlink_to(target)
+        linked.symlink_to(target, target_is_directory=True)
         with self.assertRaisesRegex(structure.StructureError, "not a plain folder"):
             structure.set_flow_command(flow["id"], True, self.root, commands_dir=linked)
         self.assertEqual(os.listdir(target), [])

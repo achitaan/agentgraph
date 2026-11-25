@@ -57,6 +57,11 @@ _BASE_ENV_NAMES = ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", 
                    "USERDOMAIN", "COMPUTERNAME", "OS", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS")
 
 
+class ShellRefused(OSError):
+    """A command string that cannot be run faithfully by the shell on hand. An OSError, so a caller that already turns "the command could
+    not be started" into a failed check shows this message and never counts it as a pass."""
+
+
 class Proc(NamedTuple):
     pid: int
     ppid: int | None
@@ -113,13 +118,19 @@ def resolve_command(name: str, *, windows=None, which=None) -> str:
 def shell_command(command: str, *, windows=None, which=None, posix_shell: str = "sh", comspec: str | None = None):
     """What to hand to Popen (without shell=True) to run a command string through a shell. POSIX: [posix_shell, "-c", command]. Windows:
     [<sh on PATH>, "-c", command] when there is one, else the string `<comspec> /d /s /c "<command>"` (a string, not a list: cmd strips
-    the outer quotes itself and a list would be quoted the way CreateProcess programs read it, which cmd does not)."""
+    the outer quotes itself and a list would be quoted the way CreateProcess programs read it, which cmd does not). A command with a
+    newline on the cmd path raises ShellRefused (an OSError); the shell path is `comspec` quoted when it holds a space."""
     if not _win(windows):
         return [posix_shell, "-c", command]
     sh = (which or shutil.which)("sh")
     if sh:
         return [sh, "-c", command]
+    if "\r" in command or "\n" in command:  # cmd runs only the first line of a multi-line string: the rest would be silently skipped
+        raise ShellRefused("a multi-line command needs a sh on PATH (install Git for Windows) or one line joined with &&: "
+                           "Windows cmd would run only its first line")
     shell = comspec or os.environ.get("COMSPEC") or "cmd.exe"
+    if " " in shell and not shell.startswith('"'):
+        shell = f'"{shell}"'
     return f'{shell} /d /s /c "{command}"'
 
 

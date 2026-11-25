@@ -16,11 +16,15 @@ from pathlib import Path
 from unittest import mock
 
 from agentgraph import __main__ as entry
-from agentgraph import check, looprun, noderun
+from agentgraph import check, looprun, noderun, osproc
+from tests.shellskip import FALSE, TRUE, needs_sh, sh_or, sleep_command
+from tests.winskip import posix_only
 
 # fails twice, passes on the third call: the counter lives in the project, outside what a scripted worker touches
 # (the counter file is named in the environment, so that the command names no file of the project)
-CHECK_THIRD = 'f="$NODE_TEST_COUNT"; n=$(cat "$f" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$f"; echo "round $n"; [ "$n" -ge 3 ]'
+CHECK_THIRD = sh_or('f="$NODE_TEST_COUNT"; n=$(cat "$f" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$f"; echo "round $n"; [ "$n" -ge 3 ]',
+                    "import os; f = os.environ['NODE_TEST_COUNT']; n = int(open(f).read()) + 1 if os.path.exists(f) else 1; "
+                    "open(f, 'w').write(str(n)); print('round', n); raise SystemExit(0 if n >= 3 else 1)")
 TASK = "demo"
 
 
@@ -176,7 +180,7 @@ class ThreeRounds(Base):
         self.run_node([{}], attempts=1)
         self.assertEqual(self.node()["status"], "failed")
         self.assertEqual(self.node()["attempts"], 1)
-        run_id, line, _ = self.run_node([{}, {}], attempts=3, check="true", raise_budget=True, amend_check=True)
+        run_id, line, _ = self.run_node([{}, {}], attempts=3, check=TRUE, raise_budget=True, amend_check=True)
         self.assertTrue(line.startswith("passed-check attempts=1"), line)
         node = self.node()
         self.assertEqual((node["status"], node["attempts"]), ("returned", 2))  # the graph counts rounds over both runs
@@ -190,7 +194,7 @@ class Verifier(Base):
     def test_a_rejection_goes_back_to_the_worker(self):
         script = {"impl-openai": [{"cost": 0.1}, {"cost": 0.1}],
                   "reviewer": [{"final": "The edge case is missing.\nVERDICT: FAIL", "cost": 0.05}, {"final": "VERDICT: PASS", "cost": 0.05}]}
-        run_id, line, executor = self.run_node(script, check="true", verify="reviewer")
+        run_id, line, executor = self.run_node(script, check=TRUE, verify="reviewer")
         self.assertTrue(line.startswith("passed-check attempts=2 cost=$0.3000"), line)
         self.assertEqual(len(executor.by_agent("impl-openai")), 2)
         self.assertEqual(len(executor.by_agent("reviewer")), 2)
@@ -208,10 +212,10 @@ class Verifier(Base):
         self.assertEqual(len(executor.by_agent("impl-openai")), 3)
 
     def test_the_verifier_may_not_be_the_worker(self):
-        self.assertIn("different agent", self.refused(check="true", cost=1, verify="impl-openai"))
+        self.assertIn("different agent", self.refused(check=TRUE, cost=1, verify="impl-openai"))
 
     def test_the_node_may_name_its_own_verifier_check_and_budget(self):
-        data = graph(check="true", verify="reviewer", budget={"cost": 2.0, "attempts": 2})
+        data = graph(check=TRUE, verify="reviewer", budget={"cost": 2.0, "attempts": 2})
         self.write(data)
         script = {"impl-openai": [{}], "reviewer": [{"final": "VERDICT: PASS"}]}
         executor = looprun.ScriptedExecutor({"impl-openai": [{"cost": 0.1}], "reviewer": [{"final": "VERDICT: PASS", "cost": 0.1}]})
@@ -222,7 +226,7 @@ class Verifier(Base):
 
 class Limits(Base):
     def test_the_cost_limit_stops_the_run_with_the_word_limit(self):
-        run_id, line, _ = self.run_node([{"cost": 0.4}] * 5, cost=0.5, attempts=5, check="false")
+        run_id, line, _ = self.run_node([{"cost": 0.4}] * 5, cost=0.5, attempts=5, check=FALSE)
         self.assertTrue(line.startswith("limit attempts=2 "), line)
         node = self.node()
         self.assertEqual(node["status"], "failed")
@@ -232,13 +236,13 @@ class Limits(Base):
         self.assertIsInstance(node["ended"], float)
 
     def test_the_attempt_limit_stops_the_run_with_the_word_failed(self):
-        run_id, line, _ = self.run_node([{"cost": 0.01}] * 5, attempts=2, check="false")
+        run_id, line, _ = self.run_node([{"cost": 0.01}] * 5, attempts=2, check=FALSE)
         self.assertTrue(line.startswith("failed attempts=2 "), line)
         self.assertEqual(self.node()["status"], "failed")
         self.assertIn("failed after 2 rounds", self.node()["evidence"])
 
     def test_a_worker_turn_that_hits_the_time_limit_is_a_limit_not_a_stall(self):
-        run_id, line, _ = self.run_node([{"hang": True}], attempts=1, attempt_seconds=0.3, check="false")
+        run_id, line, _ = self.run_node([{"hang": True}], attempts=1, attempt_seconds=0.3, check=FALSE)
         self.assertTrue(line.startswith("limit "), line)
         node = self.node()
         self.assertEqual((node["status"], node["stalled"]), ("failed", False))  # the controller saw no stall: the worker was cut off
@@ -248,7 +252,7 @@ class Limits(Base):
         self.assertEqual(self.check_graph()[0], 0)
 
     def test_an_agent_that_fails_blocks_the_node(self):
-        run_id, line, _ = self.run_node([{"error": "provider down"}], check="false")
+        run_id, line, _ = self.run_node([{"error": "provider down"}], check=FALSE)
         self.assertTrue(line.startswith("blocked "), line)
         self.assertEqual(self.node()["status"], "blocked")
 
@@ -262,7 +266,7 @@ class Refusals(Base):
         before = graph()
         before["nodes"][0]["status"] = "returned"
         self.write(before)
-        self.assertIn("n0 has not passed", self.refused(check="true", cost=1))
+        self.assertIn("n0 has not passed", self.refused(check=TRUE, cost=1))
         self.untouched(before)
 
     def test_a_node_that_is_running_or_passed(self):
@@ -270,7 +274,7 @@ class Refusals(Base):
             with self.subTest(status=status):
                 before = graph(status=status, session="ses_x") if status == "running" else graph(status=status)
                 self.write(before)
-                self.assertIn(f"already {status}", self.refused(check="true", cost=1))
+                self.assertIn(f"already {status}", self.refused(check=TRUE, cost=1))
                 self.untouched(before)
 
     def test_a_node_without_a_check(self):
@@ -278,7 +282,7 @@ class Refusals(Base):
         self.untouched(graph())
 
     def test_a_run_without_a_spend_limit(self):
-        self.assertIn("spend limit", self.refused(check="true"))
+        self.assertIn("spend limit", self.refused(check=TRUE))
         self.untouched(graph())
 
     def test_a_node_without_a_workable_agent(self):
@@ -286,16 +290,16 @@ class Refusals(Base):
             with self.subTest(change=change):
                 before = graph(**change)
                 self.write(before)
-                self.assertIn("no agent that can do the work", self.refused(check="true", cost=1))
+                self.assertIn("no agent that can do the work", self.refused(check=TRUE, cost=1))
                 self.untouched(before)
 
     def test_a_node_the_graph_does_not_have(self):
-        self.assertIn("no node 'zz'", self.refused(node="zz", check="true", cost=1))
+        self.assertIn("no node 'zz'", self.refused(node="zz", check=TRUE, cost=1))
 
     def test_the_command_line_says_it_in_words_and_exits_with_one(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            code = noderun.main(["run", "--task", TASK, "--node", "n2", "--dir", str(self.directory), "--check", "true", "--cost", "1"])
+            code = noderun.main(["run", "--task", TASK, "--node", "n2", "--dir", str(self.directory), "--check", TRUE, "--cost", "1"])
         self.assertEqual(code, 1)
         self.assertEqual(out.getvalue().strip(), "node n2 is not ready: n1 has not passed")
 
@@ -331,7 +335,7 @@ class TwoRuns(Base):
         thread, done = self.run_in_thread([{"hang": True}])
         self.assertTrue(self.wait_until(lambda: self.node()["status"] == "running"))
         first = self.runs()
-        message = self.refused(check="true", cost=1)
+        message = self.refused(check=TRUE, cost=1)
         self.assertIn("already running", message)
         self.assertIn(first[0].name, message)
         self.assertEqual(self.runs(), first)
@@ -342,7 +346,7 @@ class TwoRuns(Base):
 
         def go():
             try:
-                noderun.run(TASK, "n1", directory=self.directory, check="true", cost=1, wait=True, executor=looprun.ScriptedExecutor([{"cost": 0.1}]))
+                noderun.run(TASK, "n1", directory=self.directory, check=TRUE, cost=1, wait=True, executor=looprun.ScriptedExecutor([{"cost": 0.1}]))
                 results.append("ran")
             except noderun.NodeRefused as exc:
                 results.append(str(exc))
@@ -361,7 +365,7 @@ class KilledController(Base):
         script.write_text(json.dumps([{"hang": True}]))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            code = noderun.main(["run", "--task", TASK, "--node", "n1", "--dir", str(self.directory), "--check", "false", "--cost", "1",
+            code = noderun.main(["run", "--task", TASK, "--node", "n1", "--dir", str(self.directory), "--check", FALSE, "--cost", "1",
                                  "--executor", f"scripted:{script}"])
         self.assertEqual(code, 0, out.getvalue())
         self.assertIn("started", out.getvalue())
@@ -371,7 +375,7 @@ class KilledController(Base):
             with contextlib.suppress(Exception):
                 pid = looprun.read_run(run).get("pid")
                 if pid:
-                    os.killpg(pid, signal.SIGKILL)
+                    osproc.kill_group(pid, force=True)
         self.addCleanup(cleanup)
         self.assertTrue(self.wait_until(lambda: looprun.read_run(run).get("status") == "running" and looprun.read_run(run).get("pid")))
         return run
@@ -379,7 +383,7 @@ class KilledController(Base):
     def test_a_detached_run_that_is_killed_is_reported_as_it_is(self):
         run = self.start_detached()
         self.assertTrue(noderun.status(TASK, "n1", self.directory).startswith("running "))
-        os.killpg(looprun.read_run(run)["pid"], signal.SIGKILL)
+        osproc.kill_group(looprun.read_run(run)["pid"], force=True)
         self.assertTrue(self.wait_until(lambda: not looprun._held(run)))
         line = noderun.status(TASK, "n1", self.directory)
         self.assertTrue(line.startswith("blocked "), line)  # no controller holds the run, and the run is not over
@@ -391,7 +395,7 @@ class KilledController(Base):
 
     def test_cancel_ends_a_run_whose_controller_is_gone(self):
         run = self.start_detached()
-        os.killpg(looprun.read_run(run)["pid"], signal.SIGKILL)
+        osproc.kill_group(looprun.read_run(run)["pid"], force=True)
         self.assertTrue(self.wait_until(lambda: not looprun._held(run)))
         line = noderun.cancel(TASK, "n1", self.directory)
         self.assertTrue(line.startswith("blocked "), line)
@@ -453,14 +457,14 @@ class Budget(Base):
     """The budget belongs to the node: every run draws on the same one."""
 
     def test_a_second_run_gets_what_is_left_and_the_run_after_that_is_refused_at_zero(self):
-        thread, done = self.run_in_thread([{"cost": 0.1}, {"hang": True}], check="false", attempts=5, cost=2.0)
+        thread, done = self.run_in_thread([{"cost": 0.1}, {"hang": True}], check=FALSE, attempts=5, cost=2.0)
         self.assertTrue(self.wait_until(lambda: self.node().get("attempts") == 2 and self.node().get("spent")))
         noderun.cancel(TASK, "n1", self.directory)
         thread.join(20)
         first = self.node()
         self.assertEqual((first["status"], first["attempts"]), ("blocked", 2))
         self.assertAlmostEqual(first["spent"], 0.11)
-        run_id, line, _ = self.run_node([{}] * 5, check="false")  # no --cost or --attempts: the node's own budget
+        run_id, line, _ = self.run_node([{}] * 5, check=FALSE)  # no --cost or --attempts: the node's own budget
         limits = looprun.read_run(looprun.run_dir(self.project, run_id))["limits"]
         self.assertEqual(limits["attempts"], 3)  # five less the two the node has used
         self.assertAlmostEqual(limits["cost"], 2.0 - first["spent"])
@@ -468,24 +472,24 @@ class Budget(Base):
         node = self.node()
         self.assertEqual(node["attempts"], 5)
         self.assertAlmostEqual(node["spent"], first["spent"] + 0.03)  # a running total over both runs
-        message = self.refused(check="false")
+        message = self.refused(check=FALSE)
         self.assertIn("used 5 of its 5 attempts", message)
         self.assertIn("--raise-budget", message)
         self.assertEqual(len(self.runs()), 2)  # the refused run left nothing behind
 
     def test_a_run_is_refused_when_the_money_is_gone(self):
-        self.run_node([{"cost": 0.4}] * 5, cost=0.5, attempts=5, check="false")
+        self.run_node([{"cost": 0.4}] * 5, cost=0.5, attempts=5, check=FALSE)
         self.assertAlmostEqual(self.node()["spent"], 0.8)
-        message = self.refused(check="false")
+        message = self.refused(check=FALSE)
         self.assertIn("spent $0.8000 of its $0.5 budget", message)
         self.assertIn("--raise-budget", message)
 
     def test_cost_and_attempts_do_not_change_a_budget_the_node_has(self):
-        self.run_node([{}], attempts=1, cost=5.0, check="false")
-        message = self.refused(check="false", cost=9.0)
+        self.run_node([{}], attempts=1, cost=5.0, check=FALSE)
+        message = self.refused(check=FALSE, cost=9.0)
         self.assertIn("--raise-budget", message)
         self.assertEqual(self.node()["budget"], {"cost": 5.0, "attempts": 1})
-        run_id, line, _ = self.run_node([{}], attempts=2, cost=9.0, check="false", raise_budget=True)
+        run_id, line, _ = self.run_node([{}], attempts=2, cost=9.0, check=FALSE, raise_budget=True)
         self.assertEqual(self.node()["budget"], {"cost": 9.0, "attempts": 2})
         self.assertIn(("n1", "amended"), self.events())
         note = next(e["note"] for e in self.read()["events"] if e["event"] == "amended")
@@ -493,13 +497,13 @@ class Budget(Base):
         self.assertEqual(self.check_graph()[0], 0)
 
     def test_the_same_numbers_again_need_no_amendment(self):
-        self.run_node([{}], attempts=3, cost=5.0, check="true")
-        self.run_node([{}], attempts=3, cost=5.0, check="true")
+        self.run_node([{}], attempts=3, cost=5.0, check=TRUE)
+        self.run_node([{}], attempts=3, cost=5.0, check=TRUE)
         self.assertNotIn(("n1", "amended"), self.events())
 
     def test_spent_stays_unset_until_a_cost_is_known(self):
         executor = looprun.ScriptedExecutor([{}])  # a turn with no price
-        noderun.run(TASK, "n1", directory=self.directory, check="false", cost=5.0, attempts=1, wait=True, executor=executor)
+        noderun.run(TASK, "n1", directory=self.directory, check=FALSE, cost=5.0, attempts=1, wait=True, executor=executor)
         node = self.node()
         self.assertNotIn("spent", node)  # unknown is not nought
         self.assertEqual(node.get("unpriced"), 1)
@@ -507,7 +511,7 @@ class Budget(Base):
 
     def test_a_cost_that_is_partly_unknown_says_at_least(self):
         executor = looprun.ScriptedExecutor([{"cost": 0.1}, {}, {}, {}])
-        run_id, line = noderun.run(TASK, "n1", directory=self.directory, check="false", cost=5.0, attempts=3, wait=True, executor=executor)
+        run_id, line = noderun.run(TASK, "n1", directory=self.directory, check=FALSE, cost=5.0, attempts=3, wait=True, executor=executor)
         self.assertIn("cost=at least $0.1000 (1 turn with no known cost)", line)
         node = self.node()
         self.assertAlmostEqual(node["spent"], 0.1)
@@ -520,17 +524,17 @@ class Budget(Base):
 
 class Amendment(Base):
     def test_another_check_after_the_first_dispatch_is_refused_without_amend_check(self):
-        self.run_node([{}], attempts=1, check="false")
-        message = self.refused(check="true", raise_budget=True, attempts=3)
+        self.run_node([{}], attempts=1, check=FALSE)
+        message = self.refused(check=TRUE, raise_budget=True, attempts=3)
         self.assertIn("--amend-check", message)
         self.assertIn("sha256", message)
-        self.assertEqual(self.node()["check"], "false")
+        self.assertEqual(self.node()["check"], FALSE)
 
     def test_amend_check_writes_the_event_and_an_amendment_and_the_graph_stays_valid(self):
-        self.run_node([{}], attempts=1, check="false")
+        self.run_node([{}], attempts=1, check=FALSE)
         revision = self.read()["revision"]
-        run_id, line, _ = self.run_node([{}], attempts=3, check="true", raise_budget=True, amend_check=True)
-        self.assertEqual(self.node()["check"], "true")
+        run_id, line, _ = self.run_node([{}], attempts=3, check=TRUE, raise_budget=True, amend_check=True)
+        self.assertEqual(self.node()["check"], TRUE)
         data = self.read()
         self.assertEqual(data["revision"], revision + 1)
         self.assertEqual(len(data["amendments"]), 1)
@@ -540,24 +544,24 @@ class Amendment(Base):
         self.assertEqual(code, 0, output)
 
     def test_a_check_edited_into_the_graph_without_an_amendment_is_an_error_for_check(self):
-        self.run_node([{}], attempts=1, check="false")
+        self.run_node([{}], attempts=1, check=FALSE)
         data = self.read()
-        data["nodes"][1]["check"] = "true"
+        data["nodes"][1]["check"] = TRUE
         self.write(data)
         code, output = self.check_graph(history=True)
         self.assertEqual(code, 1, output)
         self.assertIn("n1 check changed without an amendment", output)
 
     def test_a_node_never_dispatched_may_take_another_check(self):
-        self.write(graph(check="false"))
-        run_id, line, _ = self.run_node([{}], attempts=1, check="true")
+        self.write(graph(check=FALSE))
+        run_id, line, _ = self.run_node([{}], attempts=1, check=TRUE)
         self.assertTrue(line.startswith("passed-check "), line)
-        self.assertEqual(self.node()["check"], "true")
+        self.assertEqual(self.node()["check"], TRUE)
 
     def test_another_verifier_is_an_amendment_too(self):
         executor = looprun.ScriptedExecutor({"impl-openai": [{"cost": 0.1}], "reviewer": [{"final": "VERDICT: FAIL", "cost": 0.1}]})
-        noderun.run(TASK, "n1", directory=self.directory, check="true", verify="reviewer", cost=5, attempts=1, wait=True, executor=executor)
-        message = self.refused(check="true", verify="other-reviewer", raise_budget=True, attempts=3)
+        noderun.run(TASK, "n1", directory=self.directory, check=TRUE, verify="reviewer", cost=5, attempts=1, wait=True, executor=executor)
+        message = self.refused(check=TRUE, verify="other-reviewer", raise_budget=True, attempts=3)
         self.assertIn("--amend-check", message)
 
 
@@ -589,7 +593,7 @@ class PinnedAndFlagged(Base):
         self.assertIn(noderun._sha(command), line)
 
     def test_the_check_is_pinned_at_the_start_and_a_change_in_the_graph_flags_the_pass(self):
-        run_id, line, text = self.flagged([{}, {}, {}], lambda n, call: self.edit_node(check="true") if n == 1 else None)
+        run_id, line, text = self.flagged([{}, {}, {}], lambda n, call: self.edit_node(check=TRUE) if n == 1 else None)
         self.assertTrue(line.startswith("passed-check-flagged attempts=3 "), line)  # the pinned command ran every round and passed in round 3
         self.assertIn(noderun._sha(CHECK_THIRD), line)
         self.assertEqual(self.node()["status"], "returned")
@@ -597,6 +601,7 @@ class PinnedAndFlagged(Base):
         self.assertIn("the node's check was changed in the graph during the run", text)
         self.assertEqual(noderun.exit_code(line), 2)
 
+    @needs_sh
     def test_a_file_the_check_names_changing_during_the_run_flags_the_pass(self):
         (self.project / "check.sh").write_text("exit 1\n")
         run_id, line, text = self.flagged([{}, {}], lambda n, call: (self.project / "check.sh").write_text("exit 0\n") if n == 2 else None,
@@ -614,20 +619,20 @@ class PinnedAndFlagged(Base):
             data = self.read()
             data["nodes"][1]["done_when"] = "anything at all"
             self.write(data)
-        run_id, line, text = self.flagged([{}], hook, check="true", attempts=1)
+        run_id, line, text = self.flagged([{}], hook, check=TRUE, attempts=1)
         self.assertTrue(line.startswith("passed-check-flagged "), line)
         self.assertIn("the node's own definition", text)
 
     def test_the_graph_changing_in_its_run_fields_only_does_not(self):
         def hook(n, call):
             noderun._edit(self.path, "n2", {"note": "the orchestrator wrote a note"})
-        run_id, line, text = self.flagged([{}], hook, check="true", attempts=1)
+        run_id, line, text = self.flagged([{}], hook, check=TRUE, attempts=1)
         self.assertTrue(line.startswith("passed-check "), line)
 
     def test_another_task_graph_file_changing_does_not_flag_the_pass(self):
         other = self.directory / "other.json"
         other.write_text(json.dumps({**graph(), "task": "other"}))
-        run_id, line, text = self.flagged([{}], lambda n, call: other.write_text("{}"), check="true", attempts=1)
+        run_id, line, text = self.flagged([{}], lambda n, call: other.write_text("{}"), check=TRUE, attempts=1)
         self.assertTrue(line.startswith("passed-check "), line)
         self.assertIn("- .opencode/graph/other.json", text.split("Also changed in the project")[1])  # listed, not flagged
 
@@ -636,7 +641,7 @@ class PinnedAndFlagged(Base):
             (self.project / "src").mkdir(exist_ok=True)
             (self.project / "src" / "a.py").write_text("x = 1\n")
             (self.project / "elsewhere.txt").write_text("not the node's\n")
-        run_id, line, text = self.flagged([{}], hook, check="true", attempts=1)
+        run_id, line, text = self.flagged([{}], hook, check=TRUE, attempts=1)
         self.assertTrue(line.startswith("passed-check-flagged "), line)
         self.assertEqual(self.node()["status"], "returned")
         self.assertIn("1 changed file lies outside the node's scope (src/a.py), in no running node's scope, not ignored by git: elsewhere.txt", text)
@@ -651,7 +656,7 @@ class PinnedAndFlagged(Base):
         def hook(n, call):
             for index in range(25):
                 (self.project / f"stray{index:02d}.txt").write_text("x")
-        run_id, line, text = self.flagged([{}], hook, check="true", attempts=1)
+        run_id, line, text = self.flagged([{}], hook, check=TRUE, attempts=1)
         flag = next(l for l in text.splitlines() if "lie outside the node's scope" in l)
         self.assertIn("25 changed files lie outside", flag)
         self.assertEqual(flag.count("stray"), 20)
@@ -666,13 +671,13 @@ class PinnedAndFlagged(Base):
         for index in range(6):
             (self.project / f"keep{index}.txt").write_text("x")
         self.enterContext(mock.patch.object(noderun, "FILE_LIMIT", 4))
-        run_id, line, text = self.flagged([{}], lambda n, call: (self.project / "keep0.txt").unlink(), check="true", attempts=1)
+        run_id, line, text = self.flagged([{}], lambda n, call: (self.project / "keep0.txt").unlink(), check=TRUE, attempts=1)
         self.assertIn("this list is incomplete, and no deletion is reported", text)
         self.assertNotIn("Deleted:", text)
 
     def test_a_deletion_is_named_when_the_walk_was_complete(self):
         (self.project / "gone.txt").write_text("x")
-        run_id, line, text = self.flagged([{}], lambda n, call: (self.project / "gone.txt").unlink(), check="true", attempts=1)
+        run_id, line, text = self.flagged([{}], lambda n, call: (self.project / "gone.txt").unlink(), check=TRUE, attempts=1)
         self.assertIn("Deleted:", text)
         self.assertIn("- gone.txt", text)
         self.assertNotIn("incomplete", text)
@@ -714,7 +719,7 @@ class FlagNoise(Base):
 
     def test_two_lanes_in_one_tree_the_other_lanes_files_do_not_flag_but_a_file_in_nobodys_scope_does(self):
         self.lane()
-        line, text = self.flagged([{}], self.write_files("lane2/theirs.py"), check="true", attempts=1)
+        line, text = self.flagged([{}], self.write_files("lane2/theirs.py"), check=TRUE, attempts=1)
         self.assertTrue(line.startswith("passed-check "), line)
         self.assertNotIn("Flagged", text)
         self.assertIn("- lane2/theirs.py", text.split("Also changed in the project")[1])  # listed, not flagged
@@ -722,7 +727,7 @@ class FlagNoise(Base):
 
     def test_a_file_in_nobodys_scope_flags_even_beside_the_other_lanes_files(self):
         self.lane()
-        line, text = self.flagged([{}], self.write_files("lane2/theirs.py", "nobody.txt"), check="true", attempts=1, cost=5)
+        line, text = self.flagged([{}], self.write_files("lane2/theirs.py", "nobody.txt"), check=TRUE, attempts=1, cost=5)
         self.assertTrue(line.startswith("passed-check-flagged "), line)
         flag = next(l for l in text.splitlines() if "outside the node's scope" in l)
         self.assertIn("nobody.txt", flag)
@@ -731,7 +736,7 @@ class FlagNoise(Base):
 
     def test_a_lane_that_was_not_running_does_not_excuse_its_files(self):
         self.lane(status="pending")
-        line, text = self.flagged([{}], self.write_files("lane2/theirs.py"), check="true", attempts=1)
+        line, text = self.flagged([{}], self.write_files("lane2/theirs.py"), check=TRUE, attempts=1)
         self.assertTrue(line.startswith("passed-check-flagged "), line)
 
     def test_a_lane_that_ran_and_finished_during_the_run_still_excuses_its_files(self):
@@ -744,12 +749,12 @@ class FlagNoise(Base):
             data["nodes"][3]["finished"] = time.time()
             self.write(data)
             self.write_files("lane2/theirs.py")(n, call)
-        line, text = self.flagged([{}], hook, check="true", attempts=1)
+        line, text = self.flagged([{}], hook, check=TRUE, attempts=1)
         self.assertTrue(line.startswith("passed-check "), line)
 
     def test_a_node_with_no_scope_is_not_compared_and_says_so_once(self):
         self.write(graph(scope=[]))
-        line, text = self.flagged([{}], self.write_files("anything.txt", "more/things.txt"), check="true", attempts=1)
+        line, text = self.flagged([{}], self.write_files("anything.txt", "more/things.txt"), check=TRUE, attempts=1)
         self.assertTrue(line.startswith("passed-check "), line)
         self.assertEqual(text.count("No scope set, so changed files were not compared with it."), 1)
         rest = text.split("Also changed in the project")[1]
@@ -757,7 +762,7 @@ class FlagNoise(Base):
         self.assertIn("- more/things.txt", rest)
 
     def test_a_node_with_a_scope_does_not_get_the_empty_scope_line(self):
-        line, text = self.flagged([{}], lambda n, call: None, check="true", attempts=1)
+        line, text = self.flagged([{}], lambda n, call: None, check=TRUE, attempts=1)
         self.assertNotIn("No scope set", text)
 
     def test_another_node_added_to_the_graph_during_the_run_does_not_flag(self):
@@ -768,7 +773,7 @@ class FlagNoise(Base):
                                            "changed_paths": []})
             noderun_graph["objectives"][0]["nodes"].append("n9")
             self.write(noderun_graph)
-        line, text = self.flagged([{}], hook, check="true", attempts=1)
+        line, text = self.flagged([{}], hook, check=TRUE, attempts=1)
         self.assertTrue(line.startswith("passed-check "), line)
 
     def test_another_nodes_definition_changing_does_not_flag(self):
@@ -776,7 +781,7 @@ class FlagNoise(Base):
             data = self.read()
             data["nodes"][2]["goal"] = "Later work, reworded"
             self.write(data)
-        line, text = self.flagged([{}], other, check="true", attempts=1)
+        line, text = self.flagged([{}], other, check=TRUE, attempts=1)
         self.assertTrue(line.startswith("passed-check "), line)
 
     def test_this_nodes_own_verify_changing_flags(self):
@@ -784,7 +789,7 @@ class FlagNoise(Base):
             data = self.read()
             data["nodes"][1]["verify"] = "reviewer"
             self.write(data)
-        line, text = self.flagged([{}], mine, check="true", attempts=1)
+        line, text = self.flagged([{}], mine, check=TRUE, attempts=1)
         self.assertTrue(line.startswith("passed-check-flagged "), line)
         self.assertIn("the node's own definition", text)
 
@@ -816,6 +821,7 @@ class FlagIgnoredFiles(Base):
         (self.project / ".gitignore").write_text(".coverage\nbuild/\n.ruff_cache/\n")
         (self.project / "gen.sh").write_text("echo x > .coverage; mkdir -p build .ruff_cache; echo y > build/out.o; echo z > .ruff_cache/c\n")
 
+    @needs_sh
     def test_a_check_that_writes_ignored_files_outside_the_scope_does_not_flag(self):
         run_id, line, _ = self.run_node([{}], check="sh gen.sh", attempts=1)
         self.assertTrue(line.startswith("passed-check "), line)
@@ -829,7 +835,7 @@ class FlagIgnoredFiles(Base):
             (self.project / "build").mkdir(exist_ok=True)
             (self.project / "build" / "o").write_text("x\n")
         executor = looprun.ScriptedExecutor([{"cost": 0.01}], hook=hook)
-        run_id, line = noderun.run(TASK, "n1", directory=self.directory, check="true", cost=5, attempts=1, wait=True, executor=executor)
+        run_id, line = noderun.run(TASK, "n1", directory=self.directory, check=TRUE, cost=5, attempts=1, wait=True, executor=executor)
         text = (self.project / noderun.report_path(TASK, "n1", run_id)).read_text()
         self.assertTrue(line.startswith("passed-check-flagged "), line)
         flag = next(l for l in text.splitlines() if "outside the node's scope" in l)
@@ -921,14 +927,14 @@ class OldRunSettled(Base):
         script.write_text(json.dumps(turns))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            code = noderun.main(["run", "--task", TASK, "--node", "n1", "--dir", str(self.directory), "--check", "false", "--cost", "2",
+            code = noderun.main(["run", "--task", TASK, "--node", "n1", "--dir", str(self.directory), "--check", FALSE, "--cost", "2",
                                  "--attempts", "5", "--executor", f"scripted:{script}"])
         self.assertEqual(code, 0, out.getvalue())
         (run,) = self.runs()
 
         def cleanup():
             with contextlib.suppress(Exception):
-                os.killpg(looprun.read_run(run).get("pid"), signal.SIGKILL)
+                osproc.kill_group(looprun.read_run(run).get("pid"), force=True)
         self.addCleanup(cleanup)
         return run
 
@@ -941,14 +947,14 @@ class OldRunSettled(Base):
     def test_graph_set_after_a_kill_then_node_run_cancels_the_old_run_and_counts_its_totals(self):
         run = self.start_detached([{"cost": 0.1}, {"hang": True}])
         self.assertTrue(self.wait_until(lambda: looprun.read_run(run).get("totals", {}).get("cost") == 0.1 and looprun.read_run(run).get("pid")))
-        os.killpg(looprun.read_run(run)["pid"], signal.SIGKILL)
+        osproc.kill_group(looprun.read_run(run)["pid"], force=True)
         self.assertTrue(self.wait_until(lambda: not looprun._held(run)))
         noderun.graphedit.edit(TASK, "n1", {"status": "failed", "evidence": "the orchestrator gave up on the stuck run"}, dirs=[self.directory])
         data = self.read()  # the follower had not yet written what the run did: the node does not know it
         data["nodes"][1].pop("spent", None)
         data["nodes"][1].pop("unpriced", None)
         self.write(data)
-        (run_id, line, _), said = self.run_and_say([{}] * 5, check="false")
+        (run_id, line, _), said = self.run_and_say([{}] * 5, check=FALSE)
         self.assertEqual(looprun.read_run(run)["status"], "cancelled")  # it cannot come back with `loop resume`
         self.assertIn(f"the earlier loop run {run.name} was interrupted and is now cancelled", said)
         self.assertEqual(len(said.strip().splitlines()), 1)  # one line
@@ -961,26 +967,26 @@ class OldRunSettled(Base):
         self.assertEqual(self.check_graph(history=True)[0], 0)
 
     def test_a_paused_run_is_cancelled_the_same_way(self):
-        thread, done = self.run_in_thread([{"sleep": 1.0}, {}], check="false", attempts=5)
+        thread, done = self.run_in_thread([{"sleep": 1.0}, {}], check=FALSE, attempts=5)
         (run,) = self.runs()
         self.assertTrue(self.wait_until(lambda: looprun.read_run(run).get("status") == "running"))
         looprun.pause(run)
         thread.join(30)
         self.assertEqual(looprun.read_run(run)["status"], "paused")
         noderun.graphedit.edit(TASK, "n1", {"status": "failed", "evidence": "paused for too long"}, dirs=[self.directory])
-        (run_id, line, _), said = self.run_and_say([{}] * 5, check="false")
+        (run_id, line, _), said = self.run_and_say([{}] * 5, check=FALSE)
         self.assertEqual(looprun.read_run(run)["status"], "cancelled")
         self.assertIn(f"the earlier loop run {run.name} was paused and is now cancelled", said)
         self.assertNotEqual(run_id, run.name)
 
     def test_an_old_run_that_ended_by_itself_says_nothing(self):
-        self.run_node([{}], check="true", attempts=3, cost=5.0)
-        (run_id, line, _), said = self.run_and_say([{}], check="true")
+        self.run_node([{}], check=TRUE, attempts=3, cost=5.0)
+        (run_id, line, _), said = self.run_and_say([{}], check=TRUE)
         self.assertEqual(said, "")
 
     def test_the_refusal_for_a_node_that_is_running_names_cancel_and_wait(self):
         thread, done = self.run_in_thread([{"hang": True}])
-        message = self.refused(check="true", cost=1)
+        message = self.refused(check=TRUE, cost=1)
         self.assertIn(f"agentgraph node cancel --task {TASK} --node n1", message)
         self.assertIn(f"agentgraph node wait --task {TASK} --node n1", message)
         noderun.cancel(TASK, "n1", self.directory)
@@ -990,25 +996,25 @@ class OldRunSettled(Base):
 class UnpricedTurns(Base):
     def first_run_unpriced(self):
         executor = looprun.ScriptedExecutor([{}])  # a turn that has no price
-        noderun.run(TASK, "n1", directory=self.directory, check="true", cost=5.0, attempts=3, wait=True, executor=executor)
+        noderun.run(TASK, "n1", directory=self.directory, check=TRUE, cost=5.0, attempts=3, wait=True, executor=executor)
         node = self.node()
         self.assertNotIn("spent", node)
         self.assertEqual(node["unpriced"], 1)
 
     def test_a_run_where_every_turn_is_unpriced_blocks_a_rerun_until_it_is_accepted(self):
         self.first_run_unpriced()
-        message = self.refused(check="true")
+        message = self.refused(check=TRUE)
         self.assertIn("had 1 turn with no known cost", message)
         self.assertIn("--accept-unpriced", message)
         self.assertEqual(len(self.runs()), 1)  # the refused run left nothing behind
-        run_id, line, _ = self.run_node([{}], check="true", accept_unpriced=True)
+        run_id, line, _ = self.run_node([{}], check=TRUE, accept_unpriced=True)
         self.assertTrue(line.startswith("passed-check "), line)
         note = next(e["note"] for e in self.read()["events"] if e["event"] == "amended")
         self.assertIn("continued with 1 turn of no known cost (--accept-unpriced)", note)
 
     def test_raise_budget_also_lets_an_unpriced_node_run_again(self):
         self.first_run_unpriced()
-        run_id, line, _ = self.run_node([{}], check="true", raise_budget=True, cost=9.0, attempts=3)
+        run_id, line, _ = self.run_node([{}], check=TRUE, raise_budget=True, cost=9.0, attempts=3)
         self.assertTrue(line.startswith("passed-check "), line)
         self.assertEqual(self.node()["budget"]["cost"], 9.0)
 
@@ -1018,9 +1024,9 @@ class UnpricedTurns(Base):
         script.write_text(json.dumps([{"cost": 0.01}]))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            refused = noderun.main(["run", "--task", TASK, "--node", "n1", "--dir", str(self.directory), "--check", "true", "--wait",
+            refused = noderun.main(["run", "--task", TASK, "--node", "n1", "--dir", str(self.directory), "--check", TRUE, "--wait",
                                     "--executor", f"scripted:{script}"])
-            code = noderun.main(["run", "--task", TASK, "--node", "n1", "--dir", str(self.directory), "--check", "true", "--wait", "--accept-unpriced",
+            code = noderun.main(["run", "--task", TASK, "--node", "n1", "--dir", str(self.directory), "--check", TRUE, "--wait", "--accept-unpriced",
                                  "--executor", f"scripted:{script}"])
         self.assertEqual(refused, 1, out.getvalue())
         self.assertEqual(code, 0, out.getvalue())
@@ -1028,16 +1034,16 @@ class UnpricedTurns(Base):
 
 class RaiseBelowWhatIsSpent(Base):
     def test_raise_budget_refuses_a_cost_below_what_is_spent_and_attempts_below_what_is_used(self):
-        self.run_node([{"cost": 0.4}] * 2, cost=1.0, attempts=2, check="false")
+        self.run_node([{"cost": 0.4}] * 2, cost=1.0, attempts=2, check=FALSE)
         self.assertAlmostEqual(self.node()["spent"], 0.8)
-        message = self.refused(check="false", raise_budget=True, cost=0.5, attempts=9)
+        message = self.refused(check=FALSE, raise_budget=True, cost=0.5, attempts=9)
         self.assertIn("already spent $0.8000", message)
         self.assertIn("below what is spent", message)
-        message = self.refused(check="false", raise_budget=True, cost=9.0, attempts=1)
+        message = self.refused(check=FALSE, raise_budget=True, cost=9.0, attempts=1)
         self.assertIn("already used 2 attempts", message)
         self.assertEqual(self.node()["budget"], {"cost": 1.0, "attempts": 2})  # nothing was changed
         self.assertNotIn(("n1", "amended"), self.events())
-        run_id, line, _ = self.run_node([{}], check="false", raise_budget=True, cost=9.0, attempts=3)  # above both: allowed
+        run_id, line, _ = self.run_node([{}], check=FALSE, raise_budget=True, cost=9.0, attempts=3)  # above both: allowed
         self.assertEqual(self.node()["budget"], {"cost": 9.0, "attempts": 3})
 
 
@@ -1048,6 +1054,7 @@ def agent_script(project, name):
     return script
 
 
+@posix_only
 class LeftoverKillIsNarrow(Base):
     """`_kill_leftovers` stops a process only when it leads its own process group and nothing is its parent any more."""
 
@@ -1111,10 +1118,10 @@ class LeftoverKillIsNarrow(Base):
         folder.mkdir(parents=True)
         looprun._write_atomic(folder / "run.json", looprun._json({"status": "queued", "created": time.time() - 600, "run": folder.name,
                                                                    "sessions": [self.session]}))
-        self.write(graph(status="blocked", loop_run=folder.name, attempts=1, check="true"))
+        self.write(graph(status="blocked", loop_run=folder.name, attempts=1, check=TRUE))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            noderun.run(TASK, "n1", directory=self.directory, check="true", cost=5, wait=True, executor=looprun.ScriptedExecutor([{"cost": 0.01}]))
+            noderun.run(TASK, "n1", directory=self.directory, check=TRUE, cost=5, wait=True, executor=looprun.ScriptedExecutor([{"cost": 0.01}]))
         self.assertIn(f"NOT stopped (not an orphaned group leader): pid {proc.pid}", out.getvalue())
         self.assertIsNone(proc.poll())
 
@@ -1124,7 +1131,7 @@ class Fields(Base):
 
     def test_a_verify_that_is_not_text(self):
         self.write(graph(verify=5))
-        self.assertIn("verify must be text", self.refused(check="true", cost=1))
+        self.assertIn("verify must be text", self.refused(check=TRUE, cost=1))
 
     def test_other_fields_of_the_wrong_type(self):
         for fields, said in (({"check": ["a"]}, "check must be text"), ({"scope": "src"}, "scope must be a list of text"),
@@ -1135,14 +1142,14 @@ class Fields(Base):
                              ({"agent": 3}, "agent must be text"), ({"goal": {}}, "goal must be text")):
             with self.subTest(fields=fields):
                 self.write(graph(**fields))
-                self.assertIn(said, self.refused(check="true", cost=1))
+                self.assertIn(said, self.refused(check=TRUE, cost=1))
         self.assertEqual(self.runs(), [])
 
     def test_the_command_line_says_it_in_one_line(self):
         self.write(graph(verify=5))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            code = noderun.main(["run", "--task", TASK, "--node", "n1", "--dir", str(self.directory), "--check", "true", "--cost", "1"])
+            code = noderun.main(["run", "--task", TASK, "--node", "n1", "--dir", str(self.directory), "--check", TRUE, "--cost", "1"])
         self.assertEqual(code, 1)
         self.assertEqual(len(out.getvalue().splitlines()), 1)
         self.assertNotIn("Traceback", out.getvalue())
@@ -1155,7 +1162,7 @@ class SecondController(Base):
         (run,) = self.runs()
         graphedit = noderun.graphedit
         graphedit.edit(TASK, "n1", {"status": "blocked", "note": "the orchestrator took the node"}, dirs=[self.directory])
-        message = self.refused(check="true", cost=1)  # the node says blocked, but the run is still going
+        message = self.refused(check=TRUE, cost=1)  # the node says blocked, but the run is still going
         self.assertIn("is still going", message)
         self.assertIn(run.name, message)
         self.assertEqual(self.runs(), [run])
@@ -1173,16 +1180,16 @@ class SecondController(Base):
         folder = looprun.loops_folder(self.project) / "20261121-000000-abcd"
         folder.mkdir(parents=True)
         looprun._write_atomic(folder / "run.json", looprun._json({"status": "queued", "created": time.time(), "run": folder.name}))
-        self.write(graph(status="blocked", loop_run=folder.name, attempts=1, check="true"))
-        self.assertIn("is still going (queued)", self.refused(check="true", cost=1))
+        self.write(graph(status="blocked", loop_run=folder.name, attempts=1, check=TRUE))
+        self.assertIn("is still going (queued)", self.refused(check=TRUE, cost=1))
         state = looprun.read_run(folder)
         state["created"] = time.time() - 600  # nobody took it within the grace time
         looprun._write_atomic(folder / "run.json", looprun._json(state))
-        run_id, line, _ = self.run_node([{}], check="true", attempts=3)
+        run_id, line, _ = self.run_node([{}], check=TRUE, attempts=3)
         self.assertTrue(line.startswith("passed-check"), line)
 
     def test_the_first_look_at_a_run_does_not_touch_a_node_that_already_says_what_the_run_says(self):
-        thread, done = self.run_in_thread([{"hang": True}], check="false", attempts=5)
+        thread, done = self.run_in_thread([{"hang": True}], check=FALSE, attempts=5)
         self.assertTrue(self.wait_until(lambda: self.node().get("attempts") == 1))  # the node has caught up with the run
         time.sleep(0.4)
         updated = self.read()["updated"]
@@ -1199,7 +1206,7 @@ class SecondController(Base):
         thread.join(20)
 
     def test_following_a_run_does_not_touch_a_node_that_already_says_the_same(self):
-        thread, done = self.run_in_thread([{"cost": 0.1}, {"hang": True}], check="false", attempts=5)
+        thread, done = self.run_in_thread([{"cost": 0.1}, {"hang": True}], check=FALSE, attempts=5)
         self.assertTrue(self.wait_until(lambda: self.node().get("attempts") == 2 and self.node().get("spent")))
         updated = self.read()["updated"]
         time.sleep(0.6)  # several looks at the run, with nothing new in it
@@ -1210,7 +1217,7 @@ class SecondController(Base):
 
 class Endings(Base):
     def test_paused_leaves_the_node_running_and_check_says_what_to_do(self):
-        thread, done = self.run_in_thread([{"sleep": 1.0}, {}], check="false", attempts=5)
+        thread, done = self.run_in_thread([{"sleep": 1.0}, {}], check=FALSE, attempts=5)
         (run,) = self.runs()
         self.assertTrue(self.wait_until(lambda: looprun.read_run(run).get("status") == "running"))
         looprun.pause(run)
@@ -1228,7 +1235,7 @@ class Endings(Base):
         self.assertEqual(self.node()["status"], "blocked")
 
     def test_a_check_that_cannot_decide_blocks_the_node(self):
-        run_id, line, _ = self.run_node([{}], check="sleep 5", check_timeout=0.3, attempts=1)
+        run_id, line, _ = self.run_node([{}], check=sleep_command(5), check_timeout=0.3, attempts=1)
         self.assertEqual(looprun.read_run(looprun.run_dir(self.project, run_id))["status"], "inconclusive")
         self.assertTrue(line.startswith("blocked "), line)
         node = self.node()
@@ -1248,7 +1255,7 @@ class Endings(Base):
     def test_the_result_is_never_taken_back_to_fewer_attempts_than_the_graph_has(self):
         def hook(n, call):
             noderun.graphedit.edit(TASK, "n1", {"attempts": "9"}, dirs=[self.directory])
-        run_id, line, _ = self.run_node([{}], hook=hook, check="true", attempts=3)
+        run_id, line, _ = self.run_node([{}], hook=hook, check=TRUE, attempts=3)
         node = self.node()
         self.assertEqual((node["status"], node["attempts"]), ("returned", 9))
 
@@ -1262,7 +1269,7 @@ class Endings(Base):
                 raise noderun.graphedit.Refused("this write would add a problem to demo.json: invented for the test")
             return real(path, node_id, change, *args, **kw)
         with mock.patch.object(noderun, "_edit", refuse_returned):
-            run_id, line, _ = self.run_node([{}], check="true", attempts=3)
+            run_id, line, _ = self.run_node([{}], check=TRUE, attempts=3)
         node = self.node()
         self.assertEqual(node["status"], "blocked")  # not left running
         self.assertIn("the graph refused the node's result: this write would add a problem to demo.json: invented for the test", node["evidence"])
@@ -1288,18 +1295,18 @@ class ExitCodes(Base):
             self.assertEqual(noderun.exit_code(line), code, line)
 
     def test_run_wait_and_status_and_wait_exit_by_the_word(self):
-        code, out = self.run_main([{"cost": 0.1}], "--check", "false", "--attempts", "1")
+        code, out = self.run_main([{"cost": 0.1}], "--check", FALSE, "--attempts", "1")
         self.assertEqual((code, out.split()[0]), (1, "failed"))
         self.assertEqual(self.main("status", "--task", TASK, "--node", "n1", "--dir", str(self.directory))[0], 1)
         self.assertEqual(self.main("wait", "--task", TASK, "--node", "n1", "--dir", str(self.directory), "--timeout", "5")[0], 1)
 
     def test_blocked_exits_two_and_passed_zero(self):
-        code, out = self.run_main([{"error": "provider down"}], "--check", "false", "--attempts", "1")
+        code, out = self.run_main([{"error": "provider down"}], "--check", FALSE, "--attempts", "1")
         self.assertEqual((code, out.split()[0]), (2, "blocked"))
         self.assertEqual(self.main("status", "--task", TASK, "--node", "n1", "--dir", str(self.directory))[0], 2)
 
     def test_a_flagged_pass_exits_two_by_status(self):
-        self.run_node([{}], hook=lambda n, call: (self.project / "stray.txt").write_text("x"), check="true", attempts=1)
+        self.run_node([{}], hook=lambda n, call: (self.project / "stray.txt").write_text("x"), check=TRUE, attempts=1)
         code, out = self.main("status", "--task", TASK, "--node", "n1", "--dir", str(self.directory))
         self.assertEqual((code, out.split()[0]), (2, "passed-check-flagged"))
 
@@ -1315,6 +1322,7 @@ class ExitCodes(Base):
         thread.join(20)
 
 
+@posix_only
 class CancelLeavesNothingRunning(Base):
     """A controller that was killed leaves the `opencode run --session` it started (its own process group): cancel stops it."""
 
@@ -1330,7 +1338,7 @@ class CancelLeavesNothingRunning(Base):
         db = self.project / "none.db"
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            code = noderun.main(["run", "--task", TASK, "--node", "n1", "--dir", str(self.directory), "--check", "false", "--cost", "1",
+            code = noderun.main(["run", "--task", TASK, "--node", "n1", "--dir", str(self.directory), "--check", FALSE, "--cost", "1",
                                  "--executable", str(script), "--db", str(db)])
         self.assertEqual(code, 0, out.getvalue())
         (run,) = self.runs()
@@ -1338,7 +1346,7 @@ class CancelLeavesNothingRunning(Base):
         self.assertTrue(self.wait_until(lambda: looprun.read_run(run).get("status") == "running" and looprun.read_run(run).get("pid")))
         self.assertTrue(self.wait_until(lambda: noderun._leftovers(looprun.read_run(run).get("sessions") or [])), "the agent process never started")
         sessions = looprun.read_run(run)["sessions"]
-        os.killpg(looprun.read_run(run)["pid"], signal.SIGKILL)  # the controller and its group: the agent has its own group and stays
+        osproc.kill_group(looprun.read_run(run)["pid"], force=True)  # the controller and its group: the agent has its own group and stays
         self.assertTrue(self.wait_until(lambda: not looprun._held(run)))
         self.assertTrue(noderun._leftovers(sessions), "the agent process died with its controller: nothing to test")
         line = noderun.cancel(TASK, "n1", self.directory)

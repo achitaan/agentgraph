@@ -17,6 +17,8 @@ from unittest import mock
 
 from agentgraph import __main__ as entry
 from agentgraph import check, reviewcopy
+from tests.shellskip import FALSE, TRUE, needs_sh, sh_or, sleep_command
+from tests.winskip import WINDOWS, needs_fifo, needs_symlinks, needs_uid, posix_only
 
 TASK = "demo"
 HAVE_GIT = shutil.which("git") is not None
@@ -103,6 +105,7 @@ class Base(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_GIT, "git is not installed")
 class TheCopy(Base):
+    @needs_sh
     def test_a_git_copy_has_uncommitted_and_untracked_files_and_leaves_out_the_rest(self):
         self.files(tracked="v1\n", gone="x\n", **{".gitignore": "ignored.txt\nbuild/\n"})
         self.git_init("tracked", "gone", ".gitignore")
@@ -130,7 +133,7 @@ class TheCopy(Base):
 
     def test_the_copy_is_deleted_unless_kept(self):
         self.files(a="1")
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         self.assertEqual(self.run_it()[0], 0)
         self.assertEqual(list(self.temp.iterdir()), [])
         code, line = self.run_it("--keep")
@@ -138,6 +141,7 @@ class TheCopy(Base):
         self.assertEqual(len(list(self.temp.iterdir())), 1)
         self.assertIn(", copy " + str(self.temp), line)
 
+    @needs_sh
     def test_the_project_is_unchanged_after_commands_that_write_delete_and_walk_out(self):
         self.files(a="keep me\n", dir__b="and me\n")
         self.git_init("a", "dir")
@@ -165,6 +169,7 @@ class TheCopy(Base):
         self.assertEqual(result["commands"][0]["exit"], 0)  # the command itself passed: it is the change that fails the run
         self.assertIs(self.read()["nodes"][0]["review_copy"]["project_unchanged"], False)
 
+    @posix_only
     def test_a_timeout_kills_a_child_and_its_grandchild_and_e2e_still_runs(self):
         pidfile = self.base / "grandchild.pid"
         self.write(graph(check=f"sh -c 'sleep 300 & echo $! > {pidfile}; wait'; echo not reached > {self.base}/after",
@@ -192,6 +197,7 @@ class TheCopy(Base):
         self.assertIsNone(result["commands"][0]["exit"])
         self.assertIsNone(self.read()["nodes"][0]["review_copy"]["check_exit"])
 
+    @posix_only
     def test_a_command_that_leaves_a_process_behind_does_not_hold_the_run_up(self):
         pidfile = self.base / "bg.pid"
         self.files(a="1")
@@ -213,7 +219,7 @@ class TheCopy(Base):
 
     def test_e2e_runs_when_check_fails_and_the_run_exits_1(self):
         self.files(a="1")
-        self.write(graph(check="echo broken; exit 3", e2e="echo started"))
+        self.write(graph(check=sh_or("echo broken; exit 3", "print('broken'); raise SystemExit(3)"), e2e="echo started"))
         code, line = self.run_it()
         self.assertEqual(code, 1, line)
         self.assertRegex(line, r"^review-copy demo/n1: check exit 3 \(\d+s\), e2e exit 0 \(\d+s\), result \.opencode/artifacts/demo/n1/review-copy-")
@@ -237,6 +243,7 @@ class TheCopy(Base):
 
 
 class TheEnvironment(Base):
+    @needs_sh
     def test_secrets_are_not_in_the_environment_of_the_commands(self):
         self.files(a="1")
         secrets = {"MY_API_KEY": "s1", "GITHUB_TOKEN": "s2", "DB_PASSWORD": "s3", "AWS_SECRET_ACCESS": "s4", "GCP_CREDENTIALS": "s5",
@@ -259,11 +266,12 @@ class TheEnvironment(Base):
     def test_reduced_environment(self):
         source = {"PATH": "/x", "HOME": "/h", "LANG": "C", "LC_ALL": "C", "SSH_AUTH_SOCK": "s", "API_KEY": "k", "X_credential": "c",
                   "OPENCODE_X": "o", "TMPDIR": "/real", "Password": "p"}
-        self.assertEqual(reviewcopy.reduced_environment("/scratch", source),
+        self.assertEqual(reviewcopy.reduced_environment("/scratch", source, windows=False),
                          {"PATH": "/x", "HOME": "/h", "LANG": "C", "LC_ALL": "C", "TMPDIR": "/scratch"})
 
 
 class TheResult(Base):
+    @needs_sh
     def test_the_result_file_and_the_node_field(self):
         self.files(a="1\n", b__c="2\n")
         check_cmd, e2e_cmd = "i=0; while [ $i -lt 300 ]; do echo line $i; i=$((i+1)); done", "echo \"\x1b[31mred\x1b[0m\""
@@ -305,17 +313,17 @@ class TheResult(Base):
 
     def test_the_same_tree_gives_the_same_digest_and_a_changed_file_another(self):
         self.files(a="1\n")
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         for _ in range(2):  # the graph and its history record are part of the copy, and a run changes both: put them back
             self.run_it()
-            self.write(graph(check="true"))
+            self.write(graph(check=TRUE))
             shutil.rmtree(self.graph_dir / ".history", ignore_errors=True)
         self.run_it()
         found = sorted((json.loads(p.read_text()) for p in (self.project / ".opencode/artifacts/demo/n1").glob("*.json")), key=lambda r: r["at"])
         first, second = found[1]["tree"], found[2]["tree"]
         self.assertEqual(first, second)
         self.files(a="2\n")
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         shutil.rmtree(self.graph_dir / ".history", ignore_errors=True)
         self.run_it()
         found = sorted((json.loads(p.read_text()) for p in (self.project / ".opencode/artifacts/demo/n1").glob("*.json")), key=lambda r: r["at"])
@@ -323,7 +331,7 @@ class TheResult(Base):
 
     def test_the_result_makes_a_passed_node_with_an_e2e_pass_check(self):
         self.files(a="1\n")
-        self.write(graph(check="true", e2e="true"))
+        self.write(graph(check=TRUE, e2e=TRUE))
         self.assertEqual(self.run_it()[0], 0)
         data = self.read()
         data["status"] = "passed"
@@ -331,10 +339,10 @@ class TheResult(Base):
         data["events"].append({"time": data["nodes"][0]["review_copy"]["at"], "node": "n1", "event": "evaluated", "note": "ok"})
         self.write(data)
         self.assertEqual(check.file_problems(self.path), [])
-        self.write(graph(check="true", e2e="true", status="passed"))  # no review copy
+        self.write(graph(check=TRUE, e2e=TRUE, status="passed"))  # no review copy
         self.assertTrue(any("declares an e2e and is passed" in p for p in check.file_problems(self.path)))
         # a review copy older than the node's last returned/attempt event no longer counts
-        self.write(graph(check="true", e2e="true"))
+        self.write(graph(check=TRUE, e2e=TRUE))
         self.run_it()
         data = self.read()
         data["events"].append({"time": data["nodes"][0]["review_copy"]["at"] + 5, "node": "n1", "event": "attempt", "note": "changed -> ok"})
@@ -344,7 +352,7 @@ class TheResult(Base):
 
     def test_a_failing_e2e_is_recorded_and_does_not_satisfy_the_rule(self):
         self.files(a="1\n")
-        self.write(graph(check="true", e2e="exit 1"))
+        self.write(graph(check=TRUE, e2e="exit 1"))
         self.assertEqual(self.run_it()[0], 1)
         data = self.read()
         self.assertEqual(data["nodes"][0]["review_copy"]["e2e_exit"], 1)
@@ -352,6 +360,7 @@ class TheResult(Base):
         self.write(data)
         self.assertTrue(any("e2e did not exit 0" in p for p in check.file_problems(self.path)))
 
+    @needs_sh
     def test_the_commands_changed_in_the_graph_meanwhile_are_noted(self):
         self.files(a="1\n")
         self.write(graph(check=f"python3 - <<'EOF'\nimport json\np='{self.path}'\nd=json.load(open(p))\nd['nodes'][0]['e2e']='true'\njson.dump(d,open(p,'w'))\nEOF",
@@ -368,7 +377,7 @@ class NonGit(Base):
         for rel in ("a", "sub/b", "node_modules/x", ".git/config", "venv/pyvenv.cfg", "venv/lib", "pkg/__pycache__/m.pyc",
                     ".opencode/artifacts/t/n/r", ".opencode/loops/l", ".opencode/handoff/h"):
             self.put(rel)
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         code, line = self.run_it("--keep")
         self.assertEqual(code, 0, line)
         copy = Path(line.rsplit("copy ", 1)[1])
@@ -379,7 +388,7 @@ class NonGit(Base):
     def test_a_project_over_the_file_cap_is_refused_with_a_clear_message(self):
         for i in range(6):
             self.files(**{f"f{i}": "x"})
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         with mock.patch.object(reviewcopy, "FILE_LIMIT", 4):
             code, line = self.run_it()
         self.assertEqual(code, 2)
@@ -389,7 +398,7 @@ class NonGit(Base):
 
     def test_a_project_over_the_size_cap_is_refused(self):
         self.files(big="x" * 5000)
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         with mock.patch.object(reviewcopy, "BYTE_LIMIT", 1024 * 1024):
             self.assertEqual(self.run_it()[0], 0)
         with mock.patch.object(reviewcopy, "BYTE_LIMIT", 4000):
@@ -397,6 +406,8 @@ class NonGit(Base):
         self.assertEqual(code, 2)
         self.assertIn("MiB", line.replace("0 MiB", "MiB"))
 
+    @needs_sh
+    @needs_symlinks
     def test_symlinks_that_leave_the_project_are_not_copied(self):
         outside = self.base / "outside.txt"
         outside.write_text("outside")
@@ -434,7 +445,7 @@ class Refusals(Base):
 
     def test_unknown_task_node_and_project(self):
         self.files(a="1")
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(reviewcopy.main(["--task", "nope", "--node", "n1", "--dir", str(self.project)]), 2)
@@ -447,7 +458,7 @@ class Refusals(Base):
 
     def test_commands_cannot_be_supplied_from_the_command_line(self):
         self.files(a="1")
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         marker = self.base / "marker"
         for extra in (["--check", f"touch {marker}"], ["--e2e", f"touch {marker}"], ["--command", f"touch {marker}"], ["--cmd=x"],
                       ["--ch", f"touch {marker}"], ["--", f"touch {marker}"], [f"touch {marker}"]):
@@ -459,7 +470,7 @@ class Refusals(Base):
 
     def test_a_temp_folder_inside_the_project_is_refused(self):
         self.files(a="1")
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         inside = self.project / "tmp"
         inside.mkdir()
         with mock.patch.dict(os.environ, {"TMPDIR": str(inside)}), mock.patch.object(tempfile, "tempdir", None):
@@ -470,7 +481,7 @@ class Refusals(Base):
 
     def test_a_graph_the_write_would_make_worse_is_refused_but_the_result_is_kept(self):
         self.files(a="1")
-        data = graph(check="true")
+        data = graph(check=TRUE)
         data["nodes"][0]["review_copy"] = "broken"  # already a problem: not added by the write
         self.write(data)
         self.assertEqual(self.run_it()[0], 0)
@@ -486,6 +497,8 @@ class Refusals(Base):
 class Links(Base):
     """A symlink never lets the copy, or a command in it, reach outside the copy (round 2, finding 2)."""
 
+    @needs_sh
+    @needs_symlinks
     def test_chained_links_that_climb_out_of_the_copy_are_left_out(self):
         outside = self.base / "pwn"
         self.files(a="1", d__f="2")
@@ -510,6 +523,8 @@ class Links(Base):
         self.assertEqual(os.listdir(target / "link"), ["x"])
         self.assertEqual(os.listdir(outside), [])
 
+    @needs_sh
+    @needs_symlinks
     def test_links_are_made_after_every_regular_file(self):
         self.files(b__x="1", a="2")
         os.symlink("b", self.project / "alink")  # sorts before `b/x`
@@ -517,6 +532,7 @@ class Links(Base):
         self.assertEqual(self.run_it()[0], 0)
 
 
+@posix_only
 class Signals(Base):
     """SIGTERM and SIGHUP stop the commands' whole process group, remove the copy and exit 2 (round 2, finding 3)."""
 
@@ -581,7 +597,7 @@ class Signals(Base):
 
     def test_an_interrupt_with_keep_does_not_say_the_copy_was_removed(self):
         self.files(a="1")
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         out = io.StringIO()
         with mock.patch.object(reviewcopy, "run_command", side_effect=KeyboardInterrupt), contextlib.redirect_stdout(out):
             code = reviewcopy.main(["--task", TASK, "--node", "n1", "--dir", str(self.project), "--keep"])
@@ -604,7 +620,7 @@ class GitCalls(Base):
     def test_every_git_call_turns_off_fsmonitor_and_the_untracked_cache(self):
         self.files(a="1")
         self.git_init("a")
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         real, calls = subprocess.run, []
 
         def record(args, *more, **kw):
@@ -622,15 +638,16 @@ class GitCalls(Base):
         self.files(a="1")
         self.git_init("a")
         subprocess.run(["git", "config", "core.fsmonitor", f"touch '{marker}'; printf ''"], cwd=self.project, check=True)
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         self.assertEqual(self.run_it()[0], 0)
         self.assertFalse(marker.exists())
 
 
 class Rerun(Base):
+    @needs_sh
     def test_a_failing_run_on_a_passed_node_is_recorded_and_check_then_reports_it(self):
         self.files(a="1\n")
-        self.write(graph(check="true", e2e="test -f a"))
+        self.write(graph(check=TRUE, e2e="test -f a"))
         self.assertEqual(self.run_it()[0], 0)
         data = self.read()
         data["status"] = "passed"
@@ -649,7 +666,7 @@ class Rerun(Base):
 class Stale(Base):
     def test_the_record_keeps_when_the_copy_was_taken(self):
         self.files(a="1")
-        self.write(graph(check="true", e2e="sleep 0.3"))
+        self.write(graph(check=TRUE, e2e=sleep_command(0.3)))
         before = time.time()
         self.assertEqual(self.run_it()[0], 0)
         record = self.read()["nodes"][0]["review_copy"]
@@ -665,13 +682,13 @@ class Where(Base):
         other = self.base / "other"
         (other / ".opencode" / "graph").mkdir(parents=True)
         (other / "a").write_text("1")
-        (other / ".opencode" / "graph" / f"{TASK}.json").write_text(json.dumps(graph(check="true")))
+        (other / ".opencode" / "graph" / f"{TASK}.json").write_text(json.dumps(graph(check=TRUE)))
         return other
 
     def test_another_projects_folder_is_refused(self):
         other = self.other_project()
         self.files(a="1")
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(reviewcopy.main(["--task", TASK, "--node", "n1", "--dir", str(other)]), 2)
@@ -679,6 +696,7 @@ class Where(Base):
         self.assertIn("is not this folder's project", out.getvalue())
         self.assertFalse((other / ".opencode" / "artifacts").exists())
 
+    @needs_sh
     def test_the_project_is_found_from_a_folder_below_it_and_named_by_dir_only_as_itself(self):
         self.files(a="1", sub__b="2")
         self.write(graph(check="test -f sub/b"))
@@ -696,8 +714,8 @@ class Where(Base):
         self.git_init()
         inner = self.project / "sub" / ".opencode" / "graph"
         inner.mkdir(parents=True)  # the nearest project is sub; the git root is above it
-        (inner / f"{TASK}.json").write_text(json.dumps(graph(check="true")))
-        self.write(graph(check="true"))
+        (inner / f"{TASK}.json").write_text(json.dumps(graph(check=TRUE)))
+        self.write(graph(check=TRUE))
         os.chdir(self.project / "sub")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -713,10 +731,11 @@ class Where(Base):
             self.assertEqual(reviewcopy.main(["--task", TASK, "--node", "n1"]), 2)
         self.assertIn("there is no .opencode/graph in the current folder or above it", out.getvalue())
 
+    @needs_symlinks
     def test_a_linked_graph_folder_is_refused(self):
         real = self.base / "real_graph"
         real.mkdir()
-        (real / f"{TASK}.json").write_text(json.dumps(graph(check="true")))
+        (real / f"{TASK}.json").write_text(json.dumps(graph(check=TRUE)))
         linked = self.base / "linked"
         (linked / ".opencode").mkdir(parents=True)
         (linked / "a").write_text("1")
@@ -739,6 +758,7 @@ class Watched(Base):
         code, line = self.run_it()
         return code, line, self.result()[0]
 
+    @needs_sh
     def test_a_same_size_rewrite_with_the_old_time_put_back_is_seen(self):
         self.files(a="x\n")
         self.git_init("a")
@@ -749,6 +769,7 @@ class Watched(Base):
         self.assertFalse(result["project_unchanged"])
         self.assertIn("a", result["project_changed_files"])
 
+    @needs_sh
     def test_git_hooks_config_head_and_refs_are_watched(self):
         self.files(a="1\n")
         self.git_init("a")
@@ -765,6 +786,7 @@ class Watched(Base):
                 (self.project / ".git" / "hooks" / "post-checkout").unlink(missing_ok=True)
                 subprocess.run(["git", "checkout", "-q", "--orphan", "main"], cwd=self.project)
 
+    @needs_sh
     def test_another_tasks_artifacts_are_watched_and_this_runs_own_files_are_not(self):
         self.files(a="1\n", **{".opencode__artifacts__other__n__r.md": "old\n"})
         self.git_init()
@@ -775,6 +797,7 @@ class Watched(Base):
         code, line, result = self.run_and_read("true")
         self.assertEqual(code, 0, line)  # earlier runs' results are there before and after
 
+    @needs_sh
     def test_a_graph_write_while_it_runs_raises_no_alarm(self):
         self.files(a="1\n")
         self.git_init()
@@ -787,7 +810,7 @@ class Watched(Base):
 class Odd(Base):
     def test_attempts_that_is_not_an_int_does_not_add_an_event(self):
         self.files(a="1")
-        data = graph(check="true", attempts=2.0)
+        data = graph(check=TRUE, attempts=2.0)
         self.write(data)
         before = self.read()
         self.run_it()
@@ -797,7 +820,7 @@ class Odd(Base):
 
     def test_a_file_name_that_is_not_utf8_neither_crashes_nor_leaks_a_traceback(self):
         self.files(a="1")
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         bad = "bad\udcff"
         lists = [{bad: (1, 1, 1, 1)}, {bad: (2, 1, 1, 1)}]
         with mock.patch.object(reviewcopy, "project_listing", side_effect=lists):
@@ -810,16 +833,17 @@ class Odd(Base):
 
     def test_a_value_error_anywhere_is_an_error_line_and_exit_2(self):
         self.files(a="1")
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         with mock.patch.object(reviewcopy, "_copy", side_effect=ValueError("embedded null byte")):
             code, line = self.run_it()
         self.assertEqual(code, 2)
         self.assertIn("error: embedded null byte", line)
         self.assertEqual(list(self.temp.iterdir()), [])
 
+    @needs_symlinks
     def test_a_linked_artifacts_folder_is_not_followed(self):
         self.files(a="1")
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         elsewhere = self.base / "elsewhere"
         elsewhere.mkdir()
         (self.project / ".opencode" / "artifacts").mkdir()
@@ -836,7 +860,7 @@ class Hand(Base):
 
     def real_run(self):
         self.files(a="1")
-        self.write(graph(check="true", e2e="true"))
+        self.write(graph(check=TRUE, e2e=TRUE))
         self.assertEqual(self.run_it()[0], 0)
 
     def warnings(self):
@@ -908,6 +932,7 @@ class HandRound3(Base):
             raise failure[0]
         return found
 
+    @needs_fifo
     def test_a_fifo_at_the_result_path_is_a_warning_not_a_hang(self):
         self.real_run()
         path = self.result_file()
@@ -916,6 +941,7 @@ class HandRound3(Base):
         os.mkfifo(path)
         self.assertTrue(any("is not a result file" in w for w in self.warned()))
 
+    @needs_symlinks
     def test_a_link_at_the_result_path_is_not_followed(self):
         self.real_run()
         path = self.result_file()
@@ -925,6 +951,7 @@ class HandRound3(Base):
         os.symlink(real, path)
         self.assertTrue(any("is not a result file" in w for w in self.warned()), self.warnings())
 
+    @needs_symlinks
     def test_a_linked_folder_on_the_way_is_not_followed(self):
         self.real_run()
         folder = self.result_file().parent
@@ -970,9 +997,10 @@ class HandRound3(Base):
 class Late(Base):
     """What a signal, or a refused listing, does around the saving of the result (round 3, items 2 and 6)."""
 
+    @posix_only
     def test_a_signal_while_the_result_is_saved_waits_and_the_run_is_recorded(self):
         self.files(a="1")
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         real = reviewcopy._record
 
         def record_and_get_signalled(*args, **kwargs):
@@ -988,7 +1016,7 @@ class Late(Base):
 
     def test_an_exception_while_the_result_is_written_leaves_no_half_written_file(self):
         self.files(a="1")
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         real = json.dumps
 
         def refuse_the_result(obj, **kwargs):
@@ -1004,7 +1032,7 @@ class Late(Base):
 
     def test_a_listing_that_is_refused_after_the_run_is_recorded_as_a_changed_project(self):
         self.files(a="1")
-        self.write(graph(check="true"))
+        self.write(graph(check=TRUE))
         real = reviewcopy.project_listing
         calls = []
 
@@ -1022,6 +1050,7 @@ class Late(Base):
 
 
 class Folders(Base):
+    @needs_uid
     def test_a_graph_folder_owned_by_another_user_is_refused_not_skipped(self):
         inner = self.project / "sub"
         (inner / ".opencode" / "graph").mkdir(parents=True)
@@ -1032,6 +1061,7 @@ class Folders(Base):
         self.assertIn("another user", str(caught.exception))
 
     @unittest.skipUnless(HAVE_GIT, "git is not installed")
+    @needs_sh
     def test_a_linked_work_trees_common_git_folder_is_watched(self):
         self.files(a="1\n")
         self.git_init("a")
@@ -1059,10 +1089,10 @@ class Folders(Base):
 class Documented3(unittest.TestCase):
     def test_what_is_not_seen_and_the_age_rules_are_written_down(self):
         root = Path(__file__).resolve().parents[1]
-        commands = (root / "COMMANDS.md").read_text()
+        commands = (root / "COMMANDS.md").read_text(encoding="utf-8")
         for words in (".opencode/loops", ".opencode/handoff", "common git folder"):
             self.assertIn(words, commands)
-        fmt = (root / "GRAPH_FORMAT.md").read_text()
+        fmt = (root / "GRAPH_FORMAT.md").read_text(encoding="utf-8")
         for words in ("still editing", "no events"):
             self.assertIn(words, fmt)
         proposal = root / ".opencode" / "artifacts" / "agentgraph-cost-loops" / "v1" / "permission-proposal.md"
@@ -1073,16 +1103,16 @@ class Documented3(unittest.TestCase):
 class Documented(unittest.TestCase):
     def test_the_limits_are_written_down(self):
         root = Path(__file__).resolve().parents[1]
-        commands = (root / "COMMANDS.md").read_text()
+        commands = (root / "COMMANDS.md").read_text(encoding="utf-8")
         for words in ("setsid", "SIGTERM", "must be longer than `--timeout`", "git work tree", ".git/hooks"):
             self.assertIn(words, commands)
-        self.assertIn("review_copy", (root / "GRAPH_FORMAT.md").read_text())
+        self.assertIn("review_copy", (root / "GRAPH_FORMAT.md").read_text(encoding="utf-8"))
 
 
 class Entry(Base):
     def test_the_command_is_forwarded_and_exits_like_it_says(self):
         self.files(a="1")
-        self.write(graph(check="true", e2e="exit 1"))
+        self.write(graph(check=TRUE, e2e="exit 1"))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = entry.main(["review-copy", "--task", TASK, "--node", "n1", "--dir", str(self.project)])
@@ -1093,7 +1123,7 @@ class Entry(Base):
     def test_the_launcher_runs_it(self):
         self.files(a="1")
         self.write(graph(e2e="echo up"))
-        launcher = Path(__file__).resolve().parents[1] / "bin" / "agentgraph"
+        launcher = Path(__file__).resolve().parents[1] / "bin" / ("agentgraph.cmd" if WINDOWS else "agentgraph")
         done = subprocess.run([str(launcher), "review-copy", "--task", TASK, "--node", "n1", "--dir", str(self.project)],
                               capture_output=True, text=True, cwd=self.project)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
