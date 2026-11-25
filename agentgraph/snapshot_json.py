@@ -14,7 +14,7 @@ from pathlib import Path
 from . import contract, names, paths
 from .contract import Agent, Session, Snapshot, TaskGraph
 from .demo import demo_activity, demo_snapshot
-from .sources import CONFIG_DIR, ORCHESTRATION_GRAPH_DIR, build_snapshot, top_level_session
+from .sources import CONFIG_DIR, ORCHESTRATION_GRAPH_DIR, WINDOWS, build_snapshot, top_level_session
 
 
 def _json_safe(value):
@@ -326,7 +326,7 @@ def load_flows(root: Path, shape: dict) -> None:
     flow already has is dropped with a warning (and with it the command). Adding
     stops at FLOW_FILES_LIMIT files; files beyond it (put there by hand) are
     named in a warning, never dropped silently."""
-    from .agentfiles import rev  # agentfiles imports modules that import this one
+    from .revision import rev
     shape["flows"] = []
     shape["unreadable_flows"] = []
 
@@ -726,10 +726,19 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
                   detail: bool = True) -> dict:
     """The snapshot document plus `learning` for a live source. `detail` False leaves every agent's activity
     `target` and `recent` out (the `agentgraph snapshot` command, which agents run inside chats)."""
+    # The optional editors import POSIX locking and descriptor-relative filesystem
+    # operations. Keep the session viewer usable without weakening those checks.
+    read_only = WINDOWS and source == "live"
     document = snapshot_document(snapshot, source, task, session=session,
                                  structure=load_structure() if source == "live" else None,
                                  activity=live_activity(snapshot, detail=detail) if source == "live"
                                  else demo_activity(snapshot.now, detail=detail) if source == "demo" else None)
+    if read_only:
+        document["read_only"] = True
+        document["warnings"].append("Windows: read-only viewer; task graphs and toolkit editors require POSIX.")
+        document["skills"] = skills_document()
+        document["roster"] = {"editable": False, "why": "Toolkit editors require POSIX.", "models": []}
+        return document
     if source == "live":
         from . import mcpview, roster, skillfiles, skillset  # each imports this module
         document["learning"] = _json_safe(learning_document())
@@ -754,8 +763,8 @@ def live_document(snapshot: Snapshot, source: str, task: str | None = None, *, s
         from .demo import demo_setup, demo_spend
         document["setup"] = demo_setup()
         document["spend"] = demo_spend(document)
-    from . import sidechat  # sidechat imports this module's siblings
     if source == "live":
+        from . import sidechat  # sidechat imports this module's siblings
         sidechat.annotate(document)  # whether the side chat is installed, its session and its spend
     elif source == "demo":
         from .demo import demo_sidechat

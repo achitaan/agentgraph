@@ -49,7 +49,9 @@ try:  # POSIX; elsewhere the in-process lock is the only one
 except ImportError:  # pragma: no cover
     fcntl = None
 
-from . import agentfiles, flowcommands, flowrun
+from . import flowcommands, flowrun
+if os.name != "nt":
+    from . import agentfiles
 from .snapshot_json import (FLOW_FILES_LIMIT, FLOW_ID, FLOW_NAME, FLOW_TEXT_LIMIT, FLOWS_FOLDER, STRUCTURE_DIR,
                             flow_fields, flow_refusal, flow_steps, hub_names, is_self_loop, ledger_home, load_structure,
                             read_flow, seat_lead)
@@ -808,6 +810,13 @@ def main(argv: list[str] | None = None) -> int:
         parser_.add_argument("--expect", metavar="REV", help="refuse, changing nothing, unless the flow's rev is REV "
                                                              "(the rev the caller last read)")
     args = parser.parse_args(argv)
+    if os.name == "nt" and (args.command != "flows" or args.stats):
+        message = "Windows supports listing flows only; edits and statistics require POSIX."
+        if args.json:
+            print(json.dumps({"error": message}))
+        else:
+            print(message, file=sys.stderr)
+        return 1
     action = getattr(args, "action", None)
     notes: list[str] = []
     result: dict = {}
@@ -829,6 +838,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 flows = flows_of(shape)
             unreadable = [dict(item) for item in shape.get("unreadable_flows", [])]
+            if shape.get("warnings"):
+                extra["warnings"] = shape["warnings"]
         elif action == "add":
             given = _read_text(args.text_file) if args.text_file else None
             result, notes = add_flow(args.agents, given, args.structure, name=args.name or None, command=args.command,
@@ -882,6 +893,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     for note in notes:
         print(note)
+    for warning in extra.get("warnings", []):
+        print(warning, file=sys.stderr)
     if args.command == "flows":
         if not flows and not unreadable:
             print("no drawn flows")

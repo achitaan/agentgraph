@@ -41,78 +41,87 @@
 # -P: do not put the current directory on the import path, so a project that
 # has its own "agentgraph" package cannot shadow this tool.
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
+run_python() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      if command -v py >/dev/null 2>&1; then
+        PYTHONPATH="$HERE" exec py -3 "$@"
+      fi ;;
+  esac
+  PYTHONPATH="$HERE" exec python3 "$@"
+}
 # "--home DIR <ledger command>" is also accepted.
 if [ "$1" = "--home" ] && [ $# -ge 3 ]; then
-  PYTHONPATH="$HERE" exec python3 -P -m agentgraph.ledger "$@"
+  run_python -P -m agentgraph.ledger "$@"
 fi
 case "$1" in
   check)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.check "$@" ;;
+    run_python -P -m agentgraph.check "$@" ;;
   record|feedback|signals|improved)
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.ledger "$@" ;;
+    run_python -P -m agentgraph.ledger "$@" ;;
   cases)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.cases "$@" ;;
+    run_python -P -m agentgraph.cases "$@" ;;
   serve)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.server "$@" ;;
+    run_python -P -m agentgraph.server "$@" ;;
   bloat)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.bloat "$@" ;;
+    run_python -P -m agentgraph.bloat "$@" ;;
   cost)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.cost "$@" ;;
+    run_python -P -m agentgraph.cost "$@" ;;
   chat)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.chatfeed "$@" ;;
+    run_python -P -m agentgraph.chatfeed "$@" ;;
   sidechat)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.sidechat "$@" ;;
+    run_python -P -m agentgraph.sidechat "$@" ;;
   snapshot)
     shift
     # an agent runs this inside a chat: the main chat's `target` and `recent` stay out unless --activity-detail follows
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.snapshot_json --no-activity-detail "$@" ;;
+    run_python -P -m agentgraph.snapshot_json --no-activity-detail "$@" ;;
   flow)
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.structure "$@" ;;
+    run_python -P -m agentgraph.structure "$@" ;;
   structure)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.structure "$@" ;;
+    run_python -P -m agentgraph.structure "$@" ;;
   skills)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.skillset "$@" ;;
+    run_python -P -m agentgraph.skillset "$@" ;;
   agent)
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.roster "$@" ;;
+    run_python -P -m agentgraph.roster "$@" ;;
   skill)
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.skillfiles "$@" ;;
+    run_python -P -m agentgraph.skillfiles "$@" ;;
   output)
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.outputs "$@" ;;
+    run_python -P -m agentgraph.outputs "$@" ;;
   preset|setup)
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.setups "$@" ;;
+    run_python -P -m agentgraph.setups "$@" ;;
   spend)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.spend "$@" ;;
+    run_python -P -m agentgraph.spend "$@" ;;
   team)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.teams "$@" ;;
+    run_python -P -m agentgraph.teams "$@" ;;
   improve)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.improve "$@" ;;
+    run_python -P -m agentgraph.improve "$@" ;;
   loop)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.looprun "$@" ;;
+    run_python -P -m agentgraph.looprun "$@" ;;
   graph)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.graphedit "$@" ;;
+    run_python -P -m agentgraph.graphedit "$@" ;;
   status)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.status "$@" ;;
+    run_python -P -m agentgraph.status "$@" ;;
   bench)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.bench "$@" ;;
+    run_python -P -m agentgraph.bench "$@" ;;
   route)
     shift
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph.routing "$@" ;;
+    run_python -P -m agentgraph.routing "$@" ;;
   *)
-    PYTHONPATH="$HERE" exec python3 -P -m agentgraph "$@" ;;
+    run_python -P -m agentgraph "$@" ;;
 esac
