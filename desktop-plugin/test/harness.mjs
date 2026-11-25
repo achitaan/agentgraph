@@ -25,6 +25,18 @@ const PLUGIN_ID = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, "package.json
 const TMP = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), "agentgraph-desktop-"));
 const BUNDLE = path.join(TMP, "gui-experimental.cjs");
 
+// Nothing here may read or write the developer's real home: every program started below (and os.homedir()) sees
+// a scratch one. Windows reads USERPROFILE and LOCALAPPDATA, elsewhere HOME and the XDG folders count.
+const SCRATCH_HOME = path.join(TMP, "scratch-home");
+fs.mkdirSync(path.join(SCRATCH_HOME, ".config", "opencode"), { recursive: true });
+fs.mkdirSync(path.join(SCRATCH_HOME, "AppData", "Local"), { recursive: true });
+fs.mkdirSync(path.join(SCRATCH_HOME, "AppData", "Roaming"), { recursive: true });
+for (const name of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "OPENCODE_CONFIG_DIR", "AGENTGRAPH_PERSONAL", "AGENTGRAPH_HOME", "AGENTGRAPH_ROLLOVER_HOME"]) delete process.env[name];
+Object.assign(process.env, {
+  HOME: SCRATCH_HOME, USERPROFILE: SCRATCH_HOME,
+  LOCALAPPDATA: path.join(SCRATCH_HOME, "AppData", "Local"), APPDATA: path.join(SCRATCH_HOME, "AppData", "Roaming"),
+});
+
 let group = 0;
 // Groups that start a fake interpreter written as a /bin/sh script, a real `python3`, or a Unix tool cannot run on
 // native Windows (no sh there); they are listed as skipped, and the "native Windows" groups still run.
@@ -1959,8 +1971,8 @@ await check("real Python on scratch folders: one write per kind with the snapsho
   fs.copyFileSync(path.join(ORCHESTRATION, "SKILLS.md"), path.join(orch, "SKILLS.md"));
   for (const folder of ["agents", "commands", "backups", "skills/code-assurance"]) fs.mkdirSync(path.join(config, folder), { recursive: true });
   fs.writeFileSync(path.join(config, "skills/code-assurance/SKILL.md"), "---\nname: code-assurance\ndescription: a skill\n---\nBody\n");
-  // The preset file is copied (never read into this script, never written, never printed).
-  fs.copyFileSync(path.join(os.homedir(), ".config/opencode/oh-my-opencode-slim.json"), path.join(config, "oh-my-opencode-slim.json"));
+  // The preset file is the toolkit's own template (what the installer puts there), copied, never written.
+  fs.copyFileSync(path.join(ORCHESTRATION, "config", "oh-my-opencode-slim.json"), path.join(config, "oh-my-opencode-slim.json"));
   fs.mkdirSync(project);
 
   const definition = resolveDefault(mainLoad.module.exports);
