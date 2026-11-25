@@ -5,7 +5,7 @@ Fixed tasks, run on an isolated scratch copy of the OpenCode config, to measure 
 isolation, rows and recovery: `agentgraph/bench.py` (module docstring).
 
 ```
-agentgraph bench scratch-config --to DIR                 # DIR under /private/var/folders/.../T/opencode/, new and empty
+agentgraph bench scratch-config --to DIR                 # DIR new and empty, inside the system temp folder
 agentgraph bench probe orchestrator impl-openai explorer --label base --config DIR
 agentgraph bench run s1-simple s2-parallel s3-workflow --label base --config DIR --reps 3 --budget 6
 agentgraph bench run s3-workflow --label base-rec --config DIR --interrupt-after 50       # recovery variant (stop at 50 s, resume the same session)

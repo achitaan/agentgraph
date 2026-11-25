@@ -17,7 +17,7 @@ from unittest.mock import patch
 from tests.launch import LAUNCHER
 from agentgraph import agentfiles, roster, server, skillfiles, skillset, sources
 
-SCRATCH = Path("/private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode/editor-endpoints")
+SCRATCH = Path(tempfile.gettempdir()).resolve() / "agentgraph-tests-editor-endpoints"
 ROOT = Path(__file__).resolve().parent.parent
 REAL_FILES = (skillset.CONFIG, skillset.MAP)
 REAL_FOLDERS = (agentfiles.AGENTS_DIR, skillfiles.SKILLS, ROOT / "structure")
