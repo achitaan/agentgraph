@@ -122,7 +122,7 @@ Keys in the live view: `1` agents, `2` tasks, `3` loops, `4` events, `5` issues,
 - `memory/`: the run ledger (`runs.jsonl`, `feedback.jsonl`, `improvements.jsonl`), the edit log of outputs edited by hand (`edits.jsonl`), and the cases (`cases.jsonl`) with the trials of edits on them (`replays.jsonl`).
 - `proposals/`: prompt edits proposed by the `improve-orchestration` skill, approved or rejected.
 - `LESSONS.md`: lessons from finished graphs.
-- `tests/`: `python3 -m unittest discover -s tests -t .`
+- `tests/`: `python3 -m unittest discover -s tests -t .` (CI runs `python tests/ci_run.py`: one process and time limit per module)
 
 ## Credits
 
@@ -130,7 +130,7 @@ Keys in the live view: `1` agents, `2` tasks, `3` loops, `4` events, `5` issues,
 
 ## Limits
 
-- **Native Windows:** everything runs on Windows 10 and 11 with Python 3.11 or newer (found as `py -3`, then `python`), without WSL: the viewer, the web page, the checker and the editors, the loops, the OpenCode Desktop and terminal plugins, and the slash commands. Install with `install.cmd` and start with `bin\agentgraph.cmd` (see Install). Git for Windows is only needed to clone. The two plugins find Python themselves; set the plugin option `python` to choose one. A task-graph folder must belong to you (checked by its owner on Windows) and must not be a junction or link. Mac-only: the benchmark sandbox (`agentgraph bench`), which relies on macOS tools. The test workflow (`.github/workflows/tests.yml`) runs the whole suite on Windows and macOS; if something does not start on your machine, open an issue with the command and its output.
+- **Native Windows:** everything runs on Windows 10 and 11 with Python 3.11 or newer (found as `py -3`, then `python`), without WSL: the viewer, the web page, the checker and the editors, the loops, the OpenCode Desktop and terminal plugins, and the slash commands. Install with `install.cmd` and start with `bin\agentgraph.cmd` (see Install). Git for Windows is only needed to clone. The two plugins find Python themselves; set the plugin option `python` to choose one. A task-graph folder must belong to you (checked by its owner on Windows) and must not be a junction or link. Mac-only: the benchmark sandbox (`agentgraph bench`), which relies on macOS tools. The test workflow (`.github/workflows/tests.yml`) runs the whole suite on Windows and macOS through `python tests/ci_run.py`, which gives each test module a process of its own and a time limit (300 s, `--limit`), prints one line per module as it ends, names the test that hung, and keeps every module's full output in `ci-logs` (uploaded as the `ci-logs-...` artifact of the run; `--only TEXT` runs the modules whose name contains TEXT). If something does not start on your machine, open an issue with the command and its output.
 
 - **Check commands on Windows:** a check command you give (for example a loop's test command) runs through `sh` when one is on `PATH` (Git for Windows puts one there), and through `cmd` when there is none. Write the command for the shell you have; a plain `python -m unittest` or `npm test` runs in both. Through `cmd` a check command of more than one line is refused, not run in part: put a `sh` on `PATH` (install Git for Windows) or write the command on one line. Helpers a check leaves running after its shell exits (a server it started, say) can survive a stop on Windows; look in the Task Manager if a loop was stopped in the middle of such a check. The benchmark sandbox (`agentgraph bench`) is Mac-only.
 

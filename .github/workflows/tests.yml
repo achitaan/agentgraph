@@ -13,7 +13,7 @@ jobs:
   tests:
     name: ${{ matrix.os }}, Python ${{ matrix.python-version }}${{ matrix.no-sh && ', no sh' || '' }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -33,12 +33,18 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
+
+      # The Python suite goes through tests/ci_run.py: every test module in a process of its own with a time limit
+      # (300 s), one flushed line per module in this log as it ends, a stack dump and the name of the running test
+      # when a module hangs (its whole process tree is then stopped and the run goes on), and every module's full
+      # output in ci-logs/ (uploaded at the end, whatever happened). --budget stops starting new modules after 48
+      # minutes, so the summary, the node steps and the upload still happen inside the 60-minute job limit.
+      # Node 24: tui-plugin/test/run.mjs needs module.registerHooks (Node 22.15 or later); Node 24 is what the
+      # tests are developed with, and the other three node suites need nothing newer than Node 20.
 
       # Windows runs from PowerShell (pwsh) with the console's own code page: no bash, no PYTHONUTF8, so a place
       # that only works under UTF-8 or only with a Unix shell fails here as it would for a user.
-      # The Python log is kept in a file: a failure prints the names of the failing tests first, then the last
-      # 150 lines (`gh run view --log-failed` shows them under this step), and the log is uploaded at the end.
       - name: Python tests (Windows, PowerShell)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -50,42 +56,13 @@ jobs:
             if (Get-Command sh -ErrorAction SilentlyContinue) { throw 'sh is still on PATH' }
             Write-Output 'sh removed from PATH'
           }
-          python -m unittest discover -s tests -t . *> ci-python.log
-          $code = $LASTEXITCODE
-          $names = @(Select-String -Path ci-python.log -Pattern '^(ERROR|FAIL):' | ForEach-Object { $_.Line })
-          $totals = @(Select-String -Path ci-python.log -Pattern '^(Ran |OK|FAILED)' | ForEach-Object { $_.Line })
-          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### Python tests on ${{ matrix.os }}, Python ${{ matrix.python-version }}, no sh: ${{ matrix.no-sh }}: exit $code"
-          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $totals
-          if ($code -ne 0) {
-            Write-Output "PYTHON TESTS FAILED (exit $code). Failing tests ($($names.Count)):"
-            $names | Select-Object -First 100
-            Write-Output 'Last 150 lines of the log (-Tail 150 ci-python.log):'
-            Get-Content ci-python.log -Tail 150
-          } else {
-            Get-Content ci-python.log -Tail 5
-          }
-          exit $code
+          python tests/ci_run.py --jobs 2 --limit 300 --budget 2900 --logs ci-logs
+          exit $LASTEXITCODE
 
       - name: Python tests (Unix)
         if: runner.os != 'Windows'
         shell: bash
-        run: |
-          set +e
-          python -m unittest discover -s tests -t . > ci-python.log 2>&1
-          code=$?
-          {
-            echo "### Python tests on ${{ matrix.os }}, Python ${{ matrix.python-version }}: exit $code"
-            grep -E '^(Ran |OK|FAILED)' ci-python.log || true
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [ "$code" -ne 0 ]; then
-            echo "PYTHON TESTS FAILED (exit $code). Failing tests:"
-            grep -E '^(ERROR|FAIL):' ci-python.log | head -n 100
-            echo "Last 150 lines of the log:"
-            tail -n 150 ci-python.log
-          else
-            tail -n 5 ci-python.log
-          fi
-          exit "$code"
+        run: python tests/ci_run.py --jobs 2 --limit 300 --budget 2900 --logs ci-logs
 
       - name: Terminal plugin tests
         if: ${{ always() && !matrix.no-sh }}
@@ -103,11 +80,14 @@ jobs:
         if: ${{ always() && !matrix.no-sh }}
         run: node output-caps-plugin/test.js
 
-      - name: Keep the Python log
-        if: failure()
+      # always() also runs when the job was cancelled (by a person or by the job's time limit), which
+      # `success()`, `failure()` and `!cancelled()` do not: the earlier run showed the steps marked always() still
+      # ran after the 40-minute cancel. The logs are uploaded on a pass as well, so the timings can be read.
+      - name: Keep the test logs
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: python-log-${{ matrix.os }}-py${{ matrix.python-version }}${{ matrix.no-sh && '-no-sh' || '' }}
-          path: ci-python.log
+          name: ci-logs-${{ matrix.os }}-py${{ matrix.python-version }}${{ matrix.no-sh && '-no-sh' || '' }}
+          path: ci-logs
           if-no-files-found: ignore
           retention-days: 14
