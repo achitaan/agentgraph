@@ -1,0 +1,68 @@
+name: tests
+
+on:
+  push:
+    branches: [main, "win-*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # The Python log is kept in a file so a failure can print its last 150 lines: `gh run view --log-failed`
+      # then shows them under this step.
+      - name: Python tests
+        run: |
+          set +e
+          python -m unittest discover -s tests -t . > ci-python.log 2>&1
+          code=$?
+          {
+            echo "### Python tests on ${{ matrix.os }}: exit $code"
+            grep -E '^(Ran |OK|FAILED)' ci-python.log || true
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$code" -ne 0 ]; then
+            echo "PYTHON TESTS FAILED (exit $code). Last 150 lines of the log:"
+            tail -n 150 ci-python.log
+          else
+            tail -n 5 ci-python.log
+          fi
+          exit "$code"
+
+      - name: Terminal plugin tests
+        if: always()
+        run: node tui-plugin/test/run.mjs
+
+      - name: Desktop plugin tests
+        if: always()
+        run: node desktop-plugin/test/harness.mjs
+
+      - name: Rollover plugin tests
+        if: always()
+        run: node rollover-plugin/test.js
+
+      - name: Output caps plugin tests
+        if: always()
+        run: node output-caps-plugin/test.js

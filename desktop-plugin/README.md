@@ -84,25 +84,32 @@ OpenCode Desktop loads GUI parts only from plugins listed in the **global** conf
 ```json
 "plugins": [
   {
-    "package": "/Users/achita.anantachina/.config/opencode/orchestration/desktop-plugin",
+    "package": "/ABSOLUTE/PATH/TO/.config/opencode/orchestration/desktop-plugin",
     "options": {
-      "python": "/Users/achita.anantachina/.local/state/tec/toolchain/base_profile/bin/python3"
+      "python": "/ABSOLUTE/PATH/TO/python3"
     }
   }
 ]
 ```
 
-The short form `"plugins": ["/Users/achita.anantachina/.config/opencode/orchestration/desktop-plugin"]` (or the
+The short form `"plugins": ["/ABSOLUTE/PATH/TO/.config/opencode/orchestration/desktop-plugin"]` (or the
 relative `"./orchestration/desktop-plugin"`, resolved from the config file) also loads it, but then `main` uses
 `python3` from the desktop app's `PATH`. An app started from the Dock or Finder usually gets the system `PATH`, where
 `/usr/bin/python3` is Python 3.9 on this Mac; it has no `-P` option and cannot run `agentgraph`, so the panel would show
 "Python 3.11 or newer is required". Set `options.python` to a Python 3.11+ executable to avoid that.
 
+**Native Windows.** There is no `python3`: without `options.python` the plugin asks `py -3`, then `python`, once at
+start, for a Python 3.11 or newer and uses the `python.exe` path it reports (a Python that old or missing leaves plain
+`python` and the panel says to set `options.python`). Give the package as a full Windows path or file URL, for example
+`C:\\Users\\NAME\\.config\\opencode\\orchestration\\desktop-plugin`, and `options.python` as
+`C:\\Users\\NAME\\AppData\\Local\\Programs\\Python\\Python312\\python.exe`; `~\\` is expanded like `~/`. All the editors
+are offered on Windows as on other systems. Nothing runs through a shell, so there is no `.cmd` or PowerShell step.
+
 Options (all optional):
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `python` | `python3` | Python executable (absolute path recommended; `~/` is expanded). |
+| `python` | `python3`; on Windows `py -3`, then `python`, resolved to its `python.exe` | Python executable (absolute path recommended; `~/` is expanded, on Windows also `~\\`). |
 | `home` | `~/.config/opencode/orchestration` | Directory that contains the `agentgraph` package. |
 | `intervalMs` | `4000` | Refresh interval in milliseconds; values below 250 are ignored. |
 | `demo` | `false` | `true` passes `--demo`, to see sample data. |

@@ -458,7 +458,7 @@ Add the folder to `plugins` in `~/.config/opencode/cli.json`:
   "$schema": "https://opencode.ai/v2/cli.json",
   "plugins": [
     "oh-my-opencode-slim",
-    "/Users/achita.anantachina/.config/opencode/orchestration/tui-plugin"
+    "/ABSOLUTE/PATH/TO/.config/opencode/orchestration/tui-plugin"
   ]
 }
 ```
@@ -466,19 +466,25 @@ Add the folder to `plugins` in `~/.config/opencode/cli.json`:
 Restart the TUI. In OpenCode V2, use the object form for options:
 
 ```json
-{ "package": "/Users/achita.anantachina/.config/opencode/orchestration/tui-plugin", "options": { "mode": "prepend", "intervalMs": 4000 } }
+{ "package": "/ABSOLUTE/PATH/TO/.config/opencode/orchestration/tui-plugin", "options": { "mode": "prepend", "intervalMs": 4000 } }
 ```
 
 | Option       | Default                                                               | Meaning |
 |--------------|-----------------------------------------------------------------------|---------|
 | `mode`       | `"replace"`                                                           | `"replace"` takes over the sidebar (hides Context, Limit, MCP, Todo). `"prepend"` puts the graph above them. |
 | `intervalMs` | `4000`                                                                | Refresh period; minimum 1000. |
-| `python`     | `/Users/achita.anantachina/.local/state/tec/toolchain/base_profile/bin/python3` | Absolute path to Python 3.11+ (`/usr/bin/python3` is 3.9 and has no `-P`). `~/` is expanded. |
+| `python`     | `DEFAULT_PYTHON` in `src/plugin.js` (a fixed path set for the author's machine: set your own); on Windows `py -3`, then `python`, resolved to its `python.exe` | Absolute path to Python 3.11+ (`/usr/bin/python3` is 3.9 and has no `-P`). `~/` is expanded, on Windows also `~\\`. |
 | `home`       | `~/.config/opencode/orchestration`                                   | The folder that contains `agentgraph/` (used as `PYTHONPATH`). |
 | `reducedMotion` | `false`                                                            | The pictures and the 3D sky without motion; the list never moves. |
 | `picture`    | `"off"`                                                              | What the panel opens on: `"off"` (the list; `g` shows a picture), `"planets"` or `"orbit"`. |
 
 To keep the built-in sections, use `"mode": "prepend"`.
+
+**Native Windows.** Use the object form and a full Windows path or file URL for the package, e.g.
+`file:///C:/Users/NAME/.config/opencode/orchestration/tui-plugin`. Without `python` the plugin asks `py -3`, then
+`python`, once at start, for a Python 3.11 or newer and uses the `python.exe` it reports; the panel needs an absolute
+path, so if neither answers, set `python` to the full path of `python.exe`. The flow run (`r`), the loop list and the
+editors work as on other systems; nothing is run through a shell.
 
 ## Disable
 

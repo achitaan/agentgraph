@@ -39,9 +39,11 @@ function fail(message) {
   process.exit(1);
 }
 
+// Text is read with "\n" line ends whatever the checkout's line endings are (a Windows checkout may hold "\r\n"), so the
+// bundle is the same file on every system.
 function readOptional(file) {
   try {
-    return fs.readFileSync(file, "utf8");
+    return fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
   } catch (error) {
     if (error.code === "ENOENT") return null;
     throw error;

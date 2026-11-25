@@ -79,6 +79,30 @@ async function harness(settings, { build, leads = "true", from = null, rawSettin
 }
 
 const cases = {
+
+  "native Windows: the command runs as python -P -m agentgraph.cli with PYTHONPATH above bin/, as the .cmd launcher does": async () => {
+    const dir = path.join(root, "win-python"); fs.mkdirSync(dir, { recursive: true });
+    const log = path.join(dir, "python-calls.txt");
+    const fakePython = path.join(dir, "fake-python");
+    fs.writeFileSync(fakePython, `#!/bin/sh\necho "$@ | $PYTHONPATH" >> "${log}"\nif [ "$4 $5" = "handoff leads" ]; then exit 0; fi\necho WINSUMMARY\n`, { mode: 0o755 });
+    const platform = Object.getOwnPropertyDescriptor(process, "platform"); const had = process.env.AGENTGRAPH_PYTHON;
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true }); process.env.AGENTGRAPH_PYTHON = fakePython;
+    try {
+      const h = await harness({}); await h.step(116000); h.notes(); await h.step(117000);
+      const event = await h.hook();
+      assert.equal(event.result && event.result.summary.trim(), "WINSUMMARY");
+      const rows = fs.readFileSync(log, "utf8").trim().split("\n");
+      const upAbove = path.dirname(path.dirname(JSON.parse(fs.readFileSync(h.settingsFile, "utf8")).agentgraph_bin));
+      assert.ok(rows[0].startsWith("-P -m agentgraph.cli handoff leads"), rows[0]);
+      assert.ok(rows.some((r) => r.startsWith("-P -m agentgraph.cli handoff build --session ")), rows.join(" / "));
+      assert.ok(rows.every((r) => r.endsWith("| " + upAbove)), "PYTHONPATH is the folder above bin/");
+      assert.equal(h.buildArgs().length, 0, "the sh script itself was not run");
+      h.stop();
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+      if (had === undefined) delete process.env.AGENTGRAPH_PYTHON; else process.env.AGENTGRAPH_PYTHON = had;
+    }
+  },
   async "below ask_at nothing"() {
     const h = await harness({}); await h.step(50000); await h.step(114000);
     assert.equal(h.calls.synthetic.length, 0); assert.equal(h.calls.compact.length, 0); h.stop();

@@ -64,13 +64,32 @@ function nonEmptyString(value) {
 // ---------------------------------------------------------------------------------------------------------------
 // Options
 
-export function resolveOptions(raw, { os, path }) {
+// Native Windows has no `python3`. Ask `py -3`, then `python`, for a Python 3.11 or newer and use the executable path it
+// prints: the real python.exe, so a kill ends Python itself and not just the `py` launcher in front of it. Without
+// an answer, plain "python" (the error then tells the user to set options.python).
+const WINDOWS_PYTHON_PROBE = "import sys; sys.exit(1) if sys.version_info < (3, 11) else print(sys.executable)";
+export function windowsPython(execFileSync) {
+  if (typeof execFileSync !== "function") return "python";
+  for (const [file, lead] of [["py", ["-3"]], ["python", []]]) {
+    try {
+      const out = String(execFileSync(file, [...lead, "-c", WINDOWS_PYTHON_PROBE],
+        { encoding: "utf8", timeout: 5000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }));
+      const line = out.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean).pop();
+      if (line) return line;
+    } catch (_) {}
+  }
+  return "python";
+}
+
+export function resolveOptions(raw, { os, path, execFileSync }) {
   const options = isPlainObject(raw) ? raw : {};
-  const expandHome = (value) => (value === "~" || value.startsWith("~/") ? path.join(os.homedir(), value.slice(1)) : value);
+  const expandHome = (value) => (value === "~" || value.startsWith("~/") || (path.sep === "\\" && value.startsWith("~\\"))
+    ? path.join(os.homedir(), value.slice(1)) : value);
   const home = nonEmptyString(options.home)
     ? path.resolve(expandHome(options.home.trim()))
     : path.join(os.homedir(), ".config", "opencode", "orchestration");
-  const python = nonEmptyString(options.python) ? expandHome(options.python.trim()) : DEFAULT_PYTHON;
+  const python = nonEmptyString(options.python) ? expandHome(options.python.trim())
+    : os.platform?.() === "win32" ? windowsPython(execFileSync) : DEFAULT_PYTHON;
   const requested = Number(options.intervalMs);
   const intervalMs = Number.isFinite(requested) && requested > 0 ? Math.max(MIN_INTERVAL_MS, Math.floor(requested)) : DEFAULT_INTERVAL_MS;
   const mode = options.mode === "prepend" ? "prepend" : "replace";
@@ -331,7 +350,10 @@ export function createPlugin(host) {
       if (typeof dir !== "string" || !dir.trim() || !host.path.isAbsolute(dir.trim())) return "";
       const temp = host.fs.realpathSync(host.os.tmpdir());
       const real = host.fs.realpathSync(dir.trim());
-      return real.startsWith(temp + host.path.sep) && host.fs.statSync(real).isDirectory() ? real : "";
+      // Windows paths differ in letter case without being different folders
+      const win = host.os?.platform?.() === "win32";
+      const inside = win ? real.toLowerCase().startsWith((temp + host.path.sep).toLowerCase()) : real.startsWith(temp + host.path.sep);
+      return inside && host.fs.statSync(real).isDirectory() ? real : "";
     } catch (_) {
       return "";
     }
@@ -553,7 +575,7 @@ export function createPlugin(host) {
         const asked = generation;
         return Promise.all([
           runner.snapshot({ session, directory: directory() }).catch((error) => errorDocument(errorMessage(error))),
-          host.os?.platform?.() === "win32" ? Promise.resolve([]) : loopRunner.list(directory()).catch(() => []),
+          loopRunner.list(directory()).catch(() => []),
         ])
           .then(([doc, loops]) => {
             if (doc && typeof doc === "object" && !doc.error && loops.length) doc.loops = loops;
@@ -776,7 +798,7 @@ export function createPlugin(host) {
     const canStop = () => !!(ctx.client && ctx.client.session && has(ctx.client.session.interrupt) && ctx.ui && ctx.ui.dialog && has(ctx.ui.dialog.confirm));
     const canMessage = () => !!(ctx.client && ctx.client.session && has(ctx.client.session.prompt) && ctx.ui && ctx.ui.dialog && has(ctx.ui.dialog.prompt));
     const canAsk = () => !!(ctx.ui && ctx.ui.dialog && has(ctx.ui.dialog.prompt));
-    const canRun = () => host.os?.platform?.() !== "win32" && canMessage(); // toolkit flow commands require POSIX
+    const canRun = () => canMessage();
     let runBusy = false; // a path is being run: from `r` until it was sent or given up
     const [runShown, setRunShown] = host.createSignal(true); // the key line's `r run`: hidden while runBusy
     const setRunBusy = (busy) => {

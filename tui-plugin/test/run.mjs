@@ -752,6 +752,27 @@ test("options: defaults, minimum interval, mode", () => {
   assert.equal(P.resolveOptions({ mode: "after" }, { os, path }).mode, "replace");
 });
 
+test("options on native Windows: py -3 then python give a real python.exe path; ~\\ is the home folder; other systems keep the default", () => {
+  const winOs = { platform: () => "win32", homedir: () => "C:\\Users\\someone" };
+  const asked = [];
+  const found = (file, args) => { asked.push([file, args[0]]); return "C:\\Python312\\python.exe\r\n"; };
+  assert.equal(P.resolveOptions(undefined, { os: winOs, path: path.win32, execFileSync: found }).python, "C:\\Python312\\python.exe");
+  assert.deepEqual(asked, [["py", "-3"]]);
+  const order = [];
+  const second = (file) => { order.push(file); if (file === "py") throw new Error("old"); return "D:\\Tools\\python.exe\n"; };
+  assert.equal(P.resolveOptions({}, { os: winOs, path: path.win32, execFileSync: second }).python, "D:\\Tools\\python.exe");
+  assert.deepEqual(order, ["py", "python"]);
+  const none = () => { throw new Error("none"); };
+  assert.equal(P.resolveOptions({}, { os: winOs, path: path.win32, execFileSync: none }).python, "python");
+  assert.equal(P.resolveOptions({}, { os: winOs, path: path.win32 }).python, "python", "no way to probe: plain python");
+  const never = () => { throw new Error("no probe when python is given"); };
+  assert.equal(P.resolveOptions({ python: "~\\py\\python.exe", home: "~\\orch" }, { os: winOs, path: path.win32, execFileSync: never }).python, "C:\\Users\\someone\\py\\python.exe");
+  assert.equal(P.resolveOptions({ home: "~\\orch" }, { os: winOs, path: path.win32, execFileSync: found }).home, "C:\\Users\\someone\\orch");
+  const mac = { platform: () => "darwin", homedir: () => os.homedir() };
+  assert.equal(P.resolveOptions({}, { os: mac, path, execFileSync: never }).python, P.DEFAULT_PYTHON);
+  assert.equal(P.resolveOptions({ python: "~\\x" }, { os: mac, path, execFileSync: never }).python, "~\\x", "a backslash is not the home folder on POSIX");
+});
+
 // ---------------------------------------------------------------------------------------------------------------
 // The plugin module (src/tui.js) with stub host modules
 

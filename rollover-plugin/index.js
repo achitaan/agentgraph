@@ -326,6 +326,28 @@ module.exports = {
         path.resolve(here, "..", "..", "orchestration", "bin", "agentgraph")].filter(Boolean).find((p) => { try { return fs.statSync(p).isFile(); } catch { return false; } });
       return found || null;
     };
+    // bin/agentgraph is a /bin/sh script; native Windows has no sh, so there the same command runs through
+    // `python -P -m agentgraph.cli` (the table bin/agentgraph.cmd uses), with the folder above bin/ as PYTHONPATH.
+    // Python: env AGENTGRAPH_PYTHON, else `py -3`, then `python` (3.11 or newer), found once.
+    let winPython = null;
+    const windowsPython = () => {
+      if (winPython) return winPython;
+      const probe = "import sys; sys.exit(1) if sys.version_info < (3, 11) else print(sys.executable)";
+      for (const [file, lead] of [["py", ["-3"]], ["python", []]]) {
+        try {
+          const out = String(cp.execFileSync(file, [...lead, "-c", probe], { encoding: "utf8", timeout: 5000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }));
+          const line = out.split(/\r?\n/).map((x) => x.trim()).filter(Boolean).pop();
+          if (line) return (winPython = line);
+        } catch { /* try the next one */ }
+      }
+      return (winPython = "python");
+    };
+    const runAgentgraph = (bin, args, options, done) => {
+      if (process.platform !== "win32") return cp.execFile(bin, args, options, done);
+      const python = process.env.AGENTGRAPH_PYTHON || windowsPython();
+      return cp.execFile(python, ["-P", "-m", "agentgraph.cli", ...args],
+        { ...options, env: { ...process.env, PYTHONPATH: path.dirname(path.dirname(bin)) } }, done);
+    };
     const readLeads = () => new Promise((resolve) => {
       if (settings().skip_leads === false) return resolve();
       const fail = (why) => { log(null, "leads_unreadable", { reason: why + "; only skip_agents is used to leave orchestrating agents alone" }); resolve(); };
@@ -334,7 +356,7 @@ module.exports = {
       const args = ["handoff", "leads"];
       if (settings().structure_dir) args.push("--structure-dir", settings().structure_dir);
       try {
-        cp.execFile(bin, args, { timeout: 15000, maxBuffer: 1024 * 1024, encoding: "utf8", windowsHide: true }, (err, stdout) => {
+        runAgentgraph(bin, args, { timeout: 15000, maxBuffer: 1024 * 1024, encoding: "utf8", windowsHide: true }, (err, stdout) => {
           if (err) return fail(err.killed ? "handoff leads timed out" : "handoff leads failed (exit " + err.code + ")");
           leadNames = new Set(String(stdout).split("\n").map((x) => x.trim().toLowerCase()).filter((x) => /^[a-z0-9_.-]{1,100}$/.test(x)));
           resolve();
@@ -351,7 +373,7 @@ module.exports = {
       if (isChat(s)) args.push("--chat", "--user-message-chars", String(settings().chat_message_chars), "--user-chars", String(settings().chat_user_chars));
       else args.push("--lane");
       try {
-        cp.execFile(bin, args, { timeout: num(settings().build_timeout_ms) || 15000, maxBuffer: 8 * 1024 * 1024, encoding: "utf8", windowsHide: true }, (err, stdout) => {
+        runAgentgraph(bin, args, { timeout: num(settings().build_timeout_ms) || 15000, maxBuffer: 8 * 1024 * 1024, encoding: "utf8", windowsHide: true }, (err, stdout) => {
           if (!err) return stdout && stdout.trim() ? resolve({ text: stdout }) : resolve({ fail: "empty summary" });
           if (err.killed) return resolve({ fail: "build timed out" });
           if (err.code === 3) return resolve({ fail: "notes missing or older than the last rollover or request (a chat: or too thin, or subagent reports that arrived after them do not fit)" });

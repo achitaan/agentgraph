@@ -1,6 +1,6 @@
 # Orchestration slash commands
 
-Global command files live in `~/.config/opencode/commands/`; the toolkit's copies are in `orchestration/commands/`. `install.sh` and `sync.sh` copy only the seven commands on the shared toolkit allowlist. Neither deletes commands or copies personal commands. Both back up replaced command files and refuse symlink paths. `sh sync.sh --commands-and-learning` limits sync to the toolkit commands and the two improvement skills. `/learn` does not run full sync: it mirrors only the exact approved changes.
+Global command files live in `~/.config/opencode/commands/`; the toolkit's copies are in `orchestration/commands/`. `install.sh` (on Windows `install.cmd`) and `sync.sh` copy only the seven commands on the shared toolkit allowlist. `sync.sh` is the maintainer's copy tool: optional and Unix-only. On native Windows each command calls `bin\\agentgraph.cmd` in place of `bin/agentgraph` (the command files say how for PowerShell, cmd and Git Bash). Neither deletes commands or copies personal commands. Both back up replaced command files and refuse symlink paths. `sh sync.sh --commands-and-learning` limits sync to the toolkit commands and the two improvement skills. `/learn` does not run full sync: it mirrors only the exact approved changes.
 
 | Command | What it does | Call behind it |
 |---|---|---|

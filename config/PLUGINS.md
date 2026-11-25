@@ -20,9 +20,10 @@ Clone this repository to `~/.config/opencode/orchestration` (the prompts and plu
 ]
 ```
 
-`python` must be Python 3.11 or newer, given as an absolute path. Write the plugin paths out in full if your OpenCode version does not expand `~`.
+`python` must be Python 3.11 or newer, given as an absolute path (on Windows it may be left out: the plugins then find `py -3` or `python` themselves). Write the plugin paths out in full if your OpenCode version does not expand `~`.
 
-On Windows, use the object form (not the legacy `[path, options]` tuple) and a
-file URL such as `file:///C:/Users/NAME/.config/opencode/orchestration/tui-plugin`.
-Use the absolute path to your Python executable in `options.python`. Reopen the
+On Windows, clone to `%USERPROFILE%\\.config\\opencode\\orchestration`, run `install.cmd` there, use the object form (not the legacy `[path, options]` tuple) and a
+file URL such as `file:///C:/Users/NAME/.config/opencode/orchestration/tui-plugin` (the desktop plugin takes
+`C:\\Users\\NAME\\.config\\opencode\\orchestration\\desktop-plugin`). Leave `options.python` out to let the plugin find Python, or give the
+absolute path to your `python.exe`. The Desktop and terminal plugins need no shell, `.cmd` file or PowerShell step. Reopen the
 terminal client and look for **Agent graph** in its command palette (`/graph`).

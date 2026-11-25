@@ -7,7 +7,7 @@
  * Like that plugin, it default-exports a plain `{ id, setup }` object and does not load `@opencode/plugin` at run
  * time.
  */
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -24,6 +24,6 @@ try {
   demoFile = undefined;
 }
 
-const plugin = createPlugin({ createElement, insert, setProp, createSignal, onCleanup, spawn, fs, os, path, env: process.env, demoFile });
+const plugin = createPlugin({ createElement, insert, setProp, createSignal, onCleanup, spawn, execFileSync, fs, os, path, env: process.env, demoFile });
 
 export default plugin;
