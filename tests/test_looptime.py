@@ -3,11 +3,11 @@ fresh sessions, resume, the supervisor, the off switch and the status. They run 
 the only real waits are the watch commands' own (a few milliseconds each). No test starts OpenCode."""
 import contextlib
 import datetime
-import fcntl
 import hashlib
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -18,11 +18,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agentgraph import looprun, looptime
+from agentgraph import looprun, looptime, osfs
+from tests.shellskip import sh_or, sleep_command
 from tests.test_looprun import Base
 
 T0 = 1_800_000_000.0
-WORK_OK = "test -f ok"
+WORK_OK = sh_or("test -f ok", "import os; raise SystemExit(0 if os.path.exists('ok') else 1)")
 
 
 class Died(BaseException):
@@ -70,8 +71,10 @@ class TimedExecutor(looprun.ScriptedExecutor):
 def watch_script(*codes):
     """A shell command whose nth run exits with the nth code (the last one for every run after that); it prints a line naming the run."""
     cases = "".join(f"{n}) exit {code};; " for n, code in enumerate(codes[:-1], 1))
-    return (f'n=$(cat .watch-count 2>/dev/null || echo 0); n=$((n+1)); echo $n > .watch-count; echo "watch run $n says news"; '
-            f"case $n in {cases}*) exit {codes[-1]};; esac")
+    return sh_or(f'n=$(cat .watch-count 2>/dev/null || echo 0); n=$((n+1)); echo $n > .watch-count; echo "watch run $n says news"; '
+                 f"case $n in {cases}*) exit {codes[-1]};; esac",
+                 "import os; n = int(open('.watch-count').read()) + 1 if os.path.exists('.watch-count') else 1; open('.watch-count', 'w').write(str(n)); "
+                 f"print('watch run', n, 'says news'); codes = {list(codes)}; raise SystemExit(codes[n - 1] if n <= len(codes) else codes[-1])")
 
 
 def iso(epoch):
@@ -225,7 +228,7 @@ class IntervalTests(TimedBase):
         self.assertEqual((record["status"], record["timing"]["counts"]), ("limit", {"idle": 1, "woken": 0, "skipped": 0, "failed": 4}))
 
     def test_a_watch_that_runs_too_long_is_an_error(self):
-        self.timed({"kind": "interval", "every": 20, "ticks": 9, "watch": "sleep 5", "watch_seconds": 0.3})
+        self.timed({"kind": "interval", "every": 20, "ticks": 9, "watch": sleep_command(5), "watch_seconds": 0.3})
         record, ex, clock, run = self.run_timed()
         self.assertEqual(record["status"], "check_error")
         self.assertIn("timed out", record["timing"]["last"]["error"])
@@ -498,7 +501,7 @@ class SupervisorTests(TimedBase):
         folder = looptime.loops_folder(self.project)
         folder.mkdir(parents=True)
         with open(folder / looptime.SUPERVISOR_LOCK, "a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            osfs.lock(lock.fileno(), block=False)
             self.assertTrue(looptime._supervisor_alive(self.project))
             out = io.StringIO()
             self.assertEqual(looptime.supervise(self.project, 30, FakeClock(), lambda f: None, out), 1)
@@ -775,7 +778,7 @@ class WallClockTests(TimedBase):
         self.assertEqual(timed.check_timeout(600), looptime.CHECK_GRACE)
 
     def test_a_check_that_runs_past_the_end_by_the_wall_clock_is_stopped(self):
-        self.timed({"kind": "timebox", "for": 100, "min_attempt_seconds": 10}, check="sleep 30", attempts=None)
+        self.timed({"kind": "timebox", "for": 100, "min_attempt_seconds": 10}, check=sleep_command(30), attempts=None)
         clock = FakeClock()
         executor = self.Sleeper(clock, 0)
         executor.attempt = lambda **kw: (setattr(clock, "t", T0 + 5000), {"exit": 0, "outcome": "returned", "session": kw["session"], "cost": 0.01, "tokens": None,
@@ -795,7 +798,7 @@ class IdleEventTests(TimedBase):
         return [e for e in self.events(run) if e.get("step") == "tick" and "tick" in e]
 
     def test_idle_ticks_in_a_row_are_one_event_and_one_summary_for_every_hundred(self):
-        self.timed({"kind": "interval", "every": 10, "ticks": 205, "watch": "true"})
+        self.timed({"kind": "interval", "every": 10, "ticks": 205, "watch": "exit 0"})
         record, ex, clock, run = self.run_timed()
         self.assertEqual(record["timing"]["counts"]["idle"], 205)  # exact in run.json
         events = self.ticks(run)
@@ -1154,11 +1157,11 @@ class RealProcessTests(TimedBase):
         return looprun.read_run(folder)
 
     def test_a_detached_supervisor_resumes_a_dead_run_with_a_real_controller_process(self):
-        self.timed({"kind": "interval", "every": 10, "ticks": 3, "watch": "true"})
+        self.timed({"kind": "interval", "every": 10, "ticks": 3, "watch": "exit 0"})
         start = time.time() - 30  # a schedule that began half a minute ago: its three ticks are all due
         killed = FakeClock(start, on_sleep=lambda clock: (_ for _ in ()).throw(Died()) if clock.t >= start + 5 else None)
         folder = self.die(killed)
-        self.addCleanup(lambda: [os.kill(pid, 9) for pid in [looprun.read_run(folder).get("pid")] if pid and looprun.read_run(folder)["status"] == "running" and pid != os.getpid()])
+        self.addCleanup(lambda: [os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM)) for pid in [looprun.read_run(folder).get("pid")] if pid and looprun.read_run(folder)["status"] == "running" and pid != os.getpid()])
         self.assertEqual(looprun.read_run(folder)["status"], "running")  # the controller died: nobody holds the run
         self.assertEqual(looprun.shown_status(folder, looprun.read_run(folder)), "interrupted")
         env = {**os.environ, "PYTHONPATH": str(looprun.paths.REPO)}

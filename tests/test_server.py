@@ -13,6 +13,8 @@ from unittest.mock import patch
 
 from agentgraph import server
 from agentgraph.demo import demo_snapshot
+from tests.shellskip import CHECK_SECOND
+from tests.winskip import CAN_SYMLINK
 
 
 class ServerTests(unittest.TestCase):
@@ -92,7 +94,8 @@ class ServerTests(unittest.TestCase):
         (self.cwd / "agentgraph").mkdir()
         (self.cwd / "agentgraph" / "contract.py").write_bytes(b"outside file")
         (self.cwd / "x").write_bytes(b"outside file")
-        (self.web_dir / "link.js").symlink_to(self.cwd / "x")
+        if CAN_SYMLINK:  # without the right to make links the request below is still refused, there is just no link to follow
+            (self.web_dir / "link.js").symlink_to(self.cwd / "x")
         for path in ("/../agentgraph/contract.py", "/%2e%2e/x", "/sub/file.js", "/sub%2ffile.js",
                      f"http://127.0.0.1:{self.httpd.server_port}/index.html", str(self.cwd / "x"),
                      "//index.html", "/link.js", "/sub", "/missing.js"):
@@ -200,7 +203,6 @@ class ServeCommandTests(unittest.TestCase):
 
 class LoopEndpointTests(unittest.TestCase):
     """GET /api/loops, GET /api/loop/run and POST /api/loop on temporary folders and the scripted executor (no OpenCode)."""
-    CHECK_SECOND = 'n=$(cat .count 2>/dev/null || echo 0); n=$((n+1)); echo $n > .count; echo "check call $n"; [ "$n" -ge 2 ]'
     SETTINGS = {"check": {"command": CHECK_SECOND, "timeout": 20}, "limits": {"attempts": 4}}
 
     def setUp(self):

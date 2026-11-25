@@ -2,7 +2,6 @@
 executor with real check scripts in temp folders, plus unit tests for settings, compile, outcomes, messages, the record and
 the admission rules. No test starts OpenCode."""
 import contextlib
-import fcntl
 import hashlib
 import io
 import json
@@ -15,10 +14,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agentgraph import looprun
+from agentgraph import looprun, osfs
+from tests.shellskip import CHECK_SECOND, sh_or, sleep_command
 from tests.test_looprun3 import LockHolder
-
-CHECK_SECOND = 'n=$(cat .count 2>/dev/null || echo 0); n=$((n+1)); echo $n > .count; echo "check call $n"; [ "$n" -ge 2 ]'
 
 
 def tree_hash(root: Path) -> dict:
@@ -144,7 +142,7 @@ class AcceptanceTests(Base):
         self.save(check="exit 75", attempts=3)
         run, record, _ = self.go()
         self.assertEqual((record["status"], len(record["attempts"])), ("inconclusive", 1))
-        looprun_settings = self.settings("sleep 5", attempts=3)
+        looprun_settings = self.settings(sleep_command(5), attempts=3)
         looprun_settings["check"]["timeout"] = 0.3
         looprun.save_settings(self.structure, "self", looprun_settings)
         run, record, _ = self.go()
@@ -512,7 +510,7 @@ class RecordTests(Base):
         self.assertEqual(ex.calls[1]["message"], second)
 
     def test_check_output_is_capped_at_one_megabyte(self):
-        self.save(check="head -c 3000000 /dev/zero | tr '\\0' x; echo; exit 1", attempts=1)
+        self.save(check=sh_or("head -c 3000000 /dev/zero | tr '\\0' x; echo; exit 1", "import sys; sys.stdout.write('x' * 3000000); print(); raise SystemExit(1)"), attempts=1)
         run, record, _ = self.go()
         size = (self.folder(run) / "attempt-1" / "check.out").stat().st_size
         self.assertLessEqual(size, looprun.OUTPUT_CAP + 200)
@@ -520,7 +518,7 @@ class RecordTests(Base):
 
     def test_no_status_other_than_a_check_pass_yields_passed(self):
         cases = [("exit 1", [{}]), ("exit 75", [{}]), ("nonexistent-zzz", [{}]), ("exit 0", [{"error": "boom"}]), ("exit 1", [{"hang": True}] * 3),
-                 ("sleep 5", [{}])]
+                 (sleep_command(5), [{}])]
         for check, script in cases:
             settings = self.settings(check, attempts=2, attempt_seconds=0.2)
             settings["check"]["timeout"] = 0.3
@@ -628,7 +626,7 @@ class CommandTests(Base):
         with mock.patch.object(looprun.subprocess, "Popen"):  # no real controller: this test plays it, holding the run's lock
             run = looprun.start(self.project, "self", structure=self.structure, goal="g", executor=looprun.ScriptedExecutor([]))
         with open(self.folder(run) / "lock", "a+") as held:
-            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            osfs.lock(held.fileno(), block=False)
             code, out, _ = self.cli("cancel", run, "--project", str(self.project))
         self.assertEqual(code, 0)
         self.assertTrue((self.folder(run) / "cancel").exists())

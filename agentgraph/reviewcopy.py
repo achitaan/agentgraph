@@ -420,10 +420,19 @@ def _tail(path: Path) -> str:
 
 def run_command(command: str, cwd: Path, env: dict, timeout: float, log: Path) -> dict:
     """Run one command under /bin/sh in `cwd` (on Windows: `sh` when one is on PATH, else `cmd /d /s /c`; see `osproc.shell_command`), its output (both streams) in `log`. The whole process group is killed on a timeout
-    and, when the command ends, whatever it left running. exit is None for a timeout."""
+    and, when the command ends, whatever it left running. exit is None for a timeout (and, with "error" set, for a command that was not run: see below).
+    On Windows `taskkill /T` walks the tree through parent ids, and once the shell has exited its children no longer point at it, so a
+    grandchild the command left behind (a server started with `&`, a detached job) is NOT stopped there, where POSIX `killpg` stops the
+    whole group; a copy that must be clean afterwards cannot rely on this clean-up. A multi-line command with no `sh` on PATH is refused
+    (cmd would run only its first line): no process starts, the log says why, exit is None and "error" holds the reason."""
     began = time.monotonic()
+    try:
+        argument = osproc.shell_command(command, posix_shell="/bin/sh")
+    except osproc.ShellRefused as exc:  # Windows without an sh: a command cmd cannot run whole is a failed command, with the reason in its log
+        Path(log).write_text(f"the command was not run: {exc}\n", encoding="utf-8")
+        return {"command": command, "sha256": _sha(command), "exit": None, "timed_out": False, "seconds": 0.0, "error": str(exc)}
     with open(log, "wb") as out:
-        proc = subprocess.Popen(osproc.shell_command(command, posix_shell="/bin/sh"), cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+        proc = subprocess.Popen(argument, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                 stdout=out, stderr=subprocess.STDOUT, **osproc.group_kwargs())
         try:
             ended = _wait(proc, timeout)
@@ -653,7 +662,8 @@ def review_copy(task: str, node_id: str, directory=None, timeout: float = DEFAUL
         parts = []
         for name, r in results.items():
             seconds = f"{r['seconds']:.0f}s"
-            parts.append(f"{name} timed out ({seconds})" if r["timed_out"] else f"{name} exit {r['exit']} ({seconds})")
+            parts.append(f"{name} timed out ({seconds})" if r["timed_out"] else
+                         f"{name} not run: {r['error']}" if r.get("error") else f"{name} exit {r['exit']} ({seconds})")
         line = f"review-copy {task}/{node_id}: " + ", ".join(parts) + f", result {rel_json}"
         if not_checked:
             line += f", PROJECT NOT CHECKED AFTER THE RUN ({not_checked})"

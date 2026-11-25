@@ -14,6 +14,8 @@ import unittest
 from pathlib import Path
 
 from agentgraph import looprun
+from tests.shellskip import sh_or
+from tests.winskip import needs_symlinks
 
 PASS = "Looks right to me.\nVERDICT: PASS"
 FAIL = "The header line is missing.\nVERDICT: FAIL"
@@ -142,7 +144,7 @@ class FeedbackTests(Base):
         self.assertEqual(self.events(run)[-1], ("judge:reviewer", "passed", "end"))
 
     def test_e4_a_failing_check_spends_no_judge_turn(self):
-        self.save(check="echo bad output; exit 3", attempts=2)
+        self.save(check=sh_or("echo bad output; exit 3", "print('bad output'); raise SystemExit(3)"), attempts=2)
         run, record, ex = self.go("duo", {"reviewer": [{"text": PASS}] * 5, "worker": [{}, {}]})
         self.assertEqual((record["status"], len(record["attempts"])), ("failed", 2))
         self.assertEqual(by(ex, "reviewer"), [])
@@ -518,6 +520,7 @@ class ArtifactTests(Base):
         self.assertEqual(kinds.count((2, "artifact", "reviewer")), 2)
         self.assertEqual(self.events(run)[:3], [("-", "started", "work"), ("work", "no_artifact", "work"), ("work", "returned", "judge:reviewer")])
 
+    @needs_symlinks
     def test_a_file_that_is_not_there_never_passes_and_a_link_out_of_the_work_folder_is_missing(self):
         outside = self.tmp / "secret.txt"
         outside.write_text("secret\n")

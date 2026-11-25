@@ -9,10 +9,8 @@ SIGINT, and SIGTSTP really stops the process.
 import contextlib
 import dataclasses
 import errno
-import fcntl
 import io
 import os
-import pty
 import re
 import select
 import signal
@@ -20,7 +18,6 @@ import struct
 import subprocess
 import sys
 import tempfile
-import termios
 import threading
 import time
 import types
@@ -31,6 +28,14 @@ from unittest import mock
 import agentgraph.__main__ as cli
 from agentgraph.demo import demo_snapshot
 from agentgraph.viewstate import KEY_HELP, ViewState
+from tests.winskip import posix_only
+
+try:  # the pseudo-terminal tests are POSIX; on Windows the module still loads and those classes skip (osproc/winconsole tests cover the console)
+    import fcntl
+    import pty
+    import termios
+except ImportError:  # pragma: no cover - Windows
+    fcntl = pty = termios = None
 
 PROJECT = Path(__file__).resolve().parent.parent
 AT = "1795000000"
@@ -43,7 +48,7 @@ SHOW = b"\x1b[?25h"
 CLEAR = b"\x1b[H\x1b[2J"
 EL = b"\x1b[K"
 ROW = re.compile(rb"\x1b\[(\d+);1H([^\x1b]*)")
-LFLAGS = termios.ECHO | termios.ICANON | termios.ISIG
+LFLAGS = termios.ECHO | termios.ICANON | termios.ISIG if termios else 0
 
 # An error message with ESC, DEL, a newline, a tab, an emoji and a combining mark,
 # and what the sanitiser must make of it.
@@ -301,6 +306,7 @@ class FrameComplete(unittest.TestCase):
         self.assertFalse(_full_frame(short[:-1], 2, 80))
 
 
+@posix_only
 class LiveTerminal(unittest.TestCase):
     def live(self, *args, **options) -> Live:
         run = Live(args, **options)
@@ -531,6 +537,7 @@ class VirtualClock:
         return mock.patch.multiple(cli, time=clock, select=types.SimpleNamespace(select=self.select))
 
 
+@posix_only  # its clock waits with select.select on pipes, which Windows allows only on sockets
 class LiveLoop(unittest.TestCase):
     """The live loop in-process, with the view replaced by a recording stub."""
 
@@ -712,6 +719,7 @@ class LiveLoop(unittest.TestCase):
                          (ViewState(focus="loops", scroll=1), False))
 
 
+@posix_only
 class TerminalCleanup(unittest.TestCase):
     """The terminal owner in-process on a pty: cleanup order and signals."""
 
@@ -938,6 +946,7 @@ class Arguments(unittest.TestCase):
                 self.assertEqual(err.getvalue(), f"agentgraph: could not draw the frame: {CLEAN}\n".encode())
                 self.assertEqual(out.getvalue(), "")
 
+    @posix_only  # a path under the null device
     def test_an_unwritable_html_path_is_reported_sanitised(self):
         path = os.devnull + "/\x1b[31m🙂\n.html"
         with _stderr_fd() as err:
@@ -960,6 +969,7 @@ class Arguments(unittest.TestCase):
             cli._complain(NASTY)
         self.assertEqual(err.getvalue(), ("agentgraph: " + CLEAN)[:30].encode() + b"\n")
 
+    @posix_only  # exit status 128 + SIGPIPE
     def test_once_into_a_closed_pipe_exits_quietly(self):
         # A frame far larger than a pipe holds, so the writer is still busy when the reader goes.
         with tempfile.TemporaryFile() as err:

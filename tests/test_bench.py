@@ -7,12 +7,15 @@ import os
 import shutil
 import sqlite3
 import stat
+import sys
 import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
 
-from agentgraph import bench
+from agentgraph import bench, osproc
+from tests.shellskip import sh_or
+from tests.winskip import WINDOWS, needs_symlinks
 
 SCHEMA = (
     "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, agent TEXT, title TEXT, cost REAL, time_created INT);"
@@ -92,10 +95,12 @@ class ScratchConfigTests(Base):
         self.assertIn("~/.config/opencode/AGENTS.md", text)             # the prompt text is unchanged: the scratch HOME resolves it
         self.assertIn(f"{config}/orchestration/COSTS.md", text)         # the absolute path points at the scratch copy
         self.assertNotIn(str(self.live), text)
-        self.assertIn(str(config), (config / "opencode.json").read_text())
-        self.assertIn(str(config), (config / "cli.json").read_text())
+        as_json = json.dumps(str(config))[1:-1]  # the path as a JSON string holds it (Windows backslashes are doubled)
+        self.assertIn(as_json, (config / "opencode.json").read_text())
+        self.assertIn(as_json, (config / "cli.json").read_text())
         self.assertNotIn(str(self.live), (config / "orchestration" / "bin" / "agentgraph").read_text())
-        self.assertEqual(stat.S_IMODE(os.stat(self.root / "s1").st_mode), 0o700)
+        if not WINDOWS:  # Windows has no POSIX modes
+            self.assertEqual(stat.S_IMODE(os.stat(self.root / "s1").st_mode), 0o700)
 
     def test_personal_folders_are_not_copied_and_the_ledger_is_empty(self):
         config = Path(self.scratch()["config"])
@@ -190,7 +195,8 @@ class PlainConfigTests(Base):
         self.assertEqual((data["model"], data["small_model"]), (MODEL, MODEL))
         self.assertEqual(data["provider"]["acme"]["models"], {"m1": {}})
         self.assertNotIn(str(self.live), json.dumps(data))
-        self.assertEqual(stat.S_IMODE(os.stat(info["dir"]).st_mode), 0o700)
+        if not WINDOWS:
+            self.assertEqual(stat.S_IMODE(os.stat(info["dir"]).st_mode), 0o700)
         for name in ("AGENTS.md", "agents", "commands", "skills", "oh-my-opencode-slim", "orchestration", "node_modules", "cli.json"):
             self.assertFalse((config / name).exists(), name)
 
@@ -407,6 +413,32 @@ sys.exit(step.get("exit", 0))
 '''
 
 
+def install_fake_cli(folder: Path) -> Path:
+    """The fake `opencode-cli` in `folder` and the path to run it: the script itself (a shebang) on POSIX; on Windows, which has no
+    shebang, a .cmd shim that starts the script with this interpreter (the stand-in for opencode.cmd)."""
+    if WINDOWS:
+        script = folder / "opencode-cli.py"
+        script.write_text(FAKE, encoding="utf-8")
+        shim = folder / "opencode-cli.cmd"
+        shim.write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+        return shim
+    cli = folder / "opencode-cli"
+    cli.write_text(FAKE)
+    cli.chmod(0o755)
+    return cli
+
+
+def check_env(**extra) -> dict:
+    """A stripped-down environment for a check: PATH, what Windows needs to start programs at all, and `extra`."""
+    return {**{name: os.environ[name] for name in osproc.base_env_names() if name in os.environ}, "PATH": os.environ["PATH"], **extra}
+
+
+def same_answer_check(word: str) -> str:
+    """The scenarios' check: passes when answer.txt equals the hidden expect.txt and then prints `word`."""
+    return sh_or(f"diff -q answer.txt expect.txt >/dev/null && echo {word}",
+                 f"import sys; same = open('answer.txt').read() == open('expect.txt').read(); same and print('{word}'); raise SystemExit(0 if same else 1)")
+
+
 def graph(nodes, events, status="running"):
     return json.dumps({"task": "kv", "status": status, "nodes": [{"id": i, "status": s} for i, s in nodes],
                        "events": [{"time": 1, "node": n, "event": "dispatched", "note": ""} for n in events]})
@@ -419,9 +451,7 @@ class RunTests(Base):
         self.scratch_dir = info["dir"]
         self.cli_dir = self.base / "cli"
         self.cli_dir.mkdir()
-        self.cli = self.cli_dir / "opencode-cli"
-        self.cli.write_text(FAKE)
-        self.cli.chmod(0o755)
+        self.cli = install_fake_cli(self.cli_dir)
         self.results = self.base / "results"
         self.scenarios = self.base / "scenarios"
         s = self.scenarios / "t1"
@@ -431,7 +461,7 @@ class RunTests(Base):
         (s / "hidden" / "expect.txt").write_text("right\n")
         (s / "scenario.json").write_text(json.dumps({
             "agent": "orchestrator", "prompt": "fix the answer", "timeout": 20,
-            "check": "diff -q answer.txt expect.txt >/dev/null && echo matches"}))
+            "check": same_answer_check("matches")}))
         self.db = self.base / "opencode.db"
         self.title = "agentgraph-bench: t1 lab r1"
         make_db(self.db, [
@@ -573,6 +603,7 @@ class RunTests(Base):
         self.assertEqual((kept / "answer.txt").read_text(), "right\n")
         self.assertEqual(json.loads((self.results / "lab.jsonl").read_text())["work"], str(kept))
 
+    @needs_symlinks
     def test_run_check_leaves_the_folder_as_it_was_and_does_not_follow_links_out(self):
         scenario = bench.load_scenario("t1", self.scenarios)
         work = self.base / "w"
@@ -581,14 +612,14 @@ class RunTests(Base):
         outside.write_text("untouched\n")
         (work / "expect.txt").symlink_to(outside)                                # a link where a hidden file will land
         (work / "answer.txt").write_text("right\n")
-        result = bench.run_check(scenario, work, {"PATH": os.environ["PATH"], "HOME": str(self.base)}, self.db)
+        result = bench.run_check(scenario, work, check_env(HOME=str(self.base)), self.db)
         self.assertEqual(result, {"passed": True, "detail": "matches"})
         self.assertEqual(outside.read_text(), "untouched\n")
         self.assertTrue((work / "expect.txt").is_symlink())
         self.assertEqual(sorted(p.name for p in work.iterdir()), [".git", "answer.txt", "expect.txt"])
         self.assertEqual([p.name for p in self.base.iterdir() if p.name.startswith(bench.WORK_PREFIX)], [])
         (work / "answer.txt").write_text("wrong\n")
-        self.assertFalse(bench.run_check(scenario, work, {"PATH": os.environ["PATH"]})["passed"])
+        self.assertFalse(bench.run_check(scenario, work, check_env())["passed"])
 
     def test_a_scratch_folder_with_work_folders_of_the_old_layout_is_refused(self):
         old = Path(self.scratch_dir) / "work" / "lab-t1-r1-123"
@@ -705,9 +736,7 @@ class SuiteTests(Base):
         self.plain = bench.plain_config(self.root / "pl", live=self.live, temp_root=self.root, real_home=self.real_home)["dir"]
         self.cli_dir = self.base / "cli"
         self.cli_dir.mkdir()
-        self.cli = self.cli_dir / "opencode-cli"
-        self.cli.write_text(FAKE)
-        self.cli.chmod(0o755)
+        self.cli = install_fake_cli(self.cli_dir)
         (self.cli_dir / "plan.json").write_text(json.dumps([{"write": {"answer.txt": "right\n"}}]))
         self.results, self.scenarios, self.suites = self.base / "results", self.base / "scenarios", self.base / "suites"
         for name in ("t1", "t2"):
@@ -717,7 +746,7 @@ class SuiteTests(Base):
             (s / "fixture" / "answer.txt").write_text("wrong\n")
             (s / "hidden" / "expect.txt").write_text("right\n")
             (s / "scenario.json").write_text(json.dumps({"agent": "orchestrator", "prompt": f"fix {name}", "timeout": 20,
-                                                         "check": "diff -q answer.txt expect.txt >/dev/null && echo ok"}))
+                                                         "check": same_answer_check("ok")}))
         self.suites.mkdir()
         (self.suites / "pair.json").write_text(json.dumps({"name": "pair", "note": "two", "scenarios": ["t1", "t2"]}))
         self.db = self.base / "opencode.db"

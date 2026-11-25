@@ -17,8 +17,9 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from agentgraph import chatfeed, server, sidechat, snapshot_json
+from agentgraph import chatfeed, osproc, server, sidechat, snapshot_json
 from agentgraph.demo import DEMO_SIDE, demo_chat, demo_sidechat, demo_snapshot
+from tests.winskip import WINDOWS, needs_symlinks
 
 ROOT = Path(__file__).resolve().parent.parent
 MARKER = "TOOL-OUTPUT-MARKER-5d1e-never-sent"
@@ -136,9 +137,15 @@ class Case(unittest.TestCase):
         self.config.mkdir()
         self.bin = self.dir / "bin"
         self.bin.mkdir()
-        self.exe = self.bin / "opencode-cli"
-        self.exe.write_text(FAKE)
-        self.exe.chmod(0o755)
+        if WINDOWS:  # no shebang there: a .cmd shim starts the fake with this interpreter (the stand-in for opencode.cmd)
+            script = self.bin / "opencode-cli.py"
+            script.write_text(FAKE, encoding="utf-8")
+            self.exe = self.bin / "opencode-cli.cmd"
+            self.exe.write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+        else:
+            self.exe = self.bin / "opencode-cli"
+            self.exe.write_text(FAKE)
+            self.exe.chmod(0o755)
         self.plan([{"text": "n2 is running.", "session": SIDE}])
         # The suite never depends on a real background service: the lookup of the service's executable is pinned
         # (no service found, so the route is `standalone`, as these tests expect) and the override variable is
@@ -196,11 +203,12 @@ class BriefTests(Case):
         plain, _ = self.brief("where are we?")
         self.assertNotIn("heads", plain.sizes())
 
+    @needs_symlinks
     def test_a_link_out_of_the_artifacts_is_never_read_or_listed(self):
         folder = self.project / ".opencode/artifacts/t1/n2/r1"
         os.symlink(self.project / "outside.txt", folder / "leak.md")
         os.symlink(self.project / "outside.txt", self.project / ".opencode/artifacts/t1/linked.md")
-        os.symlink(self.dir, self.project / ".opencode/artifacts/t1/dirlink")
+        os.symlink(self.dir, self.project / ".opencode/artifacts/t1/dirlink", target_is_directory=True)
         raw = graph_raw()
         raw["nodes"][1]["artifacts"] = [{"id": "x", "path": ".opencode/artifacts/t1/n2/r1/leak.md", "revision": 1}]
         self.write_graph(raw)
@@ -391,8 +399,7 @@ class RunTests(Case):
         self.assertLess(time.time() - started, 10)
         pid = int((self.bin / "slept.pid").read_text())
         time.sleep(0.2)
-        with self.assertRaises(ProcessLookupError):
-            os.kill(pid, 0)
+        self.assertFalse(osproc.is_alive(pid))
         self.assertEqual(len(self.calls()), 1)  # a timeout is not retried on the fallback model
         self.assertFalse(sidechat.is_busy(self.project))
 
@@ -471,6 +478,7 @@ class RouteTests(Case):
         self.assertNotIn("--standalone", self.flags()[1])
         self.assertIn("--session", self.flags()[1])
 
+    @needs_symlinks
     def test_a_link_to_the_same_file_is_the_same_executable(self):
         link = self.dir / "link-cli"
         link.symlink_to(self.exe)
@@ -608,7 +616,7 @@ class ServiceLookupTests(unittest.TestCase):
         table = ("  100 /usr/bin/zsh -l\n  4242 /Applications/Some App.app/opencode-cli serve --service\n"
                  "  4300 /x/opencode-cli serve --port 4096\n  4400 /bin/sh -c grep serve --service\n")
         run = self.runner(table, {"4242": "/Applications/Some App.app/opencode-cli", "4400": "/bin/sh"})
-        self.assertEqual(sidechat.service_executables(run=run), ["/Applications/Some App.app/opencode-cli"])
+        self.assertEqual(sidechat.service_executables(run=run, windows=False), ["/Applications/Some App.app/opencode-cli"])
         for cmd, kw in run.calls:
             self.assertIsInstance(cmd, list)
             self.assertFalse(kw.get("shell"))
@@ -617,15 +625,15 @@ class ServiceLookupTests(unittest.TestCase):
         self.assertEqual(run.calls[1][0], ["ps", "-p", "4242", "-o", "comm="])
 
     def test_no_service_is_an_empty_list(self):
-        self.assertEqual(sidechat.service_executables(run=self.runner("  1 /sbin/launchd\n")), [])
+        self.assertEqual(sidechat.service_executables(run=self.runner("  1 /sbin/launchd\n"), windows=False), [])
 
     def test_a_failure_a_timeout_or_nonsense_is_none(self):
         for fail in (OSError("no ps"), subprocess.TimeoutExpired("ps", 3)):
-            self.assertIsNone(sidechat.service_executables(run=self.runner("", fail=fail)))
-        self.assertIsNone(sidechat.service_executables(run=self.runner("  7 /x/cli serve --service\n", {"7": ""})))
-        self.assertIsNone(sidechat.service_executables(run=self.runner("  7 /x/cli serve --service\n", {"7": "cli"})))
+            self.assertIsNone(sidechat.service_executables(run=self.runner("", fail=fail), windows=False))
+        self.assertIsNone(sidechat.service_executables(run=self.runner("  7 /x/cli serve --service\n", {"7": ""}), windows=False))
+        self.assertIsNone(sidechat.service_executables(run=self.runner("  7 /x/cli serve --service\n", {"7": "cli"}), windows=False))
         bad = mock.Mock(return_value=subprocess.CompletedProcess(["ps"], 1, "", "boom"))
-        self.assertIsNone(sidechat.service_executables(run=bad))
+        self.assertIsNone(sidechat.service_executables(run=bad, windows=False))
 
 
 class StatusTests(Case):

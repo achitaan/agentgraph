@@ -12,7 +12,8 @@ from pathlib import Path
 from unittest import mock
 
 from agentgraph import __main__ as cli
-from agentgraph import bench, osproc, reviewcopy, sidechat, winconsole
+from agentgraph import bench, looprun, looptime, osfs, osproc, reviewcopy, sidechat, winconsole
+from tests.winskip import needs_sighup, posix_only
 
 
 class FakeRunner:
@@ -44,6 +45,10 @@ class PosixFormTests(unittest.TestCase):
         self.assertEqual(osproc.detached_kwargs(windows=False), {"start_new_session": True})
         self.assertEqual(osproc.text_kwargs(windows=False), {})
         self.assertEqual(osproc.base_env_names(windows=False), ())
+        self.assertEqual(osproc.term_signals(windows=False)[0], signal.SIGTERM)
+
+    @needs_sighup
+    def test_the_posix_stop_signals_are_term_and_hup(self):
         self.assertEqual(osproc.term_signals(windows=False), (signal.SIGTERM, signal.SIGHUP))
 
     def test_shell_command_is_sh_dash_c(self):
@@ -54,6 +59,7 @@ class PosixFormTests(unittest.TestCase):
     def test_resolve_command_is_unchanged(self):
         self.assertEqual(osproc.resolve_command("opencode", windows=False, which=lambda n: "/x/" + n), "opencode")
 
+    @posix_only
     def test_kill_group_and_stop_tree_on_a_real_child(self):
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], **osproc.group_kwargs())
         try:
@@ -68,6 +74,7 @@ class PosixFormTests(unittest.TestCase):
         with self.assertRaises(ProcessLookupError):
             osproc.kill_group(proc.pid, force=True)
 
+    @posix_only
     def test_kill_group_force_sends_sigkill(self):
         proc = subprocess.Popen([sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"],
                                 **osproc.group_kwargs())
@@ -87,6 +94,7 @@ class PosixFormTests(unittest.TestCase):
         proc.wait()
         self.assertFalse(osproc.is_alive(proc.pid))
 
+    @posix_only
     def test_list_processes_sees_this_process(self):
         table = osproc.list_processes(["-axo", "pid=,ppid=,command="], ("pid", "ppid", "command"))
         mine = [row for row in table if row.pid == os.getpid()]
@@ -94,6 +102,7 @@ class PosixFormTests(unittest.TestCase):
         self.assertEqual(mine[0].ppid, os.getppid())
         self.assertTrue(mine[0].command)
 
+    @posix_only
     def test_children_finds_a_grandchild(self):
         code = "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); time.sleep(30)"
         proc = subprocess.Popen([sys.executable, "-c", code], **osproc.group_kwargs())
@@ -124,6 +133,7 @@ class PosixFormTests(unittest.TestCase):
         self.assertEqual(sorted(osproc.descendants(1, table)), [2, 3, 4, 5])
         self.assertEqual(osproc.descendants(3, table), [5])
 
+    @posix_only
     def test_orphan_rule_on_posix(self):
         self.assertFalse(osproc.is_orphaned_leader(os.getpid(), os.getppid(), windows=False))
         self.assertFalse(osproc.is_orphaned_leader(2 ** 30, 1, windows=False))  # no such process: getpgid fails
@@ -242,6 +252,29 @@ class WindowsFormTests(unittest.TestCase):
             self.assertTrue(osproc.is_alive(1234, windows=True, runner=run))  # cannot tell: alive
         self.assertEqual(run.calls[0][0], ["tasklist", "/FI", "PID eq 1234", "/FO", "CSV", "/NH"])
 
+    def test_a_multi_line_command_is_refused_on_the_cmd_path_and_allowed_with_an_sh(self):
+        no_sh = lambda name: None  # noqa: E731
+        for command in ("echo a\necho b", "echo a\r\necho b", "echo a\r"):
+            with self.subTest(command=command):
+                with self.assertRaises(osproc.ShellRefused) as caught:
+                    osproc.shell_command(command, windows=True, which=no_sh, comspec="C:\\Windows\\cmd.exe")
+                self.assertIsInstance(caught.exception, OSError)
+                self.assertIn("first line", str(caught.exception))
+                with self.assertRaises(osproc.ShellRefused):
+                    osproc.shell_arguments(command, windows=True, which=no_sh)
+                self.assertEqual(osproc.shell_command(command, windows=True, which=lambda n: "C:\\Git\\sh.exe"), ["C:\\Git\\sh.exe", "-c", command])
+        self.assertEqual(osproc.shell_command("a\nb", windows=False), ["sh", "-c", "a\nb"])  # POSIX never refuses
+        self.assertEqual(osproc.shell_arguments("a\nb", windows=False), ("a\nb", True))
+
+    def test_a_comspec_with_a_space_is_quoted(self):
+        no_sh = lambda name: None  # noqa: E731
+        self.assertEqual(osproc.shell_command("dir", windows=True, which=no_sh, comspec="C:\\Program Files\\X\\cmd.exe"),
+                         '"C:\\Program Files\\X\\cmd.exe" /d /s /c "dir"')
+        self.assertEqual(osproc.shell_command("dir", windows=True, which=no_sh, comspec='"C:\\Program Files\\X\\cmd.exe"'),
+                         '"C:\\Program Files\\X\\cmd.exe" /d /s /c "dir"')
+        with mock.patch.dict(os.environ, {"COMSPEC": "C:\\My Windows\\cmd.exe"}):
+            self.assertTrue(osproc.shell_command("dir", windows=True, which=no_sh).startswith('"C:\\My Windows\\cmd.exe" /d /s /c'))
+
     def test_shell_choice(self):
         self.assertEqual(osproc.shell_command("echo hi", windows=True, which=lambda n: "C:\\Git\\usr\\bin\\sh.exe"),
                          ["C:\\Git\\usr\\bin\\sh.exe", "-c", "echo hi"])
@@ -297,6 +330,92 @@ class WindowsCallerTests(unittest.TestCase):
         self.assertNotIn("OTHER", env)
         posix = reviewcopy.reduced_environment("/tmp/w", {"PATH": "/x", "SYSTEMROOT": "s"}, windows=False)
         self.assertEqual(posix, {"PATH": "/x", "TMPDIR": "/tmp/w"})
+
+
+class RefusedCommandTests(unittest.TestCase):
+    """A command the shell on hand cannot run whole (cmd and a second line) is a failed command with the reason, never a pass and never run."""
+    REFUSAL = osproc.ShellRefused("a multi-line command needs a sh on PATH: Windows cmd would run only its first line")
+
+    def test_reviewcopy_run_command_records_a_command_that_was_not_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "out.txt"
+            with mock.patch.object(osproc, "shell_command", side_effect=self.REFUSAL), mock.patch.object(subprocess, "Popen") as popen:
+                result = reviewcopy.run_command("echo a\necho b", Path(tmp), {}, 5, log)
+            popen.assert_not_called()
+            self.assertIsNone(result["exit"])
+            self.assertFalse(result["timed_out"])
+            self.assertIn("first line", result["error"])
+            self.assertIn("the command was not run", log.read_text(encoding="utf-8"))
+            self.assertIn("first line", log.read_text(encoding="utf-8"))
+
+    def test_looprun_run_check_ends_as_a_check_error_and_never_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "sub" / "check.txt"
+            with mock.patch.object(osproc, "shell_command", side_effect=self.REFUSAL), mock.patch.object(subprocess, "Popen") as popen:
+                result = looprun.run_check("echo a\necho b", 5, tmp, {}, out)
+            popen.assert_not_called()
+            self.assertIsNone(result["exit"])
+            self.assertIn("first line", result["error"])
+            self.assertIn("first line", out.read_text(encoding="utf-8"))
+            self.assertEqual(looprun.check_outcome(result["exit"], result["timed_out"], ()), "check_error")
+
+    def test_bench_run_check_fails_with_the_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp) / "work"
+            work.mkdir()
+            scenario = {"dir": Path(tmp) / "scenario", "check": "echo a\necho b", "check_timeout": 5}
+            with mock.patch.object(osproc, "shell_arguments", side_effect=self.REFUSAL), mock.patch.object(subprocess, "run") as run:
+                result = bench.run_check(scenario, work, {"PATH": os.environ.get("PATH", "")})
+            run.assert_not_called()
+            self.assertIs(result["passed"], False)
+            self.assertIn("first line", result["detail"])
+            self.assertTrue(work.is_dir())
+
+
+class LockProbeTests(unittest.TestCase):
+    """looptime.lock_is_held: one more look after a short pause where shared locks collide (Windows) only."""
+
+    def probe(self, backend, answers):
+        """lock_is_held with osfs.lock answering from `answers` (an exception is raised, None is a lock taken); returns (held, lock calls, sleeps)."""
+        calls, sleeps = [], []
+
+        def lock(fd, **kwargs):
+            calls.append(kwargs)
+            answer = answers[len(calls) - 1]
+            if answer is not None:
+                raise answer
+
+        with mock.patch.object(osfs, "lock", side_effect=lock), mock.patch.object(osfs, "unlock"), \
+                mock.patch.object(looptime, "probes_collide", return_value=backend == "windows"), \
+                mock.patch.object(looptime.time, "sleep", side_effect=sleeps.append):
+            return looptime.lock_is_held(7), calls, sleeps
+
+    def test_a_free_lock_is_not_held_and_is_asked_once(self):
+        held, calls, sleeps = self.probe("windows", [None])
+        self.assertEqual((held, len(calls), sleeps), (False, 1, []))
+        self.assertEqual(calls[0], {"shared": True, "block": False})
+
+    def test_on_windows_a_held_answer_is_checked_once_more_after_a_pause(self):
+        held, calls, sleeps = self.probe("windows", [BlockingIOError(), None])
+        self.assertEqual((held, len(calls)), (False, 2))  # the first look met another probe, which has let go by now
+        self.assertEqual(len(sleeps), 1)
+        self.assertTrue(looptime.PROBE_PAUSE[0] <= sleeps[0] <= looptime.PROBE_PAUSE[1])
+
+    def test_a_lock_held_both_times_is_held(self):
+        held, calls, sleeps = self.probe("windows", [BlockingIOError(), BlockingIOError()])
+        self.assertEqual((held, len(calls), len(sleeps)), (True, 2, 1))
+
+    def test_probes_collide_only_on_the_msvcrt_backend(self):
+        with mock.patch.object(osfs, "backend_name", "portable"), mock.patch.object(osfs, "_msvcrt", object()):
+            self.assertTrue(looptime.probes_collide())
+        with mock.patch.object(osfs, "backend_name", "portable"), mock.patch.object(osfs, "_msvcrt", None):
+            self.assertFalse(looptime.probes_collide())  # a Mac against the portable backend: flock shares
+        with mock.patch.object(osfs, "backend_name", "posix"), mock.patch.object(osfs, "_msvcrt", object()):
+            self.assertFalse(looptime.probes_collide())
+
+    def test_on_the_posix_backend_there_is_no_second_look(self):
+        held, calls, sleeps = self.probe("posix", [BlockingIOError(), None])
+        self.assertEqual((held, len(calls), sleeps), (True, 1, []))
 
 
 class FakeConsole:
