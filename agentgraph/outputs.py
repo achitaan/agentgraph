@@ -1367,6 +1367,7 @@ def _read_text(source: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    osfs.utf8_stdout()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["output"]:
         argv = argv[1:]

@@ -280,6 +280,7 @@ def signal_lines(report: dict) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    osfs.utf8_stdout()
     parser = argparse.ArgumentParser(prog="agentgraph.handedits", description=__doc__.splitlines()[0])
     parser.add_argument("--home", type=Path, help="memory home holding edits.jsonl (default: $AGENTGRAPH_HOME, else "
                                                   "the active preset's memory folder)")

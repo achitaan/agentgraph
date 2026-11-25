@@ -386,6 +386,7 @@ def _read_text(source: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    osfs.utf8_stdout()
     parser = argparse.ArgumentParser(prog="agentgraph route", description=__doc__.splitlines()[0], allow_abbrev=False)
     parser.add_argument("--structure", type=Path, metavar="DIR", help="structure folder (default: the orchestration's own)")
     parser.add_argument("--map", type=Path, metavar="PATH", default=skillset.MAP,

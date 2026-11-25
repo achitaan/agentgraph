@@ -1056,6 +1056,7 @@ def _changes(values: list[str]) -> list[tuple[str, str]]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    osfs.utf8_stdout()
     args = _parser().parse_args(argv)
     line = getattr(args, "line", False)
     try:

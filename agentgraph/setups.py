@@ -1086,6 +1086,7 @@ def _print(args, result) -> None:
 
 
 def main(argv=None) -> int:
+    osfs.utf8_stdout()
     args = _parser().parse_args(argv)
     try:
         paths = _paths(args)

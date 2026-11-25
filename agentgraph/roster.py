@@ -2383,13 +2383,16 @@ def _read_prompt(source):
     return text.rstrip("\n")
 
 
+_VARIANT_MARK = "#"  # kept out of the f-string: Python before 3.12 refuses a `#` inside one
+
+
 def _lines(result):
     if "active_preset" in result:
         out = [f"active preset: {result['active_preset']}"]
         for preset, rows in result["presets"].items():
             out.append(f"{preset}:")
             out += [f"  {r['name']}  {r['kind']}{', off' if r['off'] else ''}  {r['model']}"
-                    f"{('#' + r['variant']) if r['variant'] else ''}  (remove: {r['remove'] or 'not allowed'})"
+                    f"{(_VARIANT_MARK + r['variant']) if r['variant'] else ''}  (remove: {r['remove'] or 'not allowed'})"
                     for r in rows]
         out.append("built-in: " + ", ".join(f"{b['name']}{' (off)' if b['off'] else ''}" for b in result["built_in"]))
         if "agent_files" in result:

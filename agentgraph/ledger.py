@@ -1053,7 +1053,8 @@ def _feedback_text(args: argparse.Namespace) -> str:
     if args.text is not None:
         return args.text
     if args.text_file is not None:
-        text = args.text_file.read_text(encoding="utf-8", newline="")
+        with args.text_file.open(encoding="utf-8", newline="") as stream:  # Path.read_text(newline=) needs Python 3.13
+            text = stream.read()
     elif hasattr(sys.stdin, "buffer"):
         text = sys.stdin.buffer.read().decode(sys.stdin.encoding or "utf-8")
     else:
@@ -1099,6 +1100,7 @@ def _hand_options(args: argparse.Namespace) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    osfs.utf8_stdout()
     parser = argparse.ArgumentParser(prog="agentgraph ledger", description=__doc__)
     parser.add_argument("--home", type=Path, help="ledger directory (default: the one `agentgraph check` and the views use: "
                         "$AGENTGRAPH_HOME, else the active preset's memory folder (memory-<preset>), else the "

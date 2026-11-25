@@ -792,6 +792,7 @@ def file_problems(path: Path) -> list[str] | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    osfs.utf8_stdout()
     parser = argparse.ArgumentParser(prog="agentgraph check", description=__doc__.splitlines()[0])
     parser.add_argument("--dir", type=Path, help="directory of graph JSON files (default: nearest .opencode/graph)")
     parser.add_argument("--task", metavar="NAME", help="check only the graph with this declared task name")

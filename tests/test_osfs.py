@@ -634,5 +634,57 @@ class SelectionTests(unittest.TestCase):
             self.assertEqual(getattr(osfs, name), getattr(osfs.BACKEND, name))
 
 
+class Utf8StdoutTests(unittest.TestCase):
+    """Text a command prints is the same bytes everywhere: UTF-8, "\\n" kept, on the portable backend; POSIX untouched."""
+
+    TEXT = "caf\u00e9 \u2713 line\nsecond\n"
+
+    def run_child(self, backend, encoding, code):
+        env = {**os.environ, "PYTHONPATH": str(ROOT), "PYTHONIOENCODING": encoding, "PYTHONUTF8": "0"}
+        env.pop("AGENTGRAPH_OSFS", None)
+        if backend:
+            env["AGENTGRAPH_OSFS"] = backend
+        done = subprocess.run([sys.executable, "-P", "-c", code], capture_output=True, env=env, cwd=ROOT)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout
+
+    def test_portable_writes_utf8_and_a_plain_newline_whatever_the_code_page(self):
+        code = ("import sys; from agentgraph import osfs; osfs.utf8_stdout(); "
+                "sys.stdout.write('caf\\u00e9 \\u2713 line\\nsecond\\n'); sys.stderr.write('\\u2713')")
+        out = self.run_child("portable", "cp1252", code)
+        self.assertEqual(out, self.TEXT.encode("utf-8"))
+
+    def test_posix_output_is_left_exactly_as_the_locale_makes_it(self):
+        if osfs.POSIX is None:
+            self.skipTest("no POSIX backend here")
+        code = "import sys; from agentgraph import osfs; osfs.utf8_stdout(); sys.stdout.write('caf\\u00e9\\n')"
+        self.assertEqual(self.run_child(None, "latin-1", code), "caf\u00e9\n".encode("latin-1"))
+
+    def test_the_streams_are_reconfigured_only_on_the_portable_backend(self):
+        stream = mock.Mock()
+        with mock.patch.object(osfs, "BACKEND", osfs.PORTABLE):
+            self.assertTrue(osfs.utf8_stdout([(stream, "strict")]))
+        stream.reconfigure.assert_called_once_with(encoding="utf-8", errors="strict", newline="\n")
+        other = mock.Mock()
+        with mock.patch.object(osfs, "BACKEND", SimpleNamespace(name="posix")):
+            self.assertFalse(osfs.utf8_stdout([(other, "strict")]))
+        other.reconfigure.assert_not_called()
+
+    def test_a_stream_that_cannot_be_reconfigured_is_left_alone(self):
+        with mock.patch.object(osfs, "BACKEND", osfs.PORTABLE):
+            self.assertTrue(osfs.utf8_stdout([(object(), "strict"), (mock.Mock(**{"reconfigure.side_effect": ValueError}), "strict")]))
+
+    def test_every_command_that_prints_stored_text_asks_for_it(self):
+        import contextlib
+        import io
+        from agentgraph import check, handedits, improve, ledger, outputs, routing, setups, spend
+        for module in (outputs, routing, improve, check, ledger, handedits, setups, spend):
+            with self.subTest(module=module.__name__), mock.patch.object(osfs, "utf8_stdout") as asked, \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    module.main(["--help"])
+            asked.assert_called_once_with()
+
+
 if __name__ == "__main__":
     unittest.main()

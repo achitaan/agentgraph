@@ -287,6 +287,7 @@ def _live(args) -> dict:
 
 
 def main(argv=None) -> int:
+    osfs.utf8_stdout()
     args = _parser().parse_args(argv)
     try:
         if args.op == "limit":

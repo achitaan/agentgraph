@@ -586,6 +586,23 @@ def _choose():
 BACKEND = _choose()
 backend_name = BACKEND.name
 
+
+def utf8_stdout(streams=None) -> bool:
+    """Portable backend only (Windows): make stdout and stderr write UTF-8 and leave "\\n" alone, so text a command prints
+    (a stored output, a graph's words, JSON with ensure_ascii=False) is the same bytes as on POSIX: no "\\r\\n" on a
+    pipe or file, and no failure on a character the console or locale code page (cp1252) lacks. stderr keeps going
+    on a character it cannot show (a backslash escape). The POSIX backend is left exactly as it is (returns False).
+    A stream that cannot be reconfigured (replaced by a test, closed) is left alone."""
+    if BACKEND.name != "portable":
+        return False
+    import sys
+    for stream, errors in (streams if streams is not None else ((sys.stdout, "strict"), (sys.stderr, "backslashreplace"))):
+        try:
+            stream.reconfigure(encoding="utf-8", errors=errors, newline="\n")
+        except (AttributeError, ValueError, OSError):
+            pass
+    return True
+
 open = BACKEND.open  # (path, flags, mode=0o777, *, dir_fd=None) -> fd; a folder (O_DIRECTORY) gives a handle
 dup = BACKEND.dup  # another descriptor or folder handle for the same thing
 close = BACKEND.close  # a descriptor or a folder handle; releases a lock held through it
