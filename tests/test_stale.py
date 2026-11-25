@@ -17,6 +17,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.launch import home_env
 from agentgraph import agentfiles, roster, server, skillfiles, skillset, structure, teams
 from agentgraph.demo import demo_snapshot
 import tests.test_agentfiles as agentfile_tests
@@ -295,7 +296,7 @@ class CommandLines(agentfile_tests.Base):
 
     def run_all(self, jobs):
         """Each (module, argv, stdin) as `agentgraph` runs it, in parallel: [(code, stdout, stderr)]."""
-        environment = {**os.environ, "PYTHONPATH": str(ROOT), "HOME": str(self.home), "PYTHONIOENCODING": "utf-8"}
+        environment = {**os.environ, "PYTHONPATH": str(ROOT), **home_env(self.home), "PYTHONIOENCODING": "utf-8"}
 
         def one(job):
             module, argv, stdin = job

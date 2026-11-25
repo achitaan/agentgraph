@@ -6,28 +6,36 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
+from tests.launch import home_env
+from tests.winskip import needs_symlinks, posix_only
 from agentgraph import installer, portable
 
 ROOT = Path(__file__).resolve().parent.parent
+# Where there is no `sh` (native Windows), the installer runs through install.cmd's own Python entry, installcli.
+# AGENTGRAPH_TEST_NO_SH=1 does the same anywhere, so the Mac can run that path too.
+HAVE_SH = bool(shutil.which("sh")) and not os.environ.get("AGENTGRAPH_TEST_NO_SH")
+CLI = ("import sys; from pathlib import Path; from agentgraph import installcli; "
+       "sys.exit(installcli.main(sys.argv[2:], source=Path(sys.argv[1])))")
 SKILLS = ("code-assurance", "engineering-delivery", "grilling")
 PRESET = "oh-my-opencode-slim.json"
 SLIM = "oh-my-opencode-slim"
 
 
 def read_json(path):
-    return json.loads(Path(path).read_text())
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 def write_json(path, data):
-    Path(path).write_text(json.dumps(data, indent=2) + "\n")
+    Path(path).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def append(path, text):
-    with open(path, "a") as handle:
+    with open(path, "a", encoding="utf-8") as handle:
         handle.write(text)
 
 
@@ -50,9 +58,23 @@ class InstallCase(unittest.TestCase):
             shutil.copytree(ROOT / "skills" / name, self.kit / "skills" / name)
         self.home.mkdir()
 
+    def env(self):
+        return {**os.environ, **home_env(self.home), "OPENCODE_CONFIG_DIR": str(self.t)}
+
+    def cli(self, *args, check=True):
+        """What install.cmd runs (agentgraph.installcli), against the scratch kit."""
+        env = {**self.env(), "PYTHONPATH": str(ROOT)}
+        proc = subprocess.run([sys.executable, "-P", "-c", CLI, str(self.kit), *args], env=env,
+                              capture_output=True, text=True, encoding="utf-8")
+        if check and proc.returncode:
+            self.fail(f"install.cmd {args} failed: {proc.stdout}{proc.stderr}")
+        return proc
+
     def sh(self, *args, check=True):
-        env = {**os.environ, "HOME": str(self.home), "OPENCODE_CONFIG_DIR": str(self.t)}
-        proc = subprocess.run(["sh", str(self.kit / "install.sh"), *args], env=env, capture_output=True, text=True)
+        if not HAVE_SH:
+            return self.cli(*args, check=check)
+        proc = subprocess.run(["sh", str(self.kit / "install.sh"), *args], env=self.env(), capture_output=True,
+                              text=True)
         if check and proc.returncode:
             self.fail(f"install.sh {args} failed: {proc.stdout}{proc.stderr}")
         return proc
@@ -72,15 +94,15 @@ class InstallCase(unittest.TestCase):
         data["presets"]["fast"]["my-agent"] = {"model": "x/y"}
         data["presets"]["normal"]["explorer"]["model"] = "user/chosen-model"
         write_json(self.t / PRESET, data)
-        (self.t / SLIM / "mine_append.md").write_text("my own prompt\n")
-        (self.t / SLIM / "fast" / "mine_append.md").write_text("my own fast prompt\n")
+        (self.t / SLIM / "mine_append.md").write_text("my own prompt\n", encoding="utf-8")
+        (self.t / SLIM / "fast" / "mine_append.md").write_text("my own fast prompt\n", encoding="utf-8")
         append(self.t / "skills" / "code-assurance" / "SKILL.md", "\nmy tweak\n")
-        (self.t / "skills" / "code-assurance" / "my-notes.md").write_text("mine\n")
+        (self.t / "skills" / "code-assurance" / "my-notes.md").write_text("mine\n", encoding="utf-8")
         append(self.t / SLIM / "oracle_append.md", "\nmy oracle rule\n")
         (self.t / "skills" / "my-own-skill").mkdir()
-        (self.t / "skills" / "my-own-skill" / "SKILL.md").write_text("# mine\n")
+        (self.t / "skills" / "my-own-skill" / "SKILL.md").write_text("# mine\n", encoding="utf-8")
         (self.t / "agents").mkdir()
-        (self.t / "agents" / "mine.md").write_text("# my agent\n")
+        (self.t / "agents" / "mine.md").write_text("# my agent\n", encoding="utf-8")
 
     def toolkit_update(self):
         self.edit_kit("commands/flow.md", "\nnew flow text\n")
@@ -89,7 +111,7 @@ class InstallCase(unittest.TestCase):
         self.edit_kit(f"config/{SLIM}/oracle_append.md", "\nnew toolkit oracle rule\n")
         self.edit_kit(f"config/{SLIM}/verifier_append.md", "\nnew verifier rule\n")
         (self.kit / "skills" / "brand-new").mkdir()
-        (self.kit / "skills" / "brand-new" / "SKILL.md").write_text("# new skill\n")
+        (self.kit / "skills" / "brand-new" / "SKILL.md").write_text("# new skill\n", encoding="utf-8")
 
         def change(data):
             data["presets"]["fast"]["new-agent"] = {"model": "toolkit/new"}
@@ -127,9 +149,9 @@ class FirstInstall(InstallCase):
 
     def test_existing_agents_file_is_kept_and_toolkit_copy_is_beside(self):
         self.t.mkdir(parents=True)
-        (self.t / "AGENTS.md").write_text("# mine\n")
+        (self.t / "AGENTS.md").write_text("# mine\n", encoding="utf-8")
         out = self.sh().stdout
-        self.assertEqual((self.t / "AGENTS.md").read_text(), "# mine\n")
+        self.assertEqual((self.t / "AGENTS.md").read_text(encoding="utf-8"), "# mine\n")
         self.assertTrue((self.t / "AGENTS.md.toolkit-new").is_file())
         self.assertIn("AGENTS.md.toolkit-new", out)
 
@@ -163,18 +185,18 @@ class Update(InstallCase):
 
     def test_edited_files_keep_the_users_text_with_toolkit_copy_beside(self):
         skill = self.t / "skills" / "code-assurance" / "SKILL.md"
-        self.assertIn("my tweak", skill.read_text())
-        self.assertNotIn("new toolkit text", skill.read_text())
-        self.assertIn("new toolkit text", Path(str(skill) + ".toolkit-new").read_text())
+        self.assertIn("my tweak", skill.read_text(encoding="utf-8"))
+        self.assertNotIn("new toolkit text", skill.read_text(encoding="utf-8"))
+        self.assertIn("new toolkit text", Path(str(skill) + ".toolkit-new").read_text(encoding="utf-8"))
         oracle = self.t / SLIM / "oracle_append.md"
-        self.assertIn("my oracle rule", oracle.read_text())
-        self.assertIn("new toolkit oracle rule", Path(str(oracle) + ".toolkit-new").read_text())
+        self.assertIn("my oracle rule", oracle.read_text(encoding="utf-8"))
+        self.assertIn("new toolkit oracle rule", Path(str(oracle) + ".toolkit-new").read_text(encoding="utf-8"))
         self.assertIn("oracle_append.md.toolkit-new", self.out)
 
     def test_untouched_files_get_the_update_and_new_files_arrive(self):
-        self.assertIn("new flow text", (self.t / "commands" / "flow.md").read_text())
-        self.assertIn("new grilling text", (self.t / "skills" / "grilling" / "SKILL.md").read_text())
-        self.assertIn("new verifier rule", (self.t / SLIM / "verifier_append.md").read_text())
+        self.assertIn("new flow text", (self.t / "commands" / "flow.md").read_text(encoding="utf-8"))
+        self.assertIn("new grilling text", (self.t / "skills" / "grilling" / "SKILL.md").read_text(encoding="utf-8"))
+        self.assertIn("new verifier rule", (self.t / SLIM / "verifier_append.md").read_text(encoding="utf-8"))
         self.assertTrue((self.t / "skills" / "brand-new" / "SKILL.md").is_file())
         self.assertFalse((self.t / "commands" / "flow.md.toolkit-new").exists())
 
@@ -186,9 +208,9 @@ class Update(InstallCase):
         self.assertIn("commands/flow.md", {p.relative_to(backup).as_posix() for p in backup.rglob("*") if p.is_file()})
         preview = self.sh("--restore", name, "--dry-run").stdout
         self.assertIn("would be restored", preview)
-        self.assertIn("new flow text", (self.t / "commands" / "flow.md").read_text())
+        self.assertIn("new flow text", (self.t / "commands" / "flow.md").read_text(encoding="utf-8"))
         self.sh("--restore", name)
-        self.assertNotIn("new flow text", (self.t / "commands" / "flow.md").read_text())
+        self.assertNotIn("new flow text", (self.t / "commands" / "flow.md").read_text(encoding="utf-8"))
         self.assertEqual(read_json(self.t / PRESET)["preset"], "fast")  # the backup holds the file as it was
         self.assertTrue(any("pre-restore" in p.name for p in (self.t / "backups").iterdir()))
 
@@ -219,44 +241,47 @@ class Edges(InstallCase):
         self.sh()
         (self.t / installer.MANIFEST).unlink()
         append(self.t / "commands" / "flow.md", "mine\n")
-        before = (self.t / "commands" / "spend.md").read_text()
+        before = (self.t / "commands" / "spend.md").read_text(encoding="utf-8")
         self.edit_kit("commands/spend.md", "\nnew\n")
         self.sh()
-        self.assertIn("mine", (self.t / "commands" / "flow.md").read_text())
-        self.assertEqual((self.t / "commands" / "spend.md").read_text(), before)
+        self.assertIn("mine", (self.t / "commands" / "flow.md").read_text(encoding="utf-8"))
+        self.assertEqual((self.t / "commands" / "spend.md").read_text(encoding="utf-8"), before)
         self.assertTrue((self.t / "commands" / "spend.md.toolkit-new").is_file())
 
     def test_invalid_preset_file_is_left_alone(self):
         self.sh()
-        (self.t / PRESET).write_text("{ not json")
+        (self.t / PRESET).write_text("{ not json", encoding="utf-8")
         self.kit_json(lambda d: d.update(new_key=2))
         proc = self.sh()
-        self.assertEqual((self.t / PRESET).read_text(), "{ not json")
+        self.assertEqual((self.t / PRESET).read_text(encoding="utf-8"), "{ not json")
         self.assertTrue((self.t / (PRESET + ".toolkit-new")).is_file())
         self.assertIn("left alone", proc.stdout)
 
+    @needs_symlinks
     def test_target_folder_that_is_a_link_is_installed_into(self):
         real = self.base / "real"
         real.mkdir()
         (self.home / ".config").mkdir()
-        os.symlink(real, self.t)
+        os.symlink(real, self.t, target_is_directory=True)
         self.sh()
         self.assertTrue((real / "commands" / "flow.md").is_file())
         self.assertTrue((real / installer.MANIFEST).is_file())
         self.assertIn("Nothing to change.", self.sh().stdout)
 
+    @needs_symlinks
     def test_a_linked_parent_of_the_target_is_installed_through(self):
         real = self.base / "dotfiles"
         real.mkdir()
-        os.symlink(real, self.home / ".config")
+        os.symlink(real, self.home / ".config", target_is_directory=True)
         self.sh()
         self.assertTrue((real / "opencode" / "commands" / "flow.md").is_file())
 
+    @needs_symlinks
     def test_links_below_the_target_are_still_refused(self):
         outside = self.base / "outside"
         outside.mkdir()
         self.t.mkdir(parents=True)
-        os.symlink(outside, self.t / "skills")
+        os.symlink(outside, self.t / "skills", target_is_directory=True)
         self.assertNotEqual(self.sh(check=False).returncode, 0)
         self.assertEqual(list(outside.iterdir()), [])
 
@@ -320,6 +345,7 @@ class Safety(InstallCase):
             self.run_installer()
         self.assertEqual(preset.read_bytes(), before)
 
+    @posix_only
     def test_a_merge_keeps_the_file_mode(self):
         self.kit_json(lambda d: d.update(new_key=1))
         os.chmod(self.t / PRESET, 0o600)
@@ -344,11 +370,11 @@ class Safety(InstallCase):
         append(beside, "my merge in progress\n")
         self.edit_kit("commands/flow.md", "\nthird version\n")
         out = self.sh().stdout
-        self.assertIn("third version", beside.read_text())
-        self.assertNotIn("my merge in progress", beside.read_text())
+        self.assertIn("third version", beside.read_text(encoding="utf-8"))
+        self.assertNotIn("my merge in progress", beside.read_text(encoding="utf-8"))
         kept = [p for p in (self.t / "backups").rglob("flow.md.toolkit-new")]
         self.assertEqual(len(kept), 1)
-        self.assertIn("my merge in progress", kept[0].read_text())
+        self.assertIn("my merge in progress", kept[0].read_text(encoding="utf-8"))
         self.assertIn("backups", out)
         self.assertIn("flow.md.toolkit-new", out)
 
@@ -356,29 +382,60 @@ class Safety(InstallCase):
         self.sh()  # flow.md is now the toolkit's new version; the old one is in a backup
         flow = self.t / "commands" / "flow.md"
         name = self.sh("--list-backups").stdout.split()[0]
-        old_text = (self.t / "backups" / name / "commands" / "flow.md").read_text()
+        old_text = (self.t / "backups" / name / "commands" / "flow.md").read_text(encoding="utf-8")
         out = self.sh("--restore", name).stdout
-        self.assertEqual(flow.read_text(), old_text)
+        self.assertEqual(flow.read_text(encoding="utf-8"), old_text)
         self.assertIn("differ from the toolkit", out)
         self.assertIn(".toolkit-new", out)
         out = self.sh().stdout
-        self.assertEqual(flow.read_text(), old_text)
+        self.assertEqual(flow.read_text(encoding="utf-8"), old_text)
         self.assertEqual((self.t / "commands" / "flow.md.toolkit-new").read_bytes(),
                          (self.kit / "commands" / "flow.md").read_bytes())
         self.assertIn("flow.md.toolkit-new", out)
 
+    @needs_symlinks
     def test_restore_refuses_a_backups_folder_that_is_a_link(self):
         self.sh()
         name = self.sh("--list-backups").stdout.split()[0]
         moved = self.base / "elsewhere"
         shutil.move(str(self.t / "backups"), str(moved))
-        os.symlink(moved, self.t / "backups")
+        os.symlink(moved, self.t / "backups", target_is_directory=True)
         proc = self.sh("--restore", name, check=False)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("symlink", proc.stderr)
 
 
-@unittest.skipUnless(shutil.which("rsync"), "sync.sh needs rsync")
+class InstallCmdPath(InstallCase):
+    """The same work through install.cmd's Python entry (agentgraph.installcli): it runs on every system."""
+
+    def test_first_install_is_complete_and_the_second_run_changes_nothing(self):
+        self.cli()
+        self.assertTrue((self.t / "commands" / "flow.md").is_file())
+        self.assertTrue((self.t / installer.MANIFEST).is_file())
+        self.assertIn("Nothing to change.", self.cli().stdout)
+
+    def test_dry_run_writes_nothing(self):
+        proc = self.cli("--dry-run")
+        self.assertIn("Nothing was written", proc.stdout)
+        self.assertFalse(self.t.exists())
+
+    def test_a_replaced_file_is_backed_up_and_can_be_restored(self):
+        self.cli()
+        self.edit_kit("commands/flow.md", "\nnew toolkit line\n")
+        self.cli()
+        name = self.cli("--list-backups").stdout.split()[0]
+        self.assertIn("-pre-toolkit.", name)
+        self.cli("--restore", name)
+        self.assertNotIn("new toolkit line", (self.t / "commands" / "flow.md").read_text(encoding="utf-8"))
+
+    def test_a_bad_option_and_a_path_as_a_backup_name_are_refused(self):
+        self.assertEqual(self.cli("--bogus", check=False).returncode, 2)
+        self.cli()
+        self.assertNotEqual(self.cli("--restore", "..\\..\\..\\etc", check=False).returncode, 0)
+        self.assertNotEqual(self.cli("--restore", "../../../etc", check=False).returncode, 0)
+
+
+@unittest.skipUnless(shutil.which("rsync") and shutil.which("sh"), "sync.sh needs rsync and sh (it is a Unix-only, optional tool)")
 class Sync(InstallCase):
     """sync.sh takes the author's heading and skill exclusions from sync.conf, not from its own source."""
 
@@ -391,12 +448,11 @@ class Sync(InstallCase):
         shutil.copytree(ROOT / "config" / "policy", self.kit / "config" / "policy", dirs_exist_ok=True)
         self.sh()
         (self.t / "skills" / "private-one").mkdir()
-        (self.t / "skills" / "private-one" / "SKILL.md").write_text("private\n")
-        (self.t / "AGENTS.md").write_text("# Rules\nshared rule\n# My notes\nsecret note\n")
+        (self.t / "skills" / "private-one" / "SKILL.md").write_text("private\n", encoding="utf-8")
+        (self.t / "AGENTS.md").write_text("# Rules\nshared rule\n# My notes\nsecret note\n", encoding="utf-8")
 
     def sync(self):
-        env = {**os.environ, "HOME": str(self.home), "OPENCODE_CONFIG_DIR": str(self.t)}
-        proc = subprocess.run(["sh", str(self.kit / "sync.sh")], env=env, capture_output=True, text=True)
+        proc = subprocess.run(["sh", str(self.kit / "sync.sh")], env=self.env(), capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         return proc.stdout
 
@@ -407,16 +463,16 @@ class Sync(InstallCase):
         self.assertTrue((self.kit / "skills" / "private-one").is_dir())
 
     def test_sync_conf_sets_the_heading_and_the_exclusions(self):
-        (self.kit / "sync.conf").write_text('SEPARATE_SKILLS="private-one"\nAGENTS_CUT_MARKER="# My notes"\n')
+        (self.kit / "sync.conf").write_text('SEPARATE_SKILLS="private-one"\nAGENTS_CUT_MARKER="# My notes"\n', encoding="utf-8")
         self.sync()
-        self.assertEqual((self.kit / "config" / "AGENTS.md").read_text(), "# Rules\nshared rule\n")
+        self.assertEqual((self.kit / "config" / "AGENTS.md").read_text(encoding="utf-8"), "# Rules\nshared rule\n")
         self.assertFalse((self.kit / "skills" / "private-one").exists())
 
     def test_the_authors_conf_keeps_todays_values(self):
-        text = (ROOT / "sync.conf.example").read_text()
+        text = (ROOT / "sync.conf.example").read_text(encoding="utf-8")
         self.assertIn("SEPARATE_SKILLS=", text)
         self.assertIn("AGENTS_CUT_MARKER=", text)
-        self.assertIn("sync.conf", (ROOT / ".gitignore").read_text().split())
+        self.assertIn("sync.conf", (ROOT / ".gitignore").read_text(encoding="utf-8").split())
 
 
 class MergeRules(unittest.TestCase):

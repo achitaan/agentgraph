@@ -14,6 +14,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from tests.launch import LAUNCHER
 from agentgraph import agentfiles, roster, server, skillfiles, skillset, sources
 
 SCRATCH = Path("/private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode/editor-endpoints")
@@ -80,7 +81,7 @@ class Scratch(unittest.TestCase):
         self.skills = self.root / "skills"
         for name in ("code-assurance", "engineering-delivery", "shopify-ruby"):
             (self.skills / name).mkdir(parents=True)
-            (self.skills / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {name} skill\n---\nBody\n")
+            (self.skills / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {name} skill\n---\nBody\n", encoding="utf-8")
         self.structure = self.root / "structure"
         shutil.copytree(ROOT / "structure", self.structure)
         for source, target in ((skillset.CONFIG, self.config), (skillset.MAP, self.map),
@@ -227,7 +228,7 @@ class RosterEndpoint(Served):
         first = self.ok_get()
         self.assertNotIn("checker", [agent["name"] for agent in first["agents"]])
         self.ok("/api/roster", {"op": "add", "name": "checker", "template": "verifier"})
-        (self.agents / "mine.md").write_text("---\ndescription: mine\nmodel: a/b\n---\nBody\n")
+        (self.agents / "mine.md").write_text("---\ndescription: mine\nmodel: a/b\n---\nBody\n", encoding="utf-8")
         rows = {agent["name"]: agent for agent in self.ok_get()["agents"]}
         self.assertTrue(rows["checker"]["added"])
         self.assertTrue(rows["checker"]["removable"])
@@ -248,7 +249,7 @@ class RosterEndpoint(Served):
         return body
 
     def test_refusals_are_clear_and_change_nothing(self):
-        (self.agents / "mine.md").write_text("---\ndescription: mine\nmodel: a/b\n---\nBody\n")
+        (self.agents / "mine.md").write_text("---\ndescription: mine\nmodel: a/b\n---\nBody\n", encoding="utf-8")
         for body, message in (({"op": "add", "name": "Bad", "template": "verifier"}, "invalid agent name"),
                               ({"op": "add", "name": "-x", "template": "verifier"}, "invalid agent name"),
                               ({"op": "add", "name": "impl-claude", "template": "verifier"}, "already exists"),
@@ -318,11 +319,11 @@ class ReadPaths(Scratch):
         # A preset that differs from the real one: an agent only it has, with its own model.
         data = json.loads(self.config.read_bytes())
         data["presets"][data["preset"]]["scratch-only"] = {"model": "example/scratch-model", "description": "Only here."}
-        self.config.write_text(json.dumps(data, indent=2))
+        self.config.write_text(json.dumps(data, indent=2), encoding="utf-8")
         agentfiles.create("file-agent", description="From the scratch agents folder.", model="example/file-model",
                           permissions=agentfiles.WRITER, text="Work.", agents_dir=self.agents)
         # Its own opencode.json (the root session's wear) and ledger (memory-<preset>), never the real ones.
-        (self.root / "opencode.json").write_text("{}")
+        (self.root / "opencode.json").write_text("{}", encoding="utf-8")
         (self.root / "memory").mkdir()
         httpd = Served.serve(self, opencode_dir=self.root, ledger_root=self.root)
         read_json, ledgers = [], []
@@ -372,7 +373,7 @@ class ReadPaths(Scratch):
 
 class Commands(Scratch):
     def run_cli(self, *args, stdin=""):
-        return subprocess.run([str(ROOT / "bin/agentgraph"), *args], cwd=self.root, input=stdin, capture_output=True,
+        return subprocess.run([*LAUNCHER, *args], cwd=self.root, input=stdin, capture_output=True,
                               text=True, timeout=60, env={**os.environ})
 
     def options(self):

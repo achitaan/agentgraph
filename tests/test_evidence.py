@@ -37,17 +37,17 @@ class Scratch(unittest.TestCase):
         self.home = self.tmp / "scratch-home"
 
     def write_graph(self, task, nodes, **overrides):
-        (self.graphs / f"{task}.json").write_text(json.dumps(graph(task, nodes, **overrides)))
+        (self.graphs / f"{task}.json").write_text(json.dumps(graph(task, nodes, **overrides)), encoding="utf-8")
 
     def write_bench(self, label, rows):
-        (self.results / f"{label}.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+        (self.results / f"{label}.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
     def write_feedback(self, name, texts, agent="orchestrator"):
         folder = self.tmp / name
         folder.mkdir(exist_ok=True)
         path = folder / "feedback.jsonl"
         path.write_text("".join(json.dumps({"time": 1000.0 + n, "text": text, "agent": agent, "task": "t"}) + "\n"
-                                for n, text in enumerate(texts)))
+                                for n, text in enumerate(texts)), encoding="utf-8")
         return path
 
     def database(self, sessions):
@@ -231,7 +231,7 @@ class ToCasesTests(Scratch):
         return self.main("--to-cases", "--feedback", str(feedback), "--db", str(db), "--home", str(home or self.home), *extra)
 
     def stored(self):
-        return [json.loads(line) for line in (self.home / "cases.jsonl").read_text().splitlines()]
+        return [json.loads(line) for line in (self.home / "cases.jsonl").read_text(encoding="utf-8").splitlines()]
 
     def test_the_top_items_become_non_replayable_cases_agentgraph_cases_can_list(self):
         code, out, err = self.run_cases()

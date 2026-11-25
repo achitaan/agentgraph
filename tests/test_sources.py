@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agentgraph import sources
+from tests.winskip import needs_fifo, needs_symlinks, needs_uid
 from agentgraph.sources import (
     build_snapshot,
     find_graph_dir,
@@ -63,9 +64,10 @@ def write_config(d: Path):
             "presets": {"c": {"alpha": {"model": "google/gemini-4-carbon", "variant": "high"}}},
         },
     }
-    (d / "oh-my-opencode-slim.json").write_text(json.dumps(cfg))
+    (d / "oh-my-opencode-slim.json").write_text(json.dumps(cfg), encoding="utf-8")
     (d / "agents" / "reviewer.md").write_text(
-        "---\ndescription: x\nmodel: openai/gpt-6.2-astra-ultrafast\nvariant: high\n---\nbody\n"
+        "---\ndescription: x\nmodel: openai/gpt-6.2-astra-ultrafast\nvariant: high\n---\nbody\n",
+        encoding="utf-8",
     )
 
 
@@ -74,8 +76,8 @@ class Roster(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             directory = Path(t)
             write_config(directory)
-            (directory / "agents/native.md").write_text("---\nmodel: a/b#high\n---\nNative agent")
-            (directory / "agents/explicit.md").write_text("---\nmodel: a/c\nvariant: low\n---\n")
+            (directory / "agents/native.md").write_text("---\nmodel: a/b#high\n---\nNative agent", encoding="utf-8")
+            (directory / "agents/explicit.md").write_text("---\nmodel: a/c\nvariant: low\n---\n", encoding="utf-8")
             agents, warnings = load_roster(directory)
         self.assertEqual(warnings, [])
         by_name = {agent.name: agent for agent in agents}
@@ -86,9 +88,9 @@ class Roster(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             directory = Path(t)
             write_config(directory)
-            (directory / "agents/no-model.md").write_text("---\ndescription: No model\n---\nmodel: a/body")
-            (directory / "agents/impl-openai.md").write_text("---\nmodel: a/replacement#high\n---\n")
-            (directory / "agents/disabled.md.disabled").write_text("---\nmodel: a/disabled#high\n---\n")
+            (directory / "agents/no-model.md").write_text("---\ndescription: No model\n---\nmodel: a/body", encoding="utf-8")
+            (directory / "agents/impl-openai.md").write_text("---\nmodel: a/replacement#high\n---\n", encoding="utf-8")
+            (directory / "agents/disabled.md.disabled").write_text("---\nmodel: a/disabled#high\n---\n", encoding="utf-8")
             agents, warnings = load_roster(directory)
         self.assertEqual(warnings, [])
         self.assertEqual([agent.name for agent in agents],
@@ -126,9 +128,9 @@ class Roster(unittest.TestCase):
             self.assertNotIn("reviewer", [a.name for a in agents])
 
             write_config(directory)  # restores agents/reviewer.md
-            cfg = json.loads((directory / "oh-my-opencode-slim.json").read_text())
+            cfg = json.loads((directory / "oh-my-opencode-slim.json").read_text(encoding="utf-8"))
             cfg["presets"]["p"]["reviewer"] = {"model": "anthropic/claude-opus-5-5", "variant": "xhigh"}
-            (directory / "oh-my-opencode-slim.json").write_text(json.dumps(cfg))
+            (directory / "oh-my-opencode-slim.json").write_text(json.dumps(cfg), encoding="utf-8")
             agents, warnings = load_roster(directory)
         self.assertEqual(warnings, [])
         reviewers = [a for a in agents if a.name == "reviewer"]
@@ -138,11 +140,11 @@ class Roster(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             directory = Path(t)
             write_config(directory)
-            cfg = json.loads((directory / "oh-my-opencode-slim.json").read_text())
+            cfg = json.loads((directory / "oh-my-opencode-slim.json").read_text(encoding="utf-8"))
             cfg["presets"]["p"]["fixer"] = {"model": "openai/gpt-6.1-sol-ultrafast"}
             cfg["disabled_agents"] = ["fixer", "observer", "native", "councillor-alpha", 7]
-            (directory / "oh-my-opencode-slim.json").write_text(json.dumps(cfg))
-            (directory / "agents/native.md").write_text("---\nmodel: a/b#high\n---\n")
+            (directory / "oh-my-opencode-slim.json").write_text(json.dumps(cfg), encoding="utf-8")
+            (directory / "agents/native.md").write_text("---\nmodel: a/b#high\n---\n", encoding="utf-8")
             agents, warnings = load_roster(directory)
             self.assertEqual(warnings, [])
             self.assertEqual([a.name for a in agents], ["orchestrator", "impl-openai", "oracle", "reviewer"])
@@ -151,7 +153,7 @@ class Roster(unittest.TestCase):
             snap = build_snapshot(directory, gd, directory / "no.db", now=1.0)
             self.assertEqual(snap.disabled_agents, ["fixer", "observer", "native", "councillor-alpha"])
             cfg["disabled_agents"] = "fixer"
-            (directory / "oh-my-opencode-slim.json").write_text(json.dumps(cfg))
+            (directory / "oh-my-opencode-slim.json").write_text(json.dumps(cfg), encoding="utf-8")
             agents, warnings = load_roster(directory)
             self.assertIn("fixer", [a.name for a in agents])
             self.assertEqual(warnings, ["roster: disabled_agents is not a list"])
@@ -164,7 +166,7 @@ class Roster(unittest.TestCase):
 
     def test_malformed(self):
         with tempfile.TemporaryDirectory() as t:
-            (Path(t) / "oh-my-opencode-slim.json").write_text("{nope")
+            (Path(t) / "oh-my-opencode-slim.json").write_text("{nope", encoding="utf-8")
             agents, warnings = load_roster(Path(t))
         self.assertEqual(agents, [])
         self.assertTrue(warnings)
@@ -198,7 +200,7 @@ class Graphs(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             path = Path(t) / "large.json"
             path.write_text(json.dumps({"nodes": [{}] * 1001, "events": [{}] * 2001,
-                                        "objectives": [{}] * 201}))
+                                        "objectives": [{}] * 201}), encoding="utf-8")
             graphs, warnings = load_graphs(path.parent)
         self.assertEqual(len(graphs), 1)
         self.assertEqual(graphs[0].truncated, ["nodes: kept 1000 of 1001", "events: kept 2000 of 2001",
@@ -283,9 +285,9 @@ class Graphs(unittest.TestCase):
     def test_load(self):
         with tempfile.TemporaryDirectory() as t:
             d = Path(t)
-            (d / "old.json").write_text(json.dumps({"task": "old", "updated": 5, "status": "passed", "extra": 1}))
-            (d / "bare.json").write_text(json.dumps({"updated": 9, "nodes": [{"id": "n1", "type": "check", "agent": "x", "goal": "g", "depends_on": None, "scope": None}], "events": None}))
-            (d / "bad.json").write_text("{oops")
+            (d / "old.json").write_text(json.dumps({"task": "old", "updated": 5, "status": "passed", "extra": 1}), encoding="utf-8")
+            (d / "bare.json").write_text(json.dumps({"updated": 9, "nodes": [{"id": "n1", "type": "check", "agent": "x", "goal": "g", "depends_on": None, "scope": None}], "events": None}), encoding="utf-8")
+            (d / "bad.json").write_text("{oops", encoding="utf-8")
             graphs, warnings = load_graphs(d)
         self.assertEqual([g.task for g in graphs], ["bare", "old"])
         self.assertEqual(graphs[0].nodes[0].depends_on, [])
@@ -312,11 +314,12 @@ class GraphFileSafety(unittest.TestCase):
     def setUp(self):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
 
+    @needs_symlinks
     def test_symlinks_to_valid_and_oversized_graphs_are_refused(self):
         for size in (0, 2 * 1024 * 1024):
             with self.subTest(size=size):
                 target = self.directory / "target.txt"
-                target.write_text('{"task":"target"}' + " " * size)
+                target.write_text('{"task":"target"}' + " " * size, encoding="utf-8")
                 link = self.directory / "link.json"
                 link.symlink_to(target)
                 try:
@@ -327,6 +330,7 @@ class GraphFileSafety(unittest.TestCase):
                 finally:
                     link.unlink()
 
+    @needs_fifo
     def test_fifo_is_refused_without_blocking(self):
         fifo = self.directory / "pipe.json"
         os.mkfifo(fifo)
@@ -347,7 +351,7 @@ class GraphFileSafety(unittest.TestCase):
         path = self.directory / "size.json"
         cap = 2 * 1024 * 1024
         text = '{"task":"size"}'
-        path.write_text(text + " " * (cap - len(text)))
+        path.write_text(text + " " * (cap - len(text)), encoding="utf-8")
         graphs, warnings = load_graphs(self.directory)
         self.assertEqual([graph.task for graph in graphs], ["size"])
         self.assertEqual(warnings, [])
@@ -363,7 +367,7 @@ class GraphFileSafety(unittest.TestCase):
         from types import SimpleNamespace
 
         path = self.directory / "growing.json"
-        path.write_text("{}" + " " * (2 * 1024 * 1024))
+        path.write_text("{}" + " " * (2 * 1024 * 1024), encoding="utf-8")
         actual = path.stat()
         with patch.object(sources.os, "fstat", return_value=SimpleNamespace(st_mode=actual.st_mode, st_size=0)):
             graphs, warnings = load_graphs(self.directory)
@@ -373,7 +377,7 @@ class GraphFileSafety(unittest.TestCase):
     def test_only_200_newest_files_by_mtime_are_read(self):
         for i in range(203):
             path = self.directory / f"{i:03}.json"
-            path.write_text(json.dumps({"task": str(i), "updated": 203 - i}))
+            path.write_text(json.dumps({"task": str(i), "updated": 203 - i}), encoding="utf-8")
             os.utime(path, ns=(1_000_000_000 + i, 1_000_000_000 + i))
         graphs, warnings = load_graphs(self.directory)
         self.assertEqual({graph.task for graph in graphs}, {str(i) for i in range(3, 203)})
@@ -408,6 +412,7 @@ class GraphDiscoverySafety(unittest.TestCase):
         trusted = self.graph_dir(self.home)
         self.assertEqual(find_graph_dir(project), trusted)
 
+    @needs_uid
     def test_foreign_owned_directory_is_skipped_with_warning(self):
         foreign = self.graph_dir(self.home / "project")
         warnings = []
@@ -417,6 +422,7 @@ class GraphDiscoverySafety(unittest.TestCase):
         self.assertIn(str(foreign), warnings[0])
         self.assertIn("owned", warnings[0])
 
+    @needs_uid
     def test_discovery_warning_reaches_snapshot(self):
         foreign = self.graph_dir(self.home / "project")
         with (patch("agentgraph.sources.os.getuid", return_value=os.getuid() + 1),
@@ -606,7 +612,7 @@ class Snapshots(unittest.TestCase):
             write_config(base / "cfg")
             gd = base / "proj" / ".opencode" / "graph"
             gd.mkdir(parents=True)
-            (gd / "job.json").write_text(json.dumps({"updated": 10, "session": "ghost"}))
+            (gd / "job.json").write_text(json.dumps({"updated": 10, "session": "ghost"}), encoding="utf-8")
             db = base / "o.db"
             make_db(db, [row("r1", directory=str(base / "proj"), updated=1)])
             snap = build_snapshot(base / "cfg", None, db, cwd=base / "proj", now=1.0)
@@ -619,8 +625,8 @@ class Snapshots(unittest.TestCase):
             write_config(base / "cfg")
             gd = base / "proj" / ".opencode" / "graph"
             gd.mkdir(parents=True)
-            (gd / "a.json").write_text(json.dumps({"updated": 10, "session": {"x": 1}, "nodes": [{"id": "n", "session": ["q"]}]}))
-            (gd / "b.json").write_text(json.dumps({"updated": 5, "session": ["s"], "nodes": [{"id": "n", "session": 5}]}))
+            (gd / "a.json").write_text(json.dumps({"updated": 10, "session": {"x": 1}, "nodes": [{"id": "n", "session": ["q"]}]}), encoding="utf-8")
+            (gd / "b.json").write_text(json.dumps({"updated": 5, "session": ["s"], "nodes": [{"id": "n", "session": 5}]}), encoding="utf-8")
             db = base / "o.db"
             make_db(db, [row("r1", directory=str(base / "proj"), updated=1)])
             graphs, _ = load_graphs(gd)
@@ -650,7 +656,7 @@ class Snapshots(unittest.TestCase):
             write_config(base / "cfg")
             gd = base / "proj" / ".opencode" / "graph"
             gd.mkdir(parents=True)
-            (gd / "job.json").write_text(json.dumps({"updated": 10, "session": "r1"}))
+            (gd / "job.json").write_text(json.dumps({"updated": 10, "session": "r1"}), encoding="utf-8")
             db = base / "o.db"
             make_db(db, [row("r1", directory="/a", updated=1), row("r2", directory="/b", updated=9), row("c", parent="r1", agent="impl-openai")])
             snap = build_snapshot(base / "cfg", None, db, cwd=base / "proj", now=42.0)
@@ -670,7 +676,7 @@ class Snapshots(unittest.TestCase):
                 "orchestrator": {"model": "a/b", "variant": "high", "skills": ["*"]},
                 "impl-openai": {"model": "a/b", "skills": ["engineering-delivery", 7, "code-assurance"]},
                 "reviewer": {"model": "a/b", "skills": "code-assurance"},
-                "explorer": {"model": "a/b"}}}}))
+                "explorer": {"model": "a/b"}}}}), encoding="utf-8")
             roster, _ = load_roster(cfg)
             skills = {agent.name: agent.skills for agent in roster}
             self.assertEqual(skills, {"orchestrator": ["*"], "impl-openai": ["engineering-delivery", "code-assurance"],
@@ -684,9 +690,9 @@ class Snapshots(unittest.TestCase):
             here.mkdir(parents=True)
             elsewhere = base / "tools" / ".opencode" / "graph"
             elsewhere.mkdir(parents=True)
-            (elsewhere / "mine.json").write_text(json.dumps({"updated": 5, "session": "r1"}))
-            (elsewhere / "other.json").write_text(json.dumps({"updated": 9, "session": "r2"}))
-            (elsewhere / "nobody.json").write_text(json.dumps({"updated": 7}))
+            (elsewhere / "mine.json").write_text(json.dumps({"updated": 5, "session": "r1"}), encoding="utf-8")
+            (elsewhere / "other.json").write_text(json.dumps({"updated": 9, "session": "r2"}), encoding="utf-8")
+            (elsewhere / "nobody.json").write_text(json.dumps({"updated": 7}), encoding="utf-8")
             db = base / "o.db"
             make_db(db, [row("r1", directory="/a"), row("r2", directory="/b"), row("c", parent="r1", agent="impl-openai"),
                          row("g", parent="c", agent="explorer")])
@@ -703,11 +709,11 @@ class Snapshots(unittest.TestCase):
             self.assertEqual(tasks(root_id="r1"), [])
             self.assertEqual(tasks(root_id="missing", session_graph_dir=elsewhere), [])
             # Local graphs stay, and the second folder is not read twice when it is the same folder.
-            (here / "local.json").write_text(json.dumps({"updated": 6, "session": "r1"}))
+            (here / "local.json").write_text(json.dumps({"updated": 6, "session": "r1"}), encoding="utf-8")
             self.assertEqual(tasks(root_id="r1", session_graph_dir=elsewhere), ["local", "mine"])
             self.assertEqual(tasks(root_id="r1", session_graph_dir=here), ["local"])
             # A broken file in the second folder does not warn about someone else's work.
-            (elsewhere / "broken.json").write_text("{nope")
+            (elsewhere / "broken.json").write_text("{nope", encoding="utf-8")
             snap = build_snapshot(base / "cfg", here, db, root_id="missing", now=1.0, session_graph_dir=elsewhere)
             self.assertEqual([w for w in snap.warnings if "broken" in w], [])
             snap = build_snapshot(base / "nocfg", base / "nodir", base / "no.db", now=1.0)
@@ -754,17 +760,17 @@ class Wear(unittest.TestCase):
         self.add("compaction", {"summary": "s", "reason": "auto"})
 
     def config(self, **fields):
-        (self.dir / "opencode.json").write_text(json.dumps(fields))
+        (self.dir / "opencode.json").write_text(json.dumps(fields), encoding="utf-8")
 
     def catalogue(self, window, provider="p1", model="m1"):
         path = self.dir / "models.json"
-        path.write_text(json.dumps({provider: {"models": {model: {"limit": {"context": window}}}}}))
+        path.write_text(json.dumps({provider: {"models": {model: {"limit": {"context": window}}}}}), encoding="utf-8")
         return path
 
     def wear(self, cache=None):
         config = None
         try:
-            config = json.loads((self.dir / "opencode.json").read_text())
+            config = json.loads((self.dir / "opencode.json").read_text(encoding="utf-8"))
         except OSError:
             pass
         conn = sqlite3.connect(self.db)
@@ -796,7 +802,7 @@ class Wear(unittest.TestCase):
         # A provider that does not match does not borrow another provider's model.
         self.config(providers={"p2": {"models": {"m1": {"limit": {"context": 7}}}}})
         self.assertEqual(self.wear()["window"], 1_000_000)
-        (self.dir / "bad.json").write_text("{nope")
+        (self.dir / "bad.json").write_text("{nope", encoding="utf-8")
         self.assertEqual(self.wear(self.dir / "bad.json")["window"], 1_000_000)
 
     def test_catalogue_is_parsed_again_only_when_the_file_changes(self):
@@ -806,7 +812,7 @@ class Wear(unittest.TestCase):
             self.assertEqual(self.wear(cache)["window"], 300_000)
             self.assertEqual(self.wear(cache)["window"], 300_000)
             self.assertEqual(read.call_count, 1)
-            cache.write_text(json.dumps({"p1": {"models": {"m1": {"limit": {"context": 400_000}}, "pad": {}}}}))
+            cache.write_text(json.dumps({"p1": {"models": {"m1": {"limit": {"context": 400_000}}, "pad": {}}}}), encoding="utf-8")
             self.assertEqual(self.wear(cache)["window"], 400_000)
 
     def test_model_falls_back_to_the_session_row(self):
@@ -942,7 +948,7 @@ class Wear(unittest.TestCase):
         cfg = self.dir / "cfg"
         cfg.mkdir()
         (cfg / "opencode.json").write_text(json.dumps(
-            {"providers": {"p1": {"models": {"m1": {"limit": {"context": 400_000}}}}}, "compaction": {"buffer": "25%"}}))
+            {"providers": {"p1": {"models": {"m1": {"limit": {"context": 400_000}}}}}, "compaction": {"buffer": "25%"}}), encoding="utf-8")
         snap = build_snapshot(cfg, self.dir / "nograph", self.db, root_id="root", now=1.0)
         self.assertEqual(snap.root.wear["window"], 400_000)
         self.assertEqual(snap.root.wear["compact_at"], 300_000)

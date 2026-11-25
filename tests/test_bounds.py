@@ -204,7 +204,7 @@ class BoundedCost(unittest.TestCase):
     def write(self, directory, raw, name="bounds.json"):
         text = json.dumps(raw, separators=(",", ":"))
         self.assertLess(len(text.encode()), 2 * 1024 * 1024)
-        (Path(directory) / name).write_text(text)
+        (Path(directory) / name).write_text(text, encoding="utf-8")
 
     def raw_graph(self, writers, entries, name="bounds", fmt="d{i}/{k}"):
         return {"task": name, "goal": "g", "status": "running", "created": 1, "updated": 2,

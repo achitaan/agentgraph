@@ -26,8 +26,15 @@ const TMP = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), "agentgr
 const BUNDLE = path.join(TMP, "gui-experimental.cjs");
 
 let group = 0;
+// Groups that start a fake interpreter written as a /bin/sh script, a real `python3`, or a Unix tool cannot run on
+// native Windows (no sh there); they are listed as skipped, and the "native Windows" groups still run.
+const NEEDS_POSIX = /#!\/bin\/sh|python3|\/bin\/(sleep|dd)|fakePython|process\.env\.HOME/;
 async function check(name, fn) {
   group += 1;
+  if (process.platform === "win32" && !name.startsWith("native Windows") && NEEDS_POSIX.test(fn.toString())) {
+    console.log(`ok ${group} - ${name} (skipped on Windows: needs a POSIX shell)`);
+    return;
+  }
   try {
     await fn();
     console.log(`ok ${group} - ${name}`);

@@ -46,7 +46,7 @@ class Scratch(unittest.TestCase):
 class UseWhen(Scratch):
     def test_it_is_a_setting_not_the_description(self):
         (self.root / "20-build" / "impl-openai.md").write_text(
-            "pool: 3\nuse_when: Bounded tasks with a check to run\nescalates_to: impl-claude\n\nThe default.\n")
+            "pool: 3\nuse_when: Bounded tasks with a check to run\nescalates_to: impl-claude\n\nThe default.\n", encoding="utf-8")
         shape = snapshot_json.load_structure(self.root)
         self.assertEqual(shape["about"]["impl-openai"], "The default.")
         self.assertEqual(shape["pool"]["impl-openai"], 3)
@@ -144,7 +144,7 @@ class Route(Scratch):
     def skills_md(self):
         path = self.temporary / "SKILLS.md"
         path.write_text("| Agent | Skills |\n|---|---|\n| `orchestrator` | all |\n| `impl-openai` | `code-assurance`, "
-                        "`engineering-delivery` |\n| `reviewer` | none |\n")
+                        "`engineering-delivery` |\n| `reviewer` | none |\n", encoding="utf-8")
         return path
 
     def test_the_table_comes_from_the_folder(self):
@@ -211,14 +211,14 @@ class Scaffold(Scratch):
         """Scaffold, then fill the blanks only: `check` passes with every drawn path and group (first attempt)."""
         path, raw = structure.flow_scaffold(flow_id, task, self.root, graph_dir=self.graphs, now=1000)
         self.assertEqual(path, self.graphs / f"{task}.json")
-        self.assertEqual(json.loads(path.read_text()), raw)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), raw)
         self.assertTrue(all(item["status"] == "pending" and item["goal"] == "" and item["done_when"] == ""
                             for item in raw["nodes"]))
         for item in raw["nodes"]:
             self.assertEqual(item["artifacts"][0]["path"], f".opencode/artifacts/{task}/{item['id']}/r1/handoff.md")
         code, out = self.check(task)
         self.assertEqual(code, 1, out)  # unfilled: blanks are problems
-        path.write_text(json.dumps(filled(raw)))
+        path.write_text(json.dumps(filled(raw)), encoding="utf-8")
         code, out = self.check(task)
         self.assertEqual(code, 0, out)
         self.assertTrue(out.startswith("OK"), out)
@@ -263,10 +263,10 @@ class Scaffold(Scratch):
     def test_it_never_writes_over_a_file(self):
         flow = structure.add_flow(["researcher", "impl-openai"], None, self.root)[0]
         self.graphs.mkdir()
-        (self.graphs / "taken.json").write_text("mine")
+        (self.graphs / "taken.json").write_text("mine", encoding="utf-8")
         with self.assertRaisesRegex(structure.StructureError, "already exists"):
             structure.flow_scaffold(flow["id"], "taken", self.root, graph_dir=self.graphs)
-        self.assertEqual((self.graphs / "taken.json").read_text(), "mine")
+        self.assertEqual((self.graphs / "taken.json").read_text(encoding="utf-8"), "mine")
         self.assertEqual(sorted(path.name for path in self.graphs.iterdir()), ["taken.json"])
         for bad, why in (("Bad", "task name"), ("../x", "task name"), ("", "task name")):
             with self.subTest(task=bad), self.assertRaisesRegex(structure.StructureError, why):
@@ -434,7 +434,7 @@ class FolderRulesInCheck(Scratch):
     def run_check(self, nodes):
         graphs = self.temporary / "graphs"
         graphs.mkdir(exist_ok=True)
-        (graphs / "flows.json").write_text(json.dumps(graph_of(nodes)))
+        (graphs / "flows.json").write_text(json.dumps(graph_of(nodes)), encoding="utf-8")
         return capture(check.main, ["--dir", str(graphs), "--structure", str(self.root)])[:2]
 
     def test_an_escalation_off_the_folder_is_a_problem(self):

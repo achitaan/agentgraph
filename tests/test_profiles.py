@@ -13,6 +13,7 @@ import tempfile
 import unittest
 
 import agentgraph
+from tests.launch import home_env
 from agentgraph import skillfiles, skillset, sources
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -54,7 +55,7 @@ class WithoutTheSkill(unittest.TestCase):
         # Nothing here reads the real skills folder: the scratch home's holds one made-up skill, the one a profile
         # names for an agent of the active preset (picked from the toolkit's task-profiles.md, so a later change to
         # the agents' skill lists does not break it). The preset file and SKILLS.md are scratch copies, as everywhere.
-        obj = json.loads(skillset.CONFIG.read_text())
+        obj = json.loads(skillset.CONFIG.read_text(encoding="utf-8"))
         active = obj["presets"][obj["preset"]]
 
         class Every:
@@ -70,7 +71,7 @@ class WithoutTheSkill(unittest.TestCase):
             config_dir = home / ".config" / "opencode"
             skills = config_dir / "skills"
             (skills / skill).mkdir(parents=True)
-            (skills / skill / "SKILL.md").write_text(f"---\nname: {skill}\ndescription: {skill} skill\n---\nBody\n")
+            (skills / skill / "SKILL.md").write_text(f"---\nname: {skill}\ndescription: {skill} skill\n---\nBody\n", encoding="utf-8")
             self.assertFalse((skills / "personal-orchestrator").exists())
             shutil.copyfile(skillset.CONFIG, config_dir / skillset.CONFIG.name)
             work = Path(directory) / "work"
@@ -87,7 +88,7 @@ class WithoutTheSkill(unittest.TestCase):
                 "result = skillset.remove(agent, skill, **paths)\n"
                 "print(json.dumps({'before': before, 'warnings': result['warnings'],\n"
                 "                  'after': skillset.profile_mismatches()}))\n")
-            env = {**os.environ, "HOME": str(home), "PYTHONPATH": str(ROOT)}
+            env = {**os.environ, **home_env(home), "PYTHONPATH": str(ROOT)}
             done = subprocess.run([sys.executable, "-c", script, str(work), agent, skill], cwd=work, env=env,
                                   capture_output=True, text=True, timeout=120)
             self.assertEqual(done.returncode, 0, done.stderr)
@@ -97,7 +98,7 @@ class WithoutTheSkill(unittest.TestCase):
             self.assertIn(f"task-profiles.md: the {agent} profile still names {skill}", out["warnings"][0])
             self.assertTrue(out["after"])
             # The change went to the scratch home's preset file.
-            changed = json.loads((config_dir / skillset.CONFIG.name).read_text())
+            changed = json.loads((config_dir / skillset.CONFIG.name).read_text(encoding="utf-8"))
             self.assertNotIn(skill, changed["presets"][changed["preset"]][agent].get("skills", []))
 
 if __name__ == "__main__":

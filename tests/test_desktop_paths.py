@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 
+from tests.launch import bare_env, home_env
 from agentgraph import skillset
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -37,12 +38,12 @@ class DesktopPaths(unittest.TestCase):
             (config / folder).mkdir(parents=True)
         for name in ("code-assurance", "engineering-delivery"):
             (config / "skills" / name).mkdir(parents=True)
-            (config / "skills" / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {name} skill\n---\nBody\n")
+            (config / "skills" / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {name} skill\n---\nBody\n", encoding="utf-8")
         shutil.copyfile(skillset.CONFIG, config / skillset.CONFIG.name)
         self.config_dir = config
         self.cwd = self.root / "project"
         self.cwd.mkdir()
-        self.env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.home),
+        self.env = {**bare_env(PATH=os.environ.get("PATH", "/usr/bin:/bin")), **home_env(self.home),
                     "PYTHONPATH": str(self.orch), "PYTHONIOENCODING": "utf-8", "TMPDIR": str(self.root) + "/"}
 
     def run_module(self, *args, stdin="", cwd=None):

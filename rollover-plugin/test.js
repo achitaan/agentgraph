@@ -889,11 +889,14 @@ const cases = {
 };
 
 (async () => {
-  let failed = 0;
+  let failed = 0, skipped = 0;
+  // The fake `agentgraph` here is a /bin/sh script; native Windows has no sh to run it, so those cases are skipped there.
+  const needsSh = (fn) => /harness\(|#!\/bin\/sh/.test(fn.toString());
   for (const [name, fn] of Object.entries(cases)) {
+    if (process.platform === "win32" && needsSh(fn)) { skipped += 1; console.log("skip " + name + " (needs a POSIX shell)"); continue; }
     try { await fn(); console.log("ok   " + name); } catch (e) { failed += 1; console.log("FAIL " + name + ": " + (e && e.stack ? e.stack.split("\n").slice(0, 4).join(" | ") : e)); }
   }
   fs.rmSync(root, { recursive: true, force: true });
-  console.log(failed ? `${failed} failed` : `all ${Object.keys(cases).length} passed`);
+  console.log(failed ? `${failed} failed` : skipped ? `${Object.keys(cases).length - skipped} passed, ${skipped} skipped` : `all ${Object.keys(cases).length} passed`);
   process.exit(failed ? 1 : 0);
 })();

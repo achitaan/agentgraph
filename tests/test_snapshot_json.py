@@ -116,7 +116,7 @@ class SnapshotDocumentTests(unittest.TestCase):
             self.assertIsNone(snapshot_json.load_structure(root))  # no group folders
             def agent_file(rel, text=""):
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
-                (root / rel).write_text(text)
+                (root / rel).write_text(text, encoding="utf-8")
             agent_file("00-hub/orchestrator.md")
             agent_file("10-council/council.md", "seats: councillor-\n\nprose with a colon: ignored\npool: 9\n")
             agent_file("20-build/impl-openai.md", "pool: 3\nescalates_to: impl-claude\n")
@@ -171,7 +171,7 @@ class SnapshotDocumentTests(unittest.TestCase):
             root = Path(t)
             def agent_file(rel, text=""):
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
-                (root / rel).write_text(text)
+                (root / rel).write_text(text, encoding="utf-8")
             agent_file("00-hub/orchestrator.md", "Plans the work.\nThen dispatches it.\n")
             agent_file("10-build/impl-openai.md", "pool: 3\nescalates_to: impl-claude\n\nBuilds bounded work.  It hands back changes: a diff.\n")
             agent_file("10-build/impl-claude.md", "pool: 2\n")
@@ -195,12 +195,12 @@ class SnapshotDocumentTests(unittest.TestCase):
             self.assertEqual(snapshot_json.skills_document(root), [])  # no skills folder
             def skill(name, text):
                 (root / "skills" / name).mkdir(parents=True)
-                (root / "skills" / name / "SKILL.md").write_text(text)
+                (root / "skills" / name / "SKILL.md").write_text(text, encoding="utf-8")
             skill("plain", "---\nname: plain\ndescription: Does one thing.\n---\nbody description: not this\n")
             skill("folded", "---\r\nname: folded\r\ndescription: >\r\n  Spread over\r\n  two lines.\r\nlicense: MIT\r\n---\r\n")
             skill("bare", "No frontmatter here\n")
             (root / "skills" / "empty").mkdir()
-            (root / "skills" / "note.txt").write_text("not a skill")
+            (root / "skills" / "note.txt").write_text("not a skill", encoding="utf-8")
             self.assertEqual(snapshot_json.skills_document(root), [
                 {"name": "bare", "description": ""}, {"name": "folded", "description": "Spread over two lines."},
                 {"name": "plain", "description": "Does one thing."}])
@@ -214,7 +214,7 @@ class SnapshotDocumentTests(unittest.TestCase):
             home = root / "memory"
             home.mkdir()
             def note(time, text, agent):
-                with (home / "feedback.jsonl").open("a") as stream:
+                with (home / "feedback.jsonl").open("a", encoding="utf-8") as stream:
                     stream.write(json.dumps({"time": time, "text": text, "agent": agent, "task": "t"}) + "\n")
             note(1.0, "Keep diffs small", "impl-openai")
             note(2.0, "No green", "designer")
@@ -229,12 +229,12 @@ class SnapshotDocumentTests(unittest.TestCase):
             self.assertIsInstance(doc["due"], bool)
             # The active preset's own ledger wins when it exists.
             (root / "memory-fast").mkdir()
-            (root / "oh-my-opencode-slim.json").write_text(json.dumps({"preset": "fast"}))
+            (root / "oh-my-opencode-slim.json").write_text(json.dumps({"preset": "fast"}), encoding="utf-8")
             self.assertEqual(snapshot_json.learning_document(root, root)["total"], 0)
             # ultra-fast keeps its ledger under a historical name, the one its improvement skill writes to.
             (root / "memory-o2").mkdir()
-            (root / "memory-o2" / "feedback.jsonl").write_text(json.dumps({"time": 9.0, "text": "n", "agent": "a", "task": "t"}) + "\n")
-            (root / "oh-my-opencode-slim.json").write_text(json.dumps({"preset": "ultra-fast"}))
+            (root / "memory-o2" / "feedback.jsonl").write_text(json.dumps({"time": 9.0, "text": "n", "agent": "a", "task": "t"}) + "\n", encoding="utf-8")
+            (root / "oh-my-opencode-slim.json").write_text(json.dumps({"preset": "ultra-fast"}), encoding="utf-8")
             self.assertEqual(snapshot_json.learning_document(root, root)["total"], 1)
 
     def test_an_idle_root_outside_the_roster_is_still_the_hub(self):

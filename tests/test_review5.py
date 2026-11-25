@@ -36,7 +36,7 @@ class SamePath(unittest.TestCase):
             {"id": "a1", "type": "implement", "agent": "impl-openai", "attempts": 1},
             {"id": "v1", "type": "check", "agent": "verifier", "depends_on": ["a1"], "attempts": 1}])
         path = self.graphs / "one.json"
-        path.write_text(json.dumps(raw))
+        path.write_text(json.dumps(raw), encoding="utf-8")
         shape = snapshot_json.load_structure(self.root)
         ids = sorted(flow["id"] for flow in shape["flows"] if flow["path"] == ["impl-openai", "verifier"])
         self.assertEqual(ids, [first["id"], "impl-openai-verifier-2"], "two drawn flows with the same path")
@@ -100,9 +100,9 @@ class PresetNamePattern(Base):
     is shown as not editable for skills, with the writer's own refusal as the reason."""
 
     def plant(self, name):
-        obj = json.loads(self.config.read_text())
+        obj = json.loads(self.config.read_text(encoding="utf-8"))
         obj["presets"][obj["preset"]][name] = {"model": "openai/gpt-5", "skills": []}
-        self.config.write_text(json.dumps(obj, indent=2) + "\n")
+        self.config.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
 
     def test_the_snapshot_and_the_writer_agree_on_a_name_the_pattern_refuses(self):
         for name in ("Big-Agent", "big.agent"):
@@ -167,9 +167,9 @@ class LockedChecks(Base):
 
     def preset_agent(self, name):
         with skillset._locked(self.config, self.map):
-            obj = json.loads(self.config.read_text())
+            obj = json.loads(self.config.read_text(encoding="utf-8"))
             obj["presets"][obj["preset"]][name] = {"model": "openai/gpt-5"}
-            self.config.write_text(json.dumps(obj, indent=2) + "\n")
+            self.config.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
 
     def fresh_skill(self, id="fresh-skill"):
         skillfiles.create(id, "A fresh skill", "Body\n", skills=self.skills)

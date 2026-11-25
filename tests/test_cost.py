@@ -139,16 +139,16 @@ class SettingsTests(unittest.TestCase):
         path = self.folder / "opencode.json"
         path.write_text(json.dumps({"compaction": {"buffer": 750000}, "providers": {"anthropic": {
             "settings": {"cache": {"ttl": "5m"}},
-            "models": {"fable": {"settings": {"cache": {"ttl": "1h"}}}, "plain": {}}}}}))
+            "models": {"fable": {"settings": {"cache": {"ttl": "1h"}}}, "plain": {}}}}}), encoding="utf-8")
         self.assertEqual(cost.read_settings(path), {"compaction_buffer": 750000, "cache_ttl": {"*": "5m", "fable": "1h"}})
-        path.write_text("{}")
+        path.write_text("{}", encoding="utf-8")
         self.assertEqual(cost.read_settings(path), {"compaction_buffer": None, "cache_ttl": {}})
 
     def test_a_missing_or_invalid_config_gives_the_defaults(self):
         empty = {"compaction_buffer": None, "cache_ttl": {}}
         self.assertEqual(cost.read_settings(self.folder / "missing.json"), empty)
         for text in ("{not json", "[1, 2]", '{"compaction": 5, "providers": {"anthropic": {"models": 3}}}'):
-            (self.folder / "bad.json").write_text(text)
+            (self.folder / "bad.json").write_text(text, encoding="utf-8")
             self.assertEqual(cost.read_settings(self.folder / "bad.json"), empty)
 
     def test_the_log_gets_a_line_only_when_the_settings_change(self):
@@ -157,7 +157,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(cost.load_history(log), [])
         self.assertTrue(cost.note_settings(log, one, 10))
         self.assertFalse(cost.note_settings(log, one, 20))
-        with log.open("a") as handle:
+        with log.open("a", encoding="utf-8") as handle:
             handle.write("garbage\n{\"time\": \"x\", \"settings\": {}}\n[]\n")
         self.assertFalse(cost.note_settings(log, one, 25))   # bad lines do not count as the last line
         self.assertTrue(cost.note_settings(log, two, 30))
@@ -167,7 +167,7 @@ class SettingsTests(unittest.TestCase):
 
     def test_current_settings_are_noted_with_the_config_time(self):
         config, log = self.folder / "opencode.json", self.folder / "log.jsonl"
-        config.write_text(json.dumps({"compaction": {"buffer": 7}}))
+        config.write_text(json.dumps({"compaction": {"buffer": 7}}), encoding="utf-8")
         self.assertTrue(cost.note_current_settings(log, config))
         self.assertFalse(cost.note_current_settings(log, config))
         self.assertEqual(cost.load_history(log)[0]["time"], config.stat().st_mtime)
@@ -236,7 +236,7 @@ class TrendTests(unittest.TestCase):
     def test_the_command_prints_the_periods_and_notes_the_settings(self):
         config, log = self.folder / "opencode.json", self.folder / "log.jsonl"
         config.write_text(json.dumps({"compaction": {"buffer": 750000},
-                                      "providers": {"anthropic": {"models": {"fable": {"settings": {"cache": {"ttl": "1h"}}}}}}}))
+                                      "providers": {"anthropic": {"models": {"fable": {"settings": {"cache": {"ttl": "1h"}}}}}}}), encoding="utf-8")
         # the config's time is in the past of every turn, so one period with the current settings
         os.utime(config, (self.base - HOUR, self.base - HOUR))
         args = ["--trend", "--db", str(self.db), "--settings-log", str(log), "--config", str(config), "--days", "100000"]
@@ -244,7 +244,7 @@ class TrendTests(unittest.TestCase):
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 self.assertEqual(cost.main(args), 0)
-        self.assertEqual(len(log.read_text().splitlines()), 1)
+        self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1)
         self.assertIn("one-hour cache for fable", out.getvalue())
         self.assertIn("compaction buffer 750 000", out.getvalue())
         out = io.StringIO()

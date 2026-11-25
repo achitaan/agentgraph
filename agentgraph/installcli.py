@@ -24,7 +24,7 @@ def target_folder(env=None, home=None) -> Path:
     return Path(given) if given else (Path(home) if home is not None else Path.home()) / ".config" / "opencode"
 
 
-def main(argv=None, env=None, home=None) -> int:
+def main(argv=None, env=None, home=None, source=None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     mode, dry, backup = "install", False, None
     while args:
@@ -38,7 +38,7 @@ def main(argv=None, env=None, home=None) -> int:
         else:
             print(USAGE, file=sys.stderr)
             return 2
-    source = Path(__file__).resolve().parent.parent
+    source = Path(source) if source is not None else Path(__file__).resolve().parent.parent  # tests pass a scratch kit
     call = [mode, "--target", str(target_folder(env, home)), "--source", str(source),
             "--commands", ",".join(installer.TOOLKIT_COMMANDS)]
     if dry:

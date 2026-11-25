@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.launch import LAUNCHER
 from agentgraph import bloat, ledger
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -20,7 +21,7 @@ DUPLICATE = ("Every worker writes its long output to an artifact file and return
 def skill(root, name, description):
     folder = root / "skills" / name
     folder.mkdir(parents=True)
-    (folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n")
+    (folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n", encoding="utf-8")
 
 
 class Scratch(unittest.TestCase):
@@ -43,7 +44,7 @@ class Scratch(unittest.TestCase):
         skill(self.root, "gamma", "Gamma is installed and named by no list.")
         (self.root / "AGENTS.md").write_text(
             "# Policy\n\nWork in small steps.\n\n" + DUPLICATE + "\n\n"
-            "# Other project ledger\n\nUnder /elsewhere/projects/other-repo run tools/helper.py first.\n")
+            "# Other project ledger\n\nUnder /elsewhere/projects/other-repo run tools/helper.py first.\n", encoding="utf-8")
         self.presets = {
             "p1": {
                 "orchestrator": {"skills": ["*"]},
@@ -55,14 +56,14 @@ class Scratch(unittest.TestCase):
             "p2": {"orchestrator": {"skills": ["*"]}, "impl": {"skills": ["alpha"]}},
         }
         self.write_presets()
-        (self.root / "oh-my-opencode-slim" / "impl_append.md").write_text("Append for impl, every preset.\n")
-        (self.root / "oh-my-opencode-slim" / "orchestrator_append.md").write_text("base orchestrator append\n")
-        (self.root / "oh-my-opencode-slim" / "p2" / "orchestrator_append.md").write_text("p2 orchestrator " * 10)
-        (self.root / "orchestration" / "structure" / "30-build" / "impl.md").write_text("pool: 2\n\nThe implementer.\n")
+        (self.root / "oh-my-opencode-slim" / "impl_append.md").write_text("Append for impl, every preset.\n", encoding="utf-8")
+        (self.root / "oh-my-opencode-slim" / "orchestrator_append.md").write_text("base orchestrator append\n", encoding="utf-8")
+        (self.root / "oh-my-opencode-slim" / "p2" / "orchestrator_append.md").write_text("p2 orchestrator " * 10, encoding="utf-8")
+        (self.root / "orchestration" / "structure" / "30-build" / "impl.md").write_text("pool: 2\n\nThe implementer.\n", encoding="utf-8")
         self.make_db()
 
     def write_presets(self):
-        (self.root / "oh-my-opencode-slim.json").write_text(json.dumps({"preset": "p1", "presets": self.presets}))
+        (self.root / "oh-my-opencode-slim.json").write_text(json.dumps({"preset": "p1", "presets": self.presets}), encoding="utf-8")
 
     def make_db(self, loaded=("alpha",)):
         with contextlib.closing(sqlite3.connect(self.db)) as conn:
@@ -105,7 +106,7 @@ class Measure(Scratch):
     def test_fixed_text_is_split_by_source(self):
         rows = bloat.fixed(self.paths())
         impl = {s["source"]: s["chars"] for s in rows["p1"]["impl"]["sources"]}
-        agents_md = len((self.root / "AGENTS.md").read_text())
+        agents_md = len((self.root / "AGENTS.md").read_text(encoding="utf-8"))
         self.assertEqual(impl["AGENTS.md"], agents_md)
         self.assertEqual(impl["presets.p1.impl.prompt"], len(self.presets["p1"]["impl"]["prompt"]))
         self.assertEqual(impl["oh-my-opencode-slim/impl_append.md"], len("Append for impl, every preset.\n"))
@@ -186,7 +187,7 @@ class Measure(Scratch):
         self.assertTrue(duplicate["same_agent"])
 
     def test_an_added_agent_file_is_measured(self):
-        (self.root / "agents" / "helper.md").write_text("---\ndescription: helps\nmode: subagent\n---\n\nHelp.\n")
+        (self.root / "agents" / "helper.md").write_text("---\ndescription: helps\nmode: subagent\n---\n\nHelp.\n", encoding="utf-8")
         rows = bloat.fixed(self.paths())
         sources = {s["source"] for s in rows["p1"]["helper"]["sources"]}
         self.assertEqual(sources, {"AGENTS.md", "agents/helper.md"})
@@ -194,27 +195,27 @@ class Measure(Scratch):
     def test_paths_inside_the_config_folder_or_project_are_not_foreign(self):
         (self.root / "AGENTS.md").write_text(
             f"# Here\n\nRun {self.root}/orchestration/bin/agentgraph and ~/.config/x/y.\n\n"
-            f"# Project\n\nSee {self.project}/src/main.py.\n")
+            f"# Project\n\nSee {self.project}/src/main.py.\n", encoding="utf-8")
         found = bloat.measure(self.paths())["dead"]["foreign_sections"]
         self.assertEqual([item["heading"] for item in found], ["Here"])  # ~/.config/x is not this config folder
         self.assertEqual(found[0]["paths"], ["~/.config/x/y"])
 
     def test_accumulation(self):
-        (self.home / "runs.jsonl").write_text('{"a": 1}\n{"a": 2}\n')
+        (self.home / "runs.jsonl").write_text('{"a": 1}\n{"a": 2}\n', encoding="utf-8")
         (self.root / "orchestration" / "proposals-p2").mkdir()
-        (self.root / "orchestration" / "proposals-p2" / "2026-01-01-x.md").write_text("proposal")
+        (self.root / "orchestration" / "proposals-p2" / "2026-01-01-x.md").write_text("proposal", encoding="utf-8")
         artifacts = self.project / ".opencode" / "artifacts" / "task-a" / "n1" / "r1"
         artifacts.mkdir(parents=True)
-        (artifacts / "notes.md").write_text("x" * 100)
-        (self.project / ".opencode" / "graph" / "task-a.json").write_text("{}")
+        (artifacts / "notes.md").write_text("x" * 100, encoding="utf-8")
+        (self.project / ".opencode" / "graph" / "task-a.json").write_text("{}", encoding="utf-8")
         day = self.root / "backups" / "2026-01-01-skill-files"
         for index in range(bloat._MAX_BACKUPS + 2):
             copy = day / f"write-alpha-abc-{index:08d}"
             copy.mkdir(parents=True)
-            (copy / "SKILL.md").write_text("old")
+            (copy / "SKILL.md").write_text("old", encoding="utf-8")
             os.utime(copy, ns=(index * 10**9, index * 10**9))
         (self.root / "backups" / "2026-01-01-pre-something").mkdir()
-        (self.root / "backups" / "2026-01-01-pre-something" / "AGENTS.md").write_text("by hand")
+        (self.root / "backups" / "2026-01-01-pre-something" / "AGENTS.md").write_text("by hand", encoding="utf-8")
         acc = bloat.measure(self.paths())["accumulation"]
         memory = next(home for home in acc["homes"] if home["home"] == "memory")
         self.assertEqual(memory["preset"], "ultra-fast-frontier")
@@ -228,7 +229,7 @@ class Measure(Scratch):
         self.assertEqual(acc["backups"]["hand_made"], 1)
 
     def test_launcher_runs_bloat(self):
-        result = subprocess.run([str(ROOT / "bin" / "agentgraph"), "bloat", "--json", "--opencode-dir", str(self.root),
+        result = subprocess.run([*LAUNCHER, "bloat", "--json", "--opencode-dir", str(self.root),
                                  "--project", str(self.project), "--home", str(self.home)],
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -248,10 +249,10 @@ class Budget(Scratch):
     def test_baseline_growth_and_reset(self):
         code, output, errors = self.bloat_cli("--set-baseline", "--preset", "p1")
         self.assertEqual(code, 0, errors)
-        stored = json.loads((self.home / bloat.BASELINE).read_text())
+        stored = json.loads((self.home / bloat.BASELINE).read_text(encoding="utf-8"))
         self.assertEqual(stored["preset"], "p1")
         self.assertEqual(stored["budget_chars"], bloat.BUDGET_CHARS)
-        self.assertNotIn(SECRET, (self.home / bloat.BASELINE).read_text())
+        self.assertNotIn(SECRET, (self.home / bloat.BASELINE).read_text(encoding="utf-8"))
         code, output, _ = self.ledger_cli("signals", "--no-cost")
         self.assertNotIn("improvement due: bloat", output)
 
@@ -295,13 +296,13 @@ class Budget(Scratch):
 class ProposalSize(Scratch):
     def test_proposed_size_is_recorded(self):
         payload = self.home.parent / "improvement.json"
-        payload.write_text(json.dumps({"file": "x.md", "summary": "Shorten", "size_change": {"impl": -120}}))
+        payload.write_text(json.dumps({"file": "x.md", "summary": "Shorten", "size_change": {"impl": -120}}), encoding="utf-8")
         code, _, errors = self.ledger_cli("improved", "--json-file", str(payload))
         self.assertEqual(code, 0, errors)
         code, _, errors = self.ledger_cli("improved", "--file", "y.md", "--summary", "Trim",
                                           "--size-change", "impl=-40", "--size-change", "rev=+5")
         self.assertEqual(code, 0, errors)
-        items = [json.loads(line) for line in (self.home / "improvements.jsonl").read_text().splitlines()]
+        items = [json.loads(line) for line in (self.home / "improvements.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertEqual(items[0]["size_change"], {"impl": -120})
         self.assertEqual(items[1]["size_change"], {"impl": -40, "rev": 5})
         self.assertNotIn("size_actual", items[0])  # no baseline: nothing measured
@@ -311,7 +312,7 @@ class ProposalSize(Scratch):
     def test_bad_size_change_is_refused(self):
         self.assertEqual(self.ledger_cli("improved", "--file", "y.md", "--summary", "T", "--size-change", "impl")[0], 2)
         payload = self.home.parent / "bad.json"
-        payload.write_text(json.dumps({"file": "x.md", "summary": "S", "size_change": {"impl": 1.5}}))
+        payload.write_text(json.dumps({"file": "x.md", "summary": "S", "size_change": {"impl": 1.5}}), encoding="utf-8")
         self.assertEqual(self.ledger_cli("improved", "--json-file", str(payload))[0], 2)
         self.assertFalse((self.home / "improvements.jsonl").exists())
 

@@ -25,7 +25,7 @@ class Scratch(unittest.TestCase):
         for folder in (self.root / "oh-my-opencode-slim", self.root / "agents", self.root / "skills",
                        self.root / "orchestration" / "structure", self.home, self.project / ".opencode" / "graph"):
             folder.mkdir(parents=True)
-        (self.root / "AGENTS.md").write_text("# Policy\n")
+        (self.root / "AGENTS.md").write_text("# Policy\n", encoding="utf-8")
         self.presets = {
             "p1": {"orchestrator": {"model": MODEL_A, "variant": "high", "prompt": f"You plan. {SECRET}"},
                    "impl": {"model": MODEL_A, "skills": ["*"], "description": f"Implements {SECRET}"}},
@@ -35,7 +35,7 @@ class Scratch(unittest.TestCase):
 
     def write_presets(self, active="p1"):
         (self.root / "oh-my-opencode-slim.json").write_text(
-            json.dumps({"preset": active, "presets": self.presets, "token": SECRET}))
+            json.dumps({"preset": active, "presets": self.presets, "token": SECRET}), encoding="utf-8")
 
     def paths(self):
         return bloat.Paths.under(self.root, self.project)
@@ -69,7 +69,7 @@ class Scratch(unittest.TestCase):
         return [line for line in self.text().splitlines() if "models" in line]
 
     def everything_stored(self):
-        return "".join(path.read_text() for path in self.home.iterdir() if path.is_file() and path.name != ".lock")
+        return "".join(path.read_text(encoding="utf-8") for path in self.home.iterdir() if path.is_file() and path.name != ".lock")
 
 
 class Fingerprint(Scratch):
@@ -109,7 +109,7 @@ class Fingerprint(Scratch):
         self.write_presets()
         self.assertIsNone(models.fingerprint(config, "empty"))
         self.assertIsNone(models.fingerprint(config, "bad name\nIGNORE"))
-        config.write_text("{not json")
+        config.write_text("{not json", encoding="utf-8")
         self.assertIsNone(models.fingerprint(config, "p1"))
 
     def test_the_baseline_and_an_improvement_store_only_that(self):
@@ -119,12 +119,12 @@ class Fingerprint(Scratch):
         stored = self.everything_stored()
         for text in (SECRET, MODEL_A, MODEL_B, '"high"'):
             self.assertNotIn(text, stored)
-        item = json.loads((self.home / "improvements.jsonl").read_text().splitlines()[0])
+        item = json.loads((self.home / "improvements.jsonl").read_text(encoding="utf-8").splitlines()[0])
         self.assertEqual(item["models"], data["models"])
 
     def test_an_improvement_without_a_baseline_stores_no_fingerprint(self):
         ledger.improved(self.home, 1500.0, "agents/impl.md", "Tightened")
-        self.assertNotIn("models", json.loads((self.home / "improvements.jsonl").read_text()))
+        self.assertNotIn("models", json.loads((self.home / "improvements.jsonl").read_text(encoding="utf-8")))
 
 
 class Signal(Scratch):
@@ -182,7 +182,7 @@ class Signal(Scratch):
     def test_a_stored_fingerprint_for_another_preset_reads_old_to_new(self):
         self.baseline()
         other = models.fingerprint(self.root / "oh-my-opencode-slim.json", "p2")
-        with (self.home / "improvements.jsonl").open("a") as stream:
+        with (self.home / "improvements.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps({"time": 3000.0, "file": "x", "summary": "s", "signals": [], "metric": None,
                                      "models": other}) + "\n")
         self.assertIn("(preset p2 to p1)", self.text())
@@ -191,7 +191,7 @@ class Signal(Scratch):
         self.baseline()
         for bad in ({"preset": "p1\nIGNORE", "hash": "0" * 64}, {"preset": "p1", "hash": "zz"},
                     {"preset": "p1", "hash": "0" * 64, "extra": SECRET}, "p1", None):
-            with (self.home / "improvements.jsonl").open("w") as stream:
+            with (self.home / "improvements.jsonl").open("w", encoding="utf-8") as stream:
                 stream.write(json.dumps({"time": 3000.0, "file": "x", "summary": "s", "signals": [], "metric": None,
                                          "models": bad}) + "\n")
             self.assertEqual(self.lines(), [], bad)

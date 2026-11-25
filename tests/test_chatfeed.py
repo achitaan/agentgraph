@@ -15,6 +15,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.launch import LAUNCHER, bare_env
 from agentgraph import chatfeed, server, snapshot_json
 from agentgraph.demo import demo_activity, demo_chat, demo_snapshot
 
@@ -411,7 +412,7 @@ class Failures(Case):
             code = chatfeed.main(["--session", "../etc"])
         self.assertEqual((code, out.getvalue()), (2, ""))
         self.assertEqual(len(err.getvalue().strip().splitlines()), 1)
-        run = subprocess.run([str(ROOT / "bin" / "agentgraph"), "chat", "--session", "bad id"], capture_output=True, text=True)
+        run = subprocess.run([*LAUNCHER, "chat", "--session", "bad id"], capture_output=True, text=True)
         self.assertNotEqual(run.returncode, 0)
         self.assertEqual(len(run.stderr.strip().splitlines()), 1)
         self.assertEqual(run.stdout, "")
@@ -450,7 +451,7 @@ class Digest(Case):
         self.db.session("ses_a", agent="explorer")
         self.db.assistant("ses_a", [said("hello there"), tool("grep")])
         base = [sys.executable, "-P", "-m", "agentgraph.chatfeed", "--session", "ses_a", "--db", str(self.db.path)]
-        env = {"PYTHONPATH": str(ROOT), "PATH": "/usr/bin:/bin"}
+        env = bare_env(PYTHONPATH=str(ROOT))
         text = subprocess.run(base, capture_output=True, text=True, env=env, cwd=self.dir)
         self.assertEqual(text.returncode, 0, text.stderr)
         self.assertIn("[says] hello there\n[tool] grep (completed)", text.stdout)
@@ -466,7 +467,7 @@ class Digest(Case):
         self.db.user("ses_a", "what now?" + sidechat.SEPARATOR + "\nBRIEF-MARKER the graph")
         self.db.assistant("ses_a", [reasoning("private thought"), said("this")])
         base = [sys.executable, "-P", "-m", "agentgraph.chatfeed", "--session", "ses_a", "--json", "--db", str(self.db.path)]
-        env = {"PYTHONPATH": str(ROOT), "PATH": "/usr/bin:/bin"}
+        env = bare_env(PYTHONPATH=str(ROOT))
         plain = subprocess.run(base, capture_output=True, text=True, env=env, cwd=self.dir)
         self.assertIn("BRIEF-MARKER", plain.stdout)  # without --side the feed is the raw one
         side = subprocess.run([*base, "--side"], capture_output=True, text=True, env=env, cwd=self.dir)
@@ -601,7 +602,7 @@ class Route(Case):
         for folder in ("graphs", "structure", "agents", "skills", "ledger", "commands"):
             (self.dir / folder).mkdir()
         (self.dir / "preset.json").write_text(json.dumps({"preset": "p", "presets": {"p": {
-            "orchestrator": {"model": "anthropic/claude-x"}, "impl-openai": {"model": "openai/gpt-x"}}}}))
+            "orchestrator": {"model": "anthropic/claude-x"}, "impl-openai": {"model": "openai/gpt-x"}}}}), encoding="utf-8")
         self.httpd = server.make_server(
             0, graph_dir=self.dir / "graphs", cwd=self.dir, session="ses_root", web_dir=self.dir,
             structure_dir=self.dir / "structure", skills_config=self.dir / "preset.json",

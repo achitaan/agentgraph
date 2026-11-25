@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PAGE = (ROOT / "agentgraph" / "web" / "index.html").read_text()
-SERVER = (ROOT / "agentgraph" / "server.py").read_text()
+PAGE = (ROOT / "agentgraph" / "web" / "index.html").read_text(encoding="utf-8")
+SERVER = (ROOT / "agentgraph" / "server.py").read_text(encoding="utf-8")
 WIRED = {"flow": "/api/structure/flow", "skills": "/api/skills", "roster": "/api/roster",
          "skillfile": "/api/skillfile", "team": "/api/structure/team",
          "output": "/api/output"}
