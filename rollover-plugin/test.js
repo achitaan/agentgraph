@@ -147,6 +147,7 @@ async function harness(settings, { build, leads = "true", from = null, rawSettin
     const t0 = Date.now(); while (Date.now() < t0 + (IS_WIN ? 25 : 1)) { /* the notes get a later millisecond than every event before them (the plugin compares whole milliseconds); a Windows file's time can trail the clock by a few milliseconds, so a little more */ }
     const f = h.notesPath(sid); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, body !== null ? body : size <= 5 ? "notes".padEnd(size, " ") : topical(size));
     if (ageSeconds) { const t = (Date.now() - ageSeconds * 1000) / 1000; fs.utimesSync(f, t, t); }
+    const t1 = Date.now(); while (Date.now() < t1 + (IS_WIN ? 25 : 1)) { /* and the next event gets a later millisecond than the notes */ }
   };
   h.logRows = () => { try { return fs.readFileSync(path.join(home, "rollover.log"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
   h.state = (sid = main.sid) => { try { return JSON.parse(fs.readFileSync(path.join(home, "state", `${sid}.json`), "utf8")); } catch { return null; } };
