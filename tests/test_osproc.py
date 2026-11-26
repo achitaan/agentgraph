@@ -75,6 +75,27 @@ class PosixFormTests(unittest.TestCase):
         with self.assertRaises(ProcessLookupError):
             osproc.kill_group(proc.pid, force=True)
 
+    def test_kill_group_stops_a_root_whose_child_has_already_exited(self):
+        """The child ended (its parent still holds its handle): on Windows `taskkill /T` can answer 128 for such a tree whatever it did to the
+        root. The first tree is only looked at (the raw status is printed for the CI log); the second is stopped by kill_group."""
+        code = ("import subprocess, sys, time\nchild = subprocess.Popen([sys.executable, '-c', 'pass'])\nchild.wait()\n"
+                "print('ready', flush=True)\ntime.sleep(60)")
+
+        def tree():
+            proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True, **osproc.group_kwargs())
+            self.addCleanup(lambda: (proc.poll() is None and proc.kill(), proc.wait(), proc.stdout.close()))
+            self.assertEqual(proc.stdout.readline().strip(), "ready")
+            return proc
+        if os.name == "nt":
+            raw = tree()
+            seen = subprocess.run(["taskkill", "/T", "/F", "/PID", str(raw.pid)], capture_output=True, text=True)
+            print(f"taskkill diagnostics: /T /F on a root with an exited child: status {seen.returncode} stdout {seen.stdout.strip()!r} "
+                  f"stderr {seen.stderr.strip()!r} root alive afterwards {osproc.is_alive(raw.pid)}", file=sys.stderr)
+        proc = tree()
+        osproc.kill_group(proc.pid, force=True)
+        proc.wait(timeout=10)
+        self.assertFalse(osproc.is_alive(proc.pid))
+
     @posix_only
     def test_kill_group_force_sends_sigkill(self):
         proc = subprocess.Popen([sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"],
