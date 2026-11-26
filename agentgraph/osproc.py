@@ -43,8 +43,10 @@ from typing import NamedTuple
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
-# `taskkill` exit status for "no such process"; anything else that is not 0 is a refusal (access denied, or "only /F will do").
+# `taskkill` exit status for "not found": the root is not there, or (with /T) a member of the tree was gone when it came to it, which says
+# nothing about the root. Anything else that is not 0 is a refusal (access denied, or "only /F will do").
 TASKKILL_NOT_FOUND = 128
+TASKKILL_TRIES = 4  # one `kill_group` step asks taskkill this often while the root still runs
 # GetExitCodeProcess answers this while the process is still running.
 STILL_ACTIVE = 259
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -155,26 +157,49 @@ def base_env_names(windows=None) -> tuple:
 
 # ---- stopping children ----
 
-def kill_group(pid: int, force: bool = False, *, windows=None, runner=None) -> None:
+class StillRunning(PermissionError):
+    """`kill_group` on Windows: taskkill answered "not found" (128) and the root is still running, so the step did not end it (and did not
+    refuse it either). A PermissionError for every caller that ignores that; `stop_family` waits for the root after it, as it did when this
+    was a ProcessLookupError."""
+
+
+def kill_group(pid: int, force: bool = False, *, windows=None, runner=None, alive=None, sleep=time.sleep) -> None:
     """One step of stopping the group (tree) led by `pid`. POSIX: `os.killpg(pid, SIGKILL if force else SIGTERM)`, raising what it raises.
-    Windows: `taskkill /T [/F] /PID pid`; a non-zero status becomes ProcessLookupError (no such process) or PermissionError (refused),
-    so a caller that ignores those two for killpg ignores them here. Without /F, taskkill asks windowed programs to close and refuses a
-    console program ("can only be terminated forcefully"); the forced step is the one that always works."""
+    Windows: `taskkill /T [/F] /PID pid`; a failure becomes ProcessLookupError (the root was not running) or PermissionError (refused, or
+    still running after a few tries), so a caller that ignores those two for killpg ignores them here. Without /F, taskkill asks windowed
+    programs to close and refuses a console program ("can only be terminated forcefully"); the forced step is the one that always works.
+    taskkill answers 128 ("not found") also when only a MEMBER of the tree exited while it was walking the tree, and the root can have been
+    stopped by that very call, so 128 is never taken at its word: the root itself is asked (`alive`, default `is_alive`, the process handle).
+    A forced step's 128 with the root still running is tried again (a few tries, a short pause); a polite step is asked once (it cannot
+    end a console program anyway, and the caller goes on to the forced step); with the root gone a 128 is a normal return when the root
+    was running when this call began (the step ended it) and ProcessLookupError when it was not. A forced step that fails for another
+    reason is tried once more too; when the second try finds the root gone it returns normally, which does not tell whether a member that
+    refused to die is left (taskkill does not say which one)."""
     if not _win(windows):
         os.killpg(pid, signal.SIGKILL if force else signal.SIGTERM)
         return
     argv = ["taskkill", "/T", *(["/F"] if force else []), "/PID", str(int(pid))]
-    done = _run(runner)(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if done.returncode == TASKKILL_NOT_FOUND:
-        raise ProcessLookupError(pid)
-    if done.returncode != 0 and force:
-        # taskkill also fails (255) when a member of the tree exits while it is being stopped: look once more before calling it refused
-        time.sleep(0.2)
-        done = _run(runner)(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if done.returncode == TASKKILL_NOT_FOUND:
-            return  # gone by now: the first step did stop it
-    if done.returncode != 0:
-        raise PermissionError(f"taskkill refused to stop {pid} (status {done.returncode})")
+    check = alive or (lambda p: is_alive(p, windows=True, runner=runner))
+    existed = check(pid)
+    code = 0
+    for attempt in range(TASKKILL_TRIES):
+        code = _run(runner)(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+        if code == 0:
+            return
+        if code == TASKKILL_NOT_FOUND and not check(pid):
+            if existed or attempt:
+                return  # the root was running and is not now: this step (or the one before it) stopped it
+            raise ProcessLookupError(pid)
+        if not force:
+            tries = attempt + 1
+            break  # a polite step that did not end it: asking again changes nothing, the forced step is next
+        if attempt + 1 < TASKKILL_TRIES:
+            sleep(0.2)  # a member of the tree exited while it was being stopped: look once more
+    else:
+        tries = TASKKILL_TRIES
+    if code == TASKKILL_NOT_FOUND:
+        raise StillRunning(f"taskkill could not stop {pid}: it still runs after {tries} {'try' if tries == 1 else 'tries'} (status {code})")
+    raise PermissionError(f"taskkill refused to stop {pid} (status {code})")
 
 
 def stop_tree(pid: int, *, grace: float = 2.0, windows=None, runner=None, alive=None, sleep=time.sleep, clock=time.monotonic) -> bool:
@@ -182,7 +207,7 @@ def stop_tree(pid: int, *, grace: float = 2.0, windows=None, runner=None, alive=
     check = alive or (lambda p: is_alive(p, windows=windows, runner=runner))
     for force in (False, True):
         try:
-            kill_group(pid, force, windows=windows, runner=runner)
+            kill_group(pid, force, windows=windows, runner=runner, alive=check, sleep=sleep)
         except (ProcessLookupError, PermissionError):
             pass
         deadline = clock() + grace
@@ -195,16 +220,16 @@ def stop_tree(pid: int, *, grace: float = 2.0, windows=None, runner=None, alive=
     return not check(pid)
 
 
-def stop_family(proc: subprocess.Popen, *, windows=None, runner=None, listing=None) -> None:
+def stop_family(proc: subprocess.Popen, *, windows=None, runner=None, listing=None, alive=None) -> None:
     """Stop the process we started and its descendants (a standalone server is one), nothing else. POSIX: SIGTERM, then SIGKILL, to each
     pid found through `ps`, two seconds' wait on `proc` after each. Windows: `taskkill /T` then `taskkill /T /F` on proc.pid, which
     takes the tree with it, with the same waits."""
     if _win(windows):
         for force in (False, True):
             try:
-                kill_group(proc.pid, force, windows=True, runner=runner)
-            except ProcessLookupError:
-                pass
+                kill_group(proc.pid, force, windows=True, runner=runner, alive=alive)
+            except (ProcessLookupError, StillRunning):
+                pass  # taskkill found nothing to stop (128): the root may be ending by itself, so wait for it as for any other step
             except PermissionError:
                 if not force:
                     continue  # taskkill refused the polite step (a console program only ends by force): waiting two seconds would change nothing

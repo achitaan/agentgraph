@@ -75,6 +75,27 @@ class PosixFormTests(unittest.TestCase):
         with self.assertRaises(ProcessLookupError):
             osproc.kill_group(proc.pid, force=True)
 
+    def test_kill_group_stops_a_root_whose_child_has_already_exited(self):
+        """The child ended (its parent still holds its handle): on Windows `taskkill /T` can answer 128 for such a tree whatever it did to the
+        root. The first tree is only looked at (the raw status is printed for the CI log); the second is stopped by kill_group."""
+        code = ("import subprocess, sys, time\nchild = subprocess.Popen([sys.executable, '-c', 'pass'])\nchild.wait()\n"
+                "print('ready', flush=True)\ntime.sleep(60)")
+
+        def tree():
+            proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True, **osproc.group_kwargs())
+            self.addCleanup(lambda: (proc.poll() is None and proc.kill(), proc.wait(), proc.stdout.close()))
+            self.assertEqual(proc.stdout.readline().strip(), "ready")
+            return proc
+        if os.name == "nt":
+            raw = tree()
+            seen = subprocess.run(["taskkill", "/T", "/F", "/PID", str(raw.pid)], capture_output=True, text=True)
+            print(f"taskkill diagnostics: /T /F on a root with an exited child: status {seen.returncode} stdout {seen.stdout.strip()!r} "
+                  f"stderr {seen.stderr.strip()!r} root alive afterwards {osproc.is_alive(raw.pid)}", file=sys.stderr)
+        proc = tree()
+        osproc.kill_group(proc.pid, force=True)
+        proc.wait(timeout=10)
+        self.assertFalse(osproc.is_alive(proc.pid))
+
     @posix_only
     def test_kill_group_force_sends_sigkill(self):
         proc = subprocess.Popen([sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"],
@@ -157,21 +178,76 @@ class WindowsFormTests(unittest.TestCase):
 
     def test_kill_group_command_lines(self):
         run = FakeRunner()
-        osproc.kill_group(42, windows=True, runner=run)
-        osproc.kill_group(42, True, windows=True, runner=run)
+        osproc.kill_group(42, windows=True, runner=run, alive=lambda pid: True)
+        osproc.kill_group(42, True, windows=True, runner=run, alive=lambda pid: True)
         self.assertEqual([c[0] for c in run.calls], [["taskkill", "/T", "/PID", "42"], ["taskkill", "/T", "/F", "/PID", "42"]])
 
     def test_kill_group_status_maps_to_the_two_errors_callers_ignore(self):
-        with self.assertRaises(ProcessLookupError):
-            osproc.kill_group(42, windows=True, runner=FakeRunner(done(128)))
+        with self.assertRaises(ProcessLookupError):  # 128 and the root is not running (and was not when it began)
+            osproc.kill_group(42, windows=True, runner=FakeRunner(done(128)), alive=lambda pid: False)
         with self.assertRaises(PermissionError):
-            osproc.kill_group(42, windows=True, runner=FakeRunner(done(1)))
+            osproc.kill_group(42, windows=True, runner=FakeRunner(done(1)), alive=lambda pid: True)
+
+    def test_kill_group_128_with_the_root_gone_is_not_found_only_if_it_was_not_there_to_begin_with(self):
+        run = FakeRunner(done(128))
+        with self.assertRaises(ProcessLookupError):
+            osproc.kill_group(42, True, windows=True, runner=run, alive=lambda pid: False)
+        self.assertEqual(len(run.calls), 1)  # nothing to look again for
+
+    def test_kill_group_128_with_the_root_alive_is_asked_again_and_then_succeeds(self):
+        run, pauses = FakeRunner(done(128), done(0)), []
+        osproc.kill_group(42, True, windows=True, runner=run, alive=lambda pid: True, sleep=pauses.append)
+        self.assertEqual(len(run.calls), 2)
+        self.assertEqual(len(pauses), 1)
+
+    def test_kill_group_128_with_the_root_alive_then_gone_means_this_step_stopped_it(self):
+        # taskkill /T found a member of the tree already gone (128) after it had stopped the root: the root was running when we began
+        run, states = FakeRunner(done(128)), iter([True, False])
+        osproc.kill_group(42, True, windows=True, runner=run, alive=lambda pid: next(states), sleep=lambda s: None)
+        self.assertEqual(len(run.calls), 1)
+        run, states = FakeRunner(done(128), done(128)), iter([True, True, False])  # the root still showed as running; the next try finds it gone
+        osproc.kill_group(42, True, windows=True, runner=run, alive=lambda pid: next(states), sleep=lambda s: None)
+        self.assertEqual(len(run.calls), 2)
+
+    def test_kill_group_128_again_and_again_with_the_root_alive_is_refused_not_not_found(self):
+        run, pauses = FakeRunner(*[done(128)] * 10), []
+        with self.assertRaises(PermissionError) as caught:
+            osproc.kill_group(42, True, windows=True, runner=run, alive=lambda pid: True, sleep=pauses.append)
+        self.assertEqual(len(run.calls), osproc.TASKKILL_TRIES)
+        self.assertEqual(len(pauses), osproc.TASKKILL_TRIES - 1)
+        self.assertIn("still runs", str(caught.exception))
+        self.assertNotIsInstance(caught.exception, ProcessLookupError)
+
+    def test_kill_group_a_polite_128_with_the_root_alive_is_asked_once_and_is_not_not_found(self):
+        # a polite step that did not end the root is followed by the forced step: it is not repeated (that only delays the forced step)
+        run, pauses = FakeRunner(*[done(128)] * 10), []
+        with self.assertRaises(PermissionError) as caught:
+            osproc.kill_group(42, windows=True, runner=run, alive=lambda pid: True, sleep=pauses.append)
+        self.assertEqual((len(run.calls), pauses), (1, []))
+        self.assertNotIsInstance(caught.exception, ProcessLookupError)
+
+    def test_kill_group_a_polite_refusal_is_not_repeated_a_forced_one_is_tried_once_more(self):
+        run = FakeRunner(done(1))
+        with self.assertRaises(PermissionError):
+            osproc.kill_group(42, windows=True, runner=run, alive=lambda pid: True, sleep=lambda s: None)
+        self.assertEqual(len(run.calls), 1)
+        run = FakeRunner(done(255), done(0))
+        osproc.kill_group(42, True, windows=True, runner=run, alive=lambda pid: True, sleep=lambda s: None)
+        self.assertEqual(len(run.calls), 2)
+        run = FakeRunner(done(255), done(128))  # the root went with the second look
+        states = iter([True, False])
+        osproc.kill_group(42, True, windows=True, runner=run, alive=lambda pid: next(states), sleep=lambda s: None)
+
+    def test_kill_group_asks_the_real_aliveness_check_when_none_is_given(self):
+        run = FakeRunner(done(128), done(128))
+        with mock.patch.object(osproc, "is_alive", side_effect=[True, False]) as asked:
+            osproc.kill_group(42, True, windows=True, runner=run)
+        self.assertEqual([c.args for c in asked.call_args_list], [(42,), (42,)])
 
     def test_stop_tree_is_polite_then_forced(self):
         run = FakeRunner()
-        states = iter([True, True, True, False])  # alive after the polite step until the deadline, then gone after force
         clock = iter(range(0, 100))
-        result = osproc.stop_tree(7, grace=2, windows=True, runner=run, alive=lambda pid: next(states),
+        result = osproc.stop_tree(7, grace=2, windows=True, runner=run, alive=lambda pid: len(run.calls) < 2,  # alive until the forced step is taken
                                   sleep=lambda s: None, clock=lambda: next(clock))
         self.assertTrue(result)
         self.assertEqual([c[0] for c in run.calls], [["taskkill", "/T", "/PID", "7"], ["taskkill", "/T", "/F", "/PID", "7"]])
@@ -185,8 +261,32 @@ class WindowsFormTests(unittest.TestCase):
         run = FakeRunner()
         proc = mock.Mock(pid=9)
         proc.wait.side_effect = [subprocess.TimeoutExpired("x", 2), 0]
-        osproc.stop_family(proc, windows=True, runner=run)
+        osproc.stop_family(proc, windows=True, runner=run, alive=lambda pid: True)
         self.assertEqual([c[0] for c in run.calls], [["taskkill", "/T", "/PID", "9"], ["taskkill", "/T", "/F", "/PID", "9"]])
+
+    def test_stop_family_gives_the_root_its_wait_after_a_polite_step_that_found_nothing_to_stop(self):
+        # taskkill answers 128 (not found) for a console tree whose root runs: the root may be ending by itself, as before the 128 was looked at
+        run = FakeRunner(done(128), done(0))
+        proc = mock.Mock(pid=9)
+        proc.wait.side_effect = [0]
+        osproc.stop_family(proc, windows=True, runner=run, alive=lambda pid: True)
+        self.assertEqual([c[0] for c in run.calls], [["taskkill", "/T", "/PID", "9"]])  # it ended in the wait: no forced step
+        proc.wait.assert_called_once_with(timeout=2)
+
+    def test_stop_family_does_not_wait_after_a_polite_step_that_was_refused(self):
+        run = FakeRunner(done(255), done(0))
+        proc = mock.Mock(pid=9)
+        proc.wait.side_effect = [0]
+        osproc.stop_family(proc, windows=True, runner=run, alive=lambda pid: True)
+        self.assertEqual([c[0] for c in run.calls], [["taskkill", "/T", "/PID", "9"], ["taskkill", "/T", "/F", "/PID", "9"]])
+        proc.wait.assert_called_once_with(timeout=2)  # only after the forced step
+
+    def test_kill_group_says_still_running_for_a_128_with_the_root_alive(self):
+        with self.assertRaises(osproc.StillRunning):
+            osproc.kill_group(42, windows=True, runner=FakeRunner(done(128)), alive=lambda pid: True)
+        with self.assertRaises(PermissionError) as caught:
+            osproc.kill_group(42, windows=True, runner=FakeRunner(done(1)), alive=lambda pid: True)
+        self.assertNotIsInstance(caught.exception, osproc.StillRunning)
 
     def test_list_processes_command_line(self):
         run = FakeRunner(done(0, json.dumps([{"ProcessId": 4, "ParentProcessId": 0, "CommandLine": None}])))

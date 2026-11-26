@@ -285,6 +285,7 @@ class Both:
                     seen.add(target.read_bytes())
                 except FileNotFoundError:
                     seen.add(None)
+                time.sleep(0.001)  # Windows: a file read without delete sharing cannot be replaced while it is open; a reader that is never closed starves the replace past its retries
 
         reader = threading.Thread(target=read)
         reader.start()
