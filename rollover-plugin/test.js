@@ -920,6 +920,7 @@ const cases = {
     const folder = path.join(h.work, ".opencode", "mine", "deep");
     assert.ok(h.calls.synthetic[0].text.includes(path.join(folder, `${h.sid}.md`)));
     assert.equal(fs.readFileSync(path.join(folder, ".gitignore"), "utf8"), "*\n"); assert.ok(!fs.existsSync(path.join(h.work, ".opencode", "handoff")));
+    await sleep(30);   // the notes must be newer than the events before them, by more than a file clock's tick
     fs.mkdirSync(folder, { recursive: true }); fs.writeFileSync(path.join(folder, `${h.sid}.md`), "notes"); await h.step(117000);
     assert.equal(h.calls.compact.length, 1); await h.hook(); assert.match(h.buildArgs()[0], /--notes-dir \.opencode\/mine\/deep /); assert.ok(!h.has("settings_invalid")); h.stop();
   },

@@ -6785,6 +6785,7 @@ test("side chat panel: the row is selectable; its chat is read from sidechat.ses
   const c = await chatPanel({ size: [80, 38], doc: sideDoc(), feeds: { ses_demoside: { items: [{ kind: "user", text: "what is n6 doing?", time: 1 }, { kind: "text", text: "It retries on a higher tier.", time: 2 }], busy: false } } });
   try {
     await sideSelect(c);
+    await waitFor(() => chatSessions().includes("ses_demoside"), 5000, "the side chat's session is read");
     await c.settle(1);
     assert.ok(chatSessions().includes("ses_demoside"));
     assert.ok(c.lines().some((l) => l.startsWith(" transcript · side chat")), c.lines().join("\n"));

@@ -1488,8 +1488,9 @@ def _exit_on_signal(signum, _frame):
 
 
 def main():
-    for sig in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, _exit_on_signal)
+    for name in ("SIGTERM", "SIGHUP"):  # Windows has no SIGHUP
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), _exit_on_signal)
     parser = argparse.ArgumentParser()
     parser.add_argument("--size", default="160x45")
     parser.add_argument("--binary", default=os.environ.get("OPENCODE_CLI", DEFAULT_BINARY))
