@@ -264,6 +264,30 @@ class WindowsFormTests(unittest.TestCase):
         osproc.stop_family(proc, windows=True, runner=run, alive=lambda pid: True)
         self.assertEqual([c[0] for c in run.calls], [["taskkill", "/T", "/PID", "9"], ["taskkill", "/T", "/F", "/PID", "9"]])
 
+    def test_stop_family_gives_the_root_its_wait_after_a_polite_step_that_found_nothing_to_stop(self):
+        # taskkill answers 128 (not found) for a console tree whose root runs: the root may be ending by itself, as before the 128 was looked at
+        run = FakeRunner(done(128), done(0))
+        proc = mock.Mock(pid=9)
+        proc.wait.side_effect = [0]
+        osproc.stop_family(proc, windows=True, runner=run, alive=lambda pid: True)
+        self.assertEqual([c[0] for c in run.calls], [["taskkill", "/T", "/PID", "9"]])  # it ended in the wait: no forced step
+        proc.wait.assert_called_once_with(timeout=2)
+
+    def test_stop_family_does_not_wait_after_a_polite_step_that_was_refused(self):
+        run = FakeRunner(done(255), done(0))
+        proc = mock.Mock(pid=9)
+        proc.wait.side_effect = [0]
+        osproc.stop_family(proc, windows=True, runner=run, alive=lambda pid: True)
+        self.assertEqual([c[0] for c in run.calls], [["taskkill", "/T", "/PID", "9"], ["taskkill", "/T", "/F", "/PID", "9"]])
+        proc.wait.assert_called_once_with(timeout=2)  # only after the forced step
+
+    def test_kill_group_says_still_running_for_a_128_with_the_root_alive(self):
+        with self.assertRaises(osproc.StillRunning):
+            osproc.kill_group(42, windows=True, runner=FakeRunner(done(128)), alive=lambda pid: True)
+        with self.assertRaises(PermissionError) as caught:
+            osproc.kill_group(42, windows=True, runner=FakeRunner(done(1)), alive=lambda pid: True)
+        self.assertNotIsInstance(caught.exception, osproc.StillRunning)
+
     def test_list_processes_command_line(self):
         run = FakeRunner(done(0, json.dumps([{"ProcessId": 4, "ParentProcessId": 0, "CommandLine": None}])))
         rows = osproc.list_processes(windows=True, runner=run)

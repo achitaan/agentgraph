@@ -157,6 +157,12 @@ def base_env_names(windows=None) -> tuple:
 
 # ---- stopping children ----
 
+class StillRunning(PermissionError):
+    """`kill_group` on Windows: taskkill answered "not found" (128) and the root is still running, so the step did not end it (and did not
+    refuse it either). A PermissionError for every caller that ignores that; `stop_family` waits for the root after it, as it did when this
+    was a ProcessLookupError."""
+
+
 def kill_group(pid: int, force: bool = False, *, windows=None, runner=None, alive=None, sleep=time.sleep) -> None:
     """One step of stopping the group (tree) led by `pid`. POSIX: `os.killpg(pid, SIGKILL if force else SIGTERM)`, raising what it raises.
     Windows: `taskkill /T [/F] /PID pid`; a failure becomes ProcessLookupError (the root was not running) or PermissionError (refused, or
@@ -192,7 +198,7 @@ def kill_group(pid: int, force: bool = False, *, windows=None, runner=None, aliv
     else:
         tries = TASKKILL_TRIES
     if code == TASKKILL_NOT_FOUND:
-        raise PermissionError(f"taskkill could not stop {pid}: it still runs after {tries} {'try' if tries == 1 else 'tries'} (status {code})")
+        raise StillRunning(f"taskkill could not stop {pid}: it still runs after {tries} {'try' if tries == 1 else 'tries'} (status {code})")
     raise PermissionError(f"taskkill refused to stop {pid} (status {code})")
 
 
@@ -222,8 +228,8 @@ def stop_family(proc: subprocess.Popen, *, windows=None, runner=None, listing=No
         for force in (False, True):
             try:
                 kill_group(proc.pid, force, windows=True, runner=runner, alive=alive)
-            except ProcessLookupError:
-                pass
+            except (ProcessLookupError, StillRunning):
+                pass  # taskkill found nothing to stop (128): the root may be ending by itself, so wait for it as for any other step
             except PermissionError:
                 if not force:
                     continue  # taskkill refused the polite step (a console program only ends by force): waiting two seconds would change nothing
