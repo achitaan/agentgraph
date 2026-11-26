@@ -100,19 +100,23 @@ The `g` key (orbit or list):
                     2D/3D, `g` the view, `R` close with `q` and open the panel again with /graph.
 """
 import argparse
-import fcntl
 import json
 import os
-import pty
 import re
 import select
 import signal
 import struct
 import subprocess
-import tempfile
 import sys
-import termios
+import tempfile
 import time
+
+try:  # a real terminal for the app: Unix only; --selftest needs none of it and runs everywhere
+    import fcntl
+    import pty
+    import termios
+except ImportError:
+    fcntl = pty = termios = None
 
 DEFAULT_BINARY = "/Applications/OpenCode.app/Contents/Resources/opencode-cli"
 SCRATCH = os.path.join(os.environ.get("TMPDIR_OPENCODE") or tempfile.gettempdir(), "tui-real")
@@ -1512,6 +1516,9 @@ def main():
     args = parser.parse_args()
     if args.selftest:
         return selftest()
+    if pty is None:
+        print("real-host.py: driving the real app needs a Unix terminal (pty); only --selftest runs on this system", file=sys.stderr)
+        return 2
     why = refuse(args.demo, args.dialog, any(a == "--session" or a.startswith("--session=") for a in sys.argv[1:]))
     if not why and (args.paths or args.live_paths) and (args.paths and args.live_paths or args.demo or args.dialog or args.open
                                                          or args.gcheck or args.fullscreen or args.view3d):

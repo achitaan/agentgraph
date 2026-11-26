@@ -136,7 +136,7 @@ async function harness(settings, { build, leads = "true", from = null, rawSettin
   // size 5: "notes" (a lane's); bigger: text of that many characters that names the topics of the chat floor; `body` overrides the text
   const topical = (size) => "Objective: x. Requirements and limits: y. Decisions: z. Work state: done. Next steps: a. Files: b. ".repeat(Math.ceil(size / 100)).slice(0, size);
   h.notes = (sid = main.sid, ageSeconds = 0, size = 5, body = null) => {
-    const t0 = Date.now(); while (Date.now() === t0) { /* the notes get a later millisecond than every event before them (the plugin compares whole milliseconds) */ }
+    const t0 = Date.now(); while (Date.now() < t0 + (IS_WIN ? 25 : 1)) { /* the notes get a later millisecond than every event before them (the plugin compares whole milliseconds); a Windows file's time can trail the clock by a few milliseconds, so a little more */ }
     const f = h.notesPath(sid); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, body !== null ? body : size <= 5 ? "notes".padEnd(size, " ") : topical(size));
     if (ageSeconds) { const t = (Date.now() - ageSeconds * 1000) / 1000; fs.utimesSync(f, t, t); }
   };
