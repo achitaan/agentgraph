@@ -21,7 +21,7 @@ from unittest import mock
 
 from tests.detached import reap_detached
 from agentgraph import looprun, osfs, osproc
-from tests.shellskip import CHECK_SECOND, sh_or
+from tests.shellskip import CHECK_SECOND, python_command, sh_or
 from tests.winskip import WINDOWS, needs_symlinks
 REPO = Path(__file__).resolve().parent.parent
 PASS = "Looks right to me.\nVERDICT: PASS"
@@ -1708,8 +1708,9 @@ class CancelWhilePausingTests(Base):
 class CancelInCheckTests(Base):
     def test_f10_cancel_during_a_check_stops_its_process_group_and_ends_cancelled(self):
         where = self.tmp.as_posix()
-        self.save(check=sh_or(f"echo $$ > {where}/pid; sleep 60; exit 1",
-                              f"import os, time; open('{where}/pid', 'w').write(str(os.getpid())); time.sleep(60)"))
+        in_python = f"import os, time; open('{where}/pid', 'w').write(str(os.getpid())); time.sleep(60)"
+        # the Git sh's `$$` is not a Windows process number, so on Windows the process that writes its own number is Python (sh or no sh)
+        self.save(check=python_command(in_python) if WINDOWS else sh_or(f"echo $$ > {where}/pid; sleep 60; exit 1", in_python))
         executor = self.executor()
         box = {}
 

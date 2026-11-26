@@ -521,6 +521,7 @@ class Links(Base):
         self.assertFalse(outside.exists())
         self.assertGreaterEqual(self.result()[0]["symlinks_left_out"], 1)
 
+    @posix_only  # on Windows the system's own `realpath` folds a `..` after a link into the text: the reason the walk is used there at all
     @needs_symlinks
     def test_the_walk_that_judges_links_agrees_with_the_system_one(self):
         """`_physical` is what decides on Windows; here it must give the real path the system gives (a `..` after a link goes past the link's target)."""
