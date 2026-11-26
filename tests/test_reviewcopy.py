@@ -511,7 +511,8 @@ class Links(Base):
         os.symlink("..", self.project / "d" / "up")  # points at the project root: stays inside
         os.symlink("d/up/d/up/../../..", self.project / "q")  # each step looks fine alone; the whole way leaves the copy
         if WINDOWS:  # the Git sh does not know a Windows symlink as a link (`test -L`), so Python looks at the same three things
-            looks = python_command(f"import os, sys; sys.exit(0 if not os.path.exists('{outside.as_posix()}') and not os.path.islink('q') and os.path.islink('d/up') else 1)")
+            looks = python_command(f"import os, sys; seen = (os.path.exists('{outside.as_posix()}'), os.path.islink('q'), os.path.islink('d/up'), sorted(os.listdir('d')), sorted(os.listdir('.'))); "
+                                   "print('outside, q, d/up, d, root:', seen); sys.exit(0 if seen[:3] == (False, False, True) else 1)")
             self.write(graph(check=f"echo hacked > q/pwn 2>/dev/null; {looks}"))
         else:
             self.write(graph(check=f"echo hacked > q/pwn 2>/dev/null; test ! -e '{outside}' && test ! -L q && test -L d/up"))

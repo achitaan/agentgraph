@@ -114,6 +114,10 @@ class Base(unittest.TestCase):
         for name in ("node.log", "run.log"):
             with contextlib.suppress(OSError):
                 parts.append(f"{name}: " + (run / name).read_bytes().decode("utf-8", "replace")[-1500:])
+        with contextlib.suppress(Exception):
+            state = looprun.read_run(run)
+            parts.append(f"files={sorted(os.listdir(run))} status={state.get('status')} pid={state.get('pid')} heartbeat_age="
+                         f"{time.time() - (state.get('heartbeat') or 0):.1f}s attempts={len(state.get('attempts') or [])}")
         return "\n".join(parts) + f"\nheld={looprun._held(run)}"
 
     def runs(self):
@@ -1189,7 +1193,7 @@ class SecondController(Base):
         graphedit = noderun.graphedit
         graphedit.edit(TASK, "n1", {"status": "blocked", "note": "the orchestrator took the node"}, dirs=[self.directory])
         message = self.refused(check=TRUE, cost=1)  # the node says blocked, but the run is still going
-        self.assertIn("is still going", message)
+        self.assertIn("is still going", message + f"\n[held {[looprun._held(run) for _ in range(10)]}]\n{self.logs(run)}")
         self.assertIn(run.name, message)
         self.assertEqual(self.runs(), [run])
         self.assertTrue(self.wait_until(lambda: looprun.read_run(run)["status"] in looprun.FINAL), "the run was not cancelled")
@@ -1199,7 +1203,7 @@ class SecondController(Base):
         text = (self.project / noderun.report_path(TASK, "n1", run.name)).read_text()
         self.assertIn("no longer belongs to this run", text)
         self.assertIn("asked to stop", text)
-        run_id, line, _ = self.run_node([{}, {}, {}])  # and now it is final: a new run is allowed
+        run_id, line, _ = self.run_node([{}, {}, {}], attempts=5, raise_budget=True)  # and now it is final: a new run is allowed (the cancelled run may have used a round)
         self.assertEqual(self.node()["status"], "returned", {k: v for k, v in self.node().items() if k in ("attempts", "spent", "evidence", "note", "budget")})
 
     def test_a_queued_run_that_a_controller_may_still_take_blocks_a_new_one(self):
