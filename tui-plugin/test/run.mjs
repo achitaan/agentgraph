@@ -867,7 +867,7 @@ test("options on Unix: a python3 older than 3.11 is passed over; a probe that fa
   const probed = [];
   const exec = (file, args, opts) => {
     probed.push(file);
-    assert.equal(args[0], "-c");
+    assert.deepEqual(args.slice(0, 2), ["-I", "-c"], "isolated mode");
     assert.ok(opts.timeout > 0 && opts.timeout <= 5000, "a short time limit");
     const what = files[file];
     if (what === "hangs") throw Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" });
@@ -882,14 +882,37 @@ test("options on Unix: a python3 older than 3.11 is passed over; a probe that fa
   assert.equal(resolve("/old:/new:/v"), "/new/python3", "plain python3 on PATH that is new enough comes before any versioned name");
   assert.equal(resolve("/v"), "/v/python3.13", "python3.13 comes before python3.11");
   assert.equal(resolve("/bad:/hang:/mute:/odd:/new"), "/new/python3", "a probe that throws, times out, prints nothing or throws a string is skipped");
-  assert.equal(resolve("/bad:/hang:/mute:/odd"), "python3", "no candidate answers: plain python3 (the runner then asks for options.python)");
+  assert.equal(resolve("/bad:/hang:/mute:/odd"), "/bad/python3", "no candidate answers: the first executable python3 (the runner then reports its version)");
   files["/old/python3.12"] = "3.9";
-  assert.equal(resolve("/old"), "python3", "only old ones: the fallback");
+  assert.equal(resolve("/old"), "/old/python3", "only old ones: the first executable python3");
+  assert.equal(resolve("/nothing"), "python3", "no executable python3 at all: plain python3 (the runner then asks for options.python)");
   files["/old/python3.12"] = "3.12";
   probed.length = 0;
   const never = () => { throw new Error("no probe when python is given"); };
   assert.equal(resolve("/old:/new", { python: "/custom/python3" }, never), "/custom/python3", "options.python wins untouched");
   assert.deepEqual(probed, []);
+});
+
+test("options on Unix: probing stops when the time budget is used up and the first executable python3 is returned", () => {
+  const files = new Set(["/a/python3", "/b/python3", "/c/python3", "/c/python3.12"]);
+  const fake = {
+    constants: fs.constants,
+    statSync: (file) => { if (!files.has(file)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); return { isFile: () => true }; },
+    accessSync: () => {},
+  };
+  let time = 1000;
+  const probed = [];
+  const timeouts = [];
+  const exec = (file, args, opts) => {
+    probed.push(file);
+    timeouts.push(opts.timeout);
+    time += 3000;
+    throw Object.assign(new Error("exit 1"), { status: 1 });
+  };
+  const python = P.posixPython({ env: { PATH: "/a:/b:/c" }, fs: fake, path: path.posix, execFileSync: exec, now: () => time });
+  assert.equal(python, "/a/python3", "budget used up: the first executable python3");
+  assert.deepEqual(probed, ["/a/python3", "/b/python3"], "no probe once the budget is gone");
+  assert.deepEqual(timeouts, [P.POSIX_PROBE_BUDGET_MS, P.POSIX_PROBE_BUDGET_MS - 3000], "each probe gets only what is left");
 });
 
 // ---------------------------------------------------------------------------------------------------------------

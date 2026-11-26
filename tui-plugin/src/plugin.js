@@ -82,13 +82,18 @@ export function windowsPython(execFileSync) {
 }
 
 // Unix: the snapshot runner wants an absolute interpreter path, so the default `python3` is looked up on PATH here: the first
-// executable file of that name that answers as Python 3.11 or newer (the same probe as windowsPython; one that is too old, or
-// that fails or hangs, is passed over), then the same for python3.13, python3.12 and python3.11. Without PATH or without a hit it stays
-// plain "python3": the runner then tells the user to set options.python. Without a way to probe, the first executable python3 is taken.
+// executable file of that name that answers as Python 3.11 or newer (the same probe as windowsPython, run isolated with -I; one
+// that is too old, or that fails or hangs, is passed over), then the same for python3.13, python3.12 and python3.11. All the probing
+// together takes at most POSIX_PROBE_BUDGET_MS, so a hanging interpreter cannot hold up the terminal's start. When none qualifies,
+// the first executable python3 is kept (the runner then reports the old version); without any, plain "python3" (the runner then
+// tells the user to set options.python). Without a way to probe, the first executable python3 is taken.
 const POSIX_PYTHON_NAMES = [DEFAULT_PYTHON, "python3.13", "python3.12", "python3.11"];
-export function posixPython({ env, fs, path, execFileSync }) {
+export const POSIX_PROBE_BUDGET_MS = 5000;
+export function posixPython({ env, fs, path, execFileSync, now = Date.now }) {
   const dirs = String((env && env.PATH) || "").split(path.delimiter);
   const probe = typeof execFileSync === "function";
+  const began = now();
+  let first = "";
   for (const name of POSIX_PYTHON_NAMES) {
     for (const dir of dirs) {
       if (!dir || !path.isAbsolute(dir)) continue;
@@ -97,14 +102,17 @@ export function posixPython({ env, fs, path, execFileSync }) {
         if (!fs.statSync(file).isFile()) continue;
         fs.accessSync(file, fs.constants.X_OK);
         if (!probe) return file;
-        const out = String(execFileSync(file, ["-c", WINDOWS_PYTHON_PROBE],
-          { encoding: "utf8", timeout: 5000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }));
+        if (!first && name === DEFAULT_PYTHON) first = file;
+        const left = POSIX_PROBE_BUDGET_MS - (now() - began);
+        if (left <= 0) return first || DEFAULT_PYTHON;
+        const out = String(execFileSync(file, ["-I", "-c", WINDOWS_PYTHON_PROBE],
+          { encoding: "utf8", timeout: left, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }));
         if (out.trim()) return file;
       } catch (_) {}
     }
     if (!probe) break;
   }
-  return DEFAULT_PYTHON;
+  return first || DEFAULT_PYTHON;
 }
 
 export function resolveOptions(raw, { os, path, execFileSync, env, fs }) {

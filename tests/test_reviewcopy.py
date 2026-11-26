@@ -573,6 +573,19 @@ class Links(Base):
             self.assertTrue(_inside_copy(target / "E", target))
 
     @needs_symlinks
+    def test_links_whose_two_readings_of_dotdot_differ_are_left_out_on_windows(self):
+        """`L` is three folders down, `Y` is `L\\..`, `A` is `Y\\..\\x`: the readings give `d1\\d2` and the copy for `Y`, and differ for `A` too."""
+        target = self.base / "copy"
+        target.joinpath("d1", "d2", "d3").mkdir(parents=True)
+        links = [("L", os.sep.join(["d1", "d2", "d3"])), ("Y", os.sep.join(["L", ".."])), ("A", os.sep.join(["Y", "..", "x"]))]
+        placed, skipped = reviewcopy._place_links(links, target, folders={"L", "Y"})
+        if WINDOWS:
+            self.assertEqual(([name for name, _ in placed], skipped), (["L"], 2))
+            self.assertFalse(os.path.lexists(target / "Y") or os.path.lexists(target / "A"))
+        else:
+            self.assertEqual(([name for name, _ in placed], skipped), (["A", "L", "Y"], 0))  # the system's own resolution is exact: all three stay in
+
+    @needs_symlinks
     def test_what_the_system_does_with_dotdot_after_a_link_is_shown_for_the_record(self):
         copy = self.base / "copy"
         (copy / "a" / "b").mkdir(parents=True)
@@ -614,6 +627,23 @@ class Judging(unittest.TestCase):
         self.assertEqual(walk(True), "C:\\Data\\me\\proj")  # `L\\..` cancelled as text: eight levels above the copy
         self.assertFalse(self.windows(links, "C:\\copy\\E"))
         self.assertTrue(self.windows(links, "C:\\copy\\L"))
+
+    def test_a_link_is_outside_unless_both_readings_give_the_same_path(self):
+        """Each reading alone lands inside for `Y` and `A`, but a resolver that mixes them (walking `A`, cleaning `Y` as text) reaches the parent."""
+        links = {"C:\\copy\\L": "d1\\d2\\d3", "C:\\copy\\Y": "L\\..", "C:\\copy\\A": "Y\\..\\x"}
+        where = lambda name, collapse: reviewcopy._physical(f"C:\\copy\\{name}", windows=True, is_link=links.__contains__, read_link=links.__getitem__, collapse=collapse)
+        self.assertEqual((where("Y", False), where("Y", True)), ("C:\\copy\\d1\\d2", "C:\\copy"))
+        self.assertEqual((where("A", False), where("A", True)), ("C:\\copy\\d1\\x", "C:\\copy\\x"))
+        self.assertTrue(self.windows(links, "C:\\copy\\L"))
+        self.assertFalse(self.windows(links, "C:\\copy\\Y"))
+        self.assertFalse(self.windows(links, "C:\\copy\\A"))
+
+    def test_nothing_is_kept_when_the_copys_own_place_cannot_be_resolved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "copy"
+            target.mkdir()
+            with mock.patch.object(reviewcopy, "_real", return_value=""), mock.patch.object(os, "symlink", side_effect=AssertionError("a link was made")):
+                self.assertEqual(reviewcopy._place_links([("a", "b"), ("c/d", "..")], target), ([], 2))
 
     def test_posix_walk_follows_the_link_before_a_dotdot(self):
         links = {"/copy/L": "a/b/c/d/e/f/g/h/i", "/copy/E": "L" + "/.." * 9 + "/Data/me/proj"}

@@ -106,6 +106,62 @@ class DefaultTempFolderTests(unittest.TestCase):
             self.assertEqual(work.parent, (Path(tmp) / "opencode").resolve())
 
 
+@unittest.skipIf(WINDOWS, "POSIX only: Windows has no owner or mode bits to check, and its temp folder is the user's own")
+class TempFolderSafetyTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.system_temp = Path(tmp.name).resolve()
+        self.folder = self.system_temp / "opencode"
+
+    def test_a_missing_folder_is_made_with_mode_0700_whatever_the_umask(self):
+        old = os.umask(0)
+        try:
+            bench._ensure_temp_root(self.folder)
+        finally:
+            os.umask(old)
+        self.assertEqual(stat.S_IMODE(os.lstat(self.folder).st_mode), 0o700)
+
+    def test_a_normal_folder_of_ours_is_accepted_and_left_as_it_is(self):
+        self.folder.mkdir(mode=0o755)
+        self.folder.chmod(0o755)
+        self.assertEqual(bench._ensure_temp_root(self.folder), self.folder)
+        self.assertEqual(stat.S_IMODE(os.lstat(self.folder).st_mode), 0o755)
+
+    def test_a_link_in_its_place_is_refused(self):
+        elsewhere = self.system_temp / "elsewhere"
+        elsewhere.mkdir(mode=0o700)
+        os.symlink(elsewhere, self.folder)
+        with self.assertRaises(bench.BenchError) as raised:
+            bench._ensure_temp_root(self.folder)
+        self.assertIn(str(self.folder), str(raised.exception))
+
+    def test_a_folder_that_group_or_others_can_write_to_is_refused_not_fixed(self):
+        for mode in (0o777, 0o770, 0o707):
+            with self.subTest(mode=oct(mode)):
+                self.folder.mkdir(exist_ok=True)
+                self.folder.chmod(mode)
+                with self.assertRaises(bench.BenchError) as raised:
+                    bench._ensure_temp_root(self.folder)
+                self.assertIn(str(self.folder), str(raised.exception))
+                self.assertEqual(stat.S_IMODE(os.lstat(self.folder).st_mode), mode)
+
+    def test_a_folder_of_another_user_is_refused(self):
+        self.folder.mkdir(mode=0o700)
+        with unittest.mock.patch.object(os, "getuid", return_value=os.getuid() + 1):
+            with self.assertRaises(bench.BenchError):
+                bench._ensure_temp_root(self.folder)
+
+    def test_new_work_dir_and_a_default_scratch_use_the_check(self):
+        self.folder.mkdir(mode=0o700)
+        self.folder.chmod(0o777)
+        with unittest.mock.patch.object(bench, "TEMP_ROOT", self.folder):
+            with self.assertRaises(bench.BenchError):
+                bench.new_work_dir()
+            self.folder.chmod(0o700)
+            self.assertEqual(bench.new_work_dir().parent, self.folder)
+
+
 class ScratchConfigTests(Base):
     def test_copy_rewrites_the_live_path_and_leaves_tilde_alone(self):
         info = self.scratch()

@@ -342,6 +342,30 @@ def link_folder(link: Path, real: Path, *, windows=None, junction=None) -> None:
                          f"(it allows symlinks without administrator rights)") from exc
 
 
+def _ensure_temp_root(root: Path) -> Path:
+    """The `opencode` folder of the system temp folder, made when missing (mode 0700, whatever the umask says). On POSIX the system temp
+    folder is shared, so another user could have put a link or a folder of their own at this name, or left it open to write: refuse unless
+    it is a real folder of ours that group and others cannot write to. A folder that exists with a wider mode is refused, not fixed."""
+    if osproc.is_windows():
+        return root
+    made = False
+    try:
+        root.mkdir(parents=True, mode=0o700)
+        made = True
+    except FileExistsError:
+        pass
+    if made:
+        root.chmod(0o700)  # the umask may have widened it
+    info = os.lstat(root)
+    if not stat.S_ISDIR(info.st_mode):
+        raise BenchError(f"{root} must be a real folder, not a link or a file; move it away or use another TMPDIR")
+    if info.st_uid != os.getuid():
+        raise BenchError(f"{root} belongs to another user; use another TMPDIR")
+    if info.st_mode & 0o022:
+        raise BenchError(f"{root} can be written to by group or others (mode {stat.S_IMODE(info.st_mode):04o}); run chmod 700 on it or use another TMPDIR")
+    return root
+
+
 def _new_scratch(to, *, pin_model, live: Path, temp_root: Path | None, real_home: Path | None) -> tuple[Path, Path, Path]:
     """The checks both kinds of copy share, then the empty scratch folder with its links to the real database, state and
     cache folders: (dir, home, config)."""
@@ -357,6 +381,8 @@ def _new_scratch(to, *, pin_model, live: Path, temp_root: Path | None, real_home
         raise BenchError(f"the scratch folder must be a new folder inside {root}")
     if pin_model is not None and not MODEL.fullmatch(pin_model):
         raise BenchError("--pin-model must look like provider/model")
+    if temp_root is None:
+        _ensure_temp_root(root)
     if target.exists() and any(target.iterdir()):
         raise BenchError(f"{target} exists and is not empty; use a new folder")
     if not live.is_dir():
@@ -636,7 +662,7 @@ def _git(work: Path, *args: str) -> None:
 
 def new_work_dir() -> Path:
     """A brand-new folder of its own in the `opencode` temp folder, for one run (mode 0700); never under a scratch folder."""
-    TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+    _ensure_temp_root(TEMP_ROOT)
     return Path(tempfile.mkdtemp(prefix=WORK_PREFIX, dir=TEMP_ROOT)).resolve()
 
 

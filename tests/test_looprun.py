@@ -576,6 +576,9 @@ class RunCheckTests(unittest.TestCase):
             def adopt(self, proc):
                 raise RuntimeError("adopt failed")
 
+            def terminate(self):
+                return False
+
             def close(self):
                 Job.closed += 1
 
@@ -583,6 +586,38 @@ class RunCheckTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 looprun.run_check("exit 0", 5, tmp, dict(os.environ), Path(tmp) / "out.txt")
         self.assertEqual(Job.closed, 1)
+
+    def test_a_check_still_running_is_stopped_when_something_raises_after_it_adopted_it(self):
+        made = []
+        real_popen = looprun.subprocess.Popen
+
+        def popen(*args, **kwargs):
+            made.append(real_popen(*args, **kwargs))
+            return made[-1]
+
+        class Job:
+            def adopt(self, proc):
+                raise RuntimeError("adopt failed")
+
+            def terminate(self):
+                return False  # no job object to end it with: the plain stop has to do it
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(looprun.osproc, "Job", Job), mock.patch.object(looprun.subprocess, "Popen", popen):
+            started = time.monotonic()
+            try:
+                with self.assertRaises(RuntimeError):
+                    looprun.run_check(sleep_command(60), 120, tmp, dict(os.environ), Path(tmp) / "out.txt")
+                self.assertIsNotNone(made[0].poll(), "the check was left running")
+                self.assertLess(time.monotonic() - started, 30)
+            finally:
+                for proc in made:
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.wait()
+                    proc.stdout.close()
 
 
 class CommandTests(Base):

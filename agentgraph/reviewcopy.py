@@ -363,13 +363,14 @@ def _is_rooted(text: str, windows=None) -> bool:
 
 
 def _within(path, root: str, *, windows=None, is_link=os.path.islink, read_link=os.readlink) -> bool:
-    """Is the real path of `path` inside `root`? POSIX: the system's realpath. Windows: both ways of reading a link (see `_physical`) must say
-    inside, since it is not known which one the system takes."""
+    """Is the real path of `path` inside `root`? POSIX: the system's realpath. Windows: both ways of reading a link (see `_physical`) must
+    give the same path, and it must be inside: it is not known which one the system takes, and a resolver that takes one reading for one
+    link and the other for the next could leave the copy even when each reading alone stays in."""
     on_windows = osproc.is_windows() if windows is None else windows
     if not on_windows:
         return _inside(os.path.realpath(path), root)
-    return all(_inside(_physical(path, windows=True, is_link=is_link, read_link=read_link, collapse=collapse), root, "\\")
-               for collapse in (False, True))
+    walked = _physical(path, windows=True, is_link=is_link, read_link=read_link)
+    return walked == _physical(path, windows=True, is_link=is_link, read_link=read_link, collapse=True) and _inside(walked, root, "\\")
 
 
 def _place_links(links: list[tuple[str, str]], target: Path, folders=()) -> tuple[list[tuple[str, str]], int]:
@@ -378,6 +379,8 @@ def _place_links(links: list[tuple[str, str]], target: Path, folders=()) -> tupl
     when its real path ends up outside the copy; the last is checked after all links are made, until no link is removed.
     `folders` names the links whose source points at a folder (Windows makes a folder link differently from a file link)."""
     root = _real(target)
+    if not root:  # the copy's own place could not be resolved: nothing can be judged inside it
+        return [], len(links)
     placed: list[tuple[str, str]] = []
     skipped = 0
     for rel, text in sorted(links):

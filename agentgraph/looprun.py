@@ -800,6 +800,13 @@ def run_check(command: str, timeout, cwd, env, out_path: Path, poll=None) -> dic
         if not reader.is_alive():
             proc.stdout.close()
     finally:
+        if proc.poll() is None:  # something between adopting and here raised: do not leave the check running
+            if not job.terminate():
+                sidechat._stop(proc)
+            try:
+                osproc.kill_group(proc.pid, force=True)
+            except (ProcessLookupError, PermissionError):
+                pass
         job.close()  # also when something between adopting and here raised
     return {"exit": None if timed_out or cancelled else code, "timed_out": timed_out, "cancelled": cancelled, "seconds": time.monotonic() - started, "error": None,
             "truncated": dropped[0]}
