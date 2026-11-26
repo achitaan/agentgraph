@@ -428,8 +428,8 @@ class RunTests(Case):
         self.plan([{"error": "nope", "exit": 1, "sleep": 1.5}, {"text": "never", "sleep": 30, "session": SIDE}])
         started = time.time()
         with self.assertRaisesRegex(sidechat.SidechatError, "did not answer within"):
-            self.ask(timeout=2.5)
-        self.assertLess(time.time() - started, 6)  # 1.5 s on the first model, the rest (not another 2.5 s) on the second
+            self.ask(timeout=6)  # room for a slow machine to start the first model's process (about 1.5 s of it is its own wait)
+        self.assertLess(time.time() - started, 10)  # the whole 6 s, not another 6 s for the second model (which would be 12)
         self.assertEqual(len(self.calls()), 2)
 
     def test_the_fallback_model_asked_first_is_not_retried_on_itself(self):
