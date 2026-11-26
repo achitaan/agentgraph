@@ -164,7 +164,8 @@ def kill_group(pid: int, force: bool = False, *, windows=None, runner=None, aliv
     programs to close and refuses a console program ("can only be terminated forcefully"); the forced step is the one that always works.
     taskkill answers 128 ("not found") also when only a MEMBER of the tree exited while it was walking the tree, and the root can have been
     stopped by that very call, so 128 is never taken at its word: the root itself is asked (`alive`, default `is_alive`, the process handle).
-    A 128 with the root still running is tried again (a few tries, a short pause); with the root gone it is a normal return when the root
+    A forced step's 128 with the root still running is tried again (a few tries, a short pause); a polite step is asked once (it cannot
+    end a console program anyway, and the caller goes on to the forced step); with the root gone a 128 is a normal return when the root
     was running when this call began (the step ended it) and ProcessLookupError when it was not. A forced step that fails for another
     reason is tried once more too; when the second try finds the root gone it returns normally, which does not tell whether a member that
     refused to die is left (taskkill does not say which one)."""
@@ -183,12 +184,15 @@ def kill_group(pid: int, force: bool = False, *, windows=None, runner=None, aliv
             if existed or attempt:
                 return  # the root was running and is not now: this step (or the one before it) stopped it
             raise ProcessLookupError(pid)
-        if not (force or code == TASKKILL_NOT_FOUND):
-            break  # a polite step that was refused: asking again changes nothing
+        if not force:
+            tries = attempt + 1
+            break  # a polite step that did not end it: asking again changes nothing, the forced step is next
         if attempt + 1 < TASKKILL_TRIES:
             sleep(0.2)  # a member of the tree exited while it was being stopped: look once more
+    else:
+        tries = TASKKILL_TRIES
     if code == TASKKILL_NOT_FOUND:
-        raise PermissionError(f"taskkill could not stop {pid}: it still runs after {TASKKILL_TRIES} tries (status {code})")
+        raise PermissionError(f"taskkill could not stop {pid}: it still runs after {tries} {'try' if tries == 1 else 'tries'} (status {code})")
     raise PermissionError(f"taskkill refused to stop {pid} (status {code})")
 
 

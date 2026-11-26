@@ -447,7 +447,8 @@ class Detached(Base):
         self.assertEqual(code, 0, out.getvalue() + self.logs(self.runs()[0]))
         self.assertTrue(out.getvalue().startswith("passed-check attempts=3 cost=$0.3000"), out.getvalue())
         self.assertEqual(len(out.getvalue().splitlines()), 1)
-        self.assertEqual(self.node()["status"], "returned")
+        node = self.node()
+        self.assertEqual(node["status"], "returned", {key: node.get(key) for key in ("status", "loop_run", "note", "evidence", "attempts", "ended")})
 
 
 class FinalLineMatchesFinalRecord(Base):
@@ -487,6 +488,25 @@ class FinalLineMatchesFinalRecord(Base):
         def read_run(folder):
             reads.append(folder)
             return stale if len(reads) == 1 else real(folder)  # the first look is before the run ended
+        with mock.patch.object(looprun, "read_run", read_run):
+            line = noderun.wait(TASK, "n1", self.directory, timeout=5)
+        self.assertTrue(line.startswith("passed-check attempts=3"), line)
+        self.assertEqual(self.node()["status"], "returned")
+
+    def test_a_record_that_cannot_be_read_for_a_moment_does_not_end_the_wait_with_a_node_that_still_runs(self):
+        """The record is replaced while it is read: the first look fails, the line is made from a later look that shows the run over. The
+        node is brought up to date from a look that worked, not left running under a line that says the run passed."""
+        self.run_node([{"cost": 0.1}] * 3)
+        data = self.read()
+        data["nodes"][1].update(status="running", evidence="")
+        self.write(data)
+        real, reads = looprun.read_run, []
+
+        def read_run(folder):
+            reads.append(folder)
+            if len(reads) == 1:
+                raise looprun.LoopError("run.json is being replaced")
+            return real(folder)
         with mock.patch.object(looprun, "read_run", read_run):
             line = noderun.wait(TASK, "n1", self.directory, timeout=5)
         self.assertTrue(line.startswith("passed-check attempts=3"), line)

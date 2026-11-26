@@ -5,11 +5,31 @@ folder cannot be deleted under it. `reap_detached(self)` records the processes t
 its temporary folder is removed (call it right after the folder is made: cleanups run last in, first out), stops those still
 running and waits for them. Elsewhere it does nothing: a running process holds no file there."""
 import subprocess
-import sys
 import time
 from unittest import mock
 
 from agentgraph import osproc
+
+
+def _below(pid) -> list:
+    """The pids below `pid` now (none when the list cannot be read)."""
+    try:
+        return osproc.descendants(pid, osproc.list_processes(windows=True))
+    except Exception:
+        return []
+
+
+def _stop_all(pids) -> None:
+    """Stop what is left of these processes and wait for them to go."""
+    for pid in pids:
+        if osproc.is_alive(pid):
+            try:
+                osproc.kill_group(pid, True)
+            except (ProcessLookupError, PermissionError):
+                pass
+    deadline = time.monotonic() + 10
+    while any(osproc.is_alive(pid) for pid in pids) and time.monotonic() < deadline:
+        time.sleep(0.1)
 
 
 def reap_detached(case) -> list:
@@ -28,36 +48,20 @@ def reap_detached(case) -> list:
 
     def reap():
         patch.stop()
+        family = []
         for proc in started:
             if proc.poll() is None:
-                trace = []
-                real_kill = osproc.kill_group
-
-                def traced(pid, force=False, **kw):
-                    began = time.monotonic()
-                    try:
-                        real_kill(pid, force, **kw)
-                        trace.append(f"kill_group({pid}, force={force}) returned after {time.monotonic() - began:.2f}s")
-                    except Exception as exc:
-                        trace.append(f"kill_group({pid}, force={force}) raised {type(exc).__name__}: {exc} after {time.monotonic() - began:.2f}s")
-                        raise
+                family += _below(proc.pid)  # a shell's children (MSYS `sh -c` runs a `bash`) do not end with it, and they keep the files open
                 try:
-                    table = osproc.list_processes(windows=True)
-                    below = {proc.pid, *osproc.descendants(proc.pid, table)}
-                    family = [(row.pid, row.ppid, (row.command or "")[:60]) for row in table if row.pid in below]
-                except Exception as exc:
-                    family = f"unreadable: {exc}"
-                try:
-                    with mock.patch.object(osproc, "kill_group", traced):
-                        osproc.stop_family(proc)
+                    osproc.stop_family(proc)
                 except Exception:
                     pass
-                print(f"reap diagnostics: {proc.pid} family before {family}; {trace}; root running afterwards {proc.poll() is None}", file=sys.stderr)
         for proc in started:
             try:
                 proc.wait(15)
             except Exception:
                 pass
+        _stop_all(family)
         time.sleep(0.2)  # the system lets go of the files a moment after the process has gone
 
     case.addCleanup(reap)

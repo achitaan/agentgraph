@@ -212,10 +212,18 @@ class WindowsFormTests(unittest.TestCase):
     def test_kill_group_128_again_and_again_with_the_root_alive_is_refused_not_not_found(self):
         run, pauses = FakeRunner(*[done(128)] * 10), []
         with self.assertRaises(PermissionError) as caught:
-            osproc.kill_group(42, windows=True, runner=run, alive=lambda pid: True, sleep=pauses.append)
+            osproc.kill_group(42, True, windows=True, runner=run, alive=lambda pid: True, sleep=pauses.append)
         self.assertEqual(len(run.calls), osproc.TASKKILL_TRIES)
         self.assertEqual(len(pauses), osproc.TASKKILL_TRIES - 1)
         self.assertIn("still runs", str(caught.exception))
+        self.assertNotIsInstance(caught.exception, ProcessLookupError)
+
+    def test_kill_group_a_polite_128_with_the_root_alive_is_asked_once_and_is_not_not_found(self):
+        # a polite step that did not end the root is followed by the forced step: it is not repeated (that only delays the forced step)
+        run, pauses = FakeRunner(*[done(128)] * 10), []
+        with self.assertRaises(PermissionError) as caught:
+            osproc.kill_group(42, windows=True, runner=run, alive=lambda pid: True, sleep=pauses.append)
+        self.assertEqual((len(run.calls), pauses), (1, []))
         self.assertNotIsInstance(caught.exception, ProcessLookupError)
 
     def test_kill_group_a_polite_refusal_is_not_repeated_a_forced_one_is_tried_once_more(self):

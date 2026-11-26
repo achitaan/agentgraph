@@ -947,9 +947,10 @@ def reconcile(path, task: str, node_id: str) -> str:
     """Bring the node up to date with its run once the run is over; the status line. A node that says running while its run is final is
     ended here (a driver that was killed leaves it so); a run that is not over leaves the node as it is. A run that was not over when its
     record was read but is when the line is made is looked at once more, so the line never says a run is over while its node still says
-    running (the line and the node are one answer)."""
+    running (the line and the node are one answer). A record that could not be read for a moment (it is replaced while it is read) does
+    not count as a look at the run: the line is made again from a look that worked."""
     path = Path(path)
-    for _ in range(2):
+    for _ in range(3):
         raw = _read(path)
         node = _node_of(raw, node_id)
         run_id = node.get("loop_run")
@@ -964,8 +965,10 @@ def reconcile(path, task: str, node_id: str) -> str:
             if state and state.get("status") in looprun.FINAL and node.get("status") == "running":
                 _finish(path, project, folder, state, task, node_id, run_id)
         line = status_line(task, node_id, path=path)
-        if not state or state.get("status") in looprun.FINAL:
+        if state and state.get("status") in looprun.FINAL:
             break
+        if line.split()[0] in ("running", "blocked"):
+            break  # the line does not say the run is over: nothing to bring the node up to date with
     return line
 
 
