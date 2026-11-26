@@ -5,6 +5,7 @@ folder cannot be deleted under it. `reap_detached(self)` records the processes t
 its temporary folder is removed (call it right after the folder is made: cleanups run last in, first out), stops those still
 running and waits for them. Elsewhere it does nothing: a running process holds no file there."""
 import subprocess
+import sys
 import time
 from unittest import mock
 
@@ -29,10 +30,29 @@ def reap_detached(case) -> list:
         patch.stop()
         for proc in started:
             if proc.poll() is None:
+                trace = []
+                real_kill = osproc.kill_group
+
+                def traced(pid, force=False, **kw):
+                    began = time.monotonic()
+                    try:
+                        real_kill(pid, force, **kw)
+                        trace.append(f"kill_group({pid}, force={force}) returned after {time.monotonic() - began:.2f}s")
+                    except Exception as exc:
+                        trace.append(f"kill_group({pid}, force={force}) raised {type(exc).__name__}: {exc} after {time.monotonic() - began:.2f}s")
+                        raise
                 try:
-                    osproc.stop_family(proc)
+                    table = osproc.list_processes(windows=True)
+                    below = {proc.pid, *osproc.descendants(proc.pid, table)}
+                    family = [(row.pid, row.ppid, (row.command or "")[:60]) for row in table if row.pid in below]
+                except Exception as exc:
+                    family = f"unreadable: {exc}"
+                try:
+                    with mock.patch.object(osproc, "kill_group", traced):
+                        osproc.stop_family(proc)
                 except Exception:
                     pass
+                print(f"reap diagnostics: {proc.pid} family before {family}; {trace}; root running afterwards {proc.poll() is None}", file=sys.stderr)
         for proc in started:
             try:
                 proc.wait(15)
