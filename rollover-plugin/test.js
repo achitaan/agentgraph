@@ -143,9 +143,9 @@ async function harness(settings, { build, leads = "true", from = null, rawSettin
   h.notesPath = (sid = main.sid) => path.join(infos.get(sid).location.directory, ".opencode", "handoff", `${sid}.md`);
   // size 5: "notes" (a lane's); bigger: text of that many characters that names the topics of the chat floor; `body` overrides the text
   const topical = (size) => "Objective: x. Requirements and limits: y. Decisions: z. Work state: done. Next steps: a. Files: b. ".repeat(Math.ceil(size / 100)).slice(0, size);
-  h.notes = (sid = main.sid, ageSeconds = 0, size = 5, body = null) => {
+  h.notes = (sid = main.sid, ageSeconds = 0, size = 5, body = null, file = null) => {
     const t0 = Date.now(); while (Date.now() < t0 + (IS_WIN ? 25 : 1)) { /* the notes get a later millisecond than every event before them (the plugin compares whole milliseconds); a Windows file's time can trail the clock by a few milliseconds, so a little more */ }
-    const f = h.notesPath(sid); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, body !== null ? body : size <= 5 ? "notes".padEnd(size, " ") : topical(size));
+    const f = file || h.notesPath(sid); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, body !== null ? body : size <= 5 ? "notes".padEnd(size, " ") : topical(size));
     if (ageSeconds) { const t = (Date.now() - ageSeconds * 1000) / 1000; fs.utimesSync(f, t, t); }
     const t1 = Date.now(); while (Date.now() < t1 + (IS_WIN ? 25 : 1)) { /* and the next event gets a later millisecond than the notes */ }
   };
@@ -921,8 +921,7 @@ const cases = {
     const folder = path.join(h.work, ".opencode", "mine", "deep");
     assert.ok(h.calls.synthetic[0].text.includes(path.join(folder, `${h.sid}.md`)));
     assert.equal(fs.readFileSync(path.join(folder, ".gitignore"), "utf8"), "*\n"); assert.ok(!fs.existsSync(path.join(h.work, ".opencode", "handoff")));
-    await sleep(30);   // the notes must be newer than the events before them, by more than a file clock's tick
-    fs.mkdirSync(folder, { recursive: true }); fs.writeFileSync(path.join(folder, `${h.sid}.md`), "notes"); await h.step(117000);
+    h.notes(h.sid, 0, 5, null, path.join(folder, `${h.sid}.md`)); await h.step(117000);   // the helper gives the notes a later millisecond than the events around them
     assert.equal(h.calls.compact.length, 1); await h.hook(); assert.match(h.buildArgs()[0], /--notes-dir \.opencode\/mine\/deep /); assert.ok(!h.has("settings_invalid")); h.stop();
   },
   async "N6a: the patience limit clears the request while the hook builds: the rollover is still logged truthfully"() {
