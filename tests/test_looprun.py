@@ -568,6 +568,23 @@ class RecordTests(Base):
         self.assertEqual(record["workdir"], str(work))
 
 
+class RunCheckTests(unittest.TestCase):
+    def test_the_job_is_let_go_of_when_something_raises_after_it_adopted_the_check(self):
+        class Job:
+            closed = 0
+
+            def adopt(self, proc):
+                raise RuntimeError("adopt failed")
+
+            def close(self):
+                Job.closed += 1
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(looprun.osproc, "Job", Job):
+            with self.assertRaises(RuntimeError):
+                looprun.run_check("exit 0", 5, tmp, dict(os.environ), Path(tmp) / "out.txt")
+        self.assertEqual(Job.closed, 1)
+
+
 class CommandTests(Base):
     def test_set_show_unset(self):
         code, out, err = self.cli("set", "self", "--check", "sh check.sh", "--attempts", "4", "--cost", "2", "--structure", str(self.structure))

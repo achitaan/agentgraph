@@ -758,47 +758,49 @@ def run_check(command: str, timeout, cwd, env, out_path: Path, poll=None) -> dic
         out_path.write_text(f"the check could not be started: {exc}\n", encoding="utf-8")
         return {"exit": None, "timed_out": False, "cancelled": False, "seconds": 0.0, "error": str(exc), "truncated": 0}
     job = osproc.Job()
-    job.adopt(proc)  # Windows: one call ends the check and all it started (an MSYS shell's children too)
-    dropped = [0]
+    try:
+        job.adopt(proc)  # Windows: one call ends the check and all it started (an MSYS shell's children too)
+        dropped = [0]
 
-    def drain():
-        with open(out_path, "wb") as sink:
-            kept = 0
-            while True:
-                chunk = proc.stdout.read(65536)
-                if not chunk:
-                    break
-                room = OUTPUT_CAP - kept
-                if room > 0:
-                    sink.write(chunk[:room])
-                    kept += min(room, len(chunk))
-                dropped[0] += max(0, len(chunk) - max(room, 0))
-            if dropped[0]:
-                sink.write(f"\n[output truncated: {dropped[0]} more bytes were dropped]\n".encode())
+        def drain():
+            with open(out_path, "wb") as sink:
+                kept = 0
+                while True:
+                    chunk = proc.stdout.read(65536)
+                    if not chunk:
+                        break
+                    room = OUTPUT_CAP - kept
+                    if room > 0:
+                        sink.write(chunk[:room])
+                        kept += min(room, len(chunk))
+                    dropped[0] += max(0, len(chunk) - max(room, 0))
+                if dropped[0]:
+                    sink.write(f"\n[output truncated: {dropped[0]} more bytes were dropped]\n".encode())
 
-    reader = threading.Thread(target=drain, daemon=True)
-    reader.start()
-    timed_out = cancelled = False
-    while True:
-        try:
-            code = proc.wait(timeout=0.25)
-            break
-        except subprocess.TimeoutExpired:
-            cancelled = bool(poll and poll())
-            if cancelled or (timeout and time.monotonic() - started > timeout):
-                timed_out = not cancelled
-                if not job.terminate():
-                    sidechat._stop(proc)
-                try:
-                    osproc.kill_group(proc.pid, force=True)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                code = None
+        reader = threading.Thread(target=drain, daemon=True)
+        reader.start()
+        timed_out = cancelled = False
+        while True:
+            try:
+                code = proc.wait(timeout=0.25)
                 break
-    reader.join(5)
-    if not reader.is_alive():
-        proc.stdout.close()
-    job.close()
+            except subprocess.TimeoutExpired:
+                cancelled = bool(poll and poll())
+                if cancelled or (timeout and time.monotonic() - started > timeout):
+                    timed_out = not cancelled
+                    if not job.terminate():
+                        sidechat._stop(proc)
+                    try:
+                        osproc.kill_group(proc.pid, force=True)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                    code = None
+                    break
+        reader.join(5)
+        if not reader.is_alive():
+            proc.stdout.close()
+    finally:
+        job.close()  # also when something between adopting and here raised
     return {"exit": None if timed_out or cancelled else code, "timed_out": timed_out, "cancelled": cancelled, "seconds": time.monotonic() - started, "error": None,
             "truncated": dropped[0]}
 

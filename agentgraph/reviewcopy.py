@@ -28,7 +28,9 @@ import argparse
 import contextlib
 import hashlib
 import json
+import ntpath
 import os
+import posixpath
 import re
 import shutil
 import signal
@@ -37,7 +39,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from . import check, graphedit, osfs, osproc, outputs, transitions
 from .noderun import SKIP as NODE_SKIP
@@ -301,32 +303,45 @@ def project_digest(listing: dict[str, tuple]) -> str:
     return h.hexdigest()
 
 
-def _inside(real: str, root: str) -> bool:
-    return real == root or real.startswith(root + os.sep)
+def _inside(real: str, root: str, sep: str = os.sep) -> bool:
+    return real == root or real.startswith(root + sep)
 
 
-def _physical(path) -> str:
+HOP_LIMIT = 40  # links followed on one path; Windows itself follows up to 63, so a longer chain is never trusted
+
+
+def _physical(path, *, windows=None, is_link=os.path.islink, read_link=os.readlink, collapse=False) -> str:
     """The real path of `path`, following each link the way a POSIX realpath does: a `..` after a link goes to the parent of where the link
     leads. (On Windows `os.path.realpath` cannot be trusted for a link whose target the disk does not yet show as a folder, and the system
-    itself resolves `..` after a link that way, so a chain of links must be judged by walking it.)"""
-    start = Path(path)
-    cur, todo, followed = start.anchor, list(reversed(start.parts[1:] if start.anchor else start.parts)), 0
+    itself resolves `..` after a link that way, so a chain of links must be judged by walking it.) With `collapse`, the text of each link
+    is first joined to where it lies and cleaned of `..` as plain text (the other way Windows may read it). "" when more than `HOP_LIMIT`
+    links are followed: a loop or a chain too long to trust, which is never inside anything."""
+    on_windows = osproc.is_windows() if windows is None else windows
+    mod, pure = (ntpath, PureWindowsPath) if on_windows else (posixpath, PurePosixPath)
+    start = pure(str(path))
+    anchor = start.anchor
+    cur, todo, followed = anchor, list(reversed(start.parts[1:] if anchor else start.parts)), 0
     while todo:
         part = todo.pop()
         if part in ("", "."):
             continue
         if part == "..":
-            if cur != start.anchor:
-                cur = os.path.dirname(cur) or cur
+            if cur != anchor:
+                cur = mod.dirname(cur)
             continue
-        step = os.path.join(cur, part)
-        if os.path.islink(step):
+        step = mod.join(cur, part)
+        if is_link(step):
             followed += 1
-            if followed > 40:  # a loop of links: left where it is, and judged by that
-                return step
-            where = Path(os.readlink(step))
+            if followed > HOP_LIMIT:
+                return ""
+            text = read_link(step)
+            if collapse:
+                text = mod.normpath(mod.join(cur, text))
+            where = pure(text)
             if where.anchor:
                 cur, todo = where.anchor, todo + list(reversed(where.parts[1:]))
+            elif collapse:
+                cur, todo = "", todo + list(reversed(where.parts))
             else:
                 todo += list(reversed(where.parts))
         else:
@@ -338,21 +353,41 @@ def _real(path) -> str:
     return _physical(path) if osproc.is_windows() else os.path.realpath(path)
 
 
-def _place_links(links: list[tuple[str, str]], target: Path) -> tuple[list[tuple[str, str]], int]:
+def _is_rooted(text: str, windows=None) -> bool:
+    """A link text that does not stay relative to the link's folder: on POSIX a leading `/`; on Windows also a drive (`C:\\x`, and `C:x`, which
+    is relative to a drive's current folder), a UNC name (`\\\\server\\share`, `//server/share`) and a root-relative path (`\\x`, `/x`: `os.path.isabs`
+    says no to these from Python 3.13 on)."""
+    if not (osproc.is_windows() if windows is None else windows):
+        return text.startswith("/")
+    return bool(ntpath.splitdrive(text)[0]) or text[:1] in ("/", "\\")
+
+
+def _within(path, root: str, *, windows=None, is_link=os.path.islink, read_link=os.readlink) -> bool:
+    """Is the real path of `path` inside `root`? POSIX: the system's realpath. Windows: both ways of reading a link (see `_physical`) must say
+    inside, since it is not known which one the system takes."""
+    on_windows = osproc.is_windows() if windows is None else windows
+    if not on_windows:
+        return _inside(os.path.realpath(path), root)
+    return all(_inside(_physical(path, windows=True, is_link=is_link, read_link=read_link, collapse=collapse), root, "\\")
+               for collapse in (False, True))
+
+
+def _place_links(links: list[tuple[str, str]], target: Path, folders=()) -> tuple[list[tuple[str, str]], int]:
     """Make the symlinks, after every regular file is there; (the ones kept, the count left out). A link is left out when
     something is already at its place (a case-insensitive disk, so nothing is written through a link), when it is absolute, or
-    when its real path ends up outside the copy; the last is checked after all links are made, until no link is removed."""
+    when its real path ends up outside the copy; the last is checked after all links are made, until no link is removed.
+    `folders` names the links whose source points at a folder (Windows makes a folder link differently from a file link)."""
     root = _real(target)
     placed: list[tuple[str, str]] = []
     skipped = 0
     for rel, text in sorted(links):
         dest = target / rel
-        if os.path.isabs(text) or os.path.lexists(dest) or not _inside(_real(dest.parent), root):
+        if _is_rooted(text) or os.path.lexists(dest) or not _within(dest.parent, root):
             skipped += 1
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            os.symlink(text, dest, target_is_directory=osproc.is_windows() and os.path.isdir(_physical(dest.parent / text)))
+            os.symlink(text, dest, target_is_directory=osproc.is_windows() and rel in folders)
         except (OSError, NotImplementedError):
             if not osproc.is_windows():
                 raise
@@ -363,7 +398,7 @@ def _place_links(links: list[tuple[str, str]], target: Path) -> tuple[list[tuple
     while moved:
         moved = False
         for entry in list(placed):
-            if not _inside(_real(target / entry[0]), root):
+            if not _within(target / entry[0], root):
                 os.unlink(target / entry[0])
                 placed.remove(entry)
                 skipped += 1
@@ -375,12 +410,14 @@ def _copy(project: Path, files: list[str], target: Path) -> tuple[str, int, int,
     """Copy the files; (tree digest, files copied, bytes, symlinks left out). Symlinks are made last (`_place_links`)."""
     tree = hashlib.sha256()
     count = size = 0
-    links = []
+    links, folders = [], set()
     for rel in files:
         source, dest = project / rel, target / rel
         try:
             if os.path.islink(source):
                 links.append((rel, os.readlink(source)))
+                if os.path.isdir(source):
+                    folders.add(rel)
                 continue
             if not os.path.isfile(source):
                 continue  # a folder (a submodule), a socket or a file that went away
@@ -395,7 +432,7 @@ def _copy(project: Path, files: list[str], target: Path) -> tuple[str, int, int,
         tree.update(f"F {rel}\0{digest.hexdigest()}\n".encode("utf-8", "surrogateescape"))
         count += 1
         size += dest.stat().st_size
-    placed, skipped = _place_links(links, target)
+    placed, skipped = _place_links(links, target, folders)
     for rel, text in placed:
         tree.update(f"L {rel}\0{text}\n".encode("utf-8", "surrogateescape"))
     return tree.hexdigest(), count + len(placed), size, skipped
@@ -426,8 +463,8 @@ def reduced_environment(tmp: str, source=None, windows=None) -> dict[str, str]:
 
 
 def _kill_group(pid: int, job=None) -> None:
-    if job is not None and job.terminate():  # Windows: everything the command started, MSYS programs too
-        return
+    if job is not None:
+        job.terminate()  # Windows: everything the command started, MSYS programs too; the tree kill below still takes a child started before the job held it
     try:
         osproc.kill_group(pid, force=True)
     except (ProcessLookupError, PermissionError):

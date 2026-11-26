@@ -49,7 +49,7 @@ export const DEFAULT_INTERVAL_MS = 4000;
 export const MIN_INTERVAL_MS = 1000;
 export const SPINNER_MS = 200;
 export const CHAT_POLL_MS = 2000; // a busy session's chat is read this often; an idle one once
-export const DEFAULT_PYTHON = "python3"; // on Unix, the first python3 on PATH (see posixPython); on Windows see windowsPython
+export const DEFAULT_PYTHON = "python3"; // on Unix, the first python3 on PATH that is 3.11 or newer (see posixPython); on Windows see windowsPython
 const TERRACOTTA_HUE = 18;
 const BOLD = 1; // OpenTUI TextAttributes.BOLD
 
@@ -81,20 +81,28 @@ export function windowsPython(execFileSync) {
   return "python";
 }
 
-// Unix: the snapshot runner wants an absolute interpreter path, so the default `python3` is looked up on PATH here (the
-// first executable file of that name). Without PATH or without a hit it stays plain "python3": the runner then tells the
-// user to set options.python.
-export function posixPython({ env, fs, path }) {
+// Unix: the snapshot runner wants an absolute interpreter path, so the default `python3` is looked up on PATH here: the first
+// executable file of that name that answers as Python 3.11 or newer (the same probe as windowsPython; one that is too old, or
+// that fails or hangs, is passed over), then the same for python3.13, python3.12 and python3.11. Without PATH or without a hit it stays
+// plain "python3": the runner then tells the user to set options.python. Without a way to probe, the first executable python3 is taken.
+const POSIX_PYTHON_NAMES = [DEFAULT_PYTHON, "python3.13", "python3.12", "python3.11"];
+export function posixPython({ env, fs, path, execFileSync }) {
   const dirs = String((env && env.PATH) || "").split(path.delimiter);
-  for (const dir of dirs) {
-    if (!dir || !path.isAbsolute(dir)) continue;
-    const file = path.join(dir, DEFAULT_PYTHON);
-    try {
-      if (fs.statSync(file).isFile()) {
+  const probe = typeof execFileSync === "function";
+  for (const name of POSIX_PYTHON_NAMES) {
+    for (const dir of dirs) {
+      if (!dir || !path.isAbsolute(dir)) continue;
+      const file = path.join(dir, name);
+      try {
+        if (!fs.statSync(file).isFile()) continue;
         fs.accessSync(file, fs.constants.X_OK);
-        return file;
-      }
-    } catch (_) {}
+        if (!probe) return file;
+        const out = String(execFileSync(file, ["-c", WINDOWS_PYTHON_PROBE],
+          { encoding: "utf8", timeout: 5000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }));
+        if (out.trim()) return file;
+      } catch (_) {}
+    }
+    if (!probe) break;
   }
   return DEFAULT_PYTHON;
 }
@@ -108,7 +116,7 @@ export function resolveOptions(raw, { os, path, execFileSync, env, fs }) {
     : path.join(os.homedir(), ".config", "opencode", "orchestration");
   const python = nonEmptyString(options.python) ? expandHome(options.python.trim())
     : os.platform?.() === "win32" ? windowsPython(execFileSync)
-      : env && fs ? posixPython({ env, fs, path }) : DEFAULT_PYTHON;
+      : env && fs ? posixPython({ env, fs, path, execFileSync }) : DEFAULT_PYTHON;
   const requested = Number(options.intervalMs);
   const intervalMs = Number.isFinite(requested) && requested > 0 ? Math.max(MIN_INTERVAL_MS, Math.floor(requested)) : DEFAULT_INTERVAL_MS;
   const mode = options.mode === "prepend" ? "prepend" : "replace";

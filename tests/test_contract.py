@@ -1,3 +1,4 @@
+import os
 import unittest
 from pathlib import Path
 
@@ -430,6 +431,25 @@ class Validate(unittest.TestCase):
         task = graph([writer])
         task.path = "project/.opencode/graph/test.json"
         self.assertEqual(validate(task), [])
+
+    @unittest.skipIf(os.name == "nt", "on Windows a path that starts with two slashes is a UNC one")
+    def test_posix_project_path_that_starts_with_two_slashes_is_not_a_windows_path(self):
+        writer = node("n1", scope=["src/"])
+        writer.changed_paths = ["//share/src/a.py", "//share/other/a.py"]
+        task = graph([writer])
+        task.path = "//share/.opencode/graph/test.json"
+        self.assertEqual(validate(task), ["n1 changed path '//share/other/a.py' outside its scope"])
+
+    @unittest.skipIf(os.name == "nt", "on Windows `a:b` has a drive in it")
+    def test_a_project_folder_and_a_scope_entry_with_a_colon_stay_posix(self):
+        writer = node("n1", scope=["src/"])
+        writer.changed_paths = [str(Path.cwd() / "a:b/src/a.py"), str(Path.cwd() / "a:b/other/a.py")]
+        task = graph([writer])
+        task.path = "a:b/.opencode/graph/test.json"
+        self.assertEqual(validate(task), [f"n1 changed path {writer.changed_paths[1]!r} outside its scope"])
+        writer.scope, writer.changed_paths = ["a:b/"], ["a:b/f.py", "a:c/f.py"]
+        task.path = "/project/.opencode/graph/test.json"
+        self.assertEqual(validate(task), ["n1 changed path 'a:c/f.py' outside its scope"])
 
     def test_windows_absolute_and_relative_paths(self):
         writer = node("n1", scope=["src/"])

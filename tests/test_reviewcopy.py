@@ -546,6 +546,47 @@ class Links(Base):
         self.assertEqual(os.listdir(target / "link"), ["x"])
         self.assertEqual(os.listdir(outside), [])
 
+    @needs_symlinks
+    def test_a_chain_of_links_longer_than_the_hop_limit_that_climbs_out_is_left_out(self):
+        target = self.base / "copy"
+        target.mkdir()
+        count = reviewcopy.HOP_LIMIT + 6
+        links = [(f"c{i:02d}", f"c{i + 1:02d}") for i in range(count - 1)] + [(f"c{count - 1:02d}", "..")]
+        placed, skipped = reviewcopy._place_links(links, target)
+        self.assertEqual((placed, skipped), ([], count))
+        self.assertEqual(os.listdir(target), [])
+
+    @needs_symlinks
+    def test_a_link_through_a_deep_link_and_many_dotdots_is_left_out_on_windows(self):
+        """`L` leads nine folders down; `E` goes back up through `L` and on to a path that, with `L\\..` taken as plain text, is above the copy.
+        Windows may read it either way, so it is left out there; the POSIX realpath is exact, and by it `E` stays in the copy."""
+        target = self.base / "copy"
+        target.joinpath(*"abcdefghi").mkdir(parents=True)
+        down = os.sep.join("abcdefghi")
+        text = os.sep.join(["L", *[".."] * 9, "Data", "me", "proj"])
+        placed, skipped = reviewcopy._place_links([("L", down), ("E", text)], target, folders={"L"})
+        if WINDOWS:
+            self.assertEqual(([name for name, _ in placed], skipped), (["L"], 1))
+            self.assertFalse(os.path.lexists(target / "E"))
+        else:
+            self.assertEqual(([name for name, _ in placed], skipped), (["E", "L"], 0))
+            self.assertTrue(_inside_copy(target / "E", target))
+
+    @needs_symlinks
+    def test_what_the_system_does_with_dotdot_after_a_link_is_shown_for_the_record(self):
+        copy = self.base / "copy"
+        (copy / "a" / "b").mkdir(parents=True)
+        (copy / "marker").write_text("x")
+        os.symlink(os.path.join("a", "b"), copy / "L", target_is_directory=True)
+        os.symlink(os.sep.join(["L", "..", ".."]), copy / "T", target_is_directory=True)
+        try:
+            seen = sorted(os.listdir(copy / "T"))
+        except OSError as caught:
+            seen = [f"error: {caught}"]
+        way = "followed the link, then went up" if "marker" in seen else "cleaned L\\.. as text" if "copy" in seen else "unclear"
+        print(f"OBSERVED dotdot after a link: {way}; T lists {seen}; walk says {reviewcopy._physical(copy / 'T')}; "
+              f"textual walk says {reviewcopy._physical(copy / 'T', collapse=True)}", file=sys.stderr)
+
     @needs_sh
     @needs_symlinks
     def test_links_are_made_after_every_regular_file(self):
@@ -553,6 +594,98 @@ class Links(Base):
         os.symlink("b", self.project / "alink")  # sorts before `b/x`
         self.write(graph(check="test -L alink && test -f alink/x && ! test -L b"))
         self.assertEqual(self.run_it()[0], 0)
+
+
+
+def _inside_copy(path, root) -> bool:
+    return reviewcopy._inside(os.path.realpath(path), os.path.realpath(root))
+
+
+class Judging(unittest.TestCase):
+    """How a link is judged, with links made up in a dictionary: the Windows rules run on every system."""
+
+    def windows(self, links, path, root="C:\\copy"):
+        return reviewcopy._within(path, root, windows=True, is_link=links.__contains__, read_link=links.__getitem__)
+
+    def test_a_link_to_a_deep_folder_then_many_dotdots_is_judged_both_ways(self):
+        links = {"C:\\copy\\L": "a\\b\\c\\d\\e\\f\\g\\h\\i", "C:\\copy\\E": "L" + "\\.." * 9 + "\\Data\\me\\proj"}
+        walk = lambda collapse: reviewcopy._physical("C:\\copy\\E", windows=True, is_link=links.__contains__, read_link=links.__getitem__, collapse=collapse)
+        self.assertEqual(walk(False), "C:\\copy\\Data\\me\\proj")  # following L, nine `..` climb back to the root of the copy
+        self.assertEqual(walk(True), "C:\\Data\\me\\proj")  # `L\\..` cancelled as text: eight levels above the copy
+        self.assertFalse(self.windows(links, "C:\\copy\\E"))
+        self.assertTrue(self.windows(links, "C:\\copy\\L"))
+
+    def test_posix_walk_follows_the_link_before_a_dotdot(self):
+        links = {"/copy/L": "a/b/c/d/e/f/g/h/i", "/copy/E": "L" + "/.." * 9 + "/Data/me/proj"}
+        walk = reviewcopy._physical("/copy/E", windows=False, is_link=links.__contains__, read_link=links.__getitem__)
+        self.assertEqual(walk, "/copy/Data/me/proj")
+
+    def test_a_chain_longer_than_the_hop_limit_is_never_inside(self):
+        limit = reviewcopy.HOP_LIMIT
+        for windows, root, sep in ((True, "C:\\copy", "\\"), (False, "/copy", "/")):
+            for count, inside in ((limit, True), (limit + 1, False)):
+                with self.subTest(windows=windows, links=count):
+                    links = {f"{root}{sep}l{i}": f"l{i + 1}" for i in range(count)}  # the last one leads to a name that is not a link
+                    walked = reviewcopy._physical(f"{root}{sep}l0", windows=windows, is_link=links.__contains__, read_link=links.__getitem__)
+                    self.assertEqual(walked, f"{root}{sep}l{count}" if inside else "")
+                    self.assertEqual(reviewcopy._inside(walked, root, sep), inside)
+        loop = {"C:\\copy\\a": "b", "C:\\copy\\b": "a"}
+        self.assertFalse(self.windows(loop, "C:\\copy\\a"))
+
+    def test_a_link_to_an_absolute_place_is_outside(self):
+        for text in ("C:\\other", "C:other", "\\\\server\\share\\x", "//server/share/x", "\\copy\\x", "/copy/x"):
+            with self.subTest(text=text):
+                self.assertFalse(self.windows({"C:\\copy\\E": text}, "C:\\copy\\E"))
+
+    def test_which_link_texts_count_as_absolute(self):
+        for text in ("C:\\x", "C:/x", "c:x", "C:", "\\\\server\\share", "//server/share", "\\x", "/x", "\\\\?\\C:\\x"):
+            with self.subTest(windows=True, text=text):
+                self.assertTrue(reviewcopy._is_rooted(text, windows=True))
+        for text in ("a\\b", "..\\x", "x/y", "..", ".", "dir\\..\\x"):
+            with self.subTest(windows=True, text=text):
+                self.assertFalse(reviewcopy._is_rooted(text, windows=True))
+        for text, rooted in (("/x", True), ("//x", True), ("C:x", False), ("C:\\x", False), ("\\x", False), ("a/b", False), ("../x", False)):
+            with self.subTest(windows=False, text=text):
+                self.assertEqual(reviewcopy._is_rooted(text, windows=False), rooted)
+
+    def test_links_with_an_absolute_text_are_left_out_on_windows_without_making_anything(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "copy"
+            target.mkdir()
+            texts = ["C:x", "C:\\x", "\\\\server\\share", "//server/share", "\\x", "/x"]
+            with mock.patch.object(reviewcopy.osproc, "is_windows", return_value=True), \
+                    mock.patch.object(os, "symlink", side_effect=AssertionError("a link was made")):
+                placed, skipped = reviewcopy._place_links([(f"l{i}", text) for i, text in enumerate(texts)], target)
+            self.assertEqual((placed, skipped), ([], len(texts)))
+
+    def test_a_link_to_a_folder_is_made_as_a_folder_link_by_what_the_source_is(self):
+        """Decided from the source, not from the copy as it stands: the folder may only be reachable through a link made later."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "copy"
+            target.mkdir()
+            made = []
+            with mock.patch.object(reviewcopy.osproc, "is_windows", return_value=True), \
+                    mock.patch.object(reviewcopy, "_within", return_value=True), \
+                    mock.patch.object(os, "symlink", side_effect=lambda text, dest, target_is_directory=False: made.append((os.path.basename(dest), target_is_directory))):
+                reviewcopy._place_links([("a", "z/f"), ("b", "x")], target, folders={"a"})
+            self.assertEqual(made, [("a", True), ("b", False)])
+
+
+class KillGroup(unittest.TestCase):
+    def test_the_tree_is_killed_after_the_job_too_and_a_gone_root_is_ignored(self):
+        class Job:
+            def terminate(self):
+                return True
+
+        for error in (None, ProcessLookupError(), PermissionError()):
+            with self.subTest(error=error), mock.patch.object(reviewcopy.osproc, "kill_group", side_effect=error) as killed:
+                reviewcopy._kill_group(123, Job())
+                killed.assert_called_once_with(123, force=True)
+
+    def test_without_a_job_the_tree_kill_is_all_there_is(self):
+        with mock.patch.object(reviewcopy.osproc, "kill_group") as killed:
+            reviewcopy._kill_group(123)
+            killed.assert_called_once_with(123, force=True)
 
 
 @posix_only

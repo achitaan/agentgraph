@@ -760,7 +760,7 @@ test("runner: stop() kills the child", async () => {
 // A real Python 3.11 or newer, found the way the plugin's default finds it (Windows: py -3, then python; elsewhere:
 // python3 on PATH); "" when this machine has none.
 const realPython = (() => {
-  const found = process.platform === "win32" ? P.windowsPython(execFileSync) : P.posixPython({ env: process.env, fs, path });
+  const found = process.platform === "win32" ? P.windowsPython(execFileSync) : P.posixPython({ env: process.env, fs, path, execFileSync });
   if (!path.isAbsolute(found)) return "";
   try {
     execFileSync(found, ["-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"], { stdio: "ignore", timeout: 10000, windowsHide: true });
@@ -853,6 +853,43 @@ test("options on Unix: the default interpreter is the first python3 on PATH; no 
   assert.equal(resolve(undefined), "python3", "no PATH");
   assert.equal(resolve("/opt/py", { python: "/custom/python3" }), "/custom/python3", "options.python still wins");
   assert.doesNotMatch(P.DEFAULT_PYTHON, /[\\/]/);
+});
+
+test("options on Unix: a python3 older than 3.11 is passed over; a probe that fails or hangs is skipped", () => {
+  const mac = { platform: () => "linux", homedir: () => "/home/someone" };
+  const files = { "/old/python3": "3.9", "/old/python3.12": "3.12", "/new/python3": "3.12", "/bad/python3": "throws", "/hang/python3": "hangs",
+    "/mute/python3": "silent", "/odd/python3": "throws a string", "/v/python3.11": "3.11", "/v/python3.13": "3.13", "/v/python3": "3.10" };
+  const fake = {
+    constants: fs.constants,
+    statSync: (file) => { if (!(file in files)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); return { isFile: () => true }; },
+    accessSync: () => {},
+  };
+  const probed = [];
+  const exec = (file, args, opts) => {
+    probed.push(file);
+    assert.equal(args[0], "-c");
+    assert.ok(opts.timeout > 0 && opts.timeout <= 5000, "a short time limit");
+    const what = files[file];
+    if (what === "hangs") throw Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" });
+    if (what === "throws a string") throw "not an error";
+    if (what === "throws" || Number(what.slice(2)) < 11) throw Object.assign(new Error("exit 1"), { status: 1 });
+    return what === "silent" ? "" : `${file}\n`;
+  };
+  const resolve = (PATH, extra = {}, run = exec) => P.resolveOptions(extra, { os: mac, path: path.posix, env: { PATH }, fs: fake, execFileSync: run }).python;
+  assert.equal(resolve("/old:/new"), "/new/python3", "an old python3 first on PATH, a 3.12 later: the later one");
+  assert.deepEqual(probed, ["/old/python3", "/new/python3"]);
+  assert.equal(resolve("/old"), "/old/python3.12", "the only python3 is old: a versioned name in the same folder is used");
+  assert.equal(resolve("/old:/new:/v"), "/new/python3", "plain python3 on PATH that is new enough comes before any versioned name");
+  assert.equal(resolve("/v"), "/v/python3.13", "python3.13 comes before python3.11");
+  assert.equal(resolve("/bad:/hang:/mute:/odd:/new"), "/new/python3", "a probe that throws, times out, prints nothing or throws a string is skipped");
+  assert.equal(resolve("/bad:/hang:/mute:/odd"), "python3", "no candidate answers: plain python3 (the runner then asks for options.python)");
+  files["/old/python3.12"] = "3.9";
+  assert.equal(resolve("/old"), "python3", "only old ones: the fallback");
+  files["/old/python3.12"] = "3.12";
+  probed.length = 0;
+  const never = () => { throw new Error("no probe when python is given"); };
+  assert.equal(resolve("/old:/new", { python: "/custom/python3" }, never), "/custom/python3", "options.python wins untouched");
+  assert.deepEqual(probed, []);
 });
 
 // ---------------------------------------------------------------------------------------------------------------

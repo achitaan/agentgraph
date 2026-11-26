@@ -112,7 +112,7 @@ HERE = Path(__file__).resolve().parent.parent
 BENCH_DIR = HERE / "bench"
 SCENARIOS = BENCH_DIR / "scenarios"
 RESULTS = BENCH_DIR / "results"
-TEMP_ROOT = Path(tempfile.gettempdir()).resolve()  # scratch and run folders live in the system temp folder (TMPDIR, TEMP)
+TEMP_ROOT = Path(tempfile.gettempdir()).resolve() / "opencode"  # scratch and run folders live in an `opencode` folder of the system temp folder (TMPDIR, TEMP)
 DEFAULT_PIN = "anthropic/claude-sonnet-5-5"
 MARKER = ".agentgraph-bench-scratch"
 SETUP_FILE = "bench-setup.json"
@@ -635,7 +635,7 @@ def _git(work: Path, *args: str) -> None:
 
 
 def new_work_dir() -> Path:
-    """A brand-new folder of its own in the temp folder, for one run (mode 0700); never under a scratch folder."""
+    """A brand-new folder of its own in the `opencode` temp folder, for one run (mode 0700); never under a scratch folder."""
     TEMP_ROOT.mkdir(parents=True, exist_ok=True)
     return Path(tempfile.mkdtemp(prefix=WORK_PREFIX, dir=TEMP_ROOT)).resolve()
 

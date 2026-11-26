@@ -99,9 +99,11 @@ class Base(unittest.TestCase):
 
 
 class DefaultTempFolderTests(unittest.TestCase):
-    def test_the_default_temp_folder_is_this_systems_not_a_fixed_path(self):
-        self.assertEqual(bench.TEMP_ROOT, Path(tempfile.gettempdir()).resolve())
-        self.assertTrue(bench.TEMP_ROOT.is_dir())
+    def test_the_default_temp_folder_is_an_opencode_folder_of_this_systems_temp_not_a_fixed_path(self):
+        self.assertEqual(bench.TEMP_ROOT, Path(tempfile.gettempdir()).resolve() / "opencode")
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.object(bench, "TEMP_ROOT", Path(tmp) / "opencode"):
+            work = bench.new_work_dir()  # made where the work folders are made, when it is not there yet
+            self.assertEqual(work.parent, (Path(tmp) / "opencode").resolve())
 
 
 class ScratchConfigTests(Base):

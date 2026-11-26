@@ -11,6 +11,7 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 import os
 import ntpath
+import re
 from pathlib import PurePosixPath, PureWindowsPath
 from posixpath import abspath, join, normpath
 
@@ -661,9 +662,13 @@ def shape_advice(graph: TaskGraph, layers: list[list[Node]] | None = None) -> li
     return advice
 
 
+_DRIVE_PATH = re.compile(r"[A-Za-z]:[\\/]")
+
+
 def _project_root(graph_path: str) -> PurePosixPath | PureWindowsPath | None:
-    # Absolute POSIX paths remain POSIX even when inspecting a graph on Windows.
-    if ntpath.splitdrive(graph_path)[0] or (os.name == "nt" and not graph_path.startswith("/")):
+    # Absolute POSIX paths remain POSIX even when inspecting a graph on Windows. Off Windows only `C:\` or `C:/` makes a Windows path:
+    # `//x/y` (a POSIX path that looks like a UNC one) and `a:b` (a relative name with a colon) stay POSIX.
+    if _DRIVE_PATH.match(graph_path) or (os.name == "nt" and not graph_path.startswith("/")):
         path = PureWindowsPath(ntpath.normpath(graph_path))
         for parent in path.parents:
             if parent.name == ".opencode":
