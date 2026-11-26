@@ -209,6 +209,7 @@ def read_team(data: bytes) -> tuple[str, list[str], str] | None:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         return None
+    text = text.replace("\r\n", "\n")  # a file edited by hand on Windows may use CRLF
     head, _, body = text.partition("\n\n")
     lead, members = "", []
     for line in head.split("\n"):

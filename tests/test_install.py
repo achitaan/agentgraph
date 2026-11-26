@@ -129,7 +129,9 @@ class FirstInstall(InstallCase):
         self.assertIn("item(s) installed", out)
         # the mirror holds portable.TOKEN where the installed file names this folder
         mirror = (self.kit / "config" / PRESET).read_bytes()
-        self.assertEqual((self.t / PRESET).read_bytes(), mirror.replace(portable.TOKEN.encode(), str(self.t).encode()))
+        # (a JSON file holds the path escaped: a Windows path has backslashes)
+        self.assertEqual((self.t / PRESET).read_bytes(),
+                         portable.render(mirror.decode("utf-8"), str(self.t), True).encode("utf-8"))
         self.assertEqual((self.t / "skills" / "grilling" / "SKILL.md").read_bytes(),
                          (self.kit / "skills" / "grilling" / "SKILL.md").read_bytes())
         self.assertTrue((self.t / SLIM / "fast").is_dir())

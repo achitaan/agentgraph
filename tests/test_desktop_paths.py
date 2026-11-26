@@ -16,7 +16,7 @@ from tests.launch import bare_env, home_env
 from agentgraph import skillset
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRATCH = Path("/private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode/desktop-paths")
+SCRATCH = Path(tempfile.gettempdir()).resolve() / "agentgraph-tests-desktop-paths"
 OLD = "0123456789abcdef"  # a rev no agent has
 
 

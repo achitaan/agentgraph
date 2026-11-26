@@ -16,7 +16,7 @@ from agentgraph import server, skillset
 from agentgraph.snapshot_json import skills_document
 
 
-SCRATCH = Path("/private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode/skills-endpoint")
+SCRATCH = Path(tempfile.gettempdir()).resolve() / "agentgraph-tests-skills-endpoint"
 ROOT = Path(__file__).resolve().parent.parent
 CATALOGUE = [entry["name"] for entry in skills_document()]
 

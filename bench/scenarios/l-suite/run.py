@@ -47,7 +47,7 @@ from pathlib import Path
 
 SUITE = Path(__file__).resolve().parent
 REPO = SUITE.parents[2]
-TEMP = Path("/private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode")
+TEMP = Path(tempfile.gettempdir()).resolve()
 CODE = Path(os.environ.get("L_SUITE_CODE", TEMP / "v9-code"))
 SCRATCH = Path(os.environ.get("L_SUITE_SCRATCH", TEMP / "v9-scratch"))
 WORK = Path(os.environ.get("L_SUITE_WORK", TEMP / "v9-work"))

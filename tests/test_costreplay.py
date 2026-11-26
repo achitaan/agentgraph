@@ -324,6 +324,7 @@ class DatabaseTests(unittest.TestCase):
         db.execute("INSERT INTO session_message VALUES ('ses_w', 'assistant', 99, 'not json')")
         add("ses_root", "assistant", cost=2.0, model={"id": SONNET}, time={"created": 1000}, tokens={"cache": {"read": 1, "write": 1}})
         db.commit()
+        db.close()  # an open database file cannot be deleted on Windows
 
     def test_sessions_summaries_and_tool_sizes_are_read_without_the_text(self):
         chat, sessions, tools = replay.load_sessions(None, self.db, with_tools=True)

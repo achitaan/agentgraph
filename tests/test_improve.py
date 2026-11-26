@@ -373,7 +373,7 @@ class FaultTests(Base):
         with unittest.mock.patch.object(improve, "_write_atomic", self.failing_write({"AGENTS.md": {1}, "designer.md": {2}})):
             with self.assertRaises(improve.ImproveError) as caught:
                 self.approve(record)
-        self.assertIn(self.rel, str(caught.exception))
+        self.assertIn(str(Path(self.rel)), str(caught.exception))  # shown with the system's separators
         self.assertIn("could not be put back", str(caught.exception))
         self.assertEqual(self.second.read_bytes(), b"old agents\n")
 

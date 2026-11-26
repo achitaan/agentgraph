@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 from collections import Counter, defaultdict
+from contextlib import closing
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
@@ -83,7 +84,7 @@ def _text(path: Path) -> str | None:
         if not stat.S_ISREG(info.st_mode) or info.st_size > _FILE_LIMIT:
             return None
         with open(path, "rb") as stream:
-            return stream.read(_FILE_LIMIT).decode("utf-8", "replace")
+            return stream.read(_FILE_LIMIT).decode("utf-8", "replace").replace("\r\n", "\n")  # a hand edit may use CRLF
     except OSError:
         return None
 
@@ -236,7 +237,7 @@ def fixed(paths: Paths, preset: str | None = None) -> dict:
 def _loaded_skills(db: Path, agents: list[str], sessions: int) -> dict[str, dict]:
     """{agent: {"sessions": n, "loaded": set}} from the agent's last `sessions` sessions (aggregates only)."""
     result = {}
-    with sources._connect(db) as conn:
+    with closing(sources._connect(db)) as conn:  # a connection's own `with` only commits; an open file cannot be deleted on Windows
         for agent in agents:
             ids = [row[0] for row in conn.execute(
                 "SELECT id FROM session_v2 WHERE agent = ? ORDER BY time_created DESC LIMIT ?", (agent, sessions))]

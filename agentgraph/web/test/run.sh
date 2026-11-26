@@ -2,7 +2,7 @@
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CHROME=${CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}
-BASE=${TMPDIR:-/private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode}
+BASE=${TMPDIR:-/tmp}
 WORK=$(mktemp -d "$BASE/agentgraph-view.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT HUP INT TERM
 python3 - "$HERE" "$WORK" <<'PY'

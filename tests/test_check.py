@@ -134,7 +134,8 @@ class Check(unittest.TestCase):
             data["task"] = f"task-{i:03}"
             path = self.directory / f"{i:03}.json"
             path.write_text(json.dumps(data), encoding="utf-8", newline="\n")
-            os.utime(path, ns=(1_000_000_000 + i, 1_000_000_000 + i))
+            stamp = (1_000_000_000 + i) * 10**9  # whole seconds: a Windows file time has 100 ns steps
+            os.utime(path, ns=(stamp, stamp))
         result, output = self.run_check()
         self.assertEqual(result, 2, output)
         self.assertEqual(len([line for line in output.splitlines() if line.startswith("OK")]), 200)
@@ -150,7 +151,8 @@ class Check(unittest.TestCase):
         (project / ".opencode/graph").mkdir(parents=True)
         with (patch("agentgraph.sources.Path.home", return_value=home),
               patch("agentgraph.check.Path.cwd", return_value=project),
-              patch("agentgraph.sources.osfs.getuid", return_value=osfs.getuid() + 1)):
+              patch("agentgraph.sources.osfs.getuid", return_value=osfs.getuid() + 1),
+              patch("agentgraph.sources.fileio.owned_by_me", return_value=False)):  # Windows asks the owner SID
             result, output = self.invoke()
         self.assertEqual(result, 2, output)
         self.assertIn("owned", output)

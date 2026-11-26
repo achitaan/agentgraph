@@ -335,7 +335,7 @@ class EarlierCommandFiles(Scratch):
         flow = structure.add_flow(PATHS[name], TEXT, self.root, name=name, command=True,
                                   commands_dir=self.commands)[0]
         self.assertEqual(flow["id"], flow_id)
-        (self.commands / f"{name}.md").write_text("".join(data), encoding="utf-8")
+        (self.commands / f"{name}.md").write_bytes("".join(data).encode("utf-8"))  # as written: LF on every system
         return flow
 
     def current(self, name, **change):

@@ -98,6 +98,12 @@ class Base(unittest.TestCase):
         return bench.scratch_config(self.root / name, live=self.live, temp_root=self.root, real_home=self.real_home, **kw)
 
 
+class DefaultTempFolderTests(unittest.TestCase):
+    def test_the_default_temp_folder_is_this_systems_not_a_fixed_path(self):
+        self.assertEqual(bench.TEMP_ROOT, Path(tempfile.gettempdir()).resolve())
+        self.assertTrue(bench.TEMP_ROOT.is_dir())
+
+
 class ScratchConfigTests(Base):
     def test_copy_rewrites_the_live_path_and_leaves_tilde_alone(self):
         info = self.scratch()
