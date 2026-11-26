@@ -945,21 +945,28 @@ def _evidence(state: dict, report: str, definition: dict, assessment: dict) -> s
 
 def reconcile(path, task: str, node_id: str) -> str:
     """Bring the node up to date with its run once the run is over; the status line. A node that says running while its run is final is
-    ended here (a driver that was killed leaves it so); a run that is not over leaves the node as it is."""
+    ended here (a driver that was killed leaves it so); a run that is not over leaves the node as it is. A run that was not over when its
+    record was read but is when the line is made is looked at once more, so the line never says a run is over while its node still says
+    running (the line and the node are one answer)."""
     path = Path(path)
-    raw = _read(path)
-    node = _node_of(raw, node_id)
-    run_id = node.get("loop_run")
-    if isinstance(run_id, str) and run_id:
-        project = outputs.project_of(path)
-        folder = looprun.run_dir(project, run_id)
-        try:
-            state = looprun.read_run(folder)
-        except looprun.LoopError:
-            state = None
-        if state and state.get("status") in looprun.FINAL and node.get("status") == "running":
-            _finish(path, project, folder, state, task, node_id, run_id)
-    return status_line(task, node_id, path=path)
+    for _ in range(2):
+        raw = _read(path)
+        node = _node_of(raw, node_id)
+        run_id = node.get("loop_run")
+        state = None
+        if isinstance(run_id, str) and run_id:
+            project = outputs.project_of(path)
+            folder = looprun.run_dir(project, run_id)
+            try:
+                state = looprun.read_run(folder)
+            except looprun.LoopError:
+                state = None
+            if state and state.get("status") in looprun.FINAL and node.get("status") == "running":
+                _finish(path, project, folder, state, task, node_id, run_id)
+        line = status_line(task, node_id, path=path)
+        if not state or state.get("status") in looprun.FINAL:
+            break
+    return line
 
 
 def _publish(path: Path, project: Path, folder: Path, state: dict, task: str, node_id: str, run_id: str) -> tuple[str, dict]:
@@ -1034,6 +1041,15 @@ def status_line(task: str, node_id: str, directory=None, path=None) -> str:
     if state is None:
         return f"blocked attempts={node.get('attempts', 0)} cost=unknown seconds=0 report=- (loop run {run_id} is missing)"
     shown = looprun.shown_status(folder, state)
+    if shown == "interrupted":
+        # No controller held the run when the lock was probed, but the record was read before that: a controller that ended the run in
+        # between had written the end already (the lock is let go after the final record is written). Read the record again, so that
+        # a run that just passed is never shown as `blocked` with the numbers of its last turn.
+        try:
+            state = looprun.read_run(folder)
+        except looprun.LoopError:
+            pass
+        shown = looprun.shown_status(folder, state)
     final = state.get("status") in looprun.FINAL
     project = outputs.project_of(path)
     try:

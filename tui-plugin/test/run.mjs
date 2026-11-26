@@ -5303,16 +5303,25 @@ test("paths: an empty goal sends nothing (a toast says so); a cancelled goal sen
 
 test("paths: a goal over 4,000 characters is refused with a line saying so; 4,000 is sent", async () => {
   const p = await pathsPanel("ses_p1", { answers: { prompt: "é".repeat(4001) } });
-  try {
-    await waitFor(() => p.key("r"), 2000, "r key");
+  // `r` does nothing (and says nothing) unless its command is enabled at that moment (on the list, no dialog still closing, none running):
+  // wait for that, then press in the same tick, so a slow machine cannot make the press a no-op
+  const press = async (what) => {
+    try {
+      await waitFor(() => p.key("r") && p.key("r").enabled(), 5000, `the r key enabled (${what})`);
+    } catch (error) {
+      error.message += ` ${JSON.stringify({ key: !!p.key("r"), enabled: p.key("r") ? p.key("r").enabled() : null, calls: p.calls, toasts: p.toasts })}`;
+      throw error;
+    }
     p.key("r").run();
-    await waitFor(() => p.toasts.length > 0, 2000, "toast");
+  };
+  try {
+    await press("over the limit");
+    await waitFor(() => p.toasts.length > 0, 5000, "toast");
     assert.deepEqual(p.toasts.at(-1), { message: "The goal is 4,001 characters; at most 4,000. Nothing was sent.", variant: "error" });
     assert.deepEqual(p.flowCalls(), []);
     assert.deepEqual(sends(p.calls), []);
     p.ctx.ui.dialog.prompt = async () => "é".repeat(4000);
-    await sleep(20);
-    p.key("r").run();
+    await press("at the limit");
     await waitFor(() => sends(p.calls).length === 1, 5000, "sent at the limit");
   } finally {
     p.done();

@@ -450,6 +450,57 @@ class Detached(Base):
         self.assertEqual(self.node()["status"], "returned")
 
 
+class FinalLineMatchesFinalRecord(Base):
+    def test_a_run_that_ends_between_reading_its_record_and_probing_its_lock_is_not_shown_as_blocked(self):
+        """The controller writes the end of the run and then lets go of the lock. A status that read the record while it still said
+        `running` and probed the lock afterwards found the lock free and printed `blocked` (the numbers of the last turn, no report)
+        for a run that had passed."""
+        run_id, line, _ = self.run_node([{"cost": 0.1}] * 3)
+        self.assertTrue(line.startswith("passed-check attempts=3"), line)
+        (run,) = self.runs()
+        final = (run / "run.json").read_bytes()
+        state = json.loads(final)
+        stale = dict(state, status="running", ended=None)
+        stale["totals"] = dict(state["totals"], seconds=0)
+        (run / "run.json").write_text(json.dumps(stale))
+
+        def held(folder):
+            (run / "run.json").write_bytes(final)  # the controller ends the run, then lets go of the lock
+            return False
+        with mock.patch.object(looprun, "_held", held):
+            line = noderun.status(TASK, "n1", self.directory)
+        self.assertTrue(line.startswith("passed-check attempts=3 cost=$0.3000"), line)
+        self.assertNotIn("report=-", line)
+        self.assertEqual(noderun.exit_code(line), 0)
+
+    def test_a_line_that_says_the_run_is_over_comes_with_a_node_that_says_so_too(self):
+        """`wait` brings the node up to date from the record it read first; a run that ended after that read must not give a final line
+        while the node still says running (the next thing a caller reads is the node)."""
+        self.run_node([{"cost": 0.1}] * 3)
+        (run,) = self.runs()
+        data = self.read()
+        data["nodes"][1].update(status="running", evidence="")
+        self.write(data)
+        stale = dict(json.loads((run / "run.json").read_text()), status="running", ended=None)
+        real, reads = looprun.read_run, []
+
+        def read_run(folder):
+            reads.append(folder)
+            return stale if len(reads) == 1 else real(folder)  # the first look is before the run ended
+        with mock.patch.object(looprun, "read_run", read_run):
+            line = noderun.wait(TASK, "n1", self.directory, timeout=5)
+        self.assertTrue(line.startswith("passed-check attempts=3"), line)
+        self.assertEqual(self.node()["status"], "returned")
+
+    def test_a_run_whose_controller_is_really_gone_is_still_blocked(self):
+        run_id, line, _ = self.run_node([{"cost": 0.1}] * 3)
+        (run,) = self.runs()
+        state = json.loads((run / "run.json").read_text())
+        (run / "run.json").write_text(json.dumps(dict(state, status="running", ended=None)))
+        with mock.patch.object(looprun, "_held", lambda folder: False):
+            self.assertTrue(noderun.status(TASK, "n1", self.directory).startswith("blocked "))
+
+
 class CommandLine(Base):
     def test_node_run_wait_status_through_the_main_entry(self):
         script = self.project / "turns.json"
