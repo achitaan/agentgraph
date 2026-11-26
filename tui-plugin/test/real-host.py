@@ -15,7 +15,7 @@ under it in the same column. With --no-graph the view must be in the sidebar.
 
 `pyte` is not installed globally: put it in a folder and pass it with PYTEPATH (default: the scratch folder
 <scratch>/pylib, filled with `pip install --target <scratch>/pylib pyte`). <scratch> is
-$TMPDIR_OPENCODE/tui-real (default /private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode/tui-real).
+$TMPDIR_OPENCODE/tui-real (default: <the system temp folder>/tui-real).
 
 The session: --session, else $AGENTGRAPH_REAL_SESSION, else <scratch>/session.txt; when there is none it creates a
 throwaway one with `opencode run --standalone --model anthropic/claude-haiku-5-5 "Do not call any tool. Reply with
@@ -100,21 +100,26 @@ The `g` key (orbit or list):
                     2D/3D, `g` the view, `R` close with `q` and open the panel again with /graph.
 """
 import argparse
-import fcntl
 import json
 import os
-import pty
 import re
 import select
 import signal
 import struct
 import subprocess
 import sys
-import termios
+import tempfile
 import time
 
+try:  # a real terminal for the app: Unix only; --selftest needs none of it and runs everywhere
+    import fcntl
+    import pty
+    import termios
+except ImportError:
+    fcntl = pty = termios = None
+
 DEFAULT_BINARY = "/Applications/OpenCode.app/Contents/Resources/opencode-cli"
-SCRATCH = os.path.join(os.environ.get("TMPDIR_OPENCODE", "/private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode"), "tui-real")
+SCRATCH = os.path.join(os.environ.get("TMPDIR_OPENCODE") or tempfile.gettempdir(), "tui-real")
 sys.path.insert(0, os.environ.get("PYTEPATH", os.path.join(SCRATCH, "pylib")))
 try:
     import pyte  # noqa: E402
@@ -1483,8 +1488,9 @@ def _exit_on_signal(signum, _frame):
 
 
 def main():
-    for sig in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, _exit_on_signal)
+    for name in ("SIGTERM", "SIGHUP"):  # Windows has no SIGHUP
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), _exit_on_signal)
     parser = argparse.ArgumentParser()
     parser.add_argument("--size", default="160x45")
     parser.add_argument("--binary", default=os.environ.get("OPENCODE_CLI", DEFAULT_BINARY))
@@ -1511,6 +1517,9 @@ def main():
     args = parser.parse_args()
     if args.selftest:
         return selftest()
+    if pty is None:
+        print("real-host.py: driving the real app needs a Unix terminal (pty); only --selftest runs on this system", file=sys.stderr)
+        return 2
     why = refuse(args.demo, args.dialog, any(a == "--session" or a.startswith("--session=") for a in sys.argv[1:]))
     if not why and (args.paths or args.live_paths) and (args.paths and args.live_paths or args.demo or args.dialog or args.open
                                                          or args.gcheck or args.fullscreen or args.view3d):

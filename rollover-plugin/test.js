@@ -4,6 +4,7 @@ const assert = require("node:assert");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const cp = require("node:child_process");
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "rollover-test-"));
 
@@ -17,17 +18,93 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "rollover-test-"));
 let n = 0;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// The plugin runs the `agentgraph` command two ways. On Unix it runs bin/agentgraph itself (a /bin/sh script), and the
+// fake here is a small sh script. On native Windows there is no such script: it runs `python -P -m agentgraph.cli ...`
+// with PYTHONPATH = the folder above bin/, so there the fake is a Python module, agentgraph/cli.py, under a fake
+// folder tree, started by a real Python (that is the code path a Windows user has). ROLLOVER_TEST_PYTHON_FAKES=1 does
+// the same on a Unix machine (it makes the plugin believe it runs on Windows), to try that path without Windows.
+const IS_WIN = process.platform === "win32";
+const PY_FAKES = IS_WIN || process.env.ROLLOVER_TEST_PYTHON_FAKES === "1";
+if (PY_FAKES && !IS_WIN) Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+const PY_PROBE = "import sys; sys.exit(1) if sys.version_info < (3, 11) else print(sys.executable)";
+let realPython = null;
+const findPython = () => {
+  if (realPython) return realPython;
+  for (const [file, lead] of [["py", ["-3"]], ["python3", []], ["python", []]]) {
+    try {
+      const out = String(cp.execFileSync(file, [...lead, "-c", PY_PROBE], { encoding: "utf8", timeout: 10000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }));
+      const line = out.split(/\r?\n/).map((x) => x.trim()).filter(Boolean).pop();
+      if (line) return (realPython = line);
+    } catch { /* try the next one */ }
+  }
+  throw new Error("no Python 3.11 or newer found (py -3, python3, python) for the Windows-style fake command");
+};
+// The fake command's behaviour is written as the sh snippets of the cases (`exit 3`, `sleep 1; echo SUMMARY`,
+// `exec sleep 5`, `echo x >> file`); this module runs the few statements those use, so one description serves both.
+const FAKE_CLI = (leads, build, argsFile) => `import shlex, sys, time
+
+LEADS = ${JSON.stringify(leads)}
+BUILD = ${JSON.stringify(build)}
+ARGS_FILE = ${JSON.stringify(argsFile)}
+
+
+def run(script):
+    for statement in script.replace("\\n", ";").split(";"):
+        words = shlex.split(statement)
+        target = None
+        if ">>" in words:
+            at = words.index(">>")
+            target = words[at + 1]
+            words = words[:at]
+        if words and words[0] == "exec":
+            words = words[1:]
+        if not words or words[0] == "true":
+            continue
+        if words[0] == "echo":
+            text = " ".join(words[1:]) + "\\n"
+            if target:
+                with open(target, "a") as handle:
+                    handle.write(text)
+            else:
+                sys.stdout.write(text)
+                sys.stdout.flush()
+        elif words[0] == "exit":
+            sys.exit(int(words[1]))
+        elif words[0] == "sleep":
+            time.sleep(float(words[1]))
+        else:
+            raise SystemExit("fake command: unsupported statement: " + statement)
+
+
+if sys.argv[1:3] == ["handoff", "leads"]:
+    run(LEADS)
+    sys.exit(0)
+with open(ARGS_FILE, "a") as handle:
+    handle.write(" ".join(sys.argv[1:]) + "\\n")
+run(BUILD or "echo SUMMARY")
+`;
+
 // A plugin copy with its own settings file, a fake `agentgraph` command and a fake OpenCode context.
 // `from` reuses the folders of an earlier harness (a restart of OpenCode).
-async function harness(settings, { build, leads = "true", from = null, rawSettings = null, getDelay = {}, getFail = false } = {}) {
+async function harness(settings, { build, leads = "true", from = null, rawSettings = null, getDelay = {}, getFail = false, pythonCli = null } = {}) {
   const dir = from ? from.dir : path.join(root, `case${n++}`);
   const home = path.join(dir, "home");
   process.env.AGENTGRAPH_ROLLOVER_HOME = home;
   fs.mkdirSync(path.join(dir, "plugin"), { recursive: true });
   fs.copyFileSync(path.join(__dirname, "index.js"), path.join(dir, "plugin", "index.js"));
   const argsFile = path.join(dir, "build-args.txt");
-  const fake = path.join(dir, "fake-agentgraph");
-  fs.writeFileSync(fake, `#!/bin/sh\nif [ "$1 $2" = "handoff leads" ]; then\n${leads}\nexit 0\nfi\necho "$@" >> "${argsFile}"\n${build || "echo SUMMARY"}\n`, { mode: 0o755 });
+  let fake = path.join(dir, "fake-agentgraph");
+  if (PY_FAKES || pythonCli) {
+    // bin/agentgraph only has to exist (the plugin takes the folder above bin/ as PYTHONPATH); the command is cli.py
+    fake = path.join(dir, "bin", "agentgraph");
+    fs.mkdirSync(path.dirname(fake), { recursive: true }); fs.mkdirSync(path.join(dir, "agentgraph"), { recursive: true });
+    fs.writeFileSync(fake, "#!/bin/sh\n");
+    fs.writeFileSync(path.join(dir, "agentgraph", "__init__.py"), "");
+    fs.writeFileSync(path.join(dir, "agentgraph", "cli.py"), pythonCli || FAKE_CLI(leads, build || "", argsFile));
+    if (!process.env.AGENTGRAPH_PYTHON) process.env.AGENTGRAPH_PYTHON = findPython();
+  } else {
+    fs.writeFileSync(fake, `#!/bin/sh\nif [ "$1 $2" = "handoff leads" ]; then\n${leads}\nexit 0\nfi\necho "$@" >> "${argsFile}"\n${build || "echo SUMMARY"}\n`, { mode: 0o755 });
+  }
   const settingsFile = path.join(dir, "plugin", "rollover.json");
   fs.writeFileSync(settingsFile, rawSettings !== null ? rawSettings : JSON.stringify({ agentgraph_bin: fake, ...settings }));
   const queue = []; let wake = null;
@@ -66,10 +143,11 @@ async function harness(settings, { build, leads = "true", from = null, rawSettin
   h.notesPath = (sid = main.sid) => path.join(infos.get(sid).location.directory, ".opencode", "handoff", `${sid}.md`);
   // size 5: "notes" (a lane's); bigger: text of that many characters that names the topics of the chat floor; `body` overrides the text
   const topical = (size) => "Objective: x. Requirements and limits: y. Decisions: z. Work state: done. Next steps: a. Files: b. ".repeat(Math.ceil(size / 100)).slice(0, size);
-  h.notes = (sid = main.sid, ageSeconds = 0, size = 5, body = null) => {
-    const t0 = Date.now(); while (Date.now() === t0) { /* the notes get a later millisecond than every event before them (the plugin compares whole milliseconds) */ }
-    const f = h.notesPath(sid); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, body !== null ? body : size <= 5 ? "notes".padEnd(size, " ") : topical(size));
+  h.notes = (sid = main.sid, ageSeconds = 0, size = 5, body = null, file = null) => {
+    const t0 = Date.now(); while (Date.now() < t0 + (IS_WIN ? 25 : 1)) { /* the notes get a later millisecond than every event before them (the plugin compares whole milliseconds); a Windows file's time can trail the clock by a few milliseconds, so a little more */ }
+    const f = file || h.notesPath(sid); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, body !== null ? body : size <= 5 ? "notes".padEnd(size, " ") : topical(size));
     if (ageSeconds) { const t = (Date.now() - ageSeconds * 1000) / 1000; fs.utimesSync(f, t, t); }
+    const t1 = Date.now(); while (Date.now() < t1 + (IS_WIN ? 25 : 1)) { /* and the next event gets a later millisecond than the notes */ }
   };
   h.logRows = () => { try { return fs.readFileSync(path.join(home, "rollover.log"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
   h.state = (sid = main.sid) => { try { return JSON.parse(fs.readFileSync(path.join(home, "state", `${sid}.json`), "utf8")); } catch { return null; } };
@@ -89,17 +167,18 @@ async function harness(settings, { build, leads = "true", from = null, rawSettin
 const cases = {
 
   "native Windows: the command runs as python -P -m agentgraph.cli with PYTHONPATH above bin/, as the .cmd launcher does": async () => {
-    const dir = path.join(root, "win-python"); fs.mkdirSync(dir, { recursive: true });
-    const log = path.join(dir, "python-calls.txt");
-    const fakePython = path.join(dir, "fake-python");
-    fs.writeFileSync(fakePython, `#!/bin/sh\necho "$@ | $PYTHONPATH" >> "${log}"\nif [ "$4 $5" = "handoff leads" ]; then exit 0; fi\necho WINSUMMARY\n`, { mode: 0o755 });
-    const platform = Object.getOwnPropertyDescriptor(process, "platform"); const had = process.env.AGENTGRAPH_PYTHON;
-    Object.defineProperty(process, "platform", { value: "win32", configurable: true }); process.env.AGENTGRAPH_PYTHON = fakePython;
+    // a real Python runs agentgraph/cli.py (a fake) and logs how it was started: -P (safe path), -m agentgraph.cli, the
+    // arguments, and PYTHONPATH
+    const cli = `import os, sys\nwith open(${JSON.stringify(path.join(root, "python-calls.txt"))}, "a") as log:\n    log.write(" ".join(["-P" if sys.flags.safe_path else "no-P", "-m", __spec__.name] + sys.argv[1:]) + " | " + os.environ.get("PYTHONPATH", "") + "\\n")\nif sys.argv[1:3] != ["handoff", "leads"]:\n    print("WINSUMMARY")\n`;
+    const log = path.join(root, "python-calls.txt");
+    const had = process.env.AGENTGRAPH_PYTHON; const platform = Object.getOwnPropertyDescriptor(process, "platform");
+    process.env.AGENTGRAPH_PYTHON = findPython();
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
     try {
-      const h = await harness({}); await h.step(116000); h.notes(); await h.step(117000);
+      const h = await harness({}, { pythonCli: cli }); await h.step(116000); h.notes(); await h.step(117000);
       const event = await h.hook();
       assert.equal(event.result && event.result.summary.trim(), "WINSUMMARY");
-      const rows = fs.readFileSync(log, "utf8").trim().split("\n");
+      const rows = fs.readFileSync(log, "utf8").trim().split(/\r?\n/);
       const upAbove = path.dirname(path.dirname(JSON.parse(fs.readFileSync(h.settingsFile, "utf8")).agentgraph_bin));
       assert.ok(rows[0].startsWith("-P -m agentgraph.cli handoff leads"), rows[0]);
       assert.ok(rows.some((r) => r.startsWith("-P -m agentgraph.cli handoff build --session ")), rows.join(" / "));
@@ -842,7 +921,7 @@ const cases = {
     const folder = path.join(h.work, ".opencode", "mine", "deep");
     assert.ok(h.calls.synthetic[0].text.includes(path.join(folder, `${h.sid}.md`)));
     assert.equal(fs.readFileSync(path.join(folder, ".gitignore"), "utf8"), "*\n"); assert.ok(!fs.existsSync(path.join(h.work, ".opencode", "handoff")));
-    fs.mkdirSync(folder, { recursive: true }); fs.writeFileSync(path.join(folder, `${h.sid}.md`), "notes"); await h.step(117000);
+    h.notes(h.sid, 0, 5, null, path.join(folder, `${h.sid}.md`)); await h.step(117000);   // the helper gives the notes a later millisecond than the events around them
     assert.equal(h.calls.compact.length, 1); await h.hook(); assert.match(h.buildArgs()[0], /--notes-dir \.opencode\/mine\/deep /); assert.ok(!h.has("settings_invalid")); h.stop();
   },
   async "N6a: the patience limit clears the request while the hook builds: the rollover is still logged truthfully"() {
@@ -898,13 +977,10 @@ const cases = {
 
 (async () => {
   let failed = 0, skipped = 0;
-  // The fake `agentgraph` here is a /bin/sh script; native Windows has no sh to run it, so those cases are skipped there.
-  const needsSh = (fn) => /harness\(|#!\/bin\/sh/.test(fn.toString());
   for (const [name, fn] of Object.entries(cases)) {
-    if (process.platform === "win32" && needsSh(fn)) { skipped += 1; console.log("skip " + name + " (needs a POSIX shell)"); continue; }
     try { await fn(); console.log("ok   " + name); } catch (e) { failed += 1; console.log("FAIL " + name + ": " + (e && e.stack ? e.stack.split("\n").slice(0, 4).join(" | ") : e)); }
   }
-  fs.rmSync(root, { recursive: true, force: true });
+  try { fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* a fake command may still hold a folder on Windows; the system cleans the temp folder */ }
   console.log(failed ? `${failed} failed` : skipped ? `${Object.keys(cases).length - skipped} passed, ${skipped} skipped` : `all ${Object.keys(cases).length} passed`);
   process.exit(failed ? 1 : 0);
 })();
