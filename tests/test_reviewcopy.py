@@ -521,6 +521,17 @@ class Links(Base):
         self.assertFalse(outside.exists())
         self.assertGreaterEqual(self.result()[0]["symlinks_left_out"], 1)
 
+    @needs_symlinks
+    def test_the_walk_that_judges_links_agrees_with_the_system_one(self):
+        """`_physical` is what decides on Windows; here it must give the real path the system gives (a `..` after a link goes past the link's target)."""
+        self.files(d__f="2")
+        os.symlink("..", self.project / "d" / "up")
+        os.symlink("d/up/d/up/../../..", self.project / "q")
+        os.symlink("d/up", self.project / "r")
+        for name in ("q", "r", "d/up", "d", "d/f", "."):
+            with self.subTest(name=name):
+                self.assertEqual(reviewcopy._physical(self.project / name), os.path.realpath(self.project / name))
+
     def test_a_link_is_never_made_over_something_that_is_already_there(self):
         """On a case-insensitive disk `Link` lands on `link`; nothing may be written through a link made there."""
         outside = self.base / "away"

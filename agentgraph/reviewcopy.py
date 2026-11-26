@@ -305,21 +305,54 @@ def _inside(real: str, root: str) -> bool:
     return real == root or real.startswith(root + os.sep)
 
 
+def _physical(path) -> str:
+    """The real path of `path`, following each link the way a POSIX realpath does: a `..` after a link goes to the parent of where the link
+    leads. (On Windows `os.path.realpath` cannot be trusted for a link whose target the disk does not yet show as a folder, and the system
+    itself resolves `..` after a link that way, so a chain of links must be judged by walking it.)"""
+    start = Path(path)
+    cur, todo, followed = start.anchor, list(reversed(start.parts[1:] if start.anchor else start.parts)), 0
+    while todo:
+        part = todo.pop()
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if cur != start.anchor:
+                cur = os.path.dirname(cur) or cur
+            continue
+        step = os.path.join(cur, part)
+        if os.path.islink(step):
+            followed += 1
+            if followed > 40:  # a loop of links: left where it is, and judged by that
+                return step
+            where = Path(os.readlink(step))
+            if where.anchor:
+                cur, todo = where.anchor, todo + list(reversed(where.parts[1:]))
+            else:
+                todo += list(reversed(where.parts))
+        else:
+            cur = step
+    return cur
+
+
+def _real(path) -> str:
+    return _physical(path) if osproc.is_windows() else os.path.realpath(path)
+
+
 def _place_links(links: list[tuple[str, str]], target: Path) -> tuple[list[tuple[str, str]], int]:
     """Make the symlinks, after every regular file is there; (the ones kept, the count left out). A link is left out when
     something is already at its place (a case-insensitive disk, so nothing is written through a link), when it is absolute, or
     when its real path ends up outside the copy; the last is checked after all links are made, until no link is removed."""
-    root = os.path.realpath(target)
+    root = _real(target)
     placed: list[tuple[str, str]] = []
     skipped = 0
     for rel, text in sorted(links):
         dest = target / rel
-        if os.path.isabs(text) or os.path.lexists(dest) or not _inside(os.path.realpath(dest.parent), root):
+        if os.path.isabs(text) or os.path.lexists(dest) or not _inside(_real(dest.parent), root):
             skipped += 1
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            os.symlink(text, dest)
+            os.symlink(text, dest, target_is_directory=osproc.is_windows() and os.path.isdir(_physical(dest.parent / text)))
         except (OSError, NotImplementedError):
             if not osproc.is_windows():
                 raise
@@ -330,7 +363,7 @@ def _place_links(links: list[tuple[str, str]], target: Path) -> tuple[list[tuple
     while moved:
         moved = False
         for entry in list(placed):
-            if not _inside(os.path.realpath(target / entry[0]), root):
+            if not _inside(_real(target / entry[0]), root):
                 os.unlink(target / entry[0])
                 placed.remove(entry)
                 skipped += 1

@@ -1191,9 +1191,15 @@ class SecondController(Base):
         self.assertTrue(self.wait_until(lambda: looprun.shown_status(run, looprun.read_run(run)) == "running"),
                         f"the run never showed as running: {looprun.shown_status(run, looprun.read_run(run))} held={looprun._held(run)}")
         graphedit = noderun.graphedit
-        graphedit.edit(TASK, "n1", {"status": "blocked", "note": "the orchestrator took the node"}, dirs=[self.directory])
-        message = self.refused(check=TRUE, cost=1)  # the node says blocked, but the run is still going
-        self.assertIn("is still going", message + f"\n[held {[looprun._held(run) for _ in range(10)]}]\n{self.logs(run)}")
+        slow = mock.patch.object(noderun, "POLL", 3.0)  # the follower must not end the run before the second call has looked at it
+        slow.start()
+        try:
+            time.sleep(0.3)  # it is then in its long wait
+            graphedit.edit(TASK, "n1", {"status": "blocked", "note": "the orchestrator took the node"}, dirs=[self.directory])
+            message = self.refused(check=TRUE, cost=1)  # the node says blocked, but the run is still going
+        finally:
+            slow.stop()
+        self.assertIn("is still going", message + "\n" + self.logs(run))
         self.assertIn(run.name, message)
         self.assertEqual(self.runs(), [run])
         self.assertTrue(self.wait_until(lambda: looprun.read_run(run)["status"] in looprun.FINAL), "the run was not cancelled")
