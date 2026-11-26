@@ -167,6 +167,12 @@ def kill_group(pid: int, force: bool = False, *, windows=None, runner=None) -> N
     done = _run(runner)(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if done.returncode == TASKKILL_NOT_FOUND:
         raise ProcessLookupError(pid)
+    if done.returncode != 0 and force:
+        # taskkill also fails (255) when a member of the tree exits while it is being stopped: look once more before calling it refused
+        time.sleep(0.2)
+        done = _run(runner)(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if done.returncode == TASKKILL_NOT_FOUND:
+            return  # gone by now: the first step did stop it
     if done.returncode != 0:
         raise PermissionError(f"taskkill refused to stop {pid} (status {done.returncode})")
 

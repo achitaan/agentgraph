@@ -3529,10 +3529,12 @@ await check("v7 r3 main (real python3): the bridge's loop command answers read, 
   const saved = process.env.AGENTGRAPH_PERSONAL;
   try {
     const port = await new Promise((resolve, reject) => {
-      let out = "";
+      let out = "", err = "";
+      const began = Date.now();
       httpd.stdout.on("data", (chunk) => { out += chunk; if (/\n/.test(out)) resolve(Number(out.trim())); });
-      httpd.on("exit", () => reject(new Error("the page server did not start")));
-      setTimeout(() => reject(new Error("the page server did not start in time")), 15000);
+      httpd.stderr.on("data", (chunk) => { err += chunk; });
+      httpd.on("exit", (code) => reject(new Error("the page server did not start (exit " + code + "): " + err.slice(-400))));
+      setTimeout(() => reject(new Error("the page server did not start in time (" + (Date.now() - began) + " ms; stdout " + JSON.stringify(out.slice(-200)) + "; stderr " + JSON.stringify(err.slice(-400)) + ")")), 15000);
     });
     process.env.AGENTGRAPH_PERSONAL = path.join(a, "personal"); // the structure folder the real command reads (the bridge passes the process environment on)
     const m = mainContext({ home: ORCHESTRATION });
@@ -3617,10 +3619,12 @@ await check("v7 r4 main (real python3): a run written as waiting with no control
   const saved = process.env.AGENTGRAPH_PERSONAL;
   try {
     const port = await new Promise((resolve, reject) => {
-      let out = "";
+      let out = "", err = "";
+      const began = Date.now();
       httpd.stdout.on("data", (chunk) => { out += chunk; if (/\n/.test(out)) resolve(Number(out.trim())); });
-      httpd.on("exit", () => reject(new Error("the page server did not start")));
-      setTimeout(() => reject(new Error("the page server did not start in time")), 15000);
+      httpd.stderr.on("data", (chunk) => { err += chunk; });
+      httpd.on("exit", (code) => reject(new Error("the page server did not start (exit " + code + "): " + err.slice(-400))));
+      setTimeout(() => reject(new Error("the page server did not start in time (" + (Date.now() - began) + " ms; stdout " + JSON.stringify(out.slice(-200)) + "; stderr " + JSON.stringify(err.slice(-400)) + ")")), 15000);
     });
     process.env.AGENTGRAPH_PERSONAL = path.join(a, "personal");
     const m = mainContext({ home: ORCHESTRATION });

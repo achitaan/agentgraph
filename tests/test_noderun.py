@@ -61,7 +61,13 @@ class Base(unittest.TestCase):
         self.path.write_text(json.dumps(data))
 
     def read(self):
-        return json.loads(self.path.read_text())
+        for left in range(50, -1, -1):  # on Windows a file being replaced by a writer cannot be opened for a moment
+            try:
+                return json.loads(self.path.read_text())
+            except PermissionError:
+                if not left:
+                    raise
+                time.sleep(0.02)
 
     def node(self, node_id="n1"):
         return next(n for n in self.read()["nodes"] if n["id"] == node_id)
