@@ -5,6 +5,7 @@ folder cannot be deleted under it. `reap_detached(self)` records the processes t
 its temporary folder is removed (call it right after the folder is made: cleanups run last in, first out), stops those still
 running and waits for them. Elsewhere it does nothing: a running process holds no file there."""
 import subprocess
+import threading
 import time
 from unittest import mock
 
@@ -62,6 +63,9 @@ def reap_detached(case) -> list:
             except Exception:
                 pass
         _stop_all(family)
+        for thread in threading.enumerate():
+            if thread.daemon and "drain" in thread.name:
+                thread.join(10)  # the check runner's reader holds the check's output file until its pipe ends (a grandchild may still hold the pipe)
         time.sleep(0.2)  # the system lets go of the files a moment after the process has gone
 
     case.addCleanup(reap)
