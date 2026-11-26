@@ -142,12 +142,14 @@ def make_server(
                 # which cannot supply Host and would otherwise suppress status and headers.
                 if self.request_version == "HTTP/0.9":
                     self.request_version = "HTTP/1.0"
+                self._drain_body()
                 self.send_error(403)
                 return False
             target = self.path.partition("?")[0]
             allowed = ("GET", "HEAD", "POST") if target == _IMPROVE_PATH else (
                 ("POST",) if target in _POSTS else ("GET", "HEAD"))
             if self.command not in allowed:
+                self._drain_body()
                 self.send_response(405)
                 self.send_header("Allow", ", ".join(allowed))
                 self.send_header("Content-Length", "0")
@@ -155,7 +157,33 @@ def make_server(
                 return False
             return True
 
+        def _drain_body(self, cap: int = 1 << 20):
+            """Read and drop a request body the server is not going to use. The connection closes after the answer, and closing with
+            request bytes unread makes Windows (and sometimes other systems) reset it, so the client fails before it reads the answer.
+            Bounded: at most `cap` bytes, one second of waiting, and nothing for a body that is not announced by a Content-Length."""
+            if getattr(self, "_body_drained", False):
+                return
+            self._body_drained = True
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except (TypeError, ValueError):
+                return
+            if length <= 0:
+                return
+            try:
+                self.connection.settimeout(1.0)
+                length = min(length, cap)
+                deadline = time.monotonic() + 3.0
+                while length > 0 and time.monotonic() < deadline:
+                    chunk = self.rfile.read1(min(length, 65536))
+                    if not chunk:
+                        break
+                    length -= len(chunk)
+            except OSError:
+                pass
+
         def _refuse(self, status: int, message: str):
+            self._drain_body()
             self._reply(status, "application/json", json.dumps({"error": message}).encode("utf-8"))
 
         def _stale(self, exc):
@@ -187,17 +215,10 @@ def make_server(
                 # Read what arrives of a body up to twice the limit first, while it keeps coming: closing with it
                 # unread resets the connection, and the client may never see the answer.
                 if limit < length <= 2 * limit:
-                    try:
-                        self.connection.settimeout(1.0)
-                        while length > 0:
-                            chunk = self.rfile.read1(min(length, 65536))
-                            if not chunk:
-                                break
-                            length -= len(chunk)
-                    except OSError:
-                        pass
+                    self._drain_body(2 * limit)
                 self._refuse(413, "the body is empty or too large")
                 return None
+            self._body_drained = True  # the body is read here
             try:
                 return json.loads(self.rfile.read(length).decode("utf-8"))
             except (UnicodeDecodeError, ValueError):
