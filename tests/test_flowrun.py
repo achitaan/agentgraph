@@ -19,6 +19,7 @@ from agentgraph.contract import TaskGraph
 import tests.test_agentfiles as agentfile_tests
 import tests.test_structure as structure_tests
 from tests.test_structure import make_structure, tree, write_flow
+from tests.launch import LAUNCHER, home_env
 from tests.winskip import needs_symlinks
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -436,8 +437,8 @@ class Command(Scratch):
         self.assertIn("needs a name", err)
 
     def test_shell_entry_point_flow_never_writes_the_real_commands_folder(self):
-        env = {**os.environ, "HOME": str(self.temporary)}
-        base = [str(ROOT / "bin" / "agentgraph"), "flow"]
+        env = {**os.environ, **home_env(self.temporary)}
+        base = [*LAUNCHER, "flow"]
         added = subprocess.run(base + ["add", *LOOP_PATH, "--name", "check-loop", "--command", "--structure",
                                        str(self.root), "--commands", str(self.commands), "--json"],
                                capture_output=True, text=True, env=env, timeout=30)

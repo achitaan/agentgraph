@@ -19,6 +19,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 from agentgraph import agentfiles, demo, flowcommands, server, setups, skillset
+from tests.launch import LAUNCHER
 from tests.winskip import needs_symlinks, posix_only
 from agentgraph.snapshot_json import snapshot_document
 
@@ -583,7 +584,7 @@ class Commands(Scratch):
 
     def test_the_launcher_runs_the_commands(self):
         for group, op in (("preset", "show"), ("setup", "list")):
-            done = subprocess.run([str(ROOT / "bin" / "agentgraph"), group, op, "--json", "--config-dir",
+            done = subprocess.run([*LAUNCHER, group, op, "--json", "--config-dir",
                                    str(self.root), "--orchestration", str(self.root), "--dir", str(self.project)],
                                   capture_output=True, text=True, env={**os.environ, "OH_MY_OPENCODE_SLIM_PRESET": ""})
             self.assertEqual(done.returncode, 0, done.stderr)
