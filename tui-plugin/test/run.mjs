@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn as realSpawn, execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import module from "node:module";
 
@@ -564,11 +564,51 @@ test("display width and truncate", () => {
 // ---------------------------------------------------------------------------------------------------------------
 // Snapshot runner with fake interpreters
 
+// A fake interpreter is a node script, so the same file works on every system (no /bin/sh, no exec bit). The plugin
+// starts it as `<file> -P -m agentgraph.snapshot_json ...`; `spawn` below turns that into `node <file> <the same
+// arguments>`, so the code under test (kill, timeout, size cap, stdin, cwd, environment) really runs a child process.
+// `body` is the text of an async function with these in reach: fs, path, args (the arguments after the file), say(text),
+// warn(text), readStdin() (a promise of what was written to the child's stdin), sleepMs(ms), append(file, text), sid
+// (the --session=ID argument). Set process.exitCode for a status; end with `return` (no process.exit: output may be lost).
+const FAKE_PRELUDE = `"use strict";
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+const say = (text) => process.stdout.write(text);
+const warn = (text) => process.stderr.write(text);
+process.stdout.on("error", () => {});
+process.stderr.on("error", () => {});
+const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const append = (file, text) => fs.appendFileSync(file, text);
+const readStdin = () => new Promise((resolve) => {
+  let text = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => { text += chunk; });
+  process.stdin.on("end", () => resolve(text));
+  process.stdin.on("error", () => resolve(text));
+});
+const sid = (args.find((a) => a.startsWith("--session=")) || "").slice(10);
+`;
+const fakeFiles = new Set();
 function fakePython(name, body) {
-  const file = path.join(tmp, name);
-  fs.writeFileSync(file, "#!/bin/sh\n" + body + "\n", { mode: 0o755 });
+  const file = path.join(tmp, name + ".js");
+  fs.writeFileSync(file, FAKE_PRELUDE + "(async () => {\n" + body + "\n})().catch((e) => { process.stderr.write(String((e && e.stack) || e)); process.exitCode = 70; });\n");
+  fakeFiles.add(file);
   return file;
 }
+// The system's own spawn for everything else. On Windows a child with an environment that has no SystemRoot may fail to
+// start, so a fake gets the usual ones under whatever the plugin passes.
+function spawn(file, args, options) {
+  if (!fakeFiles.has(file)) return realSpawn(file, args, options);
+  const env = Object.assign({}, options && options.env);
+  if (process.platform === "win32") {
+    for (const key of ["SystemRoot", "PATH"]) {
+      if (process.env[key] !== undefined && !Object.keys(env).some((have) => have.toLowerCase() === key.toLowerCase())) env[key] = process.env[key];
+    }
+  }
+  return realSpawn(process.execPath, [file, ...args], Object.assign({}, options, { env }));
+}
+globalThis.__agentgraphSpawn = spawn;
 
 function runnerFor(python, extra = {}) {
   return createSnapshotRunner(Object.assign({ spawn, fs, path, env: process.env, home: tmp, python }, extra));
@@ -598,6 +638,15 @@ test("runner: missing interpreter", async () => {
 });
 
 test("runner: interpreter not executable", async () => {
+  if (process.platform === "win32") {
+    // Windows has no exec bit: a file that is not a program fails to start, and that is one clean line, not a throw
+    const file = path.join(tmp, "not-exec.exe");
+    fs.writeFileSync(file, "x");
+    const doc = await runnerFor(file).snapshot({ session: "ses_a" });
+    assert.match(doc.error, /^(Python is not executable|Could not start Python|Python was not found)/, doc.error);
+    assert.ok(!doc.error.includes("\n"));
+    return;
+  }
   const file = path.join(tmp, "not-exec");
   fs.writeFileSync(file, "x", { mode: 0o644 });
   const doc = await runnerFor(file).snapshot({ session: "ses_a" });
@@ -610,14 +659,14 @@ test("runner: relative interpreter path is refused", async () => {
 });
 
 test("runner: interpreter too old for -P", async () => {
-  const py = fakePython("old-python", 'echo "Unknown option: -P" >&2\necho "usage: python3 [option] ..." >&2\nexit 2');
+  const py = fakePython("old-python", `warn("Unknown option: -P\\nusage: python3 [option] ...\\n"); process.exitCode = 2;`);
   const doc = await runnerFor(py).snapshot({ session: "ses_a" });
   assert.match(doc.error, /^Python 3\.11 or newer is required/);
 });
 
 test("runner: timeout kills the process", async () => {
   const pidFile = path.join(tmp, "timeout.pid");
-  const py = fakePython("slow-python", `echo $$ > "${pidFile}"\nexec sleep 30`);
+  const py = fakePython("slow-python", `fs.writeFileSync(${JSON.stringify(pidFile)}, process.pid + "\\n"); await sleepMs(30000);`);
   const started = Date.now();
   const doc = await runnerFor(py, { timeoutMs: 400 }).snapshot({ session: "ses_a" });
   assert.match(doc.error, /did not finish within/);
@@ -627,52 +676,53 @@ test("runner: timeout kills the process", async () => {
 });
 
 test("runner: oversized output", async () => {
-  const py = fakePython("big-python", "head -c 200000 /dev/zero | tr '\\0' a");
+  const py = fakePython("big-python", `say("a".repeat(200000));`);
   const doc = await runnerFor(py, { maxBytes: 1024 }).snapshot({ session: "ses_a" });
   assert.match(doc.error, /^The snapshot was larger than/);
 });
 
 test("runner: bad JSON", async () => {
-  const doc = await runnerFor(fakePython("bad-json", "echo 'not json'")).snapshot({ session: "ses_a" });
+  const doc = await runnerFor(fakePython("bad-json", `say("not json\\n");`)).snapshot({ session: "ses_a" });
   assert.match(doc.error, /invalid JSON/);
 });
 
 test("runner: empty output", async () => {
-  const doc = await runnerFor(fakePython("empty", "exit 0")).snapshot({ session: "ses_a" });
+  const doc = await runnerFor(fakePython("empty", ``)).snapshot({ session: "ses_a" });
   assert.equal(doc.error, "The snapshot command printed nothing.");
 });
 
 test("runner: wrong version", async () => {
-  const doc = await runnerFor(fakePython("v2", "echo '{\"version\":2}'")).snapshot({ session: "ses_a" });
+  const doc = await runnerFor(fakePython("v2", `say('{"version":2}\\n');`)).snapshot({ session: "ses_a" });
   assert.match(doc.error, /^Unsupported snapshot version: 2/);
 });
 
 test("runner: non-zero exit with stderr", async () => {
-  const doc = await runnerFor(fakePython("boom", "echo starting\necho boom >&2\nexit 3")).snapshot({ session: "ses_a" });
+  const doc = await runnerFor(fakePython("boom", `say("starting\\n"); warn("boom\\n"); process.exitCode = 3;`)).snapshot({ session: "ses_a" });
   assert.equal(doc.error, "The snapshot command exited with status 3: boom");
 });
 
 test("runner: non-zero exit keeps the command's own error document", async () => {
-  const doc = await runnerFor(fakePython("own-error", "printf '%s\\n' '{\"version\":1,\"error\":\"no   db\\there\"}'\nexit 1")).snapshot({ session: "ses_a" });
+  const doc = await runnerFor(fakePython("own-error", `say(JSON.stringify({ version: 1, error: "no   db\\there" }) + "\\n"); process.exitCode = 1;`)).snapshot({ session: "ses_a" });
   assert.deepEqual(doc, { version: 1, error: "no db here" });
 });
 
 test("runner: invalid session id", async () => {
-  const doc = await runnerFor(fakePython("unused", "exit 0")).snapshot({ session: "ses a;rm" });
+  const doc = await runnerFor(fakePython("unused", ``)).snapshot({ session: "ses a;rm" });
   assert.equal(doc.error, "The session id is not valid.");
 });
 
 test("runner: arguments, environment, working directory, no shell", async () => {
   const out = path.join(tmp, "args.txt");
   const fixture = path.join(here, "fixtures", "demo.json");
-  const py = fakePython("args-python", `pwd -P > "${out}"\necho "$PYTHONPATH" >> "${out}"\necho "$@" >> "${out}"\ncat "${fixture}"`);
+  const py = fakePython("args-python", `fs.writeFileSync(${JSON.stringify(out)}, fs.realpathSync(process.cwd()) + "\\n" + process.env.PYTHONPATH + "\\n" + args.join(" ") + "\\n"); say(fs.readFileSync(${JSON.stringify(fixture)}, "utf8"));`);
   const work = fs.mkdtempSync(path.join(tmp, "work-"));
-  const doc = await runnerFor(py, { home: "/opt/orch" }).snapshot({ session: "ses_abc", directory: work });
+  const orch = path.resolve(tmp, "orch-home"); // PYTHONPATH is passed through as given, whether or not the folder exists
+  const doc = await runnerFor(py, { home: orch }).snapshot({ session: "ses_abc", directory: work });
   assert.equal(doc.version, 1);
   assert.equal(doc.agents.length, demo.agents.length);
   const [cwd, pythonPath, args] = fs.readFileSync(out, "utf8").trim().split("\n");
   assert.equal(cwd, fs.realpathSync(work));
-  assert.equal(pythonPath, "/opt/orch");
+  assert.equal(pythonPath, orch);
   assert.equal(args, "-P -m agentgraph.snapshot_json --session=ses_abc");
   // A missing directory falls back to home (here: tmp).
   const doc2 = await runnerFor(py).snapshot({ session: "ses_abc", directory: path.join(tmp, "missing") });
@@ -682,7 +732,7 @@ test("runner: arguments, environment, working directory, no shell", async () => 
 
 test("runner: one process per session at a time", async () => {
   const log = path.join(tmp, "count.log");
-  const py = fakePython("count-python", `echo run >> "${log}"\nsleep 0.3\necho '{"version":1,"agents":[]}'`);
+  const py = fakePython("count-python", `append(${JSON.stringify(log)}, "run\\n"); await sleepMs(300); say('{"version":1,"agents":[]}\\n');`);
   const runner = runnerFor(py);
   const [a, b] = await Promise.all([runner.snapshot({ session: "ses_x" }), runner.snapshot({ session: "ses_x" })]);
   assert.equal(a, b);
@@ -694,7 +744,7 @@ test("runner: one process per session at a time", async () => {
 
 test("runner: stop() kills the child", async () => {
   const pidFile = path.join(tmp, "stop.pid");
-  const py = fakePython("hang-python", `echo $$ > "${pidFile}"\nexec sleep 30`);
+  const py = fakePython("hang-python", `fs.writeFileSync(${JSON.stringify(pidFile)}, process.pid + "\\n"); await sleepMs(30000);`);
   const runner = runnerFor(py);
   const pending = runner.snapshot({ session: "ses_a" });
   await waitFor(() => fs.existsSync(pidFile) && fs.readFileSync(pidFile, "utf8").trim(), 3000, "pid file");
@@ -707,11 +757,22 @@ test("runner: stop() kills the child", async () => {
   assert.equal((await runner.snapshot({ session: "ses_a" })).error, "The plugin stopped.");
 });
 
-const realPython = P.DEFAULT_PYTHON;
+// A real Python 3.11 or newer, found the way the plugin's default finds it (Windows: py -3, then python; elsewhere:
+// python3 on PATH); "" when this machine has none.
+const realPython = (() => {
+  const found = process.platform === "win32" ? P.windowsPython(execFileSync) : P.posixPython({ env: process.env, fs, path });
+  if (!path.isAbsolute(found)) return "";
+  try {
+    execFileSync(found, ["-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"], { stdio: "ignore", timeout: 10000, windowsHide: true });
+    return found;
+  } catch (_) {
+    return "";
+  }
+})();
 const orchestration = path.resolve(root, "..");
 test("runner: real interpreter, real demo document", async () => {
-  if (!fs.existsSync(realPython)) {
-    console.log("    (skipped: " + realPython + " not found)");
+  if (!realPython) {
+    console.log("    (skipped: no Python 3.11 or newer found for the default interpreter)");
     return;
   }
   const doc = await runnerFor(realPython, { home: orchestration, demo: true }).snapshot({ session: "" });
@@ -740,7 +801,7 @@ test("theme: accent is the warmer of warning/accent, never green", () => {
 
 test("options: defaults, minimum interval, mode", () => {
   const o = P.resolveOptions(undefined, { os, path });
-  assert.equal(o.python, P.DEFAULT_PYTHON);
+  assert.equal(o.python, process.platform === "win32" ? "python" : P.DEFAULT_PYTHON, "no environment given: the plain default");
   assert.equal(o.home, path.join(os.homedir(), ".config", "opencode", "orchestration"));
   assert.equal(o.intervalMs, 4000);
   assert.equal(o.mode, "replace");
@@ -768,9 +829,30 @@ test("options on native Windows: py -3 then python give a real python.exe path; 
   const never = () => { throw new Error("no probe when python is given"); };
   assert.equal(P.resolveOptions({ python: "~\\py\\python.exe", home: "~\\orch" }, { os: winOs, path: path.win32, execFileSync: never }).python, "C:\\Users\\someone\\py\\python.exe");
   assert.equal(P.resolveOptions({ home: "~\\orch" }, { os: winOs, path: path.win32, execFileSync: found }).home, "C:\\Users\\someone\\orch");
-  const mac = { platform: () => "darwin", homedir: () => os.homedir() };
-  assert.equal(P.resolveOptions({}, { os: mac, path, execFileSync: never }).python, P.DEFAULT_PYTHON);
-  assert.equal(P.resolveOptions({ python: "~\\x" }, { os: mac, path, execFileSync: never }).python, "~\\x", "a backslash is not the home folder on POSIX");
+  const mac = { platform: () => "darwin", homedir: () => "/Users/someone" };
+  assert.equal(P.resolveOptions({}, { os: mac, path: path.posix, execFileSync: never }).python, P.DEFAULT_PYTHON);
+  assert.equal(P.resolveOptions({ python: "~\\x" }, { os: mac, path: path.posix, execFileSync: never }).python, "~\\x", "a backslash is not the home folder on POSIX");
+  assert.equal(P.resolveOptions({ python: "~/x" }, { os: mac, path: path.posix, execFileSync: never }).python, "/Users/someone/x");
+});
+
+test("options on Unix: the default interpreter is the first python3 on PATH; no path of any one machine", () => {
+  assert.equal(P.DEFAULT_PYTHON, "python3");
+  const mac = { platform: () => "linux", homedir: () => "/home/someone" };
+  const programs = new Set(["/opt/py/python3", "/usr/bin/python3"]);
+  const plain = new Set(["/opt/py/python3", "/usr/bin/python3", "/lib/python3"]); // files that exist
+  const fake = {
+    constants: fs.constants,
+    statSync: (file) => { if (!plain.has(file)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); return { isFile: () => true }; },
+    accessSync: (file) => { if (!programs.has(file)) throw Object.assign(new Error("EACCES"), { code: "EACCES" }); },
+  };
+  const resolve = (PATH, extra = {}) => P.resolveOptions(extra, { os: mac, path: path.posix, env: PATH === undefined ? {} : { PATH }, fs: fake }).python;
+  assert.equal(resolve("/nope:/opt/py:/usr/bin"), "/opt/py/python3", "the first one on PATH wins");
+  assert.equal(resolve("/lib:/usr/bin:/opt/py"), "/usr/bin/python3", "a file that is not executable is passed over");
+  assert.equal(resolve("relative/bin::/usr/bin"), "/usr/bin/python3", "empty and relative PATH entries are ignored");
+  assert.equal(resolve("/nope:/lib"), "python3", "none found: plain python3 (the runner then asks for options.python)");
+  assert.equal(resolve(undefined), "python3", "no PATH");
+  assert.equal(resolve("/opt/py", { python: "/custom/python3" }), "/custom/python3", "options.python still wins");
+  assert.doesNotMatch(P.DEFAULT_PYTHON, /[\\/]/);
 });
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -813,6 +895,13 @@ globalThis.__agentgraphStub = (() => {
   };
 })();
 
+// The panel draws its key layers only on a host that is not Windows (a deliberate choice of the plugin), and those key
+// tests are most of the panel's tests. On a Windows machine they pretend to be a Unix host: the plugin is given an `os`
+// that says "linux", and tui.js (which binds the real `node:os`) is given the same through the module hook below. The
+// tests that are about Windows itself (the "Windows panel registration" one, the options on native Windows) build
+// their own `os`.
+const realOsPlatform = os.platform();
+const hostOs = realOsPlatform === "win32" ? { ...os, platform: () => "linux" } : os;
 const STUBS = {
   "solid-js": "const s = globalThis.__agentgraphStub; export const createSignal = (v) => s.createSignal(v); export const onCleanup = (fn) => s.onCleanup(fn);",
   "@opentui/solid": [
@@ -831,14 +920,24 @@ const STUBS = {
     "}",
   ].join("\n"),
 };
+// For tui.js only (it binds the real `node:child_process` and `node:os`): spawn goes through the test's own `spawn`
+// (so a fake interpreter file runs under node), and os.platform() answers like `hostOs` above. The stubs' own imports
+// have a `stub:` parent, so they get the real modules.
+const TUI_STUBS = {
+  "node:child_process": 'export * from "node:child_process"; export const spawn = (...a) => globalThis.__agentgraphSpawn(...a);',
+  "node:os": 'import * as real from "node:os"; export * from "node:os"; export const platform = () => (real.platform() === "win32" ? "linux" : real.platform());',
+};
+const tuiUrl = pathToFileURL(path.join(root, "src", "tui.js")).href;
 const seenSpecifiers = new Set();
 module.registerHooks({
   resolve(specifier, context, nextResolve) {
     if (context.parentURL && context.parentURL.startsWith(pathToFileURL(path.join(root, "src")).href)) seenSpecifiers.add(specifier);
     if (Object.hasOwn(STUBS, specifier)) return { url: "stub:" + specifier, shortCircuit: true };
+    if (context.parentURL === tuiUrl && Object.hasOwn(TUI_STUBS, specifier)) return { url: "stub:tui:" + specifier, shortCircuit: true };
     return nextResolve(specifier, context);
   },
   load(url, context, nextLoad) {
+    if (url.startsWith("stub:tui:")) return { format: "module", source: TUI_STUBS[url.slice(9)], shortCircuit: true };
     if (url.startsWith("stub:")) return { format: "module", source: STUBS[url.slice(5)], shortCircuit: true };
     return nextLoad(url, context);
   },
@@ -864,15 +963,12 @@ const { createSignal } = await import("solid-js");
 const pluginLog = path.join(tmp, "plugin-calls.log");
 const hangPid = path.join(tmp, "plugin-hang.pid");
 const pluginPython = fakePython("plugin-python", `
-sid=""
-for a in "$@"; do case "$a" in --session=*) sid="\${a#--session=}";; esac; done
-echo "$sid" >> "${pluginLog}"
-case "$sid" in
-  ses_slow) sleep 0.8; echo '{"version":1,"root":{"agent":"orchestrator","title":"slowagent"},"agents":[{"name":"orchestrator","group":"hub","busy":0,"parent":"","sessions":[]},{"name":"slowagent","group":"build","busy":0,"parent":"","sessions":[]}],"graph":null,"warnings":[]}';;
-  ses_err) echo '{"version":1,"error":"no db"}'; exit 1;;
-  ses_hang) echo $$ > "${hangPid}"; exec sleep 30;;
-  *) printf '{"version":1,"root":{"agent":"orchestrator","title":"t-%s"},"agents":[{"name":"orchestrator","group":"hub","busy":1,"parent":"","sessions":[]},{"name":"w-%s","group":"build","busy":0,"parent":"","sessions":[]}],"graph":null,"warnings":[]}\\n' "$sid" "$sid";;
-esac`);
+append(${JSON.stringify(pluginLog)}, sid + "\\n");
+const doc = (title, agent) => JSON.stringify({ version: 1, root: { agent: "orchestrator", title }, agents: [{ name: "orchestrator", group: "hub", busy: agent === "slowagent" ? 0 : 1, parent: "", sessions: [] }, { name: agent, group: "build", busy: 0, parent: "", sessions: [] }], graph: null, warnings: [] }) + "\\n";
+if (sid === "ses_slow") { await sleepMs(800); say(doc("slowagent", "slowagent")); }
+else if (sid === "ses_err") { say('{"version":1,"error":"no db"}\\n'); process.exitCode = 1; }
+else if (sid === "ses_hang") { fs.writeFileSync(${JSON.stringify(hangPid)}, process.pid + "\\n"); await sleepMs(30000); }
+else say(doc("t-" + sid, "w-" + sid));`);
 
 function nodeText(node) {
   if (typeof node === "string") return node;
@@ -980,15 +1076,12 @@ test("plugin: renders normal, error and missing-session documents; follows sessi
 });
 
 const timerPython = fakePython("timer-python", `
-sid=""
-for a in "$@"; do case "$a" in --session=*) sid="\${a#--session=}";; esac; done
-doc() { printf '{"version":1,"root":{"agent":"orchestrator"},"agents":[{"name":"orchestrator","group":"hub","busy":%s,"parent":"","sessions":[]},{"name":"worker","group":"build","busy":%s,"parent":"","sessions":[]}],"graph":null,"warnings":[]}\\n' "$1" "$2"; }
-case "$sid" in
-  ses_idle) doc 0 0;;
-  ses_worker) doc 0 1;;
-  ses_hub) doc 1 0;;
-  ses_flip) if [ -f "${path.join(tmp, "flip.flag")}" ]; then doc 0 0; else touch "${path.join(tmp, "flip.flag")}"; doc 0 1; fi;;
-esac`);
+const flip = ${JSON.stringify(path.join(tmp, "flip.flag"))};
+const doc = (hub, worker) => say(JSON.stringify({ version: 1, root: { agent: "orchestrator" }, agents: [{ name: "orchestrator", group: "hub", busy: hub, parent: "", sessions: [] }, { name: "worker", group: "build", busy: worker, parent: "", sessions: [] }], graph: null, warnings: [] }) + "\\n");
+if (sid === "ses_idle") doc(0, 0);
+else if (sid === "ses_worker") doc(0, 1);
+else if (sid === "ses_hub") doc(1, 0);
+else if (sid === "ses_flip") { if (fs.existsSync(flip)) doc(0, 0); else { fs.writeFileSync(flip, ""); doc(0, 1); } }`);
 
 test("plugin: the frame timer runs only while the hub or any agent works", async () => {
   fs.rmSync(path.join(tmp, "flip.flag"), { force: true });
@@ -1202,7 +1295,7 @@ test("panel: a failing host open does not throw into the host", () => {
   }
 });
 
-const demoPython = fakePython("panel-demo-python", `cat "${path.join(here, "fixtures", "demo.json")}"`);
+const demoPython = fakePython("panel-demo-python", `say(fs.readFileSync(${JSON.stringify(path.join(here, "fixtures", "demo.json"))}, "utf8"));`);
 
 const cursorRow = (view) => screen(view).findIndex((l) => l.startsWith("›"));
 
@@ -2054,7 +2147,7 @@ test("loops (v7): a run waiting for a person, a paused one and an interrupted on
 test("loop runner: `agentgraph.looprun list --json --project DIR`, no shell, only when the project has a loops folder; any failure is an empty list", async () => {
   const project = fs.mkdtempSync(path.join(tmp, "loop-project-"));
   const argvs = [];
-  const python = fakePython("loop-python", `echo '[{"run":"r-1","flow":"f","status":"passed","attempts":[],"limits":{"attempts":2},"totals":{"cost":0.01}}]'`);
+  const python = fakePython("loop-python", `say('[{"run":"r-1","flow":"f","status":"passed","attempts":[],"limits":{"attempts":2},"totals":{"cost":0.01}}]\\n');`);
   const mk = (extra = {}) => createLoopRunner(Object.assign({ spawn: (c, a, o) => (argvs.push([c, ...a, o]), spawn(c, a, o)), fs, path, env: process.env, home: tmp, python }, extra));
   assert.deepEqual(await mk().list(project), [], "no loops folder, no process");
   assert.equal(argvs.length, 0);
@@ -2067,9 +2160,9 @@ test("loop runner: `agentgraph.looprun list --json --project DIR`, no shell, onl
   assert.equal(argvs[0].at(-1).shell, false);
   assert.equal(argvs[0].at(-1).env.PYTHONPATH, tmp);
   const bad = async (body) => assert.deepEqual(await mk({ python: fakePython("loop-bad", body) }).list(project), [], body);
-  await bad("echo 'not json'");
-  await bad(`echo '{"run":"x"}'`);
-  await bad("exit 3");
+  await bad(`say("not json\\n");`);
+  await bad(`say('{"run":"x"}\\n');`);
+  await bad(`process.exitCode = 3;`);
   await bad("");
   assert.deepEqual(await mk({ python: path.join(tmp, "no-such-python") }).list(project), []);
   assert.deepEqual(await mk({ python: "python3" }).list(project), [], "a relative interpreter is refused");
@@ -2080,7 +2173,11 @@ test("loop runner: `agentgraph.looprun list --json --project DIR`, no shell, onl
 test("loops in the panel: a project with a loops folder gets the loop runs in its panel (read with the snapshot, `agentgraph.looprun list --json`); one without spawns no loop command", async () => {
   const loopsFolder = path.join(tmp, ".opencode", "loops");
   const listing = JSON.stringify([loopRun("20261121-051500-0002", "fix-loop", "running", { attempts: [{ n: 1 }], totals: { attempts: 1, cost: null, seconds: 5 } })]);
-  const python = fakePython("panel-loop-python", `case "$*" in *agentgraph.looprun*) echo '${listing}';; *agentgraph.chatfeed*) echo '{"session":"x","agent":null,"busy":false,"items":[],"truncated":false,"more":false,"warning":null}';; *) cat "${chatSnap}";; esac`);
+  const python = fakePython("panel-loop-python", `
+const all = args.join(" ");
+if (all.includes("agentgraph.looprun")) say(${JSON.stringify(listing)} + "\\n");
+else if (all.includes("agentgraph.chatfeed")) say('{"session":"x","agent":null,"busy":false,"items":[],"truncated":false,"more":false,"warning":null}\\n');
+else say(fs.readFileSync(${JSON.stringify(chatSnap)}, "utf8"));`);
   const none = await chatPanel({ python, size: [80, 38] });
   try {
     assert.ok(!none.argvs.some((a) => a.includes("agentgraph.looprun")), "a loop command ran with no loops folder");
@@ -3344,7 +3441,7 @@ function makeScenePlugin({ demoOn = true, spawned = { n: 0 }, screen = { width: 
       throw new Error("spawn called: " + args[0]);
     },
     screenSize: () => screen,
-    fs, os, path, env: demoOn ? { AGENTGRAPH_TUI_DEMO: "1" } : {}, demoFile: path.join(here, "fixtures", "demo.json"), now: () => clockRef.t,
+    fs, os: hostOs, path, env: demoOn ? { AGENTGRAPH_TUI_DEMO: "1" } : {}, demoFile: path.join(here, "fixtures", "demo.json"), now: () => clockRef.t,
     timers: {
       setInterval: (fn, ms) => {
         intervals.push(ms);
@@ -4833,11 +4930,11 @@ test("orbit sky panel: no streak on opening or switching to 3D; a run finished w
     return d;
   };
   fs.writeFileSync(docFile, JSON.stringify(withRuns(2)));
-  const skyPython = fakePython("sky-python", `cat "${docFile}"`);
+  const skyPython = fakePython("sky-python", `say(fs.readFileSync(${JSON.stringify(docFile)}, "utf8"));`);
   const clockRef = { t: SKY_NOW };
   const plugin = P.createPlugin({
     createElement: OT.createElement, insert: OT.insert, setProp: OT.setProp, createSignal: solid.createSignal, onCleanup: solid.onCleanup,
-    spawn, screenSize: () => ({ width: 200, height: 60 }), fs, os, path, env: { AGENTGRAPH_TUI_DEBUG: debugLog }, now: () => clockRef.t,
+    spawn, screenSize: () => ({ width: 200, height: 60 }), fs, os: hostOs, path, env: { AGENTGRAPH_TUI_DEBUG: debugLog }, now: () => clockRef.t,
     timers: { setInterval: (fn, ms) => globalThis.setInterval(fn, ms), clearInterval: (h) => globalThis.clearInterval(h) },
   });
   const { ctx, state, panelClaim } = makePanelHost({ python: skyPython, intervalMs: 1000 });
@@ -5045,49 +5142,42 @@ test("paths: the chooser's rows: `name  a → b → a` (the id when unnamed), mo
 // and "r2" stood in, which the panel no longer takes as revs).
 const flowLog = path.join(tmp, "flow-calls.log");
 const pathsPython = fakePython("paths-python", `
-echo "$PYTHONPATH" > "${path.join(tmp, "paths-home.log")}"
-if [ "$3" = "agentgraph.structure" ]; then
-  goal=$(cat)
-  printf '%s|%s\\n' "$*" "$goal" >> "${flowLog}"
-  expect=""
-  prev=""
-  for a in "$@"; do [ "$prev" = "--expect" ] && expect="$a"; prev="$a"; done
-  if [ "$6" = "stale" ] && [ -n "$expect" ] && [ "$expect" != "2222222222222222" ]; then
-    echo "agentgraph structure: flow stale changed since you opened it; reload and try again (rev now 2222222222222222)" >&2; exit 1
-  fi
-  case "$6" in
-    broken) echo "agentgraph structure: no flow broken" >&2; exit 1;;
-    nomod) echo "/usr/bin/python3: No module named agentgraph.structure" >&2; exit 1;;
-    slow) sleep 0.4;;
-  esac
-  printf 'RUN %s\\n%s\\n' "$6" "$goal"
-  exit 0
-fi
-sid=""
-for a in "$@"; do case "$a" in --session=*) sid="\${a#--session=}";; esac; done
-flow() {
-  printf '{"id":"%s","path":["impl-openai","verifier","impl-openai"],"text":"t","name":%s,"command":null,"source":"drawn","stats":%s' "$1" "$2" "$3"
-  if [ -n "$4" ]; then printf ',"rev":"%s"' "$4"; fi
-  printf '}'
+fs.writeFileSync(${JSON.stringify(path.join(tmp, "paths-home.log"))}, (process.env.PYTHONPATH || "") + "\\n");
+if (args[2] === "agentgraph.structure") {
+  const goal = (await readStdin()).replace(/\\n+$/, "");
+  append(${JSON.stringify(flowLog)}, args.join(" ") + "|" + goal + "\\n");
+  const at = args.indexOf("--expect");
+  const expect = at >= 0 && args[at + 1] !== undefined ? args[at + 1] : "";
+  const which = args[5];
+  if (which === "stale" && expect !== "" && expect !== "2222222222222222") {
+    warn("agentgraph structure: flow stale changed since you opened it; reload and try again (rev now 2222222222222222)\\n"); process.exitCode = 1; return;
+  }
+  if (which === "broken") { warn("agentgraph structure: no flow broken\\n"); process.exitCode = 1; return; }
+  if (which === "nomod") { warn("/usr/bin/python3: No module named agentgraph.structure\\n"); process.exitCode = 1; return; }
+  if (which === "slow") await sleepMs(400);
+  say("RUN " + which + "\\n" + goal + "\\n");
+  return;
 }
-case "$sid" in
-  ses_p0) flows="";;
-  ses_p1) flows="$(flow solo null null)";;
-  ses_pbroken) flows="$(flow broken null null)";;
-  ses_pnomod) flows="$(flow nomod null null)";;
-  ses_pslow) flows="$(flow slow null null)";;
-  ses_pbusy) flows="$(flow solo null null)";;
-  ses_prev) flows="$(flow solo null null 3f9a2c1d4e5b6a70)";;
-  ses_prev16) flows="$(flow solo null null 9b3f17e5dc59312d),$(flow other null null)";;
-  ses_pbadrev) flows="$(flow solo null null -x)";;
-  ses_ptwo) flows="$(flow stale null null 1111111111111111),$(flow solo '"other"' null)";;
-  ses_pstale) echo x >> "${path.join(tmp, "stale-snapshots.log")}"; flows="$(flow stale null null 1111111111111111)";;
-  ses_pflip) if [ -f "${path.join(tmp, "paths-gone.flag")}" ]; then flows=""; else flows="$(flow solo null null)"; fi;;
-  *) flows="$(flow aaa null null),$(flow bbb '"impl-loop"' '{"runs":3,"passed":2,"rounds":{"avg":2,"max":3},"cost":{"total":3.6,"avg":1.2},"last":1795000000}'),$(flow ccc '"old"' '{"runs":1,"passed":1,"rounds":{"avg":null,"max":null},"cost":{"total":null,"avg":null},"last":1700000000}')";;
-esac
-worker='{"name":"impl-openai","group":"build","busy":0,"parent":"","sessions":[]}'
-if [ "$sid" = "ses_pbusy" ]; then worker='{"name":"impl-openai","group":"build","busy":1,"parent":"orchestrator","sessions":[{"id":"ses_child","title":"child work","busy":true,"created":1795000000,"updated":1795000000}]}'; fi
-printf '{"version":1,"root":{"id":"ses_top","agent":"orchestrator","title":"t-%s"},"agents":[{"name":"orchestrator","group":"hub","busy":0,"parent":"","sessions":[]},'"$worker"'],"graph":null,"warnings":[],"totals":{"cost":1.5},"structure":{"source":"builtin","teams":[],"flows":[%s]}}\\n' "$sid" "$flows"
+const flow = (id, name, stats, rev) => Object.assign({ id, path: ["impl-openai", "verifier", "impl-openai"], text: "t", name, command: null, source: "drawn", stats }, rev ? { rev } : {});
+let flows;
+switch (sid) {
+  case "ses_p0": flows = []; break;
+  case "ses_p1": flows = [flow("solo", null, null)]; break;
+  case "ses_pbroken": flows = [flow("broken", null, null)]; break;
+  case "ses_pnomod": flows = [flow("nomod", null, null)]; break;
+  case "ses_pslow": flows = [flow("slow", null, null)]; break;
+  case "ses_pbusy": flows = [flow("solo", null, null)]; break;
+  case "ses_prev": flows = [flow("solo", null, null, "3f9a2c1d4e5b6a70")]; break;
+  case "ses_prev16": flows = [flow("solo", null, null, "9b3f17e5dc59312d"), flow("other", null, null)]; break;
+  case "ses_pbadrev": flows = [flow("solo", null, null, "-x")]; break;
+  case "ses_ptwo": flows = [flow("stale", null, null, "1111111111111111"), flow("solo", "other", null)]; break;
+  case "ses_pstale": append(${JSON.stringify(path.join(tmp, "stale-snapshots.log"))}, "x\\n"); flows = [flow("stale", null, null, "1111111111111111")]; break;
+  case "ses_pflip": flows = fs.existsSync(${JSON.stringify(path.join(tmp, "paths-gone.flag"))}) ? [] : [flow("solo", null, null)]; break;
+  default: flows = [flow("aaa", null, null), flow("bbb", "impl-loop", { runs: 3, passed: 2, rounds: { avg: 2, max: 3 }, cost: { total: 3.6, avg: 1.2 }, last: 1795000000 }), flow("ccc", "old", { runs: 1, passed: 1, rounds: { avg: null, max: null }, cost: { total: null, avg: null }, last: 1700000000 })];
+}
+let worker = { name: "impl-openai", group: "build", busy: 0, parent: "", sessions: [] };
+if (sid === "ses_pbusy") worker = { name: "impl-openai", group: "build", busy: 1, parent: "orchestrator", sessions: [{ id: "ses_child", title: "child work", busy: true, created: 1795000000, updated: 1795000000 }] };
+say(JSON.stringify({ version: 1, root: { id: "ses_top", agent: "orchestrator", title: "t-" + sid }, agents: [{ name: "orchestrator", group: "hub", busy: 0, parent: "", sessions: [] }, worker], graph: null, warnings: [], totals: { cost: 1.5 }, structure: { source: "builtin", teams: [], flows } }) + "\\n");
 `);
 
 // A panel on `session` with the paths fake; dialogs answer from `answers` (functions or values) and are logged.
@@ -5545,8 +5635,9 @@ test("paths: AGENTGRAPH_TUI_HOME (only a folder inside the system temp folder) p
   // path under the unresolved one would be refused by the prefix check alone): only resolving the link refuses it
   const link = path.join(fs.realpathSync(tmp), "link-out");
   fs.rmSync(link, { force: true });
-  fs.symlinkSync("/usr", link);
-  for (const value of ["relative/dir", "  ", "/usr", os.homedir(), link, os.tmpdir(), path.join(tmp, "no-such-dir")]) {
+  const outside = path.dirname(fs.realpathSync(process.execPath)); // a real folder outside the temp folder
+  fs.symlinkSync(outside, link, process.platform === "win32" ? "junction" : "dir");
+  for (const value of ["relative/dir", "  ", outside, os.homedir(), link, os.tmpdir(), path.join(tmp, "no-such-dir")]) {
     process.env.AGENTGRAPH_TUI_HOME = value;
     try {
       const q = await pathsPanel("ses_p0");
@@ -5575,7 +5666,7 @@ test("demo paths: AGENTGRAPH_TUI_DEMO=paths is the team at rest with three sampl
       spawned += 1;
       throw new Error("the demo spawned a process");
     },
-    fs, os, path, env: { AGENTGRAPH_TUI_DEMO: "paths" }, demoFile: path.join(here, "fixtures", "demo.json"),
+    fs, os: hostOs, path, env: { AGENTGRAPH_TUI_DEMO: "paths" }, demoFile: path.join(here, "fixtures", "demo.json"),
   });
   const stop = plugin.setup(host.ctx);
   try {
@@ -5596,12 +5687,12 @@ test("demo paths: AGENTGRAPH_TUI_DEMO=paths is the team at rest with three sampl
 
 test("runner: flow prompt: arguments, goal on stdin, working directory, PYTHONPATH, no shell; timeout", async () => {
   const out = path.join(tmp, "flow-args.txt");
-  const py = fakePython("flow-args-python", `pwd -P > "${out}"\necho "$PYTHONPATH" >> "${out}"\necho "$@" >> "${out}"\ncat >> "${out}"\nprintf 'the message\\n\\n'`);
+  const py = fakePython("flow-args-python", `fs.writeFileSync(${JSON.stringify(out)}, fs.realpathSync(process.cwd()) + "\\n" + process.env.PYTHONPATH + "\\n" + args.join(" ") + "\\n" + (await readStdin())); say("the message\\n\\n");`);
   const work = fs.mkdtempSync(path.join(tmp, "flowhome-"));
   const made = await RUNNER.runFlowPrompt({ spawn, path, env: process.env, home: work, python: py }, "a-b", "line one\n$(rm -rf /) `x`");
   assert.deepEqual(made, { text: "the message" });
   assert.deepEqual(fs.readFileSync(out, "utf8").split("\n").slice(0, 5), [fs.realpathSync(work), work, "-P -m agentgraph.structure flow prompt a-b --goal-file -", "line one", "$(rm -rf /) `x`"]);
-  const hang = fakePython("flow-hang-python", "exec sleep 30");
+  const hang = fakePython("flow-hang-python", `await sleepMs(30000);`);
   const t0 = Date.now();
   const late = await RUNNER.runFlowPrompt({ spawn, path, env: process.env, home: tmp, python: hang, timeoutMs: 300 }, "a-b", "g");
   assert.deepEqual(late, { error: "agentgraph flow prompt did not finish within 0 s." });
@@ -5707,23 +5798,25 @@ const chatLog = path.join(chatDir, "calls.log");
 const chatSpans = path.join(chatDir, "spans.log");
 const chatSnap = path.join(chatDir, "snap.json");
 const chatPython = fakePython("chat-python", `
-case "$*" in
-  *agentgraph.sidechat*)
-    echo "$*" >> "${chatDir}/side-calls.log"
-    cat > "${chatDir}/side-stdin.txt"
-    [ -f "${chatDir}/ask-slow" ] && sleep 0.5
-    if [ -f "${chatDir}/ask-error" ]; then echo '{"error":"the side chat could not answer: no model reachable"}'; exit 1; fi
-    echo '{"answer":"n6 retries on a higher tier.","session":"ses_demoside","model":"openai/gpt-6-luna","fallback":false,"cost":0.0021}';;
-  *agentgraph.chatfeed*)
-    echo "$*" >> "${chatLog}"
-    sid=""; prev=""
-    for a in "$@"; do [ "$prev" = "--session" ] && sid="$a"; prev="$a"; done
-    echo "start $sid" >> "${chatSpans}"
-    [ -f "${chatDir}/slow" ] && sleep 0.4
-    if [ -f "${chatDir}/feed-$sid.json" ]; then cat "${chatDir}/feed-$sid.json"; else printf '{"session":"%s","agent":null,"busy":false,"items":[],"truncated":false,"more":false,"warning":null}\\n' "$sid"; fi
-    echo "end $sid" >> "${chatSpans}";;
-  *) cat "${chatSnap}";;
-esac`);
+const all = args.join(" ");
+const dir = ${JSON.stringify(chatDir)};
+const has = (name) => fs.existsSync(path.join(dir, name));
+if (all.includes("agentgraph.sidechat")) {
+  append(path.join(dir, "side-calls.log"), all + "\\n");
+  fs.writeFileSync(path.join(dir, "side-stdin.txt"), await readStdin());
+  if (has("ask-slow")) await sleepMs(500);
+  if (has("ask-error")) { say('{"error":"the side chat could not answer: no model reachable"}\\n'); process.exitCode = 1; return; }
+  say('{"answer":"n6 retries on a higher tier.","session":"ses_demoside","model":"openai/gpt-6-luna","fallback":false,"cost":0.0021}\\n');
+} else if (all.includes("agentgraph.chatfeed")) {
+  append(${JSON.stringify(chatLog)}, all + "\\n");
+  const at = args.indexOf("--session");
+  const feedSid = at >= 0 && args[at + 1] !== undefined ? args[at + 1] : "";
+  append(${JSON.stringify(chatSpans)}, "start " + feedSid + "\\n");
+  if (has("slow")) await sleepMs(400);
+  if (has("feed-" + feedSid + ".json")) say(fs.readFileSync(path.join(dir, "feed-" + feedSid + ".json"), "utf8"));
+  else say(JSON.stringify({ session: feedSid, agent: null, busy: false, items: [], truncated: false, more: false, warning: null }) + "\\n");
+  append(${JSON.stringify(chatSpans)}, "end " + feedSid + "\\n");
+} else say(fs.readFileSync(${JSON.stringify(chatSnap)}, "utf8"));`);
 
 const feedOf = (session, items, extra = {}) => Object.assign({ session, agent: null, busy: false, items, truncated: false, more: false, warning: null }, extra);
 const writeFeed = (session, items, extra) => fs.writeFileSync(path.join(chatDir, `feed-${session}.json`), JSON.stringify(feedOf(session, items, extra)));
@@ -5761,7 +5854,7 @@ async function chatPanel({ width = 80, size = [80, 38], list = true, answers = {
     createElement: OT.createElement, insert: OT.insert, setProp: OT.setProp, createSignal: solid.createSignal, onCleanup: solid.onCleanup,
     spawn: (cmd, args, opts) => (argvs.push([cmd, ...args]), spawn(cmd, args, opts)),
     screenSize: () => ({ width: 200, height: 60 }),
-    fs, os, path, env: demoOn ? { AGENTGRAPH_TUI_DEMO: "1" } : {}, demoFile: path.join(here, "fixtures", "demo.json"), now: () => clockRef.t,
+    fs, os: hostOs, path, env: demoOn ? { AGENTGRAPH_TUI_DEMO: "1" } : {}, demoFile: path.join(here, "fixtures", "demo.json"), now: () => clockRef.t,
     timers: {
       setInterval: (fn, ms) => {
         if (ms !== P.CHAT_POLL_MS) return globalThis.setInterval(fn, ms);
@@ -5906,9 +5999,9 @@ test("chat runner: `chatfeed --session ID --json --limit 40` without a shell, `-
   assert.match((await runner.chat({ session: "ses_x; rm -rf /" })).error, /not valid/);
   assert.match((await runner.chat({})).error, /not valid/);
   assert.match((await mk({ python: path.join(tmp, "nope-python") }).chat({ session: "ses_r" })).error, /Python was not found/);
-  const junk = fakePython("chat-junk", "echo not-json");
+  const junk = fakePython("chat-junk", `say("not-json\\n");`);
   assert.match((await mk({ python: junk }).chat({ session: "ses_r" })).error, /invalid JSON/);
-  const bad = fakePython("chat-bad", "echo boom >&2; exit 2");
+  const bad = fakePython("chat-bad", `warn("boom\\n"); process.exitCode = 2;`);
   assert.match((await mk({ python: bad }).chat({ session: "ses_r" })).error, /exited with status 2: boom/);
   // one process per session at a time
   fs.writeFileSync(path.join(chatDir, "slow"), "");
@@ -5917,7 +6010,7 @@ test("chat runner: `chatfeed --session ID --json --limit 40` without a shell, `-
   assert.equal(argvs.length - before, 1);
   assert.deepEqual(a, b);
   // a hung read is killed at the timeout
-  const hang = fakePython("chat-hang", "exec sleep 30");
+  const hang = fakePython("chat-hang", `await sleepMs(30000);`);
   const t0 = Date.now();
   assert.match((await mk({ python: hang, timeoutMs: 200 }).chat({ session: "ses_r" })).error, /did not finish/);
   assert.ok(Date.now() - t0 < 3000);
@@ -6647,18 +6740,18 @@ test("side chat runner: `agentgraph.sidechat ask --main ID --text-file - --json`
   assert.ok(!failed.error.includes("\n"));
   fs.rmSync(path.join(chatDir, "ask-error"));
   assert.match((await mk({ python: path.join(tmp, "nope-python") }).ask({ main: "ses_root", text: "hi" })).error, /Python was not found/);
-  const noModule = fakePython("no-side-python", `echo "/x/python: No module named agentgraph.sidechat" >&2; exit 1`);
+  const noModule = fakePython("no-side-python", `warn("/x/python: No module named agentgraph.sidechat\\n"); process.exitCode = 1;`);
   assert.match((await mk({ python: noModule }).ask({ main: "ses_root", text: "hi" })).error, /no side chat yet/);
-  const garbage = fakePython("garbage-side-python", `cat > /dev/null; echo "not json"`);
+  const garbage = fakePython("garbage-side-python", `await readStdin(); say("not json\\n");`);
   assert.match((await mk({ python: garbage }).ask({ main: "ses_root", text: "hi" })).error, /no answer/);
-  const loud = fakePython("loud-side-python", `cat > /dev/null; yes xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx | head -c 3000000`);
+  const loud = fakePython("loud-side-python", `await readStdin(); say("x".repeat(3000000));`);
   assert.match((await mk({ python: loud }).ask({ main: "ses_root", text: "hi" })).error, /larger than/);
   assert.equal(SIDE_ASK_TIMEOUT_MS, 150000);
 });
 
 test("side chat runner: timeout kills the command; one question in flight at a time; stop kills it", async () => {
   resetChat();
-  const sleepy = fakePython("sleepy-side-python", `cat > /dev/null; sleep 5; echo '{"answer":"late"}'`);
+  const sleepy = fakePython("sleepy-side-python", `await readStdin(); await sleepMs(5000); say('{"answer":"late"}\\n');`);
   const mk = (extra = {}) => createSideAskRunner(Object.assign({ spawn, fs, path, env: process.env, home: tmp, python: sleepy }, extra));
   const started = Date.now();
   const timed = await mk({ timeoutMs: 1000 }).ask({ main: "ses_root", text: "hi" });
@@ -6873,11 +6966,10 @@ test("side chat panel: a failed question is one short error toast and the row re
 
 test("side chat panel: an error text with escape sequences and a long line stays one clean short line", async () => {
   const evilPython = fakePython("evil-side-python", `
-case "$*" in
-  *agentgraph.sidechat*) cat > /dev/null; printf '{"error":"\\\\u001b[31mbad\\\\u001b[0m \\\\u202e %s"}\\n' "$(printf 'x%.0s' $(seq 1 400))"; exit 1;;
-  *agentgraph.chatfeed*) printf '{"session":"ses_demoside","agent":null,"busy":false,"items":[],"truncated":false,"more":false,"warning":null}\\n';;
-  *) cat "${chatSnap}";;
-esac`);
+const all = args.join(" ");
+if (all.includes("agentgraph.sidechat")) { await readStdin(); say('{"error":"\\\\u001b[31mbad\\\\u001b[0m \\\\u202e ' + "x".repeat(400) + '"}\\n'); process.exitCode = 1; }
+else if (all.includes("agentgraph.chatfeed")) say('{"session":"ses_demoside","agent":null,"busy":false,"items":[],"truncated":false,"more":false,"warning":null}\\n');
+else say(fs.readFileSync(${JSON.stringify(chatSnap)}, "utf8"));`);
   const c = await chatPanel({ size: [80, 38], doc: sideDoc(), answers: { prompt: "anything" }, python: evilPython });
   try {
     await sideSelect(c);
@@ -7023,16 +7115,8 @@ test("n20 scene: the step marks of a quiet or orphan node stand still, a live on
 let failed = 0;
 let passed = 0;
 const only = process.env.TEST_ONLY ? new RegExp(process.env.TEST_ONLY) : null; // TEST_ONLY=regex runs only the tests whose name matches
-let skipped = 0;
-// Tests that write a fake interpreter as a /bin/sh script, or run a real `python3`, cannot run on native Windows.
-const NEEDS_POSIX = /fakePython\(|#!\/bin\/sh|\/bin\/sh|python3/;
 for (const t of tests) {
   if (only && !only.test(t.name)) continue;
-  if (process.platform === "win32" && !t.name.startsWith("native Windows") && NEEDS_POSIX.test(t.fn.toString())) {
-    skipped += 1;
-    console.log("skip " + t.name + " (needs a POSIX shell)");
-    continue;
-  }
   try {
     await t.fn();
     passed += 1;

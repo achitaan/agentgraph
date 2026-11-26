@@ -473,7 +473,7 @@ Restart the TUI. In OpenCode V2, use the object form for options:
 |--------------|-----------------------------------------------------------------------|---------|
 | `mode`       | `"replace"`                                                           | `"replace"` takes over the sidebar (hides Context, Limit, MCP, Todo). `"prepend"` puts the graph above them. |
 | `intervalMs` | `4000`                                                                | Refresh period; minimum 1000. |
-| `python`     | `DEFAULT_PYTHON` in `src/plugin.js` (a fixed path set for the author's machine: set your own); on Windows `py -3`, then `python`, resolved to its `python.exe` | Absolute path to Python 3.11+ (`/usr/bin/python3` is 3.9 and has no `-P`). `~/` is expanded, on Windows also `~\\`. |
+| `python`     | `python3` found on `PATH` (resolved to its absolute path; `DEFAULT_PYTHON` in `src/plugin.js` is the bare name); on Windows `py -3`, then `python`, resolved to its `python.exe` | Absolute path to Python 3.11+ (`/usr/bin/python3` is 3.9 and has no `-P`). `~/` is expanded, on Windows also `~\\`. |
 | `home`       | `~/.config/opencode/orchestration`                                   | The folder that contains `agentgraph/` (used as `PYTHONPATH`). |
 | `reducedMotion` | `false`                                                            | The pictures and the 3D sky without motion; the list never moves. |
 | `picture`    | `"off"`                                                              | What the panel opens on: `"off"` (the list; `g` shows a picture), `"planets"` or `"orbit"`. |

@@ -15,7 +15,7 @@ under it in the same column. With --no-graph the view must be in the sidebar.
 
 `pyte` is not installed globally: put it in a folder and pass it with PYTEPATH (default: the scratch folder
 <scratch>/pylib, filled with `pip install --target <scratch>/pylib pyte`). <scratch> is
-$TMPDIR_OPENCODE/tui-real (default /private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode/tui-real).
+$TMPDIR_OPENCODE/tui-real (default: <the system temp folder>/tui-real).
 
 The session: --session, else $AGENTGRAPH_REAL_SESSION, else <scratch>/session.txt; when there is none it creates a
 throwaway one with `opencode run --standalone --model anthropic/claude-haiku-5-5 "Do not call any tool. Reply with
@@ -109,12 +109,13 @@ import select
 import signal
 import struct
 import subprocess
+import tempfile
 import sys
 import termios
 import time
 
 DEFAULT_BINARY = "/Applications/OpenCode.app/Contents/Resources/opencode-cli"
-SCRATCH = os.path.join(os.environ.get("TMPDIR_OPENCODE", "/private/var/folders/pm/r8xm1mr525v913lct5tdg_5w0000gn/T/opencode"), "tui-real")
+SCRATCH = os.path.join(os.environ.get("TMPDIR_OPENCODE") or tempfile.gettempdir(), "tui-real")
 sys.path.insert(0, os.environ.get("PYTEPATH", os.path.join(SCRATCH, "pylib")))
 try:
     import pyte  # noqa: E402

@@ -49,7 +49,7 @@ export const DEFAULT_INTERVAL_MS = 4000;
 export const MIN_INTERVAL_MS = 1000;
 export const SPINNER_MS = 200;
 export const CHAT_POLL_MS = 2000; // a busy session's chat is read this often; an idle one once
-export const DEFAULT_PYTHON = "/Users/achita.anantachina/.local/state/tec/toolchain/base_profile/bin/python3";
+export const DEFAULT_PYTHON = "python3"; // on Unix, the first python3 on PATH (see posixPython); on Windows see windowsPython
 const TERRACOTTA_HUE = 18;
 const BOLD = 1; // OpenTUI TextAttributes.BOLD
 
@@ -81,7 +81,25 @@ export function windowsPython(execFileSync) {
   return "python";
 }
 
-export function resolveOptions(raw, { os, path, execFileSync }) {
+// Unix: the snapshot runner wants an absolute interpreter path, so the default `python3` is looked up on PATH here (the
+// first executable file of that name). Without PATH or without a hit it stays plain "python3": the runner then tells the
+// user to set options.python.
+export function posixPython({ env, fs, path }) {
+  const dirs = String((env && env.PATH) || "").split(path.delimiter);
+  for (const dir of dirs) {
+    if (!dir || !path.isAbsolute(dir)) continue;
+    const file = path.join(dir, DEFAULT_PYTHON);
+    try {
+      if (fs.statSync(file).isFile()) {
+        fs.accessSync(file, fs.constants.X_OK);
+        return file;
+      }
+    } catch (_) {}
+  }
+  return DEFAULT_PYTHON;
+}
+
+export function resolveOptions(raw, { os, path, execFileSync, env, fs }) {
   const options = isPlainObject(raw) ? raw : {};
   const expandHome = (value) => (value === "~" || value.startsWith("~/") || (path.sep === "\\" && value.startsWith("~\\"))
     ? path.join(os.homedir(), value.slice(1)) : value);
@@ -89,7 +107,8 @@ export function resolveOptions(raw, { os, path, execFileSync }) {
     ? path.resolve(expandHome(options.home.trim()))
     : path.join(os.homedir(), ".config", "opencode", "orchestration");
   const python = nonEmptyString(options.python) ? expandHome(options.python.trim())
-    : os.platform?.() === "win32" ? windowsPython(execFileSync) : DEFAULT_PYTHON;
+    : os.platform?.() === "win32" ? windowsPython(execFileSync)
+      : env && fs ? posixPython({ env, fs, path }) : DEFAULT_PYTHON;
   const requested = Number(options.intervalMs);
   const intervalMs = Number.isFinite(requested) && requested > 0 ? Math.max(MIN_INTERVAL_MS, Math.floor(requested)) : DEFAULT_INTERVAL_MS;
   const mode = options.mode === "prepend" ? "prepend" : "replace";
