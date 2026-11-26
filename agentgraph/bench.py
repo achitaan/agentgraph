@@ -347,6 +347,7 @@ def _ensure_temp_root(root: Path) -> Path:
     folder is shared, so another user could have put a link or a folder of their own at this name, or left it open to write: refuse unless
     it is a real folder of ours that group and others cannot write to. A folder that exists with a wider mode is refused, not fixed."""
     if osproc.is_windows():
+        root.mkdir(parents=True, exist_ok=True)
         return root
     made = False
     try:

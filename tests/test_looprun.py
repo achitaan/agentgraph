@@ -617,7 +617,8 @@ class RunCheckTests(unittest.TestCase):
                     if proc.poll() is None:
                         proc.kill()
                     proc.wait()
-                    proc.stdout.close()
+                    if proc.stdout:
+                        proc.stdout.close()
 
 
 class CommandTests(Base):
