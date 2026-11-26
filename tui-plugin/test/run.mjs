@@ -829,10 +829,10 @@ test("options on native Windows: py -3 then python give a real python.exe path; 
   const never = () => { throw new Error("no probe when python is given"); };
   assert.equal(P.resolveOptions({ python: "~\\py\\python.exe", home: "~\\orch" }, { os: winOs, path: path.win32, execFileSync: never }).python, "C:\\Users\\someone\\py\\python.exe");
   assert.equal(P.resolveOptions({ home: "~\\orch" }, { os: winOs, path: path.win32, execFileSync: found }).home, "C:\\Users\\someone\\orch");
-  const mac = { platform: () => "darwin", homedir: () => "/Users/someone" };
+  const mac = { platform: () => "darwin", homedir: () => "/home/someone" };
   assert.equal(P.resolveOptions({}, { os: mac, path: path.posix, execFileSync: never }).python, P.DEFAULT_PYTHON);
   assert.equal(P.resolveOptions({ python: "~\\x" }, { os: mac, path: path.posix, execFileSync: never }).python, "~\\x", "a backslash is not the home folder on POSIX");
-  assert.equal(P.resolveOptions({ python: "~/x" }, { os: mac, path: path.posix, execFileSync: never }).python, "/Users/someone/x");
+  assert.equal(P.resolveOptions({ python: "~/x" }, { os: mac, path: path.posix, execFileSync: never }).python, "/home/someone/x");
 });
 
 test("options on Unix: the default interpreter is the first python3 on PATH; no path of any one machine", () => {
